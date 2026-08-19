@@ -1,0 +1,293 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<Playbook xmlns="https://soc.example/playbooks" id="PB-m365-impossible-travel" name="M365 — Impossible Travel (Distant Successful Logins) - SOC Playbook" version="3.0" status="Validated" classification="TLP:AMBER">
+  <Metadata>
+    <Owner>NBI SOC / Detection Engineering</Owner>
+    <LastUpdated>2026-08-19</LastUpdated>
+    <Severity default="High">High</Severity>
+    <Confidence default="Medium">Medium</Confidence>
+    <Category>Initial Access</Category>
+    <MitreAttack>
+      <Technique id="T1078.004"/>
+      <Technique id="T1078"/>
+      <Technique id="T1539"/>
+      <Technique id="T1114"/>
+      <Tactic id="TA0001"/>
+      <Tactic id="TA0005"/>
+    </MitreAttack>
+    <References>
+      <Reference title="MITRE ATT&amp;CK - Valid Accounts: Cloud Accounts (T1078.004)" url="https://attack.mitre.org/techniques/T1078/004/"/>
+      <Reference title="MITRE ATT&amp;CK - Steal Web Session Cookie (T1539)" url="https://attack.mitre.org/techniques/T1539/"/>
+      <Reference title="MITRE ATT&amp;CK - Email Collection (T1114)" url="https://attack.mitre.org/techniques/T1114/"/>
+      <Reference title="MITRE ATT&amp;CK - Initial Access tactic (TA0001)" url="https://attack.mitre.org/tactics/TA0001/"/>
+      <Reference title="MITRE ATT&amp;CK - Defense Evasion tactic (TA0005)" url="https://attack.mitre.org/tactics/TA0005/"/>
+      <Reference title="Microsoft Learn - Entra ID Protection risk detections (impossible travel / atypical travel)" url="https://learn.microsoft.com/en-us/entra/id-protection/concept-identity-protection-risks"/>
+      <Reference title="Microsoft Learn - Investigate and respond to AiTM phishing and token theft" url="https://learn.microsoft.com/en-us/defender-xdr/first-incident-overview"/>
+      <Reference title="Microsoft Learn - Search the audit log / Unified Audit Log operations" url="https://learn.microsoft.com/en-us/purview/audit-log-search"/>
+      <Reference title="Microsoft Learn - Detect and remediate illicit consent grants / OAuth app consent" url="https://learn.microsoft.com/en-us/defender-office-365/detect-and-remediate-illicit-consent-grants"/>
+      <Reference title="Elastic - Microsoft 365 integration (o365 audit data streams and fields)" url="https://docs.elastic.co/integrations/o365"/>
+      <Reference title="Elastic - Microsoft Defender XDR / M365 Defender integration (alert fields)" url="https://docs.elastic.co/integrations/m365_defender"/>
+      <Reference title="Elastic Security - ES|QL reference (MV_EXPAND, COUNT_DISTINCT, VALUES)" url="https://www.elastic.co/guide/en/elasticsearch/reference/current/esql.html"/>
+    </References>
+  </Metadata>
+  <AlertContext>
+    <RuleName>M365 — Impossible Travel (Distant Successful Logins)</RuleName>
+    <RuleId>raad-18-impossible-travel-m365</RuleId>
+    <RuleType>esql</RuleType>
+    <Index></Index>
+    <TriggerLogic>The deployed rule is an ES|QL analytic over logs-o365.audit-default on a 60-minute lookback (15-minute interval). In plain English it: keeps successful interactive sign-ins (event.action == "UserLoggedIn", event.outcome == "success") that carry a non-null user.name, source.ip, and source.geo.country_iso_code; aggregates by user.name; and fires when one account shows sign-ins from two or more distinct source.geo.country_iso_code values whose first-to-last spread is greater than zero and no more than 60 minutes. It reports the distinct-country count, the country codes seen, and the distinct source-IP count.
+
+Deployed trigger logic (ES|QL) - VALIDATION_BLOCKED on NBI: logs-o365.audit-default has 0 documents, so this cannot execute here; it is field-correct and will run once ingestion is restored:
+
+
+
+One-line Kibana KQL detection filter (the &gt;= 2 distinct country velocity aggregation itself is ES|QL, not KQL):
+
+
+
+Why these predicates: the rule needs a *successful* interactive sign-in with a geo-enriched source IP to compute a country delta. Without source.geo.country_iso_code enrichment it is silent; and it deliberately ignores failed sign-ins (a blocked attempt is not impossible trave</TriggerLogic>
+    <KeyAlertFields>source.geo.country_iso_code, user.name, m365_defender.alert.evidence.user_account.user_principal_name, user.email, m365_defender.alert.title, event.action, m365_defender.alert.evidence.device_dns_name, host.name, email.sender.address, email.subject, email.from.address, source.ip</KeyAlertFields>
+  </AlertContext>
+  <Inputs>
+    <Input name="$user_name"/>
+  </Inputs>
+  <ExecutiveSummary>
+    <Overview>This playbook drives triage and investigation of the M365 Impossible Travel detection on NBI's Elastic Security deployment. The rule fires when one account ($user_name) signs in successfully to Microsoft 365 from two or more distinct countries within 60 minutes - a geographic velocity no traveller can achieve. Because the rule keys on successful sign-ins, the question is never "did authentication pass" (it did, twice) but "were both sign-ins the real user, or has the account been taken over".
+
+Impossible travel is a leading indicator of cloud account takeover - a stolen password used from abroad, a replayed session cookie/token, or an adversary-in-the-middle (AiTM) proxy - but it is also produced by entirely legitimate patterns (corporate VPN/global proxy egressing in several countries, a roaming mobile carrier, or a wrong IP-to-country enrichment). The analyst decides between account compromise (true_positive), authorised/explained travel or a proven false-geo enrichment error (false_positive), a recurring shared-egress / geo-enrichment tuning condition (misconfiguration), or unproven (needs_escalation) - and on NBI today the honest default, absent the sign-in stream, is needs_escalation with a portal cross-check.</Overview>
+    <BusinessImpact>An alert means: the same M365 account signed in successfully from two or more countries inside an hour. Two populations produce this:
+
+- Account takeover - the attacker authenticated as the user from a second country: a password sprayed/stuffed and used abroad, a session cookie/token replayed (so no fresh password auth was even needed), or an AiTM proxy relaying the victim's own session. The tell is a *single session reused across both countries*, an unfamiliar/hosting source, a new device/user-agent, and post-login persistence/fraud actions (inbox rules, forwarding, OAuth consent, MFA changes).
+- Legitimate but distant - a corporate VPN or global proxy that egresses in multiple countries, a mobile device roaming across a border carrier, confirmed user travel with the same device/session, or simply a mis-mapped IP-to-country enrichment (so there were never truly two locations).
+
+The verdict rests on three facts: what each source is (IP, geo, user agent), whether one session/token was reused across the two locations, and what the account did after the login. On NBI, all three normally come from the o365 audit stream - which is currently empty - so they are gathered from the Entra/M3</BusinessImpact>
+  </ExecutiveSummary>
+  <Investigation>
+    <Goal>Decide true_positive / false_positive / misconfiguration / needs_escalation for M365 — Impossible Travel (Distant Successful Logins).</Goal>
+    <Workflow>
+      <Step order="1" name="Live corroboration - concurrent Defender alerts for the account">
+        <Purpose>Live corroboration - concurrent Defender alerts for the account</Purpose>
+        <Query platform="Elastic" language="ES|QL" id="Q-01">
+          <![CDATA[
+FROM logs-m365_defender.*
+| WHERE @timestamp >= NOW() - 4 hours
+| MV_EXPAND user.name
+| EVAL un = TO_LOWER(user.name)
+| WHERE un LIKE "*$user_name*"
+| STATS alerts = COUNT(*), first_seen = MIN(@timestamp), last_seen = MAX(@timestamp)
+    BY m365_defender.alert.title, m365_defender.alert.severity, m365_defender.alert.detection_source
+| SORT alerts DESC
+| LIMIT 25
+]]>
+        </Query>
+      </Step>
+      <Step order="2" name="Entity pivoting">
+        <Purpose>Entity pivoting</Purpose>
+        <Query platform="Elastic" language="ES|QL" id="Q-02">
+          <![CDATA[
+FROM logs-m365_defender.*
+| WHERE @timestamp >= NOW() - 4 hours
+| MV_EXPAND user.name
+| EVAL un = TO_LOWER(user.name)
+| WHERE un LIKE "*$user_name*"
+| STATS alerts = COUNT(*), severities = VALUES(m365_defender.alert.severity),
+        first_seen = MIN(@timestamp), last_seen = MAX(@timestamp)
+    BY m365_defender.alert.category, m365_defender.alert.detection_source
+| SORT alerts DESC
+| LIMIT 20
+]]>
+        </Query>
+      </Step>
+      <Step order="3" name="User investigation">
+        <Purpose>User investigation</Purpose>
+        <Query platform="Elastic" language="ES|QL" id="Q-03">
+          <![CDATA[
+FROM logs-m365_defender.*
+| WHERE @timestamp >= NOW() - 4 hours
+| MV_EXPAND user.name
+| EVAL un = TO_LOWER(user.name)
+| WHERE un LIKE "*$user_name*"
+| STATS alerts = COUNT(*),
+        upns = VALUES(m365_defender.alert.evidence.user_account.user_principal_name),
+        domains = VALUES(user.domain), emails = VALUES(user.email)
+| LIMIT 5
+]]>
+        </Query>
+      </Step>
+      <Step order="4" name="Host investigation">
+        <Purpose>Host investigation</Purpose>
+        <Query platform="Elastic" language="ES|QL" id="Q-04">
+          <![CDATA[
+FROM logs-m365_defender.*
+| WHERE @timestamp >= NOW() - 4 hours
+    AND m365_defender.alert.evidence.device_dns_name IS NOT NULL
+| MV_EXPAND user.name
+| EVAL un = TO_LOWER(user.name)
+| WHERE un LIKE "*$user_name*"
+| MV_EXPAND m365_defender.alert.evidence.device_dns_name
+| STATS alerts = COUNT(*), titles = VALUES(m365_defender.alert.title)
+    BY m365_defender.alert.evidence.device_dns_name
+| SORT alerts DESC
+| LIMIT 15
+]]>
+        </Query>
+      </Step>
+      <Step order="5" name="IP investigation">
+        <Purpose>IP investigation</Purpose>
+        <Query platform="Elastic" language="ES|QL" id="Q-05">
+          <![CDATA[
+FROM logs-m365_defender.*
+| WHERE @timestamp >= NOW() - 4 hours AND source.ip IS NOT NULL
+| MV_EXPAND user.name
+| EVAL un = TO_LOWER(user.name)
+| WHERE un LIKE "*$user_name*"
+| STATS alerts = COUNT(*), titles = VALUES(m365_defender.alert.title) BY source.ip
+| SORT alerts DESC
+| LIMIT 15
+]]>
+        </Query>
+      </Step>
+      <Step order="6" name="Email investigation">
+        <Purpose>Email investigation</Purpose>
+        <Query platform="Elastic" language="ES|QL" id="Q-06">
+          <![CDATA[
+FROM logs-m365_defender.*
+| WHERE @timestamp >= NOW() - 4 hours
+    AND m365_defender.alert.title LIKE "*Email messages*"
+| MV_EXPAND user.name
+| EVAL un = TO_LOWER(user.name)
+| WHERE un LIKE "*$user_name*"
+| STATS alerts = COUNT(*), senders = VALUES(email.sender.address),
+        subjects = VALUES(email.subject), source_ips = VALUES(source.ip)
+| LIMIT 10
+]]>
+        </Query>
+      </Step>
+      <Step order="7" name="Timeline Reconstruction">
+        <Purpose>Timeline Reconstruction</Purpose>
+        <Query platform="Elastic" language="ES|QL" id="Q-07">
+          <![CDATA[
+FROM logs-m365_defender.*
+| WHERE @timestamp >= NOW() - 4 hours
+| MV_EXPAND user.name
+| EVAL un = TO_LOWER(user.name)
+| WHERE un LIKE "*$user_name*"
+| KEEP @timestamp, m365_defender.alert.title, m365_defender.alert.severity, m365_defender.alert.detection_source, m365_defender.alert.evidence.device_dns_name
+| SORT @timestamp ASC
+| LIMIT 100
+]]>
+        </Query>
+      </Step>
+      <Step order="8" name="Lateral movement validation">
+        <Purpose>Lateral movement validation</Purpose>
+        <Query platform="Elastic" language="ES|QL" id="Q-08">
+          <![CDATA[
+FROM logs-m365_defender.*
+| WHERE @timestamp >= NOW() - 4 hours
+    AND (m365_defender.alert.title LIKE "*hash*" OR m365_defender.alert.title LIKE "*lateral*"
+         OR m365_defender.alert.title LIKE "*credential*" OR m365_defender.alert.title LIKE "*sign-in*"
+         OR m365_defender.alert.title LIKE "*logon*")
+| MV_EXPAND user.name
+| EVAL un = TO_LOWER(user.name)
+| WHERE un LIKE "*$user_name*"
+| STATS alerts = COUNT(*), titles = VALUES(m365_defender.alert.title),
+        devices = VALUES(m365_defender.alert.evidence.device_dns_name)
+| LIMIT 10
+]]>
+        </Query>
+      </Step>
+      <Step order="9" name="Impact assessment">
+        <Purpose>Impact assessment</Purpose>
+        <Query platform="Elastic" language="ES|QL" id="Q-09">
+          <![CDATA[
+FROM logs-m365_defender.*
+| WHERE @timestamp >= NOW() - 4 hours
+| MV_EXPAND user.name
+| EVAL un = TO_LOWER(user.name)
+| WHERE un LIKE "*$user_name*"
+| EVAL sev = CASE(m365_defender.alert.severity == "high", 3,
+                  m365_defender.alert.severity == "medium", 2,
+                  m365_defender.alert.severity == "low", 1, 0)
+| STATS total_alerts = COUNT(*), peak_severity = MAX(sev),
+        distinct_titles = COUNT_DISTINCT(m365_defender.alert.title),
+        devices = COUNT_DISTINCT(m365_defender.alert.evidence.device_dns_name)
+| LIMIT 5
+]]>
+        </Query>
+      </Step>
+      <Step order="10" name="Finalize verdict">
+        <DecisionTree>
+        </DecisionTree>
+      </Step>
+    </Workflow>
+  </Investigation>
+  <ClassificationGuidance>
+    <TruePositive>
+      <Definition></Definition>
+    </TruePositive>
+    <FalsePositive>
+      <Definition></Definition>
+      <Indicators>
+        <Item>Corporate VPN / global proxy egress that surfaces in multiple countries for one session - the dominant benign cause. Validate against the known egress-country list, but confirm the *specific* account and session, never auto-clear on the egress alone.</Item>
+        <Item>Roaming mobile carriers that hand off across a border, presenting a foreign carrier IP while the user has not physically moved far.</Item>
+        <Item>Confirmed user travel with a consistent device/session and no risky post-login actions.</Item>
+        <Item>False-geo enrichment - an NBI/ISP IP range mis-mapped to another country, so there were never truly two locations. This is a *proven* enrichment error, documented as such, not an assumption.</Item>
+        <Item>CDN/anycast sign-in paths where the apparent source resolves to a multi-region POP.</Item>
+        <Item>The deployed sign-in stream is empty, so there is currently no measured firing baseline. logs-o365.audit-default holds 0 documents (verified all-time). When ingestion is restored, expect recurring benign firings from corporate VPN egress surfacing in multiple countries, roaming carriers, and proxy/CDN sign-in paths - none of which can be tuned today because the data is absent.</Item>
+        <Item>The live Defender index carries no geo and no sign-ins. logs-m365_defender.* (377 alerts/24h) is DLP, email-threat, and endpoint alerts - m365_defender.alert.evidence.countryLetterCode is 0% populated, m365_defender.alert.evidence.ip_address is 0% populated, and source.ip appears only on email-threat alerts (~12%, the sender path - not a sign-in origin). Impossible travel cannot be computed from this index; it only tells you whether the same account has *other* Defender alerts around the same time.</Item>
+        <Item>NBI identities are first.last@nbirq.com. $user_name matches ECS user.name, but in the Defender index user.name / user_principal_name are multivalued and case-fragmented, and DLP/email alerts co-mingle several involved users in one alert document (e.g. a single DLP alert lists yossef.mohammed@nbirq.com, saif.ahmed@nbirq.com, areegf@nbirq.com). Always pivot with MV_EXPAND + TO_LOWER and treat the account-to-alert link as *associative*, not exact.</Item>
+      </Indicators>
+    </FalsePositive>
+    <Misconfiguration>
+      <Definition></Definition>
+    </Misconfiguration>
+    <NeedsEscalation>
+      <Definition></Definition>
+    </NeedsEscalation>
+  </ClassificationGuidance>
+  <ResponseActions>
+    <Phase name="Containment">
+      <Action>Revoke all sessions and refresh tokens for $user_name immediately when takeover is confirmed or strongly indicated (session reuse, post-login persistence, or a concurrent email-threat/EDR alert). Token revocation is what actually stops a replay/AiTM session - a password reset alone does not.</Action>
+      <Action>Disable the account (or require re-authentication with a compliant device) pending investigation, coordinating with the identity team so a legitimate user on travel is not stranded without a fallback.</Action>
+      <Action>Remove attacker persistence at the portal: delete planted inbox rules / forwarding, revoke illicit OAuth consents / service principals / added credentials, and reset MFA / auth methods the attacker may have registered.</Action>
+      <Action>Preserve evidence first: export the Entra sign-in records and Unified Audit Log entries for the window (sources, session IDs, operations) before changes, since NBI cannot reconstruct them from Elastic today.</Action>
+      <Action>Deploy/confirm any change only via the authorised human-approved path; investigation itself is read-only.</Action>
+    </Phase>
+    <Phase name="Eradication">
+      <Action>Reset the password and re-register MFA with phishing-resistant methods after tokens are revoked; ensure no attacker-registered auth method survives.</Action>
+      <Action>Purge persistence: confirm all malicious inbox rules, forwarding, OAuth grants, service principals, and added credentials are removed tenant-wide (an attacker often plants several).</Action>
+      <Action>Determine and close the entry vector: if section 15.11 or the portal shows a phishing/AiTM email, remediate it (block sender/URL, purge from other mailboxes) and identify any other recipients who interacted.</Action>
+      <Action>Hunt the tenant for the same source infrastructure, the same OAuth app, or the same inbox-rule pattern across other accounts.</Action>
+    </Phase>
+    <Phase name="Recovery">
+      <Action>Restore the account to normal access only after tokens/credentials/MFA are reset, persistence is purged, and mailbox/file access has been reviewed for exfiltration and BEC.</Action>
+      <Action>Harden: enforce phishing-resistant MFA and Conditional Access (named locations, risky sign-in and token-protection policies), baseline the corporate VPN/proxy egress countries, and - the single highest-value fix for this rule on NBI - restore logs-o365.audit-default ingestion and geo enrichment so impossible travel can actually be confirmed in Elastic.</Action>
+      <Action>Return to steady state only after section 22 closing criteria are met and monitoring (portal risky-sign-in + any restored o365 audit) shows no recurrence.</Action>
+    </Phase>
+  </ResponseActions>
+  <Escalation>
+    <Trigger>Escalate to SOC L2 / IR and the identity/M365 team (request immediate session revocation and account disable) when any hold:
+
+- One session/token reused across the two countries (section 15.12 / portal) - replay or AiTM; near-conclusive.
+- Post-login persistence/fraud: inbox rule, forwarding, OAuth consent, added credential, or MFA change after the sign-in (section 17.2 / portal).
+- A source resolves to hosting/anonymiser infrastructure abroad, or a new device/user-agent accompanies the second country.
+- A concurrent email-threat or endpoint Defender alert on the account (section 14.2 / section 15.11 / section 17.1) around the sign-in.
+- Evidence cannot be established because the o365 audit stream is empty and no portal cross-check is possible in time - escalate as needs_escalation, explicitly stating the telemetry block. An empty Elastic result is not proof of safety.</Trigger>
+    <To>SOC L2 / IR</To>
+  </Escalation>
+  <ClosureCriteria>
+    <Item>false_positive (authorised/explained): the second location is a positively proven authorised path - named VPN/proxy egress, roaming carrier, or confirmed travel - with a consistent device/session and no risky post-login actions. Documented with the evidence, never a bare "benign".</Item>
+    <Item>false_positive (proven false-geo): the "foreign" country is shown to be a mis-mapped NBI/ISP range (geo-enrichment error), so there were not truly two locations. Correct/note the mapping.</Item>
+    <Item>misconfiguration: the two-country split recurs from legitimate multi-region egress or a stale geo database across many users - a detection/enrichment tuning condition, not an account event. Retune (geo-velocity/ASN rather than raw country count) and baseline the egress.</Item>
+    <Item>true_positive: cloud account takeover confirmed - session reuse and/or post-login persistence/fraud; sessions/tokens revoked, credentials/MFA reset, persistence purged, mailbox/file access and BEC hunted, entry vector closed, incident documented.</Item>
+    <Item>needs_escalation: handed to L2/IR with the specific gap (empty o365 stream, portal cross-check pending) documented. This is the honest default on NBI today for any alert not resolved by the portal.</Item>
+  </ClosureCriteria>
+  <Limitations>
+    <Item>The confirming telemetry is not in Elastic on NBI. logs-o365.audit-default = 0 documents (verified all-time, 2026-08-19); the live logs-m365_defender.* has no sign-ins, no geo (countryLetterCode/ip_address 0%), and no SessionId. Impossible travel therefore cannot be confirmed or excluded from Elastic today - the honest default is needs_escalation with an Entra/M365 portal cross-check. Empty != safe.</Item>
+    <Item>Restoring o365 audit ingestion + geo enrichment is the top hardening ask from this rule; without it the detection fires (once populated) but is unconfirmable, and today it cannot even fire.</Item>
+    <Item>The live Defender index is corroboration, not confirmation. It tells you whether the same account is *simultaneously* in DLP/email/endpoint alerts - useful for prioritisation, useless for proving travel. Its category/event.action are null; use alert.title/severity.</Item>
+    <Item>Identity fields are multivalued and co-mingled. One DLP/email alert lists several involved users (e.g. yossef.mohammed@nbirq.com alongside saif.ahmed@nbirq.com, areegf@nbirq.com); host.name is unmapped (use evidence.device_dns_name). Always MV_EXPAND + TO_LOWER; treat the account-to-alert link as associative.</Item>
+    <Item>Session/token reuse is the single best discriminator - pursue SessionId across countries at the portal first. Distinct sessions per country still allow password-abuse-abroad; do not clear on "separate sessions" alone.</Item>
+    <Item>Mind the silent evasions: in-country/residential proxy (no country delta), replay from the victim's own IP, or logins spaced just outside 60 minutes - the rule stays quiet. Complement with session-reuse-as-its-own-rule, new-country/new-ASN geo-velocity, risky-OAuth-consent and inbox-rule/forwarding-creation detections, and first-seen-device/AiTM analytics.</Item>
+    <Item>KB-worthy (persist to NBI customer scope): (1) logs-o365.audit-default = 0 docs (mapping present, ingestion down) as of 2026-08-19 - impossible-travel rule telemetry-blocked; (2) logs-m365_defender.* = Defender alerts only, no geo/sign-in/session, countryLetterCode/ip_address 0%, source.ip ~12% (email-sender only), category/event.action null; (3) Defender identity fields multivalued/co-mingled, host.name unmapped → evidence.device_dns_name; (4) NBI M365 identity domain nbirq.com. All observed live 2026-08-19.</Item>
+  </Limitations>
+</Playbook>

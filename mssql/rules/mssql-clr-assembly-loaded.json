@@ -1,0 +1,72 @@
+{
+  "name": "MS SQL — CLR Assembly Loaded (Code Execution)",
+  "tags": [
+    "NBI-Database",
+    "Phase3",
+    "MS-SQL-Server"
+  ],
+  "interval": "5m",
+  "enabled": true,
+  "description": "Detects loading of a CLR assembly into SQL Server (CREATE/ALTER ASSEMBLY), which allows execution of arbitrary .NET code inside the database engine — a stealthy code-execution and persistence technique.",
+  "risk_score": 80,
+  "severity": "high",
+  "note": "## Investigation\n1. Inspect the assembly name and permission set (SAFE/EXTERNAL_ACCESS/UNSAFE).\n2. UNSAFE/EXTERNAL_ACCESS assemblies can run arbitrary OS code.\n## Response\nDrop unauthorised assemblies; investigate the loading principal.",
+  "output_index": "",
+  "investigation_fields": {
+    "field_names": [
+      "sqlserver.audit.statement",
+      "sqlserver.audit.server_principal_name",
+      "sqlserver.audit.session_server_principal_name",
+      "sqlserver.audit.database_name",
+      "sqlserver.audit.client_ip",
+      "sqlserver.audit.application_name",
+      "sqlserver.audit.host_name",
+      "event.action",
+      "host.name",
+      "user.name"
+    ]
+  },
+  "author": [
+    "raadabujaish"
+  ],
+  "false_positives": [],
+  "from": "now-9m",
+  "rule_id": "nbi-sql-clr-assembly",
+  "max_signals": 100,
+  "risk_score_mapping": [],
+  "severity_mapping": [],
+  "threat": [
+    {
+      "framework": "MITRE ATT&CK",
+      "tactic": {
+        "id": "TA0002",
+        "name": "Execution",
+        "reference": "https://attack.mitre.org/tactics/TA0002/"
+      },
+      "technique": [
+        {
+          "id": "T1190",
+          "name": "Exploit Public-Facing Application",
+          "reference": "https://attack.mitre.org/techniques/T1190/"
+        }
+      ]
+    }
+  ],
+  "to": "now",
+  "references": [
+    "https://attack.mitre.org/",
+    "https://learn.microsoft.com/en-us/sql/relational-databases/security/auditing/"
+  ],
+  "version": 1,
+  "exceptions_list": [],
+  "related_integrations": [],
+  "required_fields": [],
+  "setup": "",
+  "type": "query",
+  "language": "kuery",
+  "index": [
+    "logs-microsoft_sqlserver.audit-*"
+  ],
+  "query": "sqlserver.audit.statement:\"CREATE ASSEMBLY\" or sqlserver.audit.statement:\"ALTER ASSEMBLY\"",
+  "actions": []
+}

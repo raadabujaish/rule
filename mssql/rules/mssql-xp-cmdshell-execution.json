@@ -1,0 +1,89 @@
+{
+  "name": "MS SQL — xp_cmdshell Execution",
+  "tags": [
+    "NBI-Database",
+    "Phase3",
+    "MS-SQL-Server"
+  ],
+  "interval": "5m",
+  "enabled": true,
+  "description": "Fires when a SQL Server audit record contains xp_cmdshell — the extended stored procedure that runs arbitrary OS commands from the database engine, typically as the SQL Server service account. This is a primary post-SQL-injection or post-DB-compromise pivot from database access to host code execution. The rule matches the audited statement text. Maps to ATT&CK Execution T1059 (Command and Scripting Interpreter).",
+  "risk_score": 75,
+  "severity": "high",
+  "note": "### Investigation\n1. Read the statement to see the OS command invoked and assess intent (recon, download, persistence).\n2. Identify the executing principal (server_principal_name) and origin (client_ip) — an application account from an app server, or an interactive/unknown login?\n3. Confirm whether xp_cmdshell is even supposed to be enabled on this instance (in a bank it should be disabled).\n4. Correlate with preceding web/app errors or FortiWeb SQLi alerts against the same DB (post-SQLi pivot).\n5. Escalate on any unexpected principal/source or any command beyond a known legacy job.\n\n### False positives / benign\nRare legacy jobs or monitoring that legitimately enable and call xp_cmdshell can match. Distinguish by whether the calling principal, client_ip, and command are a known sanctioned job running on schedule versus an ad-hoc call from an app or interactive login. Confirm the instance is supposed to have xp_cmdshell enabled at all — the right fix is disabling it, not allowlisting the statement.",
+  "output_index": "",
+  "investigation_fields": {
+    "field_names": [
+      "sqlserver.audit.session_server_principal_name",
+      "sqlserver.audit.statement",
+      "sqlserver.audit.client_ip",
+      "sqlserver.audit.database_name",
+      "host.name"
+    ]
+  },
+  "author": [
+    "raadabujaish"
+  ],
+  "false_positives": [],
+  "from": "now-9m",
+  "rule_id": "nbi-sql-xp-cmdshell",
+  "max_signals": 100,
+  "risk_score_mapping": [],
+  "severity_mapping": [],
+  "threat": [
+    {
+      "framework": "MITRE ATT&CK",
+      "tactic": {
+        "id": "TA0002",
+        "name": "Execution",
+        "reference": "https://attack.mitre.org/tactics/TA0002/"
+      },
+      "technique": [
+        {
+          "id": "T1059",
+          "name": "Command and Scripting Interpreter",
+          "reference": "https://attack.mitre.org/techniques/T1059/"
+        }
+      ]
+    },
+    {
+      "framework": "MITRE ATT&CK",
+      "tactic": {
+        "id": "TA0003",
+        "name": "Persistence",
+        "reference": "https://attack.mitre.org/tactics/TA0003/"
+      },
+      "technique": [
+        {
+          "id": "T1505",
+          "name": "Server Software Component",
+          "reference": "https://attack.mitre.org/techniques/T1505/",
+          "subtechnique": [
+            {
+              "id": "T1505.001",
+              "name": "SQL Stored Procedures",
+              "reference": "https://attack.mitre.org/techniques/T1505/001/"
+            }
+          ]
+        }
+      ]
+    }
+  ],
+  "to": "now",
+  "references": [
+    "https://attack.mitre.org/",
+    "https://learn.microsoft.com/en-us/sql/relational-databases/security/auditing/"
+  ],
+  "version": 1,
+  "exceptions_list": [],
+  "related_integrations": [],
+  "required_fields": [],
+  "setup": "",
+  "type": "query",
+  "language": "kuery",
+  "index": [
+    "logs-microsoft_sqlserver.audit-*"
+  ],
+  "query": "sqlserver.audit.statement:\"xp_cmdshell\"",
+  "actions": []
+}

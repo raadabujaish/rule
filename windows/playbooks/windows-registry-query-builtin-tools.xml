@@ -1,0 +1,401 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<Playbook xmlns="https://soc.example/playbooks" id="PB-windows-registry-query-builtin-tools" name="Query Registry using Built-in Tools [NBI-4688] - SOC Playbook" version="3.0" status="Validated" classification="TLP:AMBER">
+  <Metadata>
+    <Owner>NBI SOC / Detection Engineering</Owner>
+    <LastUpdated>2026-08-19</LastUpdated>
+    <Severity default="low">low</Severity>
+    <Confidence default="Medium">Medium</Confidence>
+    <Category>Discovery</Category>
+    <MitreAttack>
+      <Technique id="T1012"/>
+      <Technique id="T1552.002"/>
+      <Technique id="T1547.001"/>
+      <Technique id="T1082"/>
+      <Tactic id="TA0007"/>
+    </MitreAttack>
+    <References>
+      <Reference title="MITRE ATT&amp;CK - Query Registry (T1012)" url="https://attack.mitre.org/techniques/T1012/"/>
+      <Reference title="MITRE ATT&amp;CK - Discovery tactic (TA0007)" url="https://attack.mitre.org/tactics/TA0007/"/>
+      <Reference title="MITRE ATT&amp;CK - Unsecured Credentials: Credentials in Registry (T1552.002)" url="https://attack.mitre.org/techniques/T1552/002/"/>
+      <Reference title="MITRE ATT&amp;CK - Boot or Logon Autostart Execution: Registry Run Keys (T1547.001)" url="https://attack.mitre.org/techniques/T1547/001/"/>
+      <Reference title='Elastic Security - "Query Registry using Built-in Tools" prebuilt rule reference' url="https://www.elastic.co/docs/reference/security/prebuilt-rules/rules/windows/discovery_query_registry_via_built_in_tools"/>
+      <Reference title="Elastic - New Terms rule type (detection rules reference)" url="https://www.elastic.co/guide/en/security/current/rules-ui-create.html"/>
+      <Reference title="LOLBAS - Reg.exe" url="https://lolbas-project.github.io/lolbas/Binaries/Reg/"/>
+      <Reference title="Microsoft Learn - reg query command reference" url="https://learn.microsoft.com/en-us/windows-server/administration/windows-commands/reg-query"/>
+      <Reference title="Microsoft Learn - Command line process auditing (Event 4688 command-line GPO)" url="https://learn.microsoft.com/en-us/windows-server/identity/ad-ds/manage/component-updates/command-line-process-auditing"/>
+    </References>
+  </Metadata>
+  <AlertContext>
+    <RuleName>Query Registry using Built-in Tools [NBI-4688]</RuleName>
+    <RuleId>nbi-b2-query-registry-using-built-in-tools</RuleId>
+    <RuleType>new_terms</RuleType>
+    <Index>logs-system.security-*</Index>
+    <TriggerLogic>The deployed rule is a new_terms analytic. Its underlying selection (Kibana KQL, the "detection filter") matches a built-in registry-query execution on Windows Security Event 4688:
+
+
+
+The new_terms_fields are host.id and user.id: Elastic emits an alert only when that host+user pairing has not been seen performing this behaviour in the rule's history window. The deployed query already excludes two known-benign inventory queries (a SoftwareInventoryLogging PowerShell read and an Npcap probe), so those recurring reads do not generate novelty alerts.
+
+Plain English: a host+user pair that had not previously done so ran a built-in registry query. The alert's value is the *novelty of the pairing plus the sensitivity of the keys* - not the mere fact that the registry was read. It is a low-severity corroborating signal, not a standalone incident.</TriggerLogic>
+    <KeyAlertFields>process.name, process.executable, reg.exe, process.parent.name, process.parent.executable, process.pid, process.parent.pid, process.entity_id, user.name, user.id, host.name, host.id</KeyAlertFields>
+  </AlertContext>
+  <Inputs>
+    <Input name="$host"/>
+    <Input name="$user"/>
+  </Inputs>
+  <ExecutiveSummary>
+    <Overview>This playbook drives triage and investigation of the Query Registry using Built-in Tools detection on NBI's Elastic Security deployment. The rule is a new-terms building-block (BBR) analytic keyed on the pair (host.id, user.id): it fires the first time a given host+user combination runs a built-in registry query - reg.exe with a query argument, or PowerShell (powershell.exe / powershell_ise.exe / pwsh.exe) enumerating HKLM/HKCU via Get-ChildItem / Get-Item / Get-ItemProperty and their aliases. Reading the registry is ordinary administration, but it is also a standard Discovery step (MITRE T1012): attackers enumerate autorun/persistence keys, stored-credential locations, and installed-software inventory during hands-on activity.
+
+Because the signal is a novelty (new_terms) rather than a known-bad pattern, most individual hits are benign. The analyst's job is to decide, quickly and defensibly, whether the novel registry query is isolated benign admin/automation (false_positive - authorised, or a misconfiguration where a stale baseline saw a new host+user pair) or part of hands-on discovery targeting sensitive keys (true_positive - one signal inside a broader intrusion) - and to classify the alert as true_positive, false_positive, misconfiguration, or needs_escalation with evidence attached. The discriminators are *which keys were read* and *whether other discovery tooling ran alongside*.</Overview>
+    <BusinessImpact>An alert means: on $host, the account $user ran reg.exe query … or a PowerShell registry enumeration for the first time the baseline has recorded for that exact host+user pairing. Two facts are established and one is not:
+
+- Established: a registry-reading tool executed (4688 process creation), and the host+user combination is novel to the baseline.
+- Established (partially): *which* keys were targeted - but only when process.command_line / process.args are populated (see section 8; ~50% on 4688).
+- Not established: *what the read returned.* Windows Event 4688 records the invocation of reg.exe/PowerShell and its command line - it does not record the registry values that came back, nor whether access was denied. The rule sees the *act of querying*, not its *result*.
+
+So the alert is a discovery-intent signal. Registry reads of inventory/version/policy keys are routine administration; reads of autorun (Run/RunOnce), Winlogon, LSA/SecurityProviders, or stored-credential application keys (PuTTY/WinSCP/VNC/OpenSSH) are discovery of persistence points and secrets. The novelty of the host+user pair raises it above background noise, but only the targeted keys and surrounding activity tell</BusinessImpact>
+  </ExecutiveSummary>
+  <Investigation>
+    <Goal>Decide true_positive / false_positive / misconfiguration / needs_escalation for Query Registry using Built-in Tools [NBI-4688].</Goal>
+    <Workflow>
+      <Step order="1" name="Confirm the registry query and read the exact keys">
+        <Purpose>Confirm the registry query and read the exact keys</Purpose>
+        <Query platform="Elastic" language="ES|QL" id="Q-01">
+          <![CDATA[
+FROM logs-system.security-*
+| WHERE event.code == "4688" AND host.name == "$host" AND user.name == "$user"
+    AND @timestamp >= NOW() - 4 hours
+    AND TO_LOWER(process.name) IN ("reg.exe", "powershell.exe", "powershell_ise.exe", "pwsh.exe")
+| EVAL cl = TO_LOWER(CONCAT(COALESCE(process.command_line, ""), " ", COALESCE(MV_CONCAT(process.args, " "), "")))
+| WHERE (TO_LOWER(process.name) == "reg.exe" AND cl LIKE "*query*")
+     OR cl LIKE "*hklm*" OR cl LIKE "*hkcu*" OR cl LIKE "*hkey_local_machine*" OR cl LIKE "*hkey_current_user*"
+| KEEP @timestamp, host.name, user.name, process.name, process.parent.name, process.command_line, process.args
+| SORT @timestamp DESC
+| LIMIT 20
+]]>
+        </Query>
+      </Step>
+      <Step order="2" name="Grade the sensitivity of the queried keys">
+        <Purpose>Grade the sensitivity of the queried keys</Purpose>
+        <Query platform="Elastic" language="ES|QL" id="Q-02">
+          <![CDATA[
+FROM logs-system.security-*
+| WHERE event.code == "4688" AND host.name == "$host" AND user.name == "$user"
+    AND @timestamp >= NOW() - 4 hours
+    AND TO_LOWER(process.name) IN ("reg.exe", "powershell.exe", "powershell_ise.exe", "pwsh.exe")
+| EVAL cl = TO_LOWER(CONCAT(COALESCE(process.command_line, ""), " ", COALESCE(MV_CONCAT(process.args, " "), "")))
+| WHERE cl LIKE "*hklm*" OR cl LIKE "*hkcu*" OR cl LIKE "*hkey*" OR cl LIKE "*query*"
+| EVAL sensitive = CASE(
+    cl LIKE "*winlogon*" OR cl LIKE "*runonce*" OR cl LIKE "*securityproviders*" OR cl LIKE "*putty*" OR cl LIKE "*winscp*" OR cl LIKE "*vnc*" OR cl LIKE "*openssh*", "sensitive-credential-or-autorun",
+    cl LIKE "*uninstall*" OR cl LIKE "*softwareinventory*" OR cl LIKE "*currentversion*" OR cl LIKE "*policies*", "inventory-or-config",
+    "other-registry")
+| STATS execs = COUNT(*) BY sensitive, process.name
+| SORT execs DESC
+| LIMIT 20
+]]>
+        </Query>
+      </Step>
+      <Step order="3" name="Entity pivoting">
+        <Purpose>Entity pivoting</Purpose>
+        <Query platform="Elastic" language="ES|QL" id="Q-03">
+          <![CDATA[
+FROM logs-system.security-*
+| WHERE @timestamp >= NOW() - 4 hours
+    AND event.code == "4688"
+    AND host.name == "$host"
+    AND user.name == "$user"
+| KEEP @timestamp, host.name, user.name, process.name, process.executable, process.parent.name, process.parent.executable, process.pid, process.parent.pid
+| SORT @timestamp DESC
+| LIMIT 100
+]]>
+        </Query>
+      </Step>
+      <Step order="4" name="Process investigation">
+        <Purpose>Process investigation</Purpose>
+        <Query platform="Elastic" language="ES|QL" id="Q-04">
+          <![CDATA[
+FROM logs-system.security-*
+| WHERE @timestamp >= NOW() - 4 hours
+    AND event.code == "4688"
+    AND user.name == "$user"
+    AND TO_LOWER(process.name) IN ("reg.exe", "powershell.exe", "powershell_ise.exe", "pwsh.exe")
+| STATS executions = COUNT(*), hosts = COUNT_DISTINCT(host.name) BY process.name, process.parent.name
+| SORT executions DESC
+| LIMIT 30
+]]>
+        </Query>
+      </Step>
+      <Step order="5" name="Process investigation">
+        <Purpose>Process investigation</Purpose>
+        <Query platform="Elastic" language="ES|QL" id="Q-05">
+          <![CDATA[
+FROM logs-system.security-*
+| WHERE event.code == "4688" AND host.name == "$host" AND user.name == "$user"
+    AND @timestamp >= NOW() - 4 hours
+    AND TO_LOWER(process.name) IN ("whoami.exe", "net.exe", "net1.exe", "systeminfo.exe", "tasklist.exe", "nltest.exe", "ipconfig.exe", "netstat.exe", "quser.exe", "reg.exe", "wmic.exe", "arp.exe", "route.exe", "dsquery.exe")
+| STATS execs = COUNT(*), last_seen = MAX(@timestamp) BY process.name
+| SORT execs DESC
+| LIMIT 20
+]]>
+        </Query>
+      </Step>
+      <Step order="6" name="Parent-Child process analysis">
+        <Purpose>Parent-Child process analysis</Purpose>
+        <Query platform="Elastic" language="ES|QL" id="Q-06">
+          <![CDATA[
+FROM logs-system.security-*
+| WHERE @timestamp >= NOW() - 4 hours
+    AND event.code == "4688"
+    AND host.name == "$host"
+    AND user.name == "$user"
+    AND TO_LOWER(process.name) IN ("reg.exe", "powershell.exe", "powershell_ise.exe", "pwsh.exe")
+| STATS executions = COUNT(*), first_seen = MIN(@timestamp), last_seen = MAX(@timestamp) BY process.parent.name, process.parent.executable, process.name
+| SORT executions DESC
+| LIMIT 30
+]]>
+        </Query>
+      </Step>
+      <Step order="7" name="User investigation">
+        <Purpose>User investigation</Purpose>
+        <Query platform="Elastic" language="ES|QL" id="Q-07">
+          <![CDATA[
+FROM logs-system.security-*
+| WHERE @timestamp >= NOW() - 4 hours
+    AND event.code == "4688"
+    AND user.name == "$user"
+| STATS executions = COUNT(*), distinct_procs = COUNT_DISTINCT(process.name) BY host.name
+| SORT executions DESC
+| LIMIT 25
+]]>
+        </Query>
+      </Step>
+      <Step order="8" name="Host investigation">
+        <Purpose>Host investigation</Purpose>
+        <Query platform="Elastic" language="ES|QL" id="Q-08">
+          <![CDATA[
+FROM logs-system.security-*
+| WHERE @timestamp >= NOW() - 4 hours
+    AND event.code == "4688"
+    AND host.name == "$host"
+| STATS executions = COUNT(*), users = COUNT_DISTINCT(user.name) BY process.name, process.parent.name
+| SORT executions ASC
+| LIMIT 40
+]]>
+        </Query>
+      </Step>
+      <Step order="9" name="IP investigation">
+        <Purpose>IP investigation</Purpose>
+        <Query platform="Elastic" language="ES|QL" id="Q-09">
+          <![CDATA[
+FROM logs-system.security-*
+| WHERE @timestamp >= NOW() - 4 hours
+    AND event.code == "4624"
+    AND host.name == "$host" AND user.name == "$user"
+    AND source.ip IS NOT NULL
+| STATS logons = COUNT(*) BY source.ip, winlog.event_data.LogonType
+| SORT logons DESC
+| LIMIT 20
+]]>
+        </Query>
+      </Step>
+      <Step order="10" name="File investigation">
+        <Purpose>File investigation</Purpose>
+        <Query platform="Elastic" language="ES|QL" id="Q-10">
+          <![CDATA[
+FROM logs-system.security-*
+| WHERE @timestamp >= NOW() - 4 hours
+    AND event.code == "4688"
+    AND host.name == "$host"
+    AND user.name == "$user"
+    AND TO_LOWER(process.name) IN ("reg.exe", "powershell.exe", "powershell_ise.exe", "pwsh.exe")
+| STATS executions = COUNT(*), first_seen = MIN(@timestamp), last_seen = MAX(@timestamp) BY process.name, process.executable
+| SORT executions DESC
+| LIMIT 30
+]]>
+        </Query>
+      </Step>
+      <Step order="11" name="Authentication investigation">
+        <Purpose>Authentication investigation</Purpose>
+        <Query platform="Elastic" language="ES|QL" id="Q-11">
+          <![CDATA[
+FROM logs-system.security-*
+| WHERE @timestamp >= NOW() - 4 hours
+    AND event.code IN ("4624", "4625", "4634", "4647")
+    AND host.name == "$host" AND user.name == "$user"
+| STATS events = COUNT(*), first_seen = MIN(@timestamp), last_seen = MAX(@timestamp) BY event.code, winlog.event_data.LogonType, source.ip
+| SORT events DESC
+| LIMIT 30
+]]>
+        </Query>
+      </Step>
+      <Step order="12" name="Timeline Reconstruction">
+        <Purpose>Timeline Reconstruction</Purpose>
+        <Query platform="Elastic" language="ES|QL" id="Q-12">
+          <![CDATA[
+FROM logs-system.security-*
+| WHERE @timestamp >= NOW() - 4 hours
+    AND event.code == "4688"
+    AND host.name == "$host"
+    AND user.name == "$user"
+| KEEP @timestamp, process.parent.name, process.parent.pid, process.name, process.pid, process.executable, process.command_line
+| SORT @timestamp ASC
+| LIMIT 200
+]]>
+        </Query>
+      </Step>
+      <Step order="13" name="Lateral movement validation">
+        <Purpose>Lateral movement validation</Purpose>
+        <Query platform="Elastic" language="ES|QL" id="Q-13">
+          <![CDATA[
+FROM logs-system.security-*
+| WHERE @timestamp >= NOW() - 4 hours
+    AND event.code IN ("4624", "4648", "4768", "4769", "5140", "5145")
+    AND user.name == "$user"
+    AND host.name != "$host"
+| STATS events = COUNT(*) BY host.name, event.code, winlog.event_data.LogonType
+| SORT events DESC
+| LIMIT 30
+]]>
+        </Query>
+      </Step>
+      <Step order="14" name="Persistence validation">
+        <Purpose>Persistence validation</Purpose>
+        <Query platform="Elastic" language="ES|QL" id="Q-14">
+          <![CDATA[
+FROM logs-system.security-*
+| WHERE @timestamp >= NOW() - 4 hours
+    AND host.name == "$host"
+    AND (
+        (event.code == "4688" AND TO_LOWER(process.name) IN ("schtasks.exe", "reg.exe", "sc.exe", "at.exe", "powershell.exe", "wscript.exe", "cscript.exe", "rundll32.exe", "mshta.exe"))
+        OR event.code == "7045"
+        OR event.code == "4720"
+        OR event.code == "4698"
+    )
+| STATS events = COUNT(*) BY event.code, process.name, user.name
+| SORT events DESC
+| LIMIT 40
+]]>
+        </Query>
+      </Step>
+      <Step order="15" name="Privilege escalation validation">
+        <Purpose>Privilege escalation validation</Purpose>
+        <Query platform="Elastic" language="ES|QL" id="Q-15">
+          <![CDATA[
+FROM logs-system.security-*
+| WHERE @timestamp >= NOW() - 4 hours
+    AND event.code == "4672"
+    AND host.name == "$host"
+| STATS special_priv_logons = COUNT(*) BY user.name
+| SORT special_priv_logons DESC
+| LIMIT 25
+]]>
+        </Query>
+      </Step>
+      <Step order="16" name="Defense evasion validation">
+        <Purpose>Defense evasion validation</Purpose>
+        <Query platform="Elastic" language="ES|QL" id="Q-16">
+          <![CDATA[
+FROM logs-system.security-*
+| WHERE @timestamp >= NOW() - 4 hours
+    AND host.name == "$host"
+    AND (
+        (event.code == "4688" AND TO_LOWER(process.name) IN ("wevtutil.exe", "fsutil.exe", "vssadmin.exe", "wmic.exe", "cipher.exe", "sdelete.exe", "sdelete64.exe"))
+        OR event.code == "1102"
+        OR event.code == "4719"
+    )
+| STATS events = COUNT(*) BY event.code, process.name, user.name
+| SORT events DESC
+| LIMIT 30
+]]>
+        </Query>
+      </Step>
+      <Step order="17" name="Impact assessment">
+        <Purpose>Impact assessment</Purpose>
+        <Query platform="Elastic" language="ES|QL" id="Q-17">
+          <![CDATA[
+FROM logs-system.security-*
+| WHERE @timestamp >= NOW() - 4 hours
+    AND event.code == "4688"
+    AND host.name == "$host" AND user.name == "$user"
+    AND TO_LOWER(process.name) IN ("reg.exe", "whoami.exe", "net.exe", "net1.exe", "systeminfo.exe", "tasklist.exe", "nltest.exe", "ipconfig.exe", "netstat.exe", "quser.exe", "wmic.exe", "arp.exe", "route.exe", "dsquery.exe", "powershell.exe", "cmd.exe")
+| STATS executions = COUNT(*), distinct_tools = COUNT_DISTINCT(process.name) BY user.name
+| SORT executions DESC
+| LIMIT 10
+]]>
+        </Query>
+      </Step>
+      <Step order="18" name="Finalize verdict">
+        <DecisionTree>
+        </DecisionTree>
+      </Step>
+    </Workflow>
+  </Investigation>
+  <ClassificationGuidance>
+    <TruePositive>
+      <Definition></Definition>
+    </TruePositive>
+    <FalsePositive>
+      <Definition></Definition>
+      <Indicators>
+        <Item>Routine administration and software management. Admins and management agents read Uninstall, CurrentVersion, policy, and configuration keys constantly. On NBI these reads are frequently issued by machine/service identities (the validated $user = NIM-PAM-DBV12$ is exactly this pattern) as part of patching, inventory, and health checks.</Item>
+        <Item>Endpoint/EDR and systems-management tooling (inventory collectors, PAM/health agents, monitoring scripts) that enumerate the registry programmatically. A scripted parent (a service or agent) is the tell.</Item>
+        <Item>Software installers / first-run configuration reading version and feature keys during setup, especially on freshly-built or re-imaged hosts.</Item>
+        <Item>A genuinely new-but-benign host+user pairing - a rebuilt host, a new admin, or a newly-deployed agent - tripping the novelty condition with only inventory reads. This is a stale-baseline condition (see section 6 and the misconfiguration branch), not an attack.</Item>
+        <Item>Built-in registry queries on NBI are dominated by machine/service accounts, not humans. In the validation window, the hosts running reg.exe query were nim-pam-dbv12, nim-jump-apv03, nam-mi-appdb004, and nim-pam-apv04, and the acting accounts were the corresponding machine accounts (NIM-PAM-DBV12$, etc.) - i.e. automation/servicing, not interactive discovery. A novel *machine-account* registry query reading inventory/config keys is the expected benign shape here.</Item>
+        <Item>PowerShell volume is bimodal and server-driven. Two hosts (nim-st-apv10, nim-st-apv11) generated the overwhelming majority of powershell.exe executions (hundreds per 4h, again under machine accounts) - automation, not hands-on. A registry enumeration from these hosts is very likely a scripted read; still confirm the parent and keys.</Item>
+        <Item>The interactive tier is the jump/VDI hosts. Named human accounts (e.g. on nim-jump-* hosts) are where a *hands-on* registry query would surface. A novel query by a named interactive user on a jump host - especially reading sensitive keys or inside a recon burst - is materially more interesting than the machine-account baseline.</Item>
+        <Item>No standing NBI allow-list beyond the rule's two built-in exclusions. The deployed query already excludes the SoftwareInventoryLogging and Npcap reads. Do not add blanket host/user exceptions off a single alert; if an exception is warranted, scope it to the exact tool + key pattern + account + host after a documented authorised cause.</Item>
+      </Indicators>
+    </FalsePositive>
+    <Misconfiguration>
+      <Definition></Definition>
+    </Misconfiguration>
+    <NeedsEscalation>
+      <Definition></Definition>
+    </NeedsEscalation>
+  </ClassificationGuidance>
+  <ResponseActions>
+    <Phase name="Containment">
+      <Action>If the alert stands alone (isolated novel read of inventory keys, recognised account/agent): no containment - document and correlate. Over-reacting to a BBR signal burns analyst time.</Action>
+      <Action>If it corroborates hands-on discovery (sensitive keys + recon burst by an interactive account, or clustering with other alerts): treat $host/$user as part of an active intrusion. Suspend or force-logoff $user's interactive session on $host and disable the account pending investigation if the identity is implicated; prioritise host isolation if follow-on credential access, persistence, or lateral movement is visible (section 17).</Action>
+      <Action>Preserve volatile evidence first where feasible (running process list, the queried registry keys and their current values, the account's other session artefacts) - NBI does not collect the registry read result, so host-side capture is the only way to recover what the query returned.</Action>
+      <Action>Any containment change is executed only via the authorised human-approved DEPLOY path; investigation itself is read-only.</Action>
+    </Phase>
+    <Phase name="Eradication">
+      <Action>Remove any persistence the discovery led to (section 17.2): services, scheduled tasks, Run-key entries, or rogue accounts created after the registry reads.</Action>
+      <Action>Rotate exposed secrets. If the queried keys included stored-credential application keys (PuTTY/WinSCP/OpenSSH/VNC) or LSA/SecurityProviders, treat those secrets as potentially harvested and rotate them.</Action>
+      <Action>Remove any dropped tooling identified via section 15.10 (a registry-reading binary running from a user-writable path) and hunt the same image across peers.</Action>
+      <Action>Remediate the initial-access vector that gave the actor the foothold from which they ran the discovery.</Action>
+    </Phase>
+    <Phase name="Recovery">
+      <Action>Reset $user's credentials and any secrets accessible from $host during the session if a compromise is confirmed; if the account is a service/automation identity, coordinate the rotation with the owner to avoid an outage.</Action>
+      <Action>Validate host integrity - confirm no persistence or defence-tampering remains (section 17.2, section 17.4) and that the registry keys of interest hold their expected values.</Action>
+      <Action>Return the account/host to service only after section 22 closing criteria are met and monitoring confirms no recurrence of the discovery pattern.</Action>
+      <Action>Recommend the highest-value hardening coming out of this rule: enable command-line process auditing on the host class where it is off (the jump/VDI tier), so the exact keys are always recoverable, and tighten who may run interactive shells on servers.</Action>
+    </Phase>
+  </ResponseActions>
+  <Escalation>
+    <Trigger>Escalate to Tier 2/Tier 3 (and correlate into any open incident) when any of the following hold:
+
+- Sensitive credential/autorun/security keys were read (section 14.2, section 14.1) by a named interactive account with no authorised cause.
+- The registry query sits inside a discovery burst (section 15.2b, section 17.5) or the same $host/$user carries other high-severity alerts.
+- Follow-on persistence (section 17.2), privilege context (section 17.3), defence evasion (section 17.4), or lateral movement (section 17.1) appears around the discovery.
+- The exact keys cannot be recovered (command line/args empty) and the account/host role is unclear - escalate as needs_escalation with the gap named, and pull the registry-read detail from EDR/host.</Trigger>
+    <To>SOC L2 / IR</To>
+  </Escalation>
+  <ClosureCriteria>
+    <Item>false_positive (authorised): the read is confirmed as authorised admin/automation (owner/agent documented, not assumed), inventory/config keys only, no discovery burst. Record the owner. Do not create a broad exception; if warranted, scope it to the exact tool + key pattern + account + host.</Item>
+    <Item>false_positive (proven-blocked discovery): the query was positively proven denied (access denied, no data returned); documented as a blocked attempt, never "benign".</Item>
+    <Item>misconfiguration: a benign new host+user pairing (rebuild, reimage, new admin, new agent) tripped the novelty rule with routine reads; note the pairing and let the baseline learn it.</Item>
+    <Item>true_positive: the registry discovery is confirmed part of hands-on activity; correlated into the incident, discovery scope established, and follow-on credential access/persistence/lateral movement hunted and contained.</Item>
+    <Item>needs_escalation: handed onward with the specific evidence gaps documented.</Item>
+  </ClosureCriteria>
+  <Limitations>
+    <Item>This is corroboration, not an incident. A new_terms/BBR discovery signal is designed to add weight to a picture. Its fidelity comes from *what it clusters with* - sensitive keys and a recon burst make it matter; an isolated inventory read by an agent does not.</Item>
+    <Item>The NBI baseline is machine/service accounts. Validated live: built-in registry queries here are dominated by machine identities (NIM-PAM-DBV12$ and peers) and by two automation-heavy PowerShell hosts (nim-st-apv10/-apv11). A named interactive account is the shift that should draw the eye.</Item>
+    <Item>Command line is ~50% and the read result is never captured. The keys are only visible when command-line auditing is on for that host, and Event 4688 never records what the query returned. Empty text is not exoneration; recover the keys/values host-side.</Item>
+    <Item>The rule already excludes two benign reads (SoftwareInventoryLogging, Npcap) - do not re-flag those, and do not widen exclusions off a single alert.</Item>
+    <Item>Evasion (design a complementary analytic): an attacker can read the registry via the Win32 API (RegOpenKeyEx) or WMI StdRegProv, or via a LOLBin not on the tool list, avoiding reg.exe/PowerShell entirely - none of which this rule sees. Complement with credential-access analytics (stored-secret access), autorun-key *modification* monitoring, and API/WMI registry-read telemetry where an EDR is available.</Item>
+    <Item>KB-worthy (persist to NBI customer scope): (1) built-in registry-query baseline on logs-system.security-* is machine/service-account dominated (NIM-PAM-DBV12$, nim-jump-apv03, nam-mi-appdb004, nim-pam-apv04); (2) powershell.exe volume concentrated on nim-st-apv10/-apv11 (automation); (3) process.command_line ~50% and no registry value-level auditing (4657 absent) on 4688. Observed live 2026-08-19.</Item>
+  </Limitations>
+</Playbook>

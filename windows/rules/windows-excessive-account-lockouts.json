@@ -1,0 +1,40 @@
+{
+  "name": "Excessive User Account Lockouts",
+  "tags": [],
+  "interval": "5m",
+  "enabled": true,
+  "description": "Detects excessive user account lockouts (brute force indicator)",
+  "risk_score": 73,
+  "severity": "high",
+  "license": "",
+  "output_index": "",
+  "meta": {
+    "kibana_siem_app_url": "https://nbi.scanwave.local:8008/app/security"
+  },
+  "investigation_fields": {
+    "field_names": [
+      "user.name",
+      "host.name",
+      "lockout_count"
+    ]
+  },
+  "author": [],
+  "false_positives": [],
+  "from": "now-15m",
+  "rule_id": "04ebef6e-21e4-4deb-be0a-0171d2710f53",
+  "max_signals": 100,
+  "risk_score_mapping": [],
+  "severity_mapping": [],
+  "threat": [],
+  "to": "now",
+  "references": [],
+  "version": 1,
+  "exceptions_list": [],
+  "related_integrations": [],
+  "required_fields": [],
+  "setup": "",
+  "type": "esql",
+  "language": "esql",
+  "query": "FROM logs-* | WHERE event.code == \"4740\" \r\n| WHERE user.name NOT LIKE \"*$\" AND user.name NOT LIKE \"svc_*\"\r\n| STATS lockout_count = count() BY user.name, host.name \r\n| WHERE lockout_count > 10",
+  "actions": []
+}

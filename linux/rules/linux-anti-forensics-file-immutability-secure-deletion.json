@@ -1,0 +1,75 @@
+{
+  "name": "Linux — Anti-Forensics: File Immutability or Secure Deletion (chattr/shred)",
+  "tags": [
+    "NBI-Endpoint",
+    "Phase3",
+    "Linux-auditd"
+  ],
+  "interval": "5m",
+  "enabled": true,
+  "description": "Detects execution of chattr (setting/removing file immutability, often to protect malware or block log writes) or secure-deletion tools (shred/wipe/srm) used to destroy forensic evidence.",
+  "risk_score": 47,
+  "severity": "medium",
+  "note": "## Investigation\n1. `user.name` ran `process.executable` `process.args` on `host.name`.\n2. `chattr +i` protects a file from modification; `shred` destroys it.\n## Response\nPreserve remaining evidence, identify the target files, and treat as active intrusion cleanup.",
+  "output_index": "",
+  "investigation_fields": {
+    "field_names": [
+      "process.executable",
+      "process.args",
+      "process.name",
+      "process.parent.executable",
+      "user.name",
+      "host.name"
+    ]
+  },
+  "author": [
+    "raadabujaish"
+  ],
+  "false_positives": [],
+  "from": "now-9m",
+  "rule_id": "nbi-lnx-anti-forensics",
+  "max_signals": 100,
+  "risk_score_mapping": [],
+  "severity_mapping": [],
+  "threat": [
+    {
+      "framework": "MITRE ATT&CK",
+      "tactic": {
+        "id": "TA0005",
+        "name": "Defense Evasion",
+        "reference": "https://attack.mitre.org/tactics/TA0005/"
+      },
+      "technique": [
+        {
+          "id": "T1070",
+          "name": "Indicator Removal",
+          "reference": "https://attack.mitre.org/techniques/T1070/",
+          "subtechnique": [
+            {
+              "id": "T1070.004",
+              "name": "File Deletion",
+              "reference": "https://attack.mitre.org/techniques/T1070/004/"
+            }
+          ]
+        }
+      ]
+    }
+  ],
+  "to": "now",
+  "references": [
+    "https://attack.mitre.org/"
+  ],
+  "version": 1,
+  "exceptions_list": [],
+  "related_integrations": [],
+  "required_fields": [],
+  "setup": "",
+  "type": "query",
+  "language": "kuery",
+  "index": [
+    "logs-auditd.log-*",
+    "logs-auditd_manager.auditd-*"
+  ],
+  "query": "event.category:\"process\" and process.name:(\"chattr\" or \"shred\" or \"wipe\" or \"srm\")",
+  "actions": []
+}

@@ -1,0 +1,54 @@
+{
+  "name": "FortiWeb — SQL Injection: Classic Patterns",
+  "tags": [
+    "raad",
+    "redteam-2026-05",
+    "phase-3",
+    "web",
+    "variant-a",
+    "sqli"
+  ],
+  "interval": "5m",
+  "enabled": true,
+  "description": "Detects textbook SQL-injection payloads (`' OR '1'='1`, `UNION SELECT`, `ORDER BY n--`, `; DROP TABLE`, `WAITFOR DELAY`) in HTTP request parameters, bodies and headers seen by the WAF — unencoded, signature-style injection attempts against web applications.",
+  "risk_score": 73,
+  "severity": "high",
+  "license": "",
+  "output_index": "",
+  "meta": {
+    "kibana_siem_app_url": ""
+  },
+  "investigation_fields": {
+    "field_names": [
+      "data.original_src",
+      "data.http_host",
+      "data.http_url",
+      "data.http_retcode"
+    ]
+  },
+  "author": [],
+  "false_positives": [
+    "Legitimate WAF testing tools owned by NBI's appsec team — allowlist",
+    "Application code that legitimately includes the strings in URL",
+    "ScanWave Variant A — TP-Verified during the engagement window."
+  ],
+  "from": "now-10m",
+  "rule_id": "raad-06-classic-sqli",
+  "max_signals": 100,
+  "risk_score_mapping": [],
+  "severity_mapping": [],
+  "threat": [],
+  "to": "now",
+  "references": [],
+  "version": 1,
+  "exceptions_list": [],
+  "related_integrations": [],
+  "required_fields": [],
+  "setup": "",
+  "type": "query",
+  "language": "lucene",
+  "data_view_id": "logs-*",
+  "query": "data.packet.packet:(*'\\ OR\\ '1'\\='1* OR *'\\ or\\ 1\\=1* OR *\\\"'\\ or\\ 1\\=1\\-\\-* OR *UNION\\ SELECT* OR *UNION\\ ALL\\ SELECT* OR *ORDER\\ BY\\ 1\\-\\-* OR *ORDER\\ BY\\ 100\\-\\-* OR *WAITFOR\\ DELAY* OR *\\;\\ DROP\\ TABLE* OR *';\\ \\-\\-* OR *1'\\ AND\\ SLEEP\\(* OR *1'\\ AND\\ BENCHMARK\\(* OR *INFORMATION_SCHEMA.TABLES* OR *sys.databases* OR *xp_cmdshell* OR *'\\ UNION\\ SELECT*)",
+  "filters": [],
+  "actions": []
+}

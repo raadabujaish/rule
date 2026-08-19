@@ -1,0 +1,68 @@
+{
+  "name": "Linux — Netcat/Socat Execution (Reverse Shell / Tunneling)",
+  "tags": [
+    "NBI-Endpoint",
+    "Phase3",
+    "Linux-auditd"
+  ],
+  "interval": "5m",
+  "enabled": true,
+  "description": "Detects execution of netcat/socat — frequently used to establish reverse shells, bind shells, or data-tunneling channels. These tools do not appear in normal application workloads on these servers.",
+  "risk_score": 73,
+  "severity": "high",
+  "note": "## Investigation\n1. `user.name` ran `process.executable` `process.args` on `host.name`.\n2. Look for `-e`, `exec`, or `/dev/tcp` patterns and the remote endpoint.\n## Response\nIsolate the host and identify the C2 destination and parent process.",
+  "output_index": "",
+  "investigation_fields": {
+    "field_names": [
+      "process.executable",
+      "process.args",
+      "process.name",
+      "process.parent.executable",
+      "user.name",
+      "host.name"
+    ]
+  },
+  "author": [
+    "raadabujaish"
+  ],
+  "false_positives": [],
+  "from": "now-9m",
+  "rule_id": "nbi-lnx-reverse-shell-tools",
+  "max_signals": 100,
+  "risk_score_mapping": [],
+  "severity_mapping": [],
+  "threat": [
+    {
+      "framework": "MITRE ATT&CK",
+      "tactic": {
+        "id": "TA0011",
+        "name": "Command and Control",
+        "reference": "https://attack.mitre.org/tactics/TA0011/"
+      },
+      "technique": [
+        {
+          "id": "T1095",
+          "name": "Non-Application Layer Protocol",
+          "reference": "https://attack.mitre.org/techniques/T1095/"
+        }
+      ]
+    }
+  ],
+  "to": "now",
+  "references": [
+    "https://attack.mitre.org/"
+  ],
+  "version": 1,
+  "exceptions_list": [],
+  "related_integrations": [],
+  "required_fields": [],
+  "setup": "",
+  "type": "query",
+  "language": "kuery",
+  "index": [
+    "logs-auditd.log-*",
+    "logs-auditd_manager.auditd-*"
+  ],
+  "query": "event.category:\"process\" and process.name:(\"nc\" or \"ncat\" or \"netcat\" or \"socat\")",
+  "actions": []
+}

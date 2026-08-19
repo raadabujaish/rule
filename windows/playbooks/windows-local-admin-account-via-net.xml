@@ -1,0 +1,406 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<Playbook xmlns="https://soc.example/playbooks" id="PB-windows-local-admin-account-via-net" name="Create local admin accounts using net exe - SOC Playbook" version="3.0" status="Validated" classification="TLP:AMBER">
+  <Metadata>
+    <Owner>NBI SOC / Detection Engineering</Owner>
+    <LastUpdated>2026-08-19</LastUpdated>
+    <Severity default="high">high</Severity>
+    <Confidence default="Medium">Medium</Confidence>
+    <Category>Persistence</Category>
+    <MitreAttack>
+      <Technique id="T1136.001"/>
+      <Technique id="T1136"/>
+      <Technique id="T1098"/>
+      <Technique id="T1078.003"/>
+      <Technique id="T1078"/>
+      <Tactic id="TA0003"/>
+      <Tactic id="TA0004"/>
+    </MitreAttack>
+    <References>
+      <Reference title="MITRE ATT&amp;CK - Create Account: Local Account (T1136.001)" url="https://attack.mitre.org/techniques/T1136/001/"/>
+      <Reference title="MITRE ATT&amp;CK - Account Manipulation (T1098)" url="https://attack.mitre.org/techniques/T1098/"/>
+      <Reference title="MITRE ATT&amp;CK - Valid Accounts: Local Accounts (T1078.003)" url="https://attack.mitre.org/techniques/T1078/003/"/>
+      <Reference title="MITRE ATT&amp;CK - Persistence tactic (TA0003)" url="https://attack.mitre.org/tactics/TA0003/"/>
+      <Reference title="Microsoft Learn - 4732: A member was added to a security-enabled local group" url="https://learn.microsoft.com/en-us/windows/security/threat-protection/auditing/event-4732"/>
+      <Reference title="Microsoft Learn - 4720: A user account was created" url="https://learn.microsoft.com/en-us/windows/security/threat-protection/auditing/event-4720"/>
+      <Reference title="LOLBAS - Net.exe" url="https://lolbas-project.github.io/lolbas/Binaries/Net/"/>
+      <Reference title="Microsoft Learn - Local Administrator Password Solution (LAPS)" url="https://learn.microsoft.com/en-us/windows-server/identity/laps/laps-overview"/>
+    </References>
+  </Metadata>
+  <AlertContext>
+    <RuleName>Create local admin accounts using net exe</RuleName>
+    <RuleId>bca2dd02-bc4d-4435-a04f-dffc29b0d2c2</RuleId>
+    <RuleType>query</RuleType>
+    <Index>logs-system.security*</Index>
+    <TriggerLogic>The deployed rule is a KQL query analytic over 4688 process creation. The one-line Kibana KQL detection filter (the deployed condition, faithful to the rule's trigger logic):
+
+
+
+Plain English: a net/net1 command that adds a user to, or creates an account for, the local administrators group - e.g. net localgroup administrators &lt;acct&gt; /add (elevation) or a paired net user &lt;acct&gt; &lt;pw&gt; /add (account creation) beforehand.
+
+Two NBI-specific notes: (1) net.exe delegates to net1.exe, so the meaningful command may appear on net1.exe - both are matched. (2) process.command_line is only ~50% populated (0% on the jump tier), so where the command line is null the directory events (4720/4732, section 14.2) are the corroboration; the arguments are also recoverable from process.args (MV_CONCAT) where the host audits them.</TriggerLogic>
+    <KeyAlertFields>process.name, net.exe, net1.exe, process.parent.name, process.command_line, process.args, user.name, host.name, source.ip</KeyAlertFields>
+  </AlertContext>
+  <Inputs>
+    <Input name="$host"/>
+    <Input name="$user"/>
+    <Input name="$source_ip"/>
+  </Inputs>
+  <ExecutiveSummary>
+    <Overview>This playbook drives triage and investigation of the Create local admin accounts using net exe detection on NBI's Elastic Security deployment. The rule fires when net.exe (or its net1.exe worker) runs with arguments combining user/localgroup, add//add, and administrators - the command line that creates a local account and/or adds a principal to the local Administrators group. This is the canonical local-privilege / local-persistence action performed from the command line.
+
+A hidden or unexpected local administrator is exactly how an attacker plants durable local privilege after a foothold - a backdoor admin that survives domain password resets and often evades identity monitoring - and also exactly what imaging, break-glass, and some installers do legitimately. The analyst decides whether this is a sanctioned administrative/provisioning action (false_positive), attacker persistence/privilege escalation (true_positive), an unbaselined benign provisioning job (misconfiguration), or unresolved (needs_escalation). The discriminators: the exact command (which account, which group), the parent process, who ran it, and whether a matching 4720/4732 directory event confirms an account was really created or elevated.</Overview>
+    <BusinessImpact>An alert means: on $host, a command-line action created a local account and/or added a member to the local Administrators group via net/net1. The command itself is the trigger; whether it succeeded - whether an account was actually created or a group membership actually changed - is confirmed by the paired directory events (4720 local user created, 4732 member added to a security-enabled *local* group). A command with a matching 4720/4732 is a real change; a command with no matching event may have failed, targeted an existing account, or run with a null command line that the rule matched on process.args.
+
+The stakes are persistence and privilege: a local administrator on a banking server or endpoint lets an intruder return, disable controls, and stage further compromise even after the original entry is closed. The investigative question is whether the actor is an entitled administrator doing sanctioned work or an intruder planting a backdoor.</BusinessImpact>
+  </ExecutiveSummary>
+  <Investigation>
+    <Goal>Decide true_positive / false_positive / misconfiguration / needs_escalation for Create local admin accounts using net exe.</Goal>
+    <Workflow>
+      <Step order="1" name="Recover the exact local-admin command (reuse of deployed INV-R2-01)">
+        <Purpose>Recover the exact local-admin command (reuse of deployed INV-R2-01)</Purpose>
+        <Query platform="Elastic" language="ES|QL" id="Q-01">
+          <![CDATA[
+FROM logs-system.security*
+| WHERE @timestamp >= NOW() - 4 hours
+    AND event.code == "4688" AND host.name == "$host"
+    AND TO_LOWER(process.name) IN ("net.exe", "net1.exe")
+    AND process.command_line LIKE "*localgroup*" AND process.command_line LIKE "*administrators*"
+| KEEP @timestamp, user.name, process.parent.name, process.command_line
+| SORT @timestamp DESC
+| LIMIT 20
+]]>
+        </Query>
+      </Step>
+      <Step order="2" name="Corroborate with the account/group directory events (reuse of deployed INV-R2-02)">
+        <Purpose>Corroborate with the account/group directory events (reuse of deployed INV-R2-02)</Purpose>
+        <Query platform="Elastic" language="ES|QL" id="Q-02">
+          <![CDATA[
+FROM logs-system.security*
+| WHERE @timestamp >= NOW() - 4 hours
+    AND host.name == "$host"
+    AND event.code IN ("4720", "4726", "4732", "4756")
+| STATS n = COUNT(*), targets = VALUES(winlog.event_data.TargetUserName), subj = VALUES(winlog.event_data.SubjectUserName) BY event.code
+| SORT n DESC
+| LIMIT 20
+]]>
+        </Query>
+      </Step>
+      <Step order="3" name="Entity pivoting">
+        <Purpose>Entity pivoting</Purpose>
+        <Query platform="Elastic" language="ES|QL" id="Q-03">
+          <![CDATA[
+FROM logs-system.security*
+| WHERE @timestamp >= NOW() - 4 hours
+    AND event.code == "4688"
+    AND host.name == "$host"
+    AND TO_LOWER(process.name) IN ("net.exe", "net1.exe")
+| KEEP @timestamp, host.name, user.name, process.name, process.executable, process.parent.name, process.pid, process.parent.pid, process.command_line
+| SORT @timestamp DESC
+| LIMIT 50
+]]>
+        </Query>
+      </Step>
+      <Step order="4" name="Process investigation">
+        <Purpose>Process investigation</Purpose>
+        <Query platform="Elastic" language="ES|QL" id="Q-04">
+          <![CDATA[
+FROM logs-system.security*
+| WHERE @timestamp >= NOW() - 4 hours
+    AND event.code == "4688"
+    AND TO_LOWER(process.name) IN ("net.exe", "net1.exe")
+| STATS executions = COUNT(*), hosts = COUNT_DISTINCT(host.name), users = COUNT_DISTINCT(user.name) BY process.name, process.parent.name
+| SORT executions DESC
+| LIMIT 50
+]]>
+        </Query>
+      </Step>
+      <Step order="5" name="Process investigation">
+        <Purpose>Process investigation</Purpose>
+        <Query platform="Elastic" language="ES|QL" id="Q-05">
+          <![CDATA[
+FROM logs-system.security*
+| WHERE @timestamp >= NOW() - 4 hours
+    AND event.code == "4688"
+    AND host.name == "$host" AND user.name == "$user"
+    AND TO_LOWER(process.name) IN ("net.exe", "net1.exe", "whoami.exe", "powershell.exe", "cmd.exe", "reg.exe", "sc.exe")
+| STATS execs = COUNT(*), cmds = VALUES(process.command_line) BY process.name, process.parent.name
+| SORT execs DESC
+| LIMIT 20
+]]>
+        </Query>
+      </Step>
+      <Step order="6" name="Parent-Child process analysis">
+        <Purpose>Parent-Child process analysis</Purpose>
+        <Query platform="Elastic" language="ES|QL" id="Q-06">
+          <![CDATA[
+FROM logs-system.security*
+| WHERE @timestamp >= NOW() - 4 hours
+    AND event.code == "4688"
+    AND host.name == "$host"
+    AND (TO_LOWER(process.name) IN ("net.exe", "net1.exe") OR TO_LOWER(process.parent.name) IN ("net.exe", "net1.exe"))
+| KEEP @timestamp, user.name, process.parent.name, process.parent.pid, process.name, process.pid, process.executable
+| SORT @timestamp DESC
+| LIMIT 50
+]]>
+        </Query>
+      </Step>
+      <Step order="7" name="User investigation">
+        <Purpose>User investigation</Purpose>
+        <Query platform="Elastic" language="ES|QL" id="Q-07">
+          <![CDATA[
+FROM logs-system.security*
+| WHERE @timestamp >= NOW() - 4 hours
+    AND event.code == "4688"
+    AND user.name == "$user"
+| STATS executions = COUNT(*), distinct_procs = COUNT_DISTINCT(process.name) BY host.name
+| SORT executions DESC
+| LIMIT 20
+]]>
+        </Query>
+      </Step>
+      <Step order="8" name="Host investigation">
+        <Purpose>Host investigation</Purpose>
+        <Query platform="Elastic" language="ES|QL" id="Q-08">
+          <![CDATA[
+FROM logs-system.security*
+| WHERE @timestamp >= NOW() - 4 hours
+    AND event.code == "4688"
+    AND host.name == "$host"
+| STATS executions = COUNT(*), users = COUNT_DISTINCT(user.name) BY process.name, process.parent.name
+| SORT executions ASC
+| LIMIT 40
+]]>
+        </Query>
+      </Step>
+      <Step order="9" name="IP investigation">
+        <Purpose>IP investigation</Purpose>
+        <Query platform="Elastic" language="ES|QL" id="Q-09">
+          <![CDATA[
+FROM logs-system.security*
+| WHERE @timestamp >= NOW() - 4 hours
+    AND event.code == "4624"
+    AND host.name == "$host" AND user.name == "$user"
+    AND source.ip IS NOT NULL
+| STATS logons = COUNT(*) BY source.ip, winlog.event_data.LogonType
+| SORT logons DESC
+| LIMIT 20
+]]>
+        </Query>
+      </Step>
+      <Step order="10" name="IP investigation">
+        <Purpose>IP investigation</Purpose>
+        <Query platform="Elastic" language="ES|QL" id="Q-10">
+          <![CDATA[
+FROM logs-system.security*
+| WHERE @timestamp >= NOW() - 4 hours
+    AND event.code == "4624"
+    AND source.ip == "$source_ip"
+| STATS logons = COUNT(*) BY user.name, host.name, winlog.event_data.LogonType
+| SORT logons DESC
+| LIMIT 25
+]]>
+        </Query>
+      </Step>
+      <Step order="11" name="File investigation">
+        <Purpose>File investigation</Purpose>
+        <Query platform="Elastic" language="ES|QL" id="Q-11">
+          <![CDATA[
+FROM logs-system.security*
+| WHERE @timestamp >= NOW() - 4 hours
+    AND event.code == "4688"
+    AND host.name == "$host"
+    AND TO_LOWER(process.name) IN ("net.exe", "net1.exe")
+| STATS executions = COUNT(*), first_seen = MIN(@timestamp), last_seen = MAX(@timestamp) BY process.executable
+| SORT executions DESC
+| LIMIT 30
+]]>
+        </Query>
+      </Step>
+      <Step order="12" name="Authentication investigation">
+        <Purpose>Authentication investigation</Purpose>
+        <Query platform="Elastic" language="ES|QL" id="Q-12">
+          <![CDATA[
+FROM logs-system.security*
+| WHERE @timestamp >= NOW() - 4 hours
+    AND event.code IN ("4624", "4625", "4634", "4647")
+    AND host.name == "$host" AND user.name == "$user"
+| STATS events = COUNT(*), first_seen = MIN(@timestamp), last_seen = MAX(@timestamp) BY event.code, winlog.event_data.LogonType, source.ip
+| SORT events DESC
+| LIMIT 30
+]]>
+        </Query>
+      </Step>
+      <Step order="13" name="Timeline Reconstruction">
+        <Purpose>Timeline Reconstruction</Purpose>
+        <Query platform="Elastic" language="ES|QL" id="Q-13">
+          <![CDATA[
+FROM logs-system.security*
+| WHERE @timestamp >= NOW() - 4 hours
+    AND event.code == "4688"
+    AND host.name == "$host"
+    AND user.name == "$user"
+| KEEP @timestamp, process.parent.name, process.parent.pid, process.name, process.pid, process.executable
+| SORT @timestamp ASC
+| LIMIT 200
+]]>
+        </Query>
+      </Step>
+      <Step order="14" name="Lateral movement validation">
+        <Purpose>Lateral movement validation</Purpose>
+        <Query platform="Elastic" language="ES|QL" id="Q-14">
+          <![CDATA[
+FROM logs-system.security*
+| WHERE @timestamp >= NOW() - 4 hours
+    AND event.code IN ("4624", "4648", "4768", "4769", "5140")
+    AND user.name == "$user"
+    AND host.name != "$host"
+| STATS events = COUNT(*) BY host.name, event.code, winlog.event_data.LogonType
+| SORT events DESC
+| LIMIT 30
+]]>
+        </Query>
+      </Step>
+      <Step order="15" name="Persistence validation">
+        <Purpose>Persistence validation</Purpose>
+        <Query platform="Elastic" language="ES|QL" id="Q-15">
+          <![CDATA[
+FROM logs-system.security*
+| WHERE @timestamp >= NOW() - 4 hours
+    AND host.name == "$host"
+    AND (
+        (event.code == "4688" AND TO_LOWER(process.name) IN ("schtasks.exe", "reg.exe", "sc.exe", "at.exe", "powershell.exe", "net.exe", "net1.exe"))
+        OR event.code == "7045"
+        OR event.code == "4720"
+        OR event.code == "4698"
+    )
+| STATS events = COUNT(*) BY event.code, process.name, user.name
+| SORT events DESC
+| LIMIT 40
+]]>
+        </Query>
+      </Step>
+      <Step order="16" name="Privilege escalation validation">
+        <Purpose>Privilege escalation validation</Purpose>
+        <Query platform="Elastic" language="ES|QL" id="Q-16">
+          <![CDATA[
+FROM logs-system.security*
+| WHERE @timestamp >= NOW() - 4 hours
+    AND event.code == "4672"
+    AND host.name == "$host"
+| STATS special_priv_logons = COUNT(*) BY user.name
+| SORT special_priv_logons DESC
+| LIMIT 25
+]]>
+        </Query>
+      </Step>
+      <Step order="17" name="Defense evasion validation">
+        <Purpose>Defense evasion validation</Purpose>
+        <Query platform="Elastic" language="ES|QL" id="Q-17">
+          <![CDATA[
+FROM logs-system.security*
+| WHERE @timestamp >= NOW() - 4 hours
+    AND host.name == "$host"
+    AND (
+        (event.code == "4688" AND TO_LOWER(process.name) IN ("wevtutil.exe", "fsutil.exe", "vssadmin.exe", "wmic.exe", "cipher.exe", "sdelete.exe", "sdelete64.exe"))
+        OR event.code == "1102"
+        OR event.code == "4719"
+        OR event.code == "4726"
+    )
+| STATS events = COUNT(*) BY event.code, process.name, user.name
+| SORT events DESC
+| LIMIT 30
+]]>
+        </Query>
+      </Step>
+      <Step order="18" name="Impact assessment">
+        <Purpose>Impact assessment</Purpose>
+        <Query platform="Elastic" language="ES|QL" id="Q-18">
+          <![CDATA[
+FROM logs-system.security*
+| WHERE @timestamp >= NOW() - 4 hours
+    AND host.name == "$host"
+    AND event.code IN ("4720", "4732", "4756", "4726", "4738", "7045", "4698")
+| STATS events = COUNT(*), targets = VALUES(winlog.event_data.TargetUserName) BY event.code
+| SORT events DESC
+| LIMIT 20
+]]>
+        </Query>
+      </Step>
+      <Step order="19" name="Finalize verdict">
+        <DecisionTree>
+        </DecisionTree>
+      </Step>
+    </Workflow>
+  </Investigation>
+  <ClassificationGuidance>
+    <TruePositive>
+      <Definition></Definition>
+    </TruePositive>
+    <FalsePositive>
+      <Definition></Definition>
+      <Indicators>
+        <Item>Authorised administration / provisioning. Imaging and build workflows, break-glass procedures, and approved installers legitimately create or elevate local accounts. Confirm the change/owner and that the executing account is entitled to administer $host - do not trust the account name alone.</Item>
+        <Item>Automated provisioning jobs creating or elevating a local service account, recurring from a recognised installer parent - usually a misconfiguration/baseline gap (section 6) rather than an attack.</Item>
+        <Item>Proven-failed hostile attempts - the command ran but the group membership did not change (no 4720/4732). Recorded as a blocked attempt, never a bare "benign"; the account is still investigated.</Item>
+        <Item>Administrator/red-team testing - authorised but not benign; confirm against ROE/change.</Item>
+        <Item>net.exe/net1.exe local-admin activity is rare here. In the validation window there were 0 net/net1 executions and 0 4720/4726/4732/4756 account-management events across the estate (only a handful of 4738 account-changed events on 2 hosts). There is no high-volume legitimate source to tune out; a firing is genuinely notable, and the directory-event corroboration is the reliable confirmation.</Item>
+        <Item>nim-jump-apv02 is a plausible admin locus. Jump/imaging/admin hosts are where local-admin creation legitimately happens (build/break-glass). A local admin such as wahab.admin running the command there could be sanctioned; the same command from a non-admin user or a foothold-style parent is the opposite.</Item>
+        <Item>Command-line auditing is 0% on the jump tier. On nim-jump-apv02 process.command_line/process.args are null, so the exact command (which account, which group) may be unreadable from telemetry - lean on the 4720/4732 directory events (section 14.2) and read the command on a command-line-audited host (nim-est-apv07 ~100%) where relevant.</Item>
+        <Item>No recorded benign-true-positive / allow-list. Baseline a specific provisioning job (parent/child/path/account) after confirming it; never blanket-except a host or user for local-admin creation off a single alert.</Item>
+      </Indicators>
+    </FalsePositive>
+    <Misconfiguration>
+      <Definition></Definition>
+    </Misconfiguration>
+    <NeedsEscalation>
+      <Definition></Definition>
+    </NeedsEscalation>
+  </ClassificationGuidance>
+  <ResponseActions>
+    <Phase name="Containment">
+      <Action>Isolate $host (network-contain / quarantine) if a true_positive is confirmed, to stop use of the backdoor admin. On a shared jump/admin host, coordinate with IT but prioritise containment.</Action>
+      <Action>Disable/remove the backdoor account identified via section 14.2/section 17.5 (TargetUserName) and remove it from local Administrators; capture current membership first (net localgroup administrators) for evidence.</Action>
+      <Action>Suspend $user's session and disable the executing account pending investigation if it is implicated; reset its credentials (section 20).</Action>
+      <Action>Preserve volatile evidence first - running process list, local SAM/group state, and the command history - since NBI does not retain current membership as an event; host-side capture is the only way to prove the present state.</Action>
+      <Action>Deploy/confirm changes only via the authorised human-approved DEPLOY path; investigation itself is read-only.</Action>
+    </Phase>
+    <Phase name="Eradication">
+      <Action>Remove the backdoor admin account and any other rogue accounts, and remove the persistence discovered in section 17.2 (services, scheduled tasks, Run keys).</Action>
+      <Action>Sweep the estate for the same account name or SID (section 17.1 note): a backdoor admin is commonly planted on multiple hosts. Remove every instance.</Action>
+      <Action>Reset local and any exposed domain credentials on $host, and identify how the actor gained the ability to run this (the foothold / any prior privilege escalation, section 17.3) and remediate it.</Action>
+      <Action>Run a full anti-malware / EDR scan on $host and any host $user or the backdoor account touched.</Action>
+    </Phase>
+    <Phase name="Recovery">
+      <Action>Verify local Administrators membership is correct on $host (and on any swept peers) after removal, and that the backdoor account is gone.</Action>
+      <Action>Reset $user's password and any credentials exposed on $host during the compromised window; if privileged accounts logged on there (section 17.3), rotate those too.</Action>
+      <Action>Restore $host from a known-good image if persistence or tampering was extensive; otherwise validate that all eradication actions hold after reboot.</Action>
+      <Action>Harden: enforce LAPS/managed local admin, restrict interactive local-admin creation to provisioning tooling, alert on new members of local Administrators (4732) fleet-wide independent of the command-line tool used, and enable command-line auditing on the jump/workstation class (section 8).</Action>
+    </Phase>
+  </ResponseActions>
+  <Escalation>
+    <Trigger>Escalate to SOC L2 / IR (and involve the server/endpoint owner) when any of the following hold:
+
+- An unexpected account was added to local Administrators with a matching 4720/4732 (section 14.2) and no authorised cause.
+- The same backdoor account appears on multiple hosts (section 17.1), or $host is a Tier-0/critical banking server.
+- Surrounding recon/persistence or a foothold-style parent is present (section 15.2b, section 15.3, section 17.2), or the executing account was itself elevated first (section 17.3).
+- Defence evasion - log clearing, audit tampering, or account deletion (4726) after use (section 17.4).
+- The command text and the 4720/4732 corroboration are both unavailable - escalate as needs_escalation with a request to pull current membership and endpoint triage.</Trigger>
+    <To>SOC L2 / IR</To>
+  </Escalation>
+  <ClosureCriteria>
+    <Item>false_positive (authorised administration/provisioning): a documented build/break-glass/installer action by an account entitled to administer $host, no recon/persistence context. Documented; scope any exception narrowly.</Item>
+    <Item>false_positive (proven-failed attempt): the command ran but no group-membership change occurred (no 4720/4732; error return) - recorded as a blocked attempt, never a bare "benign"; the account still investigated.</Item>
+    <Item>misconfiguration: a recognised automated installer/provisioning job creates/elevates a local service account; baseline it and least-privilege the local admin.</Item>
+    <Item>true_positive: a backdoor local admin was created/elevated; host contained, backdoor removed, credentials reset, estate swept for reuse, incident documented.</Item>
+    <Item>needs_escalation: handed to SOC L2 / IR with current membership and the corroboration unresolved.</Item>
+  </ClosureCriteria>
+  <Limitations>
+    <Item>The directory events are the truth of impact. The 4688 says a command ran; 4720 (created) and 4732 (added to Administrators) say it *worked*. When the command line is null (jump tier), lean entirely on 4720/4732 and the TargetUserName.</Item>
+    <Item>Watch the target account name. A random/lookalike/service-style name added to Administrators is a strong abuse signal; a well-known break-glass or provisioning account is more likely sanctioned - but verify entitlement, do not trust the name.</Item>
+    <Item>net delegates to net1. The meaningful command frequently lands on net1.exe; always inspect both (every query here includes both).</Item>
+    <Item>Command-line auditing is 0% on the jump tier, so the exact account/group may be unreadable exactly where admin activity concentrates; the 4720/4732 corroboration is the fallback, and enabling the GPO is the top hardening ask.</Item>
+    <Item>This rule is command-line-tool-specific and trivially evaded. The same result comes from PowerShell (Add-LocalGroupMember/New-LocalUser), ADSI, or direct SAM manipulation, none of which invoke net.exe. Complement with a 4732-into-Administrators analytic independent of the tool used (this is a genuine coverage gap to raise).</Item>
+    <Item>source.ip is shared infrastructure (validated 10.11.102.2 fronts PAM/DC identities); correlate IP + user + host, never treat it as an individual identifier.</Item>
+    <Item>KB-worthy (persist to NBI customer scope): (1) net/net1 and 4720/4726/4732/4756 near-zero over 4h (only 4738 seen); (2) command-line 0% on nim-jump-apv02 vs ~100% on nim-est-apv07; (3) rule is net-tool-specific - PowerShell/ADSI path bypasses it; (4) 10.11.102.2 = shared PAM/DC/VDI network-logon source. All observed live on 2026-08-19.</Item>
+  </Limitations>
+</Playbook>

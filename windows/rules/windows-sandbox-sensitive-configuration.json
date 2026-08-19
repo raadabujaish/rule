@@ -1,0 +1,86 @@
+{
+  "name": "Windows Sandbox with Sensitive Configuration [NBI-4688]",
+  "tags": [
+    "Domain: Endpoint",
+    "OS: Windows",
+    "Use Case: Threat Detection",
+    "Tactic: Defense Evasion",
+    "Data Source: Elastic Endgame",
+    "Data Source: Elastic Defend",
+    "Data Source: Sysmon",
+    "Data Source: Microsoft Defender for Endpoint",
+    "Data Source: SentinelOne",
+    "Data Source: Crowdstrike",
+    "Resources: Investigation Guide",
+    "NBI-Recovered",
+    "Phase2-Batch2",
+    "Windows-4688",
+    "coverage:partial-29pct"
+  ],
+  "interval": "5m",
+  "enabled": true,
+  "description": "Identifies Windows sanfbox processes indicating the start of a new container with sensitive configurations like write access to the host file system, network connection and automatic execution via logon command. Malware may abuse the sandbox feature to evade detection.",
+  "risk_score": 47,
+  "severity": "medium",
+  "note": "## Coverage\nThis rule runs on Windows Security 4688 process-creation events. Command-line-dependent conditions currently apply to hosts where command-line auditing is enabled.\n\n## Detection guidance\n## Triage and analysis\n\n> **Disclaimer**:\n> This investigation guide was created using generative AI technology and has been reviewed to improve its accuracy and relevance. While every effort has been made to ensure its quality, we recommend validating the content and adapting it to suit your specific environment and operational needs.\n\n### Investigating Windows Sandbox with Sensitive Configuration\n\nWindows Sandbox is a lightweight virtual environment designed to safely run untrusted applications. It isolates processes from the host system, preventing permanent changes. However, adversaries can exploit this by configuring the sandbox to access host resources, enabling network connections, or executing commands at startup. The detection rule identifies such misuse by monitoring specific process activities and configurations indicative of potential abuse, such as unauthorized file system access or network enablement, helping analysts spot and mitigate threats effectively.\n\n### Possible investigation steps\n\n- Review the process details for \"wsb.exe\" or \"WindowsSandboxClient.exe\" to confirm the start of a new container and check for any unusual command-line arguments that match the qu",
+  "output_index": "",
+  "investigation_fields": {
+    "field_names": [
+      "user.name",
+      "process.name",
+      "process.parent.name",
+      "process.command_line",
+      "host.name"
+    ]
+  },
+  "author": [
+    "raadabujaish"
+  ],
+  "false_positives": [],
+  "from": "now-9m",
+  "rule_id": "nbi-b2-windows-sandbox-with-sensitive-configuration",
+  "max_signals": 100,
+  "risk_score_mapping": [],
+  "severity_mapping": [],
+  "threat": [
+    {
+      "framework": "MITRE ATT&CK",
+      "tactic": {
+        "id": "TA0005",
+        "name": "Defense Evasion",
+        "reference": "https://attack.mitre.org/tactics/TA0005/"
+      },
+      "technique": [
+        {
+          "id": "T1564",
+          "name": "Hide Artifacts",
+          "reference": "https://attack.mitre.org/techniques/T1564/",
+          "subtechnique": [
+            {
+              "id": "T1564.006",
+              "name": "Run Virtual Instance",
+              "reference": "https://attack.mitre.org/techniques/T1564/006/"
+            }
+          ]
+        }
+      ]
+    }
+  ],
+  "to": "now",
+  "references": [
+    "https://blog-en.itochuci.co.jp/entry/2025/03/12/140000",
+    "https://www.elastic.co/guide/en/security/current/prebuilt-rules.html"
+  ],
+  "version": 1,
+  "exceptions_list": [],
+  "related_integrations": [],
+  "required_fields": [],
+  "setup": "",
+  "type": "eql",
+  "language": "eql",
+  "index": [
+    "logs-system.security-*"
+  ],
+  "query": "process where host.os.type == \"windows\" and event.type == \"start\" and\n  process.name : (\"wsb.exe\", \"WindowsSandboxClient.exe\") and\n  process.command_line : (\"*<Networking>Enable</Networking>*\",\n                          \"*<HostFolder>C:\\\\*<ReadOnly>false*\",\n                          \"*<LogonCommand>*\",\n                          \"*<NetworkingEnabled>true*\")\n",
+  "actions": []
+}

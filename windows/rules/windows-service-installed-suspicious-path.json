@@ -1,0 +1,77 @@
+{
+  "name": "Windows — Service Installed from a Suspicious Path",
+  "tags": [
+    "NBI-Endpoint",
+    "Phase3",
+    "Windows-Security"
+  ],
+  "interval": "5m",
+  "enabled": true,
+  "description": "Detects a new Windows service whose binary path (ServiceFileName) resides in a user-writable or temporary directory (Temp, AppData, ProgramData, Public, PerfLogs). Legitimate services run from Program Files or System32; user-writable paths indicate persistence or lateral-movement tooling.",
+  "risk_score": 73,
+  "severity": "high",
+  "note": "## Investigation\n1. `SubjectUserName` installed service `ServiceName` with binary `ServiceFileName` on `host.name`.\n2. Inspect the binary; check whether it was created recently and by whom.\n## Response\nStop/remove the service, quarantine the binary, and investigate the installing account.",
+  "output_index": "",
+  "investigation_fields": {
+    "field_names": [
+      "process.name",
+      "process.parent.name",
+      "process.command_line",
+      "process.executable",
+      "winlog.event_data.ServiceName",
+      "winlog.event_data.ServiceFileName",
+      "winlog.event_data.SubjectUserName",
+      "user.name",
+      "host.name"
+    ]
+  },
+  "author": [
+    "raadabujaish"
+  ],
+  "false_positives": [],
+  "from": "now-9m",
+  "rule_id": "nbi-win-service-suspicious-path",
+  "max_signals": 100,
+  "risk_score_mapping": [],
+  "severity_mapping": [],
+  "threat": [
+    {
+      "framework": "MITRE ATT&CK",
+      "tactic": {
+        "id": "TA0003",
+        "name": "Persistence",
+        "reference": "https://attack.mitre.org/tactics/TA0003/"
+      },
+      "technique": [
+        {
+          "id": "T1543",
+          "name": "Create or Modify System Process",
+          "reference": "https://attack.mitre.org/techniques/T1543/",
+          "subtechnique": [
+            {
+              "id": "T1543.003",
+              "name": "Windows Service",
+              "reference": "https://attack.mitre.org/techniques/T1543/003/"
+            }
+          ]
+        }
+      ]
+    }
+  ],
+  "to": "now",
+  "references": [
+    "https://attack.mitre.org/"
+  ],
+  "version": 1,
+  "exceptions_list": [],
+  "related_integrations": [],
+  "required_fields": [],
+  "setup": "",
+  "type": "query",
+  "language": "kuery",
+  "index": [
+    "logs-system.security-*"
+  ],
+  "query": "event.code:\"4697\" and winlog.event_data.ServiceFileName:(*\\\\Temp\\\\* or *\\\\AppData\\\\* or *\\\\ProgramData\\\\* or *\\\\Users\\\\Public\\\\* or *\\\\Windows\\\\Temp\\\\* or *\\\\PerfLogs\\\\*)",
+  "actions": []
+}

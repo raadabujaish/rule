@@ -1,0 +1,380 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<Playbook xmlns="https://soc.example/playbooks" id="PB-kaspersky-virus-outbreak-detected" name="Kaspersky — Virus Outbreak Detected - SOC Playbook" version="3.0" status="Validated" classification="TLP:AMBER">
+  <Metadata>
+    <Owner>NBI SOC / Detection Engineering</Owner>
+    <LastUpdated>2026-08-19</LastUpdated>
+    <Severity default="Critical">Critical</Severity>
+    <Confidence default="Medium">Medium</Confidence>
+    <Category>Lateral Movement</Category>
+    <MitreAttack>
+      <Technique id="T1210"/>
+      <Technique id="T1080"/>
+      <Technique id="T1105"/>
+      <Tactic id="TA0008"/>
+      <Tactic id="TA0002"/>
+    </MitreAttack>
+    <References>
+      <Reference title="MITRE ATT&amp;CK - Lateral Movement tactic (TA0008)" url="https://attack.mitre.org/tactics/TA0008/"/>
+      <Reference title="MITRE ATT&amp;CK - Execution tactic (TA0002)" url="https://attack.mitre.org/tactics/TA0002/"/>
+      <Reference title="MITRE ATT&amp;CK - Exploitation of Remote Services (T1210)" url="https://attack.mitre.org/techniques/T1210/"/>
+      <Reference title="MITRE ATT&amp;CK - Taint Shared Content (T1080)" url="https://attack.mitre.org/techniques/T1080/"/>
+      <Reference title="MITRE ATT&amp;CK - Ingress Tool Transfer (T1105)" url="https://attack.mitre.org/techniques/T1105/"/>
+      <Reference title="Kaspersky Security Center - Virus outbreak notification &amp; threshold configuration" url="https://support.kaspersky.com/KSC/14/en-US/153924.htm"/>
+      <Reference title="Kaspersky - Export of events to a SIEM system (KSC CEF event format; GNRL_EV_VIRUS_OUTBREAK / GNRL_EV_VIRUS_FOUND / GNRL_EV_OBJECT_* event types)" url="https://support.kaspersky.com/KSC/14/en-US/89299.htm"/>
+      <Reference title="Kaspersky Endpoint Security - Exploit Prevention and Behavior Detection components" url="https://support.kaspersky.com/KESWin/12.5/en-US/183487.htm"/>
+      <Reference title="Elastic - CEF integration (Common Event Format ingestion into logs-cef.log-*)" url="https://www.elastic.co/docs/reference/integrations/cef"/>
+    </References>
+  </Metadata>
+  <AlertContext>
+    <RuleName>Kaspersky — Virus Outbreak Detected</RuleName>
+    <RuleId>nbi-ksc-virus-outbreak</RuleId>
+    <RuleType>query</RuleType>
+    <Index>logs-cef.log-*</Index>
+    <TriggerLogic>The deployed rule is a query rule over the Kaspersky CEF stream. Its detection condition, expressed as a one-line Kibana-KQL filter (for fast pivoting in Discover / Timeline):
+
+
+
+Plain English: any KSC-declared virus outbreak. There is no per-threat or per-host predicate because the source event does not carry those - KSC has already applied its threshold logic across the group and emitted a single aggregate signal. The signal names the group in cef.extensions.cs9 (e.g. SERVERS, ATM's, WORKGROUP) and a high severity (cef.severity = 4), and identifies the raising KSC server in destination.domain / cef.extensions.destinationHostName. Everything else in this playbook is reconstruction of what that aggregate is actually made of.</TriggerLogic>
+    <KeyAlertFields>cef.extensions.cs9, destination.domain, host.name, destination.ip, related.ip, source.ip, file.path, cef.extensions.message, destination.user.name, cef.extensions.cs10, cef.severity</KeyAlertFields>
+  </AlertContext>
+  <Inputs>
+    <Input name="$ksc_server"/>
+    <Input name="$admin_group"/>
+  </Inputs>
+  <ExecutiveSummary>
+    <Overview>This playbook drives triage and investigation of the Kaspersky - Virus Outbreak Detected detection on NBI's Elastic Security deployment. The rule fires on a Kaspersky Security Center CEF event - observer.vendor == "KasperskyLab", event.code == "GNRL_EV_VIRUS_OUTBREAK" - meaning KSC's own outbreak logic declared a virus outbreak for an administration group (its detection rate crossed the configured outbreak threshold).
+
+The outbreak event is a bare server-side aggregate: it carries the administration group (cef.extensions.cs9), severity, and the KSC server that raised it - but not the threat name, the affected hosts, or a hash. The entire outbreak must therefore be reconstructed from the underlying detection stream (GNRL_EV_VIRUS_FOUND / _BY_KSN) and remediation-outcome events in that group and window: which threat is spreading, across how many endpoints, where it started (patient-zero), and whether the objects are being neutralised (blocked / cured / deleted) or remain active.
+
+The analyst's job is to decide whether this is a genuine active outbreak spreading across multiple endpoints with uncleaned objects (true_positive); a real outbreak positively proven contained/blocked group-wide, or a mass-misclassification of one legitimate artifact (false_positive - record which); an outbreak-threshold artifact driven by a single object/host or scan burst (misconfiguration); or an outbreak whose threat/scope cannot be reconstructed (needs_escalation) - with evidence attached, and never auto-trusting a scanner or scan account as the cause.</Overview>
+    <BusinessImpact>An alert means: KSC declared a virus outbreak for $admin_group, raised by $ksc_server. It is a statement about a *rate* - detections in the group crossed the outbreak threshold - not about a specific object. Because the event is an aggregate, its face value is limited; a single declaration may be a threshold blip, while a sustained series over a short span indicates a real, ongoing event.
+
+The investigative substance comes from three reconstructions, all keyed on the same administration group (cef.extensions.cs9) and window:
+
+- Spread &amp; patient-zero (section 15.5 / section 14.2): distinct affected endpoints (destination.domain), each host's earliest detection (MIN(@timestamp)), and the threat on each (cef.extensions.deviceCustomString1). Many hosts, one threat family, distinct object paths, staggered onset = a propagating outbreak. One identical object recurring across identically-imaged hosts = suspect a shared-image/deployment artifact - verify by hash.
+- Containment ratio (section 17.5): detections (GNRL_EV_VIRUS_FOUND/_BY_KSN) versus outcomes (GNRL_EV_OBJECT_BLOCKED/_CURED/_DELETED/_QUARANTINED/_NOTCURED). Outcomes dominating detections with no not-cured = contained; not-cured</BusinessImpact>
+  </ExecutiveSummary>
+  <Investigation>
+    <Goal>Decide true_positive / false_positive / misconfiguration / needs_escalation for Kaspersky — Virus Outbreak Detected.</Goal>
+    <Workflow>
+      <Step order="1" name="Confirm the outbreak declaration and bound the window (INV-01)">
+        <Purpose>Confirm the outbreak declaration and bound the window (INV-01)</Purpose>
+        <Query platform="Elastic" language="ES|QL" id="Q-01">
+          <![CDATA[
+FROM logs-cef.log-*
+| WHERE observer.vendor == "KasperskyLab"
+    AND event.code == "GNRL_EV_VIRUS_OUTBREAK"
+    AND destination.domain == "$ksc_server"
+    AND @timestamp >= NOW() - 4 hours
+| STATS declarations = COUNT(*), first_seen = MIN(@timestamp), last_seen = MAX(@timestamp)
+    BY cef.extensions.cs9, cef.severity, cef.name
+| SORT declarations DESC
+| LIMIT 10
+]]>
+        </Query>
+      </Step>
+      <Step order="2" name="Reconstruct the spread and patient-zero (INV-02)">
+        <Purpose>Reconstruct the spread and patient-zero (INV-02)</Purpose>
+        <Query platform="Elastic" language="ES|QL" id="Q-02">
+          <![CDATA[
+FROM logs-cef.log-*
+| WHERE observer.vendor == "KasperskyLab"
+    AND event.code IN ("GNRL_EV_VIRUS_FOUND", "GNRL_EV_VIRUS_FOUND_BY_KSN")
+    AND cef.extensions.cs9 == "$admin_group"
+    AND @timestamp >= NOW() - 4 hours
+| STATS events = COUNT(*), first_seen = MIN(@timestamp),
+        threats = VALUES(cef.extensions.deviceCustomString1),
+        objects = VALUES(cef.extensions.filePath)
+    BY destination.domain
+| SORT first_seen ASC
+| LIMIT 25
+]]>
+        </Query>
+      </Step>
+      <Step order="3" name="Entity pivoting">
+        <Purpose>Entity pivoting</Purpose>
+        <Query platform="Elastic" language="ES|QL" id="Q-03">
+          <![CDATA[
+FROM logs-cef.log-*
+| WHERE observer.vendor == "KasperskyLab"
+    AND event.code == "GNRL_EV_VIRUS_OUTBREAK"
+    AND destination.domain == "$ksc_server"
+    AND cef.extensions.cs9 == "$admin_group"
+    AND @timestamp >= NOW() - 4 hours
+| KEEP @timestamp, destination.domain, cef.extensions.cs9, cef.severity, cef.name
+| SORT @timestamp DESC
+| LIMIT 15
+]]>
+        </Query>
+      </Step>
+      <Step order="4" name="Process investigation">
+        <Purpose>Process investigation</Purpose>
+        <Query platform="Elastic" language="ES|QL" id="Q-04">
+          <![CDATA[
+FROM logs-cef.log-*
+| WHERE observer.vendor == "KasperskyLab"
+    AND event.code IN ("GNRL_EV_VIRUS_FOUND","GNRL_EV_VIRUS_FOUND_BY_KSN","GNRL_EV_OBJECT_BLOCKED","GNRL_EV_OBJECT_DELETED")
+    AND cef.extensions.cs9 == "$admin_group"
+    AND @timestamp >= NOW() - 4 hours
+| STATS events = COUNT(*), hosts = COUNT_DISTINCT(destination.domain), threats = VALUES(cef.extensions.deviceCustomString1)
+    BY cef.extensions.filePath, cef.extensions.cs10
+| SORT events DESC
+| LIMIT 25
+]]>
+        </Query>
+      </Step>
+      <Step order="5" name="User investigation">
+        <Purpose>User investigation</Purpose>
+        <Query platform="Elastic" language="ES|QL" id="Q-05">
+          <![CDATA[
+FROM logs-cef.log-*
+| WHERE observer.vendor == "KasperskyLab"
+    AND event.code IN ("GNRL_EV_VIRUS_FOUND","GNRL_EV_VIRUS_FOUND_BY_KSN","GNRL_EV_OBJECT_BLOCKED")
+    AND cef.extensions.cs9 == "$admin_group"
+    AND @timestamp >= NOW() - 4 hours
+| STATS events = COUNT(*), hosts = COUNT_DISTINCT(destination.domain) BY cef.extensions.destinationUserName, cef.extensions.cs10
+| SORT events DESC
+| LIMIT 20
+]]>
+        </Query>
+      </Step>
+      <Step order="6" name="Host investigation">
+        <Purpose>Host investigation</Purpose>
+        <Query platform="Elastic" language="ES|QL" id="Q-06">
+          <![CDATA[
+FROM logs-cef.log-*
+| WHERE observer.vendor == "KasperskyLab"
+    AND event.code IN ("GNRL_EV_VIRUS_FOUND","GNRL_EV_VIRUS_FOUND_BY_KSN")
+    AND cef.extensions.cs9 == "$admin_group"
+    AND @timestamp >= NOW() - 4 hours
+| STATS detections = COUNT(*), first_seen = MIN(@timestamp), last_seen = MAX(@timestamp),
+        threats = VALUES(cef.extensions.deviceCustomString1)
+    BY destination.domain
+| SORT detections DESC
+| LIMIT 25
+]]>
+        </Query>
+      </Step>
+      <Step order="7" name="IP investigation">
+        <Purpose>IP investigation</Purpose>
+        <Query platform="Elastic" language="ES|QL" id="Q-07">
+          <![CDATA[
+FROM logs-cef.log-*
+| WHERE observer.vendor == "KasperskyLab"
+    AND event.code IN ("GNRL_EV_VIRUS_FOUND","GNRL_EV_VIRUS_FOUND_BY_KSN")
+    AND cef.extensions.cs9 == "$admin_group"
+    AND @timestamp >= NOW() - 4 hours
+| STATS detections = COUNT(*) BY destination.domain, destination.ip
+| SORT detections DESC
+| LIMIT 25
+]]>
+        </Query>
+      </Step>
+      <Step order="8" name="Hash investigation">
+        <Purpose>Hash investigation</Purpose>
+        <Query platform="Elastic" language="ES|QL" id="Q-08">
+          <![CDATA[
+FROM logs-cef.log-*
+| WHERE observer.vendor == "KasperskyLab"
+    AND event.code IN ("GNRL_EV_VIRUS_FOUND","GNRL_EV_VIRUS_FOUND_BY_KSN","GNRL_EV_OBJECT_BLOCKED","GNRL_EV_OBJECT_DELETED")
+    AND cef.extensions.cs9 == "$admin_group"
+    AND cef.extensions.deviceCustomString4 IS NOT NULL
+    AND @timestamp >= NOW() - 4 hours
+| STATS events = COUNT(*), hosts = COUNT_DISTINCT(destination.domain), threats = VALUES(cef.extensions.deviceCustomString1)
+    BY cef.extensions.deviceCustomString4
+| SORT events DESC
+| LIMIT 20
+]]>
+        </Query>
+      </Step>
+      <Step order="9" name="File investigation">
+        <Purpose>File investigation</Purpose>
+        <Query platform="Elastic" language="ES|QL" id="Q-09">
+          <![CDATA[
+FROM logs-cef.log-*
+| WHERE observer.vendor == "KasperskyLab"
+    AND event.code IN ("GNRL_EV_VIRUS_FOUND","GNRL_EV_VIRUS_FOUND_BY_KSN")
+    AND cef.extensions.cs9 == "$admin_group"
+    AND @timestamp >= NOW() - 4 hours
+| STATS detections = COUNT(*), hosts = COUNT_DISTINCT(destination.domain), first_seen = MIN(@timestamp)
+    BY cef.extensions.filePath, cef.extensions.deviceCustomString1
+| SORT detections DESC
+| LIMIT 25
+]]>
+        </Query>
+      </Step>
+      <Step order="10" name="Timeline Reconstruction">
+        <Purpose>Timeline Reconstruction</Purpose>
+        <Query platform="Elastic" language="ES|QL" id="Q-10">
+          <![CDATA[
+FROM logs-cef.log-*
+| WHERE observer.vendor == "KasperskyLab"
+    AND cef.extensions.cs9 == "$admin_group"
+    AND event.code IN ("GNRL_EV_VIRUS_OUTBREAK","GNRL_EV_VIRUS_FOUND","GNRL_EV_VIRUS_FOUND_BY_KSN",
+        "GNRL_EV_OBJECT_BLOCKED","GNRL_EV_OBJECT_CURED","GNRL_EV_OBJECT_DELETED","GNRL_EV_OBJECT_QUARANTINED","GNRL_EV_OBJECT_NOTCURED")
+    AND @timestamp >= NOW() - 4 hours
+| KEEP @timestamp, event.code, destination.domain, cef.extensions.deviceCustomString1, cef.extensions.filePath, cef.name
+| SORT @timestamp ASC
+| LIMIT 200
+]]>
+        </Query>
+      </Step>
+      <Step order="11" name="Lateral movement validation">
+        <Purpose>Lateral movement validation</Purpose>
+        <Query platform="Elastic" language="ES|QL" id="Q-11">
+          <![CDATA[
+FROM logs-cef.log-*
+| WHERE observer.vendor == "KasperskyLab"
+    AND event.code IN ("GNRL_EV_VIRUS_FOUND","GNRL_EV_VIRUS_FOUND_BY_KSN")
+    AND cef.extensions.cs9 == "$admin_group"
+    AND @timestamp >= NOW() - 4 hours
+| STATS affected_hosts = COUNT_DISTINCT(destination.domain), detections = COUNT(*),
+        earliest = MIN(@timestamp), latest = MAX(@timestamp)
+| LIMIT 5
+]]>
+        </Query>
+      </Step>
+      <Step order="12" name="Persistence validation">
+        <Purpose>Persistence validation</Purpose>
+        <Query platform="Elastic" language="ES|QL" id="Q-12">
+          <![CDATA[
+FROM logs-cef.log-*
+| WHERE observer.vendor == "KasperskyLab"
+    AND event.code IN ("GNRL_EV_VIRUS_FOUND","GNRL_EV_VIRUS_FOUND_BY_KSN","GNRL_EV_OBJECT_BLOCKED","GNRL_EV_OBJECT_DELETED")
+    AND cef.extensions.cs9 == "$admin_group"
+    AND (cef.extensions.deviceCustomString1 LIKE "*Autorun*" OR cef.extensions.deviceCustomString1 LIKE "*Scheduler*"
+         OR cef.extensions.deviceCustomString1 LIKE "*Task*" OR cef.extensions.filePath LIKE "*Temp*"
+         OR cef.extensions.filePath LIKE "*.bat")
+    AND @timestamp >= NOW() - 4 hours
+| STATS events = COUNT(*), hosts = COUNT_DISTINCT(destination.domain) BY cef.extensions.deviceCustomString1, cef.extensions.filePath
+| SORT events DESC
+| LIMIT 20
+]]>
+        </Query>
+      </Step>
+      <Step order="13" name="Privilege escalation validation">
+        <Purpose>Privilege escalation validation</Purpose>
+        <Query platform="Elastic" language="ES|QL" id="Q-13">
+          <![CDATA[
+FROM logs-cef.log-*
+| WHERE observer.vendor == "KasperskyLab"
+    AND event.code IN ("GNRL_EV_VIRUS_FOUND","GNRL_EV_VIRUS_FOUND_BY_KSN","GNRL_EV_OBJECT_BLOCKED")
+    AND cef.extensions.cs9 == "$admin_group"
+    AND @timestamp >= NOW() - 4 hours
+| STATS events = COUNT(*), hosts = COUNT_DISTINCT(destination.domain) BY cef.extensions.cs10, cef.extensions.destinationUserName
+| SORT events DESC
+| LIMIT 20
+]]>
+        </Query>
+      </Step>
+      <Step order="14" name="Defense evasion validation">
+        <Purpose>Defense evasion validation</Purpose>
+        <Query platform="Elastic" language="ES|QL" id="Q-14">
+          <![CDATA[
+FROM logs-cef.log-*
+| WHERE observer.vendor == "KasperskyLab"
+    AND event.code IN ("GNRL_EV_OBJECT_NOTCURED","GNRL_EV_DEVCTRL_DEV_PLUG_DENIED","KLNAG_EV_INV_APP_UNINSTALLED")
+    AND cef.extensions.cs9 == "$admin_group"
+    AND @timestamp >= NOW() - 4 hours
+| STATS events = COUNT(*), hosts = COUNT_DISTINCT(destination.domain), last_seen = MAX(@timestamp) BY event.code, cef.name
+| SORT events DESC
+| LIMIT 15
+]]>
+        </Query>
+      </Step>
+      <Step order="15" name="Impact assessment">
+        <Purpose>Impact assessment</Purpose>
+        <Query platform="Elastic" language="ES|QL" id="Q-15">
+          <![CDATA[
+FROM logs-cef.log-*
+| WHERE observer.vendor == "KasperskyLab"
+    AND cef.extensions.cs9 == "$admin_group"
+    AND event.code IN ("GNRL_EV_VIRUS_FOUND", "GNRL_EV_VIRUS_FOUND_BY_KSN",
+        "GNRL_EV_OBJECT_CURED", "GNRL_EV_OBJECT_DELETED", "GNRL_EV_OBJECT_BLOCKED",
+        "GNRL_EV_OBJECT_QUARANTINED", "GNRL_EV_OBJECT_NOTCURED")
+    AND @timestamp >= NOW() - 4 hours
+| STATS events = COUNT(*), hosts = COUNT_DISTINCT(destination.domain),
+        last_seen = MAX(@timestamp)
+    BY event.code
+| SORT events DESC
+| LIMIT 15
+]]>
+        </Query>
+      </Step>
+      <Step order="16" name="Finalize verdict">
+        <DecisionTree>
+        </DecisionTree>
+      </Step>
+    </Workflow>
+  </Investigation>
+  <ClassificationGuidance>
+    <TruePositive>
+      <Definition></Definition>
+    </TruePositive>
+    <FalsePositive>
+      <Definition></Definition>
+      <Indicators>
+        <Item>Real outbreak, positively contained. Kaspersky blocked/cured/deleted the objects group-wide, no active objects remain, and detections stop after the declaration. This is a *contained (blocked-malicious)* outcome - documented as contained, never "benign".</Item>
+        <Item>Mass-misclassification of one legitimate artifact. A single legitimate file (a management tool, a deployment payload, an EICAR test object) present across many identically-imaged hosts is detected en masse and trips the threshold. Only a *false positive* once the object is verified clean by hash.</Item>
+        <Item>Threshold sensitivity. An aggressive outbreak threshold relative to a normally-noisy group can declare an outbreak off a modest, non-propagating detection burst.</Item>
+        <Item>A scan task or scan account generating a burst of detections (e.g. an on-demand full scan surfacing quarantined items). Investigate identically - a scanner is never auto-trusted as the benign cause; verify the objects and their outcomes.</Item>
+        <Item>Outbreaks are rare and consequential in NBI, and currently real. In the validation window there were 3 GNRL_EV_VIRUS_OUTBREAK declarations for SERVERS from NIM-KC-APV07 (severity 4), reconstructing to a genuine behavioural-exploit detection burst - threats PDM:Exploit.Win32.Generic(.nblk), PDM:Trojan.Win32.Generic, PDM:Trojan.Win32.GenAutorunSchedulerTaskRun.c - under Kaspersky's Exploit Prevention task, hitting system processes (svchost.exe, WmiPrvSE.exe, wsmprovhost.exe) and a dropped C:\Windows\Temp\d.bat. This is not a tuning blip; it is exploitation being blocked.</Item>
+        <Item>Concentration on one host is the key NBI nuance here. The declaration for SERVERS was driven by detections concentrated on a single server, NIM-ADY-APV1 (COUNT_DISTINCT(destination.domain) = 1 in-window), not a multi-host spread. Per the reconstruction logic (section 15.5), a single heavily-hit host tripping a *group* outbreak threshold points away from "propagating outbreak" and toward a contained single-host event / threshold artifact - while still demanding a full investigation of *that host*. Do not read "one host" as "harmless"; read it as "not yet a group spread, and NIM-ADY-APV1 needs its own workup".</Item>
+        <Item>Never auto-trust the account context. The exploit-prevention detections on NIM-ADY-APV1 span NBIRQ\sysadm, NT AUTHORITY\SYSTEM, NETWORK SERVICE, and LOCAL SERVICE. A named admin account (NBIRQ\sysadm) appearing in the detection context is not a reason to dismiss - verify what that session was doing.</Item>
+      </Indicators>
+    </FalsePositive>
+    <Misconfiguration>
+      <Definition></Definition>
+    </Misconfiguration>
+    <NeedsEscalation>
+      <Definition></Definition>
+    </NeedsEscalation>
+  </ClassificationGuidance>
+  <ResponseActions>
+    <Phase name="Containment">
+      <Action>Declare the incident level from the reconstruction, not the label. Active multi-host + uncontained → major incident / mass IR across $admin_group; contained single-host → scoped host containment. Treat server/ATM-group outbreaks as live until proven contained.</Action>
+      <Action>Isolate / segment the affected hosts (and, for a spreading outbreak, the group's network segment) to stop propagation, coordinating with IT to protect core banking/ATM availability.</Action>
+      <Action>Accelerate the endpoint control: push current signatures/policy to the group, force full scans, and confirm KES Exploit Prevention / Behavior Detection are enforced.</Action>
+      <Action>Cut the propagation vector once identified (patch the exploited service, lock down the tainted share, block the host-to-host path, disable/rotate reused credentials).</Action>
+      <Action>Preserve evidence on patient-zero and representative hosts (memory, the flagged objects, autoruns) before reimaging.</Action>
+      <Action>Deploy/confirm changes only via the authorised human-approved DEPLOY path; investigation itself is read-only.</Action>
+    </Phase>
+    <Phase name="Eradication">
+      <Action>Remediate every affected host: ensure all detected objects are blocked/cured/deleted and re-scan; specifically clear any not-cured objects from section 17.5 and any persistence flagged in section 17.2.</Action>
+      <Action>Close the propagation path: patch the exploited remote service (the WMI/WinRM/SMB vector suggested by the objects), remove tainted content from shares/deployment paths, and rotate credentials that enabled host-to-host movement.</Action>
+      <Action>Remove delivered payloads (e.g. dropped .bat/stagers) and any tooling planted on patient-zero; hunt the same SHA256s (section 15.9) across the whole estate, not just the declared group.</Action>
+      <Action>Address patient-zero's initial access - the foothold from which the outbreak began.</Action>
+    </Phase>
+    <Phase name="Recovery">
+      <Action>Reimage hosts of uncertain integrity (especially patient-zero and any host with not-cured objects); validate the rest are clean after full scan and reboot.</Action>
+      <Action>Confirm the detection rate returns to baseline for the group and that no GNRL_EV_VIRUS_FOUND continues after remediation; verify no further outbreak declarations.</Action>
+      <Action>Restore service to isolated/segmented hosts only after section 22 closing criteria are met and monitoring confirms no recurrence.</Action>
+      <Action>Review why the control did not contain it earlier and tune the KSC outbreak threshold if the declaration was a single-host/single-artifact trip (misconfiguration branch).</Action>
+    </Phase>
+  </ResponseActions>
+  <Escalation>
+    <Trigger>Escalate to SOC L2 / IR leadership and initiate the major-incident / mass-IR process when any of the following hold:
+
+- Reconstruction shows one threat across multiple endpoints with distinct paths and staggered onset (section 15.5) and objects not contained (section 17.5).
+- The affected group is the ATM estate or core banking servers, regardless of current containment, until proven contained.
+- The threat class is exploit / worm / ransomware / credential-dumper, or protection tampering accompanies the outbreak (section 17.4).
+- Detections are still arriving after the declaration (live spread), or lateral movement is confirmed in Windows telemetry for the affected hosts.
+- The outbreak's threat or scope cannot be reconstructed in-index - escalate as needs_escalation to the endpoint/EDR team for the KSC outbreak report, treating the group as live.</Trigger>
+    <To>SOC L2 / IR</To>
+  </Escalation>
+  <ClosureCriteria>
+    <Item>false_positive (proven contained): objects blocked/cured/deleted group-wide with none active, detections stopped after the declaration (section 17.5); documented as a contained (blocked-malicious) outbreak, never "benign".</Item>
+    <Item>false_positive (verified mass-misclassification): one object verified clean by hash (section 15.9) across the affected hosts; an evidence-backed exclusion added and the misclassification documented.</Item>
+    <Item>misconfiguration: a single object/host or scan burst tripped the outbreak threshold with no true multi-host spread (verified by hash first); the threshold tuned / artifact removed, no scan account auto-trusted.</Item>
+    <Item>true_positive: an active spreading outbreak confirmed; group contained/segmented, spreading threat eradicated across affected hosts, propagation vector closed, patient-zero's initial access investigated, and the mass incident documented.</Item>
+    <Item>needs_escalation: the threat/scope could not be reconstructed; handed to the endpoint/EDR team + SOC L2 with the KSC report request and the evidence gaps documented.</Item>
+  </ClosureCriteria>
+  <Limitations>
+    <Item>The declaration is a pointer, not evidence. GNRL_EV_VIRUS_OUTBREAK carries no threat, host, or hash (all absent, verified live) - the outbreak only becomes real (or not) through the GNRL_EV_VIRUS_FOUND/outcome reconstruction on the same cs9 group and window. Never triage off the declaration alone.</Item>
+    <Item>Shape beats count. Many hosts / one threat / distinct paths / staggered onset = propagation (true_positive). One host / many detections = concentration - investigate the host, but it is not a group spread. One identical object fleet-wide = suspect misclassification, verify by hash. The validated NBI case was single-host concentration on NIM-ADY-APV1 with objects positively blocked/deleted.</Item>
+    <Item>Containment != closure. A high blocked/deleted ratio (24 blocked + 6 deleted, 0 not-cured in the validated window) means the endpoint control is winning, but the propagation vector and patient-zero's initial access still need closing; and detections arriving after the declaration mean it is still live.</Item>
+    <Item>This CEF index has no host.name/user.name/source.ip. Endpoints are the CEF *destination* (destination.domain/destination.ip); the account context is destination.user.name; the SHA256 is deviceCustomString4; the threat is deviceCustomString1; the detecting task is cs10. The propagation *mechanism* is only in logs-system.security* / FortiGate - reconstruct it out of band.</Item>
+    <Item>Never auto-trust a scanner or scan account. A named admin (NBIRQ\sysadm) or a scan task appearing in the detection context is investigated identically, never whitelisted on sight.</Item>
+    <Item>KB-worthy (persist to NBI customer scope): (1) real single-host outbreak on NIM-ADY-APV1 in SERVERS, raised by NIM-KC-APV07, behavioural Exploit-Prevention detections on svchost.exe/WmiPrvSE.exe/wsmprovhost.exe + C:\Windows\Temp\d.bat, contained (24 blocked/6 deleted/0 not-cured); (2) outbreak declaration is a bare aggregate (no threat/host/hash); (3) detection events carry SHA256 in deviceCustomString4, threat in deviceCustomString1, account in destination.user.name, task in cs10; (4) endpoint modelled as CEF *destination* - destination.ip present, source.ip absent. All observed live on 2026-08-17 (KSC 15.1.0.20748, KES 11.0.0.0).</Item>
+  </Limitations>
+</Playbook>

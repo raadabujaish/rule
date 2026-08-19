@@ -1,0 +1,75 @@
+{
+  "name": "Linux — SELinux / Security Control Tampering (setenforce/semanage)",
+  "tags": [
+    "NBI-Endpoint",
+    "Phase3",
+    "Linux-auditd"
+  ],
+  "interval": "5m",
+  "enabled": true,
+  "description": "Detects execution of setenforce or semanage, used to place SELinux in permissive mode or alter its policy — a common step to disable a Linux security control before further attack activity.",
+  "risk_score": 73,
+  "severity": "high",
+  "note": "## Investigation\n1. `user.name` ran `process.executable` `process.args` on `host.name`.\n2. `setenforce 0` disables SELinux enforcement.\n## Response\nRe-enable enforcement, and investigate what activity followed the change.",
+  "output_index": "",
+  "investigation_fields": {
+    "field_names": [
+      "process.executable",
+      "process.args",
+      "process.name",
+      "process.parent.executable",
+      "user.name",
+      "host.name"
+    ]
+  },
+  "author": [
+    "raadabujaish"
+  ],
+  "false_positives": [],
+  "from": "now-9m",
+  "rule_id": "nbi-lnx-defense-evasion-selinux",
+  "max_signals": 100,
+  "risk_score_mapping": [],
+  "severity_mapping": [],
+  "threat": [
+    {
+      "framework": "MITRE ATT&CK",
+      "tactic": {
+        "id": "TA0005",
+        "name": "Defense Evasion",
+        "reference": "https://attack.mitre.org/tactics/TA0005/"
+      },
+      "technique": [
+        {
+          "id": "T1562",
+          "name": "Impair Defenses",
+          "reference": "https://attack.mitre.org/techniques/T1562/",
+          "subtechnique": [
+            {
+              "id": "T1562.001",
+              "name": "Disable or Modify Tools",
+              "reference": "https://attack.mitre.org/techniques/T1562/001/"
+            }
+          ]
+        }
+      ]
+    }
+  ],
+  "to": "now",
+  "references": [
+    "https://attack.mitre.org/"
+  ],
+  "version": 1,
+  "exceptions_list": [],
+  "related_integrations": [],
+  "required_fields": [],
+  "setup": "",
+  "type": "query",
+  "language": "kuery",
+  "index": [
+    "logs-auditd.log-*",
+    "logs-auditd_manager.auditd-*"
+  ],
+  "query": "event.category:\"process\" and process.name:(\"setenforce\" or \"semanage\")",
+  "actions": []
+}

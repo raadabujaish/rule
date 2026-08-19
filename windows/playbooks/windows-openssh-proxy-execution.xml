@@ -1,0 +1,388 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<Playbook xmlns="https://soc.example/playbooks" id="PB-windows-openssh-proxy-execution" name="Proxy Execution via Windows OpenSSH [NBI-4688] - SOC Playbook" version="3.0" status="Validated" classification="TLP:AMBER">
+  <Metadata>
+    <Owner>NBI SOC / Detection Engineering</Owner>
+    <LastUpdated>2026-08-19</LastUpdated>
+    <Severity default="High">High</Severity>
+    <Confidence default="Medium">Medium</Confidence>
+    <Category>Defense Evasion</Category>
+    <MitreAttack>
+      <Technique id="T1572"/>
+      <Technique id="T1021.004"/>
+      <Technique id="T1021"/>
+      <Technique id="T1059"/>
+      <Tactic id="TA0005"/>
+      <Tactic id="TA0011"/>
+    </MitreAttack>
+    <References>
+      <Reference title="MITRE ATT&amp;CK - Protocol Tunneling (T1572)" url="https://attack.mitre.org/techniques/T1572/"/>
+      <Reference title="MITRE ATT&amp;CK - Remote Services: SSH (T1021.004)" url="https://attack.mitre.org/techniques/T1021/004/"/>
+      <Reference title="MITRE ATT&amp;CK - Command and Scripting Interpreter (T1059)" url="https://attack.mitre.org/techniques/T1059/"/>
+      <Reference title="MITRE ATT&amp;CK - Defense Evasion tactic (TA0005)" url="https://attack.mitre.org/tactics/TA0005/"/>
+      <Reference title="MITRE ATT&amp;CK - Command and Control tactic (TA0011)" url="https://attack.mitre.org/tactics/TA0011/"/>
+      <Reference title="Microsoft Learn - OpenSSH in Windows (ssh_config options: ProxyCommand, LocalCommand, PermitLocalCommand)" url="https://learn.microsoft.com/en-us/windows-server/administration/openssh/openssh_overview"/>
+      <Reference title="OpenSSH - ssh_config(5) manual (ProxyCommand / LocalCommand / PermitLocalCommand)" url="https://man.openbsd.org/ssh_config"/>
+      <Reference title="LOLBAS - Ssh.exe (proxy execution / LocalCommand)" url="https://lolbas-project.github.io/lolbas/Binaries/Ssh/"/>
+      <Reference title="Elastic Security - detection rules repository (Command and Control / OpenSSH proxy execution)" url="https://github.com/elastic/detection-rules"/>
+      <Reference title="Microsoft Learn - Command line process auditing (Event 4688 command-line GPO)" url="https://learn.microsoft.com/en-us/windows-server/identity/ad-ds/manage/component-updates/command-line-process-auditing"/>
+    </References>
+  </Metadata>
+  <AlertContext>
+    <RuleName>Proxy Execution via Windows OpenSSH [NBI-4688]</RuleName>
+    <RuleId>nbi-b2-proxy-execution-via-windows-openssh</RuleId>
+    <RuleType>eql</RuleType>
+    <Index>logs-system.security-*</Index>
+    <TriggerLogic>The deployed rule is an EQL rule on logs-system.security-*. Its trigger logic, expressed in EQL from the deployed rule's definition:
+
+
+
+Plain English: an OpenSSH client (ssh.exe/sftp.exe) started with an embedded command directive - Command= pointing at an interpreter or URL, or a LocalCommand/ProxyCommand chain. The signal is command proxying through the SSH client, not the SSH connection itself.
+
+One-line Kibana KQL detection filter (for fast pivoting in Discover / Timeline):
+
+
+
+Because process.command_line is only ~50% populated on NBI 4688 (see section 8), the SSH options can be invisible even on a true firing; process.args (multivalued) is folded in to recover them, and where both are null the payload must come from the endpoint.</TriggerLogic>
+    <KeyAlertFields>process.name, process.executable, ssh.exe, process.parent.name, process.parent.pid, process.pid, process.entity_id, user.name, process.command_line, process.args</KeyAlertFields>
+  </AlertContext>
+  <Inputs>
+    <Input name="$host"/>
+    <Input name="$user"/>
+  </Inputs>
+  <ExecutiveSummary>
+    <Overview>This playbook drives triage and investigation of the Proxy Execution via Windows OpenSSH detection on NBI's Elastic Security deployment. The rule fires on a process-creation event (Windows Security 4688) where process.name is ssh.exe or sftp.exe and the command line carries a proxied local/remote payload - a Command= running powershell/cmd/mshta/msiexec/an http URL/a script, or a LocalCommand/ProxyCommand that chains a local command (e.g. scp … &amp;&amp; …).
+
+Windows OpenSSH can execute local or remote commands via its Command=, LocalCommand, and ProxyCommand options. Attackers abuse these to run and tunnel commands under a trusted, Microsoft-signed client binary, evading detections that watch for cmd/powershell under suspicious parents. The analyst's job is to decide whether this is a sanctioned administrator using SSH options on a jump/admin host (false_positive - authorised), an operator/malware proxying execution and tunnelling (true_positive), a not-yet-baselined legitimate SSH automation (misconfiguration), or unresolved (needs_escalation) - using the embedded command, the client's local children, and whether SSH is normal on this host/account.</Overview>
+    <BusinessImpact>An alert means: on $host, the OpenSSH client (ssh.exe/sftp.exe) was launched with an embedded command payload under $user. OpenSSH's -o options let the client run a program locally before/while connecting (LocalCommand with PermitLocalCommand, ProxyCommand) or run a command on the remote end (Command=). Each is a legitimate feature - and each is a documented way to proxy execution and tunnel through a signed binary.
+
+The distinction that matters: a plain ssh user@bastion opening an interactive remote shell is ordinary admin work; an ssh invocation that spawns powershell/cmd/mshta locally, or builds a forwarding tunnel while chaining a local command, is proxied execution. The client already ran the option - this is an execution event. The investigative question is whether the embedded command was sanctioned admin tooling or attacker command-and-control, and whether the client spawned a local child.</BusinessImpact>
+  </ExecutiveSummary>
+  <Investigation>
+    <Goal>Decide true_positive / false_positive / misconfiguration / needs_escalation for Proxy Execution via Windows OpenSSH [NBI-4688].</Goal>
+    <Workflow>
+      <Step order="1" name="Reproduce the rule estate-wide (confirm the detection logic)">
+        <Purpose>Reproduce the rule estate-wide (confirm the detection logic)</Purpose>
+        <Query platform="Elastic" language="ES|QL" id="Q-01">
+          <![CDATA[
+FROM logs-system.security-*
+| WHERE @timestamp >= NOW() - 4 hours
+    AND event.code == "4688"
+    AND TO_LOWER(process.name) IN ("ssh.exe", "sftp.exe")
+| EVAL cl = TO_LOWER(CONCAT(COALESCE(process.command_line, ""), " ", COALESCE(MV_CONCAT(process.args, " "), "")))
+| WHERE cl LIKE "*command=*" OR cl LIKE "*proxycommand*" OR cl LIKE "*localcommand*"
+| KEEP @timestamp, host.name, user.name, process.parent.name, process.command_line, process.args
+| SORT @timestamp DESC
+| LIMIT 50
+]]>
+        </Query>
+      </Step>
+      <Step order="2" name="Confirm on the alert host and recover the embedded command">
+        <Purpose>Confirm on the alert host and recover the embedded command</Purpose>
+        <Query platform="Elastic" language="ES|QL" id="Q-02">
+          <![CDATA[
+FROM logs-system.security-*
+| WHERE event.code == "4688" AND host.name == "$host"
+    AND TO_LOWER(process.name) IN ("ssh.exe", "sftp.exe")
+    AND @timestamp >= NOW() - 4 hours
+| EVAL cl = TO_LOWER(CONCAT(COALESCE(process.command_line, ""), " ", COALESCE(MV_CONCAT(process.args, " "), "")))
+| WHERE cl LIKE "*command=*" OR cl LIKE "*proxycommand*" OR cl LIKE "*localcommand*"
+| KEEP @timestamp, host.name, user.name, process.parent.name, process.command_line, process.args
+| SORT @timestamp DESC
+| LIMIT 20
+]]>
+        </Query>
+      </Step>
+      <Step order="3" name="Entity pivoting">
+        <Purpose>Entity pivoting</Purpose>
+        <Query platform="Elastic" language="ES|QL" id="Q-03">
+          <![CDATA[
+FROM logs-system.security-*
+| WHERE @timestamp >= NOW() - 4 hours
+    AND event.code == "4688" AND host.name == "$host"
+    AND TO_LOWER(process.name) IN ("ssh.exe", "sftp.exe")
+| KEEP @timestamp, user.name, process.parent.name, process.name, process.executable, process.command_line, process.pid, process.parent.pid
+| SORT @timestamp DESC
+| LIMIT 50
+]]>
+        </Query>
+      </Step>
+      <Step order="4" name="Process investigation">
+        <Purpose>Process investigation</Purpose>
+        <Query platform="Elastic" language="ES|QL" id="Q-04">
+          <![CDATA[
+FROM logs-system.security-*
+| WHERE event.code == "4688" AND host.name == "$host" AND user.name == "$user"
+    AND @timestamp >= NOW() - 4 hours
+    AND TO_LOWER(process.name) IN ("ssh.exe", "sftp.exe", "scp.exe", "plink.exe", "powershell.exe", "cmd.exe", "curl.exe", "mshta.exe", "schtasks.exe")
+| STATS execs = COUNT(*), last_seen = MAX(@timestamp) BY process.name
+| SORT execs DESC
+| LIMIT 20
+]]>
+        </Query>
+      </Step>
+      <Step order="5" name="Process investigation">
+        <Purpose>Process investigation</Purpose>
+        <Query platform="Elastic" language="ES|QL" id="Q-05">
+          <![CDATA[
+FROM logs-system.security-*
+| WHERE @timestamp >= NOW() - 4 hours
+    AND event.code == "4688"
+    AND TO_LOWER(process.name) IN ("ssh.exe", "sftp.exe", "scp.exe", "plink.exe")
+| STATS executions = COUNT(*), hosts = COUNT_DISTINCT(host.name), users = COUNT_DISTINCT(user.name) BY process.name, process.parent.name
+| SORT executions DESC
+| LIMIT 25
+]]>
+        </Query>
+      </Step>
+      <Step order="6" name="Parent-Child process analysis">
+        <Purpose>Parent-Child process analysis</Purpose>
+        <Query platform="Elastic" language="ES|QL" id="Q-06">
+          <![CDATA[
+FROM logs-system.security-*
+| WHERE event.code == "4688" AND host.name == "$host"
+    AND TO_LOWER(process.parent.name) IN ("ssh.exe", "sftp.exe")
+    AND @timestamp >= NOW() - 4 hours
+| KEEP @timestamp, process.name, process.executable, user.name, process.command_line
+| SORT @timestamp DESC
+| LIMIT 20
+]]>
+        </Query>
+      </Step>
+      <Step order="7" name="User investigation">
+        <Purpose>User investigation</Purpose>
+        <Query platform="Elastic" language="ES|QL" id="Q-07">
+          <![CDATA[
+FROM logs-system.security-*
+| WHERE @timestamp >= NOW() - 4 hours
+    AND event.code == "4688" AND user.name == "$user"
+| STATS executions = COUNT(*), distinct_procs = COUNT_DISTINCT(process.name) BY host.name
+| SORT executions DESC
+| LIMIT 20
+]]>
+        </Query>
+      </Step>
+      <Step order="8" name="Host investigation">
+        <Purpose>Host investigation</Purpose>
+        <Query platform="Elastic" language="ES|QL" id="Q-08">
+          <![CDATA[
+FROM logs-system.security-*
+| WHERE @timestamp >= NOW() - 4 hours
+    AND event.code == "4688" AND host.name == "$host"
+| STATS executions = COUNT(*), users = COUNT_DISTINCT(user.name) BY process.name, process.parent.name
+| SORT executions ASC
+| LIMIT 40
+]]>
+        </Query>
+      </Step>
+      <Step order="9" name="IP investigation">
+        <Purpose>IP investigation</Purpose>
+        <Query platform="Elastic" language="ES|QL" id="Q-09">
+          <![CDATA[
+FROM logs-system.security-*
+| WHERE @timestamp >= NOW() - 4 hours
+    AND event.code == "4624"
+    AND host.name == "$host" AND user.name == "$user"
+    AND source.ip IS NOT NULL
+| STATS logons = COUNT(*) BY source.ip, winlog.event_data.LogonType
+| SORT logons DESC
+| LIMIT 20
+]]>
+        </Query>
+      </Step>
+      <Step order="10" name="File investigation">
+        <Purpose>File investigation</Purpose>
+        <Query platform="Elastic" language="ES|QL" id="Q-10">
+          <![CDATA[
+FROM logs-system.security-*
+| WHERE @timestamp >= NOW() - 4 hours
+    AND event.code == "4688" AND host.name == "$host"
+    AND TO_LOWER(process.name) IN ("ssh.exe", "sftp.exe", "scp.exe", "plink.exe")
+| STATS executions = COUNT(*), first_seen = MIN(@timestamp), last_seen = MAX(@timestamp) BY process.executable, process.name
+| SORT executions DESC
+| LIMIT 30
+]]>
+        </Query>
+      </Step>
+      <Step order="11" name="Authentication investigation">
+        <Purpose>Authentication investigation</Purpose>
+        <Query platform="Elastic" language="ES|QL" id="Q-11">
+          <![CDATA[
+FROM logs-system.security-*
+| WHERE @timestamp >= NOW() - 4 hours
+    AND event.code IN ("4624", "4625", "4634", "4647")
+    AND host.name == "$host" AND user.name == "$user"
+| STATS events = COUNT(*), first_seen = MIN(@timestamp), last_seen = MAX(@timestamp) BY event.code, winlog.event_data.LogonType, source.ip
+| SORT events DESC
+| LIMIT 30
+]]>
+        </Query>
+      </Step>
+      <Step order="12" name="Timeline Reconstruction">
+        <Purpose>Timeline Reconstruction</Purpose>
+        <Query platform="Elastic" language="ES|QL" id="Q-12">
+          <![CDATA[
+FROM logs-system.security-*
+| WHERE @timestamp >= NOW() - 4 hours
+    AND event.code == "4688" AND host.name == "$host" AND user.name == "$user"
+| KEEP @timestamp, process.parent.name, process.parent.pid, process.name, process.pid, process.executable
+| SORT @timestamp ASC
+| LIMIT 200
+]]>
+        </Query>
+      </Step>
+      <Step order="13" name="Lateral movement validation">
+        <Purpose>Lateral movement validation</Purpose>
+        <Query platform="Elastic" language="ES|QL" id="Q-13">
+          <![CDATA[
+FROM logs-system.security-*
+| WHERE @timestamp >= NOW() - 4 hours
+    AND event.code IN ("4624", "4648", "4768", "4769", "5140")
+    AND user.name == "$user"
+    AND host.name != "$host"
+| STATS events = COUNT(*) BY host.name, event.code, winlog.event_data.LogonType
+| SORT events DESC
+| LIMIT 30
+]]>
+        </Query>
+      </Step>
+      <Step order="14" name="Persistence validation">
+        <Purpose>Persistence validation</Purpose>
+        <Query platform="Elastic" language="ES|QL" id="Q-14">
+          <![CDATA[
+FROM logs-system.security-*
+| WHERE @timestamp >= NOW() - 4 hours
+    AND host.name == "$host"
+    AND (
+        (event.code == "4688" AND TO_LOWER(process.name) IN ("schtasks.exe", "reg.exe", "sc.exe", "at.exe", "powershell.exe", "wscript.exe", "cscript.exe", "rundll32.exe", "mshta.exe"))
+        OR event.code == "7045"
+        OR event.code == "4720"
+        OR event.code == "4698"
+    )
+| STATS events = COUNT(*) BY event.code, process.name, user.name
+| SORT events DESC
+| LIMIT 40
+]]>
+        </Query>
+      </Step>
+      <Step order="15" name="Privilege escalation validation">
+        <Purpose>Privilege escalation validation</Purpose>
+        <Query platform="Elastic" language="ES|QL" id="Q-15">
+          <![CDATA[
+FROM logs-system.security-*
+| WHERE @timestamp >= NOW() - 4 hours
+    AND event.code == "4672" AND host.name == "$host"
+| STATS special_priv_logons = COUNT(*) BY user.name
+| SORT special_priv_logons DESC
+| LIMIT 25
+]]>
+        </Query>
+      </Step>
+      <Step order="16" name="Defense evasion validation">
+        <Purpose>Defense evasion validation</Purpose>
+        <Query platform="Elastic" language="ES|QL" id="Q-16">
+          <![CDATA[
+FROM logs-system.security-*
+| WHERE @timestamp >= NOW() - 4 hours
+    AND host.name == "$host"
+    AND (
+        (event.code == "4688" AND TO_LOWER(process.name) IN ("wevtutil.exe", "fsutil.exe", "vssadmin.exe", "wmic.exe", "cipher.exe", "sdelete.exe", "sdelete64.exe"))
+        OR event.code == "1102"
+        OR event.code == "4719"
+    )
+| STATS events = COUNT(*) BY event.code, process.name, user.name
+| SORT events DESC
+| LIMIT 30
+]]>
+        </Query>
+      </Step>
+      <Step order="17" name="Impact assessment">
+        <Purpose>Impact assessment</Purpose>
+        <Query platform="Elastic" language="ES|QL" id="Q-17">
+          <![CDATA[
+FROM logs-system.security-*
+| WHERE @timestamp >= NOW() - 4 hours
+    AND host.name == "$host" AND event.code == "4688"
+    AND TO_LOWER(process.parent.name) IN ("ssh.exe", "sftp.exe")
+| STATS children = COUNT(*), distinct_children = COUNT_DISTINCT(process.name) BY process.name
+| SORT children DESC
+| LIMIT 30
+]]>
+        </Query>
+      </Step>
+      <Step order="18" name="Finalize verdict">
+        <DecisionTree>
+        </DecisionTree>
+      </Step>
+    </Workflow>
+  </Investigation>
+  <ClassificationGuidance>
+    <TruePositive>
+      <Definition></Definition>
+    </TruePositive>
+    <FalsePositive>
+      <Definition></Definition>
+      <Indicators>
+        <Item>Sanctioned administrator SSH use on jump/admin hosts. Operators legitimately use ssh/scp/sftp to reach network devices, Linux/AIX systems, and appliances. A ProxyCommand to reach a bastion, or a benign LocalCommand, can be normal for a specific engineer - authorisation must be positively confirmed (operator + destination), not assumed.</Item>
+        <Item>Legitimate SSH-based automation (backup/transfer jobs, config-management runners) that uses LocalCommand/ProxyCommand as designed and simply has not been baselined.</Item>
+        <Item>Administrator or red/purple-team testing of SSH proxy execution - authorised malicious-technique execution, classified false_positive (blocked/authorised) only against a ticket or ROE, never dismissed on sight.</Item>
+        <Item>ssh.exe/sftp.exe have a zero baseline in NBI 4688. Neither client appeared in a 4-hour estate-wide window, and no scp.exe/plink.exe either. There is no noisy legitimate SSH source to tune out - so any firing, and especially any command-proxying variant, is a strong anomaly.</Item>
+        <Item>Jump hosts are the plausible legitimate locus. Hosts such as nim-jump-apv02/-apv03/-apv22 carry real interactive named-user sessions (e.g. Sam.Rajendran, temenos.barathkumar, MUSTAFA.KAREEM). If a sanctioned admin genuinely uses SSH options there, that is where it would surface - confirm the operator identity and the destination against change/access records.</Item>
+        <Item>Command-line capture is bimodal (~50%). On a command-line-blind host the SSH options and payload are simply absent from 4688; corroborate with process.args and, failing that, the local-child pivot (section 15.3) and EDR. A null command line is a telemetry gap, not evidence of benign use.</Item>
+        <Item>No historical NBI benign-true-positive is on record for this rule. Do not create a blanket exception; scope any exception to the exact account + host + SSH options + destination after a documented authorised cause.</Item>
+      </Indicators>
+    </FalsePositive>
+    <Misconfiguration>
+      <Definition></Definition>
+    </Misconfiguration>
+    <NeedsEscalation>
+      <Definition></Definition>
+    </NeedsEscalation>
+  </ClassificationGuidance>
+  <ResponseActions>
+    <Phase name="Containment">
+      <Action>Isolate $host (network-contain / quarantine) if a true_positive is confirmed, to sever any active tunnel and stop proxied execution. On a shared jump host, coordinate with IT to avoid dropping unrelated admin sessions unnecessarily, but prioritise containment.</Action>
+      <Action>Terminate the SSH client and its local children (the ssh.exe/sftp.exe PID tree from section 15.3/section 17.5) to break the tunnel and any proxied interpreter.</Action>
+      <Action>Suspend or force-logoff $user's session on $host and disable the account pending investigation if the context is implicated; reset its credentials (section 20).</Action>
+      <Action>Preserve volatile evidence first where feasible: the running process list, the SSH client's command line, ~/.ssh/config and known_hosts, and open network connections - NBI does not capture the tunnel, so host-side capture is the only way to recover the SSH destination and options.</Action>
+      <Action>Block the SSH destination at the firewall once identified (from the command line / FortiGate egress). Deploy changes only via the authorised human-approved DEPLOY path; investigation itself is read-only.</Action>
+    </Phase>
+    <Phase name="Eradication">
+      <Action>Remove the persistence discovered in section 17.2 (services, scheduled tasks, Run keys, rogue accounts) and any staged tooling delivered over the tunnel, identified via section 15.10 (process.executable path).</Action>
+      <Action>Remove any attacker ~/.ssh/config LocalCommand/ProxyCommand entries and rogue authorized keys; audit OpenSSH client/server configuration on the host.</Action>
+      <Action>Run a full anti-malware / EDR scan on $host and on the SSH destination system; hunt the same account's SSH activity and staged tooling across peer jump/admin hosts (section 15.4, section 17.1).</Action>
+      <Action>Remediate the initial-access vector that gave the operator the foothold from which they proxied execution.</Action>
+    </Phase>
+    <Phase name="Recovery">
+      <Action>Reset $user's password and any credentials accessible from $host during the window; if privileged accounts logged on there (section 17.3) or the SSH destination is Tier-0, rotate those and review Kerberos/NTLM secret exposure.</Action>
+      <Action>Restore $host (and the destination if compromised) from a known-good image if persistence or tampering was extensive; otherwise validate eradication holds after reboot.</Action>
+      <Action>Return the host/account to service only after section 22 closing criteria are met and monitoring confirms the SSH command-proxying does not recur.</Action>
+      <Action>Recommend hardening (section 23): restrict OpenSSH client options and destinations, allow SSH only from sanctioned admin/jump hosts, and enable full command-line auditing on the jump-host class.</Action>
+    </Phase>
+  </ResponseActions>
+  <Escalation>
+    <Trigger>Escalate to Tier 3 / Incident Response (and notify the customer) when any of the following hold:
+
+- The SSH client spawned a local cmd/powershell/mshta child (section 15.3), or the embedded command runs an interpreter/fetches an http payload (section 14.2).
+- SSH command-proxying appears on a host/account that does not normally use SSH (section 15.2a, section 15.4), or the SSH destination is an admin/Tier-0 system.
+- Lateral movement from $host/$user is observed (section 17.1), persistence installed (section 17.2), or a renamed/relocated ssh.exe is found (section 15.10).
+- Log clearing or audit tampering appears (section 17.4), or a privileged/service identity is involved.
+- Evidence is incomplete because of NBI's telemetry gaps (command line blind, tunnel/network not collected) and the alert cannot be safely cleared - escalate as needs_escalation with the gaps named.</Trigger>
+    <To>SOC L2 / IR</To>
+  </Escalation>
+  <ClosureCriteria>
+    <Item>false_positive (authorised): a named operator, an expected bastion/destination, and the specific SSH options are positively confirmed against change/access records for this exact $user + $host + time. Record the reference; scope any exception to that exact tuple, never a blanket rule.</Item>
+    <Item>false_positive (blocked-malicious): the SSH client ran but the proxied command was positively proven prevented/errored with no local child and no tunnel; documented as a blocked malicious attempt, never "benign".</Item>
+    <Item>misconfiguration: a legitimate SSH automation uses LocalCommand/ProxyCommand benignly and simply was not baselined; document the expected options and raise a tuning action.</Item>
+    <Item>true_positive: proxied execution/tunnelling confirmed; containment/eradication/recovery completed, scope of $user/$host/destination/peers established, and no residual persistence or recurrence on monitoring.</Item>
+    <Item>needs_escalation: handed to Tier 3/IR with the specific evidence gaps documented.</Item>
+  </ClosureCriteria>
+  <Limitations>
+    <Item>Zero baseline = high fidelity. ssh.exe/sftp.exe (and scp/plink) simply do not appear in NBI's 4-hour Windows telemetry. There is nothing legitimate to tune out, so this rule should be near-silent; when it fires, believe it - and any command-proxying variant is doubly notable.</Item>
+    <Item>The payload is the SSH options, and the command line is bimodal. Recover them with process.command_line and MV_CONCAT(process.args, " ") (section 14.2). Where the host is command-line-blind (~50% of the estate), lean on the local-child pivot (section 15.3), the account/host SSH context (section 15.2a), and EDR.</Item>
+    <Item>The tunnel is invisible to this index. logs-system.security-* sees the SSH *process*, never the network session/tunnel. Recover the SSH destination from the command line and FortiGate egress; empty in-index network results never clear the host.</Item>
+    <Item>A local child of ssh.exe is the smoking gun. With no Sysmon, the source-host evidence of proxied execution is the 4688 child of the SSH client (section 15.3/section 17.5) - a cmd/powershell/mshta child is proxied execution, not a remote session.</Item>
+    <Item>winlog.event_data.TargetUserName is null on 4688. Key all process/user pivots on user.name / winlog.event_data.SubjectUserName.</Item>
+    <Item>Watch for a renamed/relocated ssh.exe. The genuine client is under System32\OpenSSH; an SSH client in a user-writable path (section 15.10) is a LOLBin flag even before reading the command line.</Item>
+    <Item>KB-worthy (persist to NBI customer scope): (1) ssh.exe/sftp.exe/scp.exe/plink.exe zero-baseline over 4h on logs-system.security-*; (2) process.command_line/process.args host-bimodality (~50%); (3) winlog.event_data.TargetUserName null on 4688; (4) no Sysmon/EDR → SSH tunnel not collected, recover from FortiGate/host. All observed live on 2026-08-19.</Item>
+  </Limitations>
+</Playbook>

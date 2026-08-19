@@ -1,0 +1,75 @@
+{
+  "name": "Linux — at/batch Job Scheduling (Persistence)",
+  "tags": [
+    "NBI-Endpoint",
+    "Phase3",
+    "Linux-auditd"
+  ],
+  "interval": "5m",
+  "enabled": true,
+  "description": "Detects use of the 'at' / 'batch' one-shot job schedulers (0 baseline on these servers), used by attackers to schedule delayed or one-time execution of payloads for persistence or defence evasion.",
+  "risk_score": 47,
+  "severity": "medium",
+  "note": "## Investigation\n1. `user.name` scheduled a job via at/batch on `host.name`.\n2. Inspect the scheduled command (atq/at -c).\n## Response\nRemove unauthorised jobs and investigate the user.",
+  "output_index": "",
+  "investigation_fields": {
+    "field_names": [
+      "process.executable",
+      "process.args",
+      "process.name",
+      "process.parent.executable",
+      "user.name",
+      "host.name"
+    ]
+  },
+  "author": [
+    "raadabujaish"
+  ],
+  "false_positives": [],
+  "from": "now-9m",
+  "rule_id": "nbi-lnx-at-persistence",
+  "max_signals": 100,
+  "risk_score_mapping": [],
+  "severity_mapping": [],
+  "threat": [
+    {
+      "framework": "MITRE ATT&CK",
+      "tactic": {
+        "id": "TA0003",
+        "name": "Persistence",
+        "reference": "https://attack.mitre.org/tactics/TA0003/"
+      },
+      "technique": [
+        {
+          "id": "T1053",
+          "name": "Scheduled Task/Job",
+          "reference": "https://attack.mitre.org/techniques/T1053/",
+          "subtechnique": [
+            {
+              "id": "T1053.001",
+              "name": "At",
+              "reference": "https://attack.mitre.org/techniques/T1053/001/"
+            }
+          ]
+        }
+      ]
+    }
+  ],
+  "to": "now",
+  "references": [
+    "https://attack.mitre.org/"
+  ],
+  "version": 1,
+  "exceptions_list": [],
+  "related_integrations": [],
+  "required_fields": [],
+  "setup": "",
+  "type": "query",
+  "language": "kuery",
+  "index": [
+    "logs-auditd.log-*",
+    "logs-auditd_manager.auditd-*"
+  ],
+  "query": "event.category:\"process\" and process.name:(\"at\" or \"batch\")",
+  "actions": []
+}

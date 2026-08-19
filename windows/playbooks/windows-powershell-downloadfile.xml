@@ -1,0 +1,397 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<Playbook xmlns="https://soc.example/playbooks" id="PB-windows-powershell-downloadfile" name="Powershell DownloadFile - SOC Playbook" version="3.0" status="Validated" classification="TLP:AMBER">
+  <Metadata>
+    <Owner>NBI SOC / Detection Engineering</Owner>
+    <LastUpdated>2026-08-19</LastUpdated>
+    <Severity default="High">High</Severity>
+    <Confidence default="Medium">Medium</Confidence>
+    <Category>Command and Control</Category>
+    <MitreAttack>
+      <Technique id="T1105"/>
+      <Technique id="T1059.001"/>
+      <Technique id="T1059"/>
+      <Tactic id="TA0011"/>
+      <Tactic id="TA0002"/>
+    </MitreAttack>
+    <References>
+      <Reference title="MITRE ATT&amp;CK - Ingress Tool Transfer (T1105)" url="https://attack.mitre.org/techniques/T1105/"/>
+      <Reference title="MITRE ATT&amp;CK - Command and Scripting Interpreter: PowerShell (T1059.001)" url="https://attack.mitre.org/techniques/T1059/001/"/>
+      <Reference title="MITRE ATT&amp;CK - Command and Control tactic (TA0011)" url="https://attack.mitre.org/tactics/TA0011/"/>
+      <Reference title="MITRE ATT&amp;CK - Execution tactic (TA0002)" url="https://attack.mitre.org/tactics/TA0002/"/>
+      <Reference title="Elastic Security - PowerShell suspicious download / Ingress Tool Transfer rules" url="https://github.com/elastic/detection-rules"/>
+      <Reference title="Microsoft Learn - about_PowerShell_Logging / Script Block Logging (Event 4104)" url="https://learn.microsoft.com/en-us/powershell/module/microsoft.powershell.core/about/about_logging_windows"/>
+      <Reference title="Microsoft Learn - System.Net.WebClient.DownloadFile method" url="https://learn.microsoft.com/en-us/dotnet/api/system.net.webclient.downloadfile"/>
+      <Reference title="LOLBAS - download/ingress LOLBins (Certutil, Bitsadmin, Curl)" url="https://lolbas-project.github.io/"/>
+      <Reference title="Microsoft Learn - Command line process auditing (Event 4688 command-line GPO)" url="https://learn.microsoft.com/en-us/windows-server/identity/ad-ds/manage/component-updates/command-line-process-auditing"/>
+    </References>
+  </Metadata>
+  <AlertContext>
+    <RuleName>Powershell DownloadFile</RuleName>
+    <RuleId>1bae4afe-c59b-4d88-91bc-b7c1d44402fa</RuleId>
+    <RuleType>query</RuleType>
+    <Index>logs-system.security-*</Index>
+    <TriggerLogic>The deployed rule is a KQL (query) rule on logs-system.security-*:
+
+
+
+Plain English: a powershell.exe process creation whose arguments contain the literal string DownloadFile. On NBI this is anchored to Event 4688; the argument match is evaluated against process.args (multivalued) and, equivalently, process.command_line.
+
+The rule is content-based, so it depends on command-line/argument capture - which on NBI is only ~50% populated estate-wide (see section 8). Where a host does not audit command lines, a real DownloadFile can fire nothing here; the complementary PowerShell script-block log (logs-windows.powershell-*, Event 4104) recovers the *decoded* call independently (section 15.2b) and is the durable corroborator.</TriggerLogic>
+    <KeyAlertFields>powershell.exe, powershell.file.script_block_text, process.name, process.executable, process.parent.name, user.name, process.command_line, process.args, host.name</KeyAlertFields>
+  </AlertContext>
+  <Inputs>
+    <Input name="$host"/>
+    <Input name="$user"/>
+  </Inputs>
+  <ExecutiveSummary>
+    <Overview>This playbook drives triage and investigation of the Powershell DownloadFile detection on NBI's Elastic Security deployment. The rule fires on a powershell.exe process (Windows Security 4688) whose command line contains DownloadFile - the System.Net.WebClient.DownloadFile method (and its DownloadString/DownloadData siblings), which fetches a file from a remote URL to local disk. It is one of the most common ways an attacker pulls a second-stage payload or tool onto a host after initial access (Ingress Tool Transfer).
+
+Ingress by itself is not proof of compromise - admins and installers download files too - so the decision turns on three facts recoverable from the command line and the process tree: the source URL (internal/trusted vs an unknown internet address or raw IP), the destination path (a normal software location vs Temp/AppData/Public/Downloads staging), and, decisively, whether the downloaded file then executed. Verdicts: a payload pulled from an untrusted source and run (true_positive), an authorised admin/software download or a positively-blocked attempt (false_positive - the latter documented as blocked-malicious, never "benign"), a legitimate script/agent using DownloadFile not yet baselined (misconfiguration), or unresolved (needs_escalation).</Overview>
+    <BusinessImpact>An alert means: **on $host, $user ran PowerShell whose command line invoked DownloadFile (or a Download* WebClient method) to fetch a file from a URL to local disk.** The WebClient.DownloadFile(url, path) call takes exactly two operands - the remote source and the local destination - and both are visible in the command line when the host captures it.
+
+The download *happened*; what it means depends on the operands and the follow-on:
+
+- Source URL - an internal server or a signed software CDN leans benign; an unknown domain, a raw IP, a non-standard port, or a paste/tunnelling service (pastebin, trycloudflare, ngrok) leans malicious.
+- Destination path - a normal install location is expected; Users\…\Downloads, \AppData\Local\Temp, \Public, or ProgramData with a random name is payload staging.
+- Execution - a new process starting from that staging path shortly after, or a PowerShell child (rundll32/regsvr32/mshta/an unsigned .exe), turns ingress into an active foothold.</BusinessImpact>
+  </ExecutiveSummary>
+  <Investigation>
+    <Goal>Decide true_positive / false_positive / misconfiguration / needs_escalation for Powershell DownloadFile.</Goal>
+    <Workflow>
+      <Step order="1" name="Reproduce the rule estate-wide (confirm the detection logic)">
+        <Purpose>Reproduce the rule estate-wide (confirm the detection logic)</Purpose>
+        <Query platform="Elastic" language="ES|QL" id="Q-01">
+          <![CDATA[
+FROM logs-system.security-*
+| WHERE @timestamp >= NOW() - 4 hours
+    AND event.code == "4688" AND TO_LOWER(process.name) == "powershell.exe"
+| EVAL cl = TO_LOWER(CONCAT(COALESCE(process.command_line, ""), " ", COALESCE(MV_CONCAT(process.args, " "), "")))
+| WHERE cl LIKE "*downloadfile*"
+| KEEP @timestamp, host.name, user.name, process.parent.name, process.command_line
+| SORT @timestamp DESC
+| LIMIT 100
+]]>
+        </Query>
+      </Step>
+      <Step order="2" name="Confirm on the alert host: source URL and destination path">
+        <Purpose>Confirm on the alert host: source URL and destination path</Purpose>
+        <Query platform="Elastic" language="ES|QL" id="Q-02">
+          <![CDATA[
+FROM logs-system.security-*
+| WHERE event.code == "4688" AND process.name == "powershell.exe"
+    AND host.name == "$host" AND user.name == "$user"
+    AND process.command_line LIKE "*DownloadFile*"
+    AND @timestamp >= NOW() - 4 hours
+| KEEP @timestamp, process.command_line, process.parent.name
+| SORT @timestamp DESC
+| LIMIT 20
+]]>
+        </Query>
+      </Step>
+      <Step order="3" name="Entity pivoting">
+        <Purpose>Entity pivoting</Purpose>
+        <Query platform="Elastic" language="ES|QL" id="Q-03">
+          <![CDATA[
+FROM logs-system.security-*
+| WHERE @timestamp >= NOW() - 4 hours
+    AND event.code == "4688" AND TO_LOWER(process.name) == "powershell.exe"
+    AND host.name == "$host" AND user.name == "$user"
+| EVAL argline = MV_CONCAT(process.args, " ")
+| KEEP @timestamp, process.parent.name, process.command_line, argline, process.pid, process.parent.pid
+| SORT @timestamp DESC
+| LIMIT 50
+]]>
+        </Query>
+      </Step>
+      <Step order="4" name="Process investigation">
+        <Purpose>Process investigation</Purpose>
+        <Query platform="Elastic" language="ES|QL" id="Q-04">
+          <![CDATA[
+FROM logs-system.security-*
+| WHERE @timestamp >= NOW() - 4 hours
+    AND event.code == "4688" AND TO_LOWER(process.name) == "powershell.exe"
+| EVAL cl = TO_LOWER(CONCAT(COALESCE(process.command_line, ""), " ", COALESCE(MV_CONCAT(process.args, " "), "")))
+| WHERE cl LIKE "*downloadfile*" OR cl LIKE "*downloadstring*" OR cl LIKE "*downloaddata*"
+| STATS occurrences = COUNT(*), hosts = COUNT_DISTINCT(host.name), users = COUNT_DISTINCT(user.name) BY process.parent.name
+| SORT occurrences DESC
+| LIMIT 25
+]]>
+        </Query>
+      </Step>
+      <Step order="5" name="Process investigation">
+        <Purpose>Process investigation</Purpose>
+        <Query platform="Elastic" language="ES|QL" id="Q-05">
+          <![CDATA[
+FROM logs-windows.powershell*
+| WHERE @timestamp >= NOW() - 4 hours
+    AND event.code == "4104" AND host.name == "$host"
+    AND (TO_LOWER(powershell.file.script_block_text) LIKE "*downloadfile*"
+         OR TO_LOWER(powershell.file.script_block_text) LIKE "*downloadstring*"
+         OR TO_LOWER(powershell.file.script_block_text) LIKE "*downloaddata*"
+         OR TO_LOWER(powershell.file.script_block_text) LIKE "*invoke-webrequest*"
+         OR TO_LOWER(powershell.file.script_block_text) LIKE "*start-bitstransfer*"
+         OR TO_LOWER(powershell.file.script_block_text) LIKE "*net.webclient*")
+| KEEP @timestamp, host.name, powershell.file.script_block_text
+| SORT @timestamp DESC
+| LIMIT 20
+]]>
+        </Query>
+      </Step>
+      <Step order="6" name="Parent-Child process analysis">
+        <Purpose>Parent-Child process analysis</Purpose>
+        <Query platform="Elastic" language="ES|QL" id="Q-06">
+          <![CDATA[
+FROM logs-system.security-*
+| WHERE event.code == "4688" AND process.name == "powershell.exe"
+    AND host.name == "$host" AND process.command_line LIKE "*DownloadFile*"
+    AND @timestamp >= NOW() - 4 hours
+| STATS downloads = COUNT(*), users = COUNT_DISTINCT(user.name)
+    BY process.parent.name
+| SORT downloads DESC
+| LIMIT 15
+]]>
+        </Query>
+      </Step>
+      <Step order="7" name="User investigation">
+        <Purpose>User investigation</Purpose>
+        <Query platform="Elastic" language="ES|QL" id="Q-07">
+          <![CDATA[
+FROM logs-system.security-*
+| WHERE @timestamp >= NOW() - 4 hours
+    AND event.code == "4688" AND user.name == "$user"
+| STATS executions = COUNT(*), distinct_procs = COUNT_DISTINCT(process.name) BY host.name
+| SORT executions DESC
+| LIMIT 20
+]]>
+        </Query>
+      </Step>
+      <Step order="8" name="Host investigation">
+        <Purpose>Host investigation</Purpose>
+        <Query platform="Elastic" language="ES|QL" id="Q-08">
+          <![CDATA[
+FROM logs-system.security-*
+| WHERE @timestamp >= NOW() - 4 hours
+    AND event.code == "4688" AND TO_LOWER(process.name) == "powershell.exe"
+    AND host.name == "$host"
+| STATS executions = COUNT(*), users = COUNT_DISTINCT(user.name) BY process.parent.name
+| SORT executions DESC
+| LIMIT 30
+]]>
+        </Query>
+      </Step>
+      <Step order="9" name="IP investigation">
+        <Purpose>IP investigation</Purpose>
+        <Query platform="Elastic" language="ES|QL" id="Q-09">
+          <![CDATA[
+FROM logs-system.security-*
+| WHERE @timestamp >= NOW() - 4 hours
+    AND event.code == "4624"
+    AND host.name == "$host" AND user.name == "$user"
+    AND source.ip IS NOT NULL
+| STATS logons = COUNT(*) BY source.ip, winlog.event_data.LogonType
+| SORT logons DESC
+| LIMIT 20
+]]>
+        </Query>
+      </Step>
+      <Step order="10" name="File investigation">
+        <Purpose>File investigation</Purpose>
+        <Query platform="Elastic" language="ES|QL" id="Q-10">
+          <![CDATA[
+FROM logs-system.security-*
+| WHERE event.code == "4688" AND host.name == "$host" AND @timestamp >= NOW() - 4 hours
+    AND (process.executable LIKE "*Temp*" OR process.executable LIKE "*AppData*"
+         OR process.executable LIKE "*Downloads*" OR process.executable LIKE "*Public*"
+         OR process.parent.name == "powershell.exe")
+| STATS spawns = COUNT(*), procs = VALUES(process.name)
+    BY process.parent.name, user.name
+| SORT spawns DESC
+| LIMIT 20
+]]>
+        </Query>
+      </Step>
+      <Step order="11" name="Authentication investigation">
+        <Purpose>Authentication investigation</Purpose>
+        <Query platform="Elastic" language="ES|QL" id="Q-11">
+          <![CDATA[
+FROM logs-system.security-*
+| WHERE @timestamp >= NOW() - 4 hours
+    AND event.code IN ("4624", "4625", "4634", "4647")
+    AND host.name == "$host" AND user.name == "$user"
+| STATS events = COUNT(*), first_seen = MIN(@timestamp), last_seen = MAX(@timestamp) BY event.code, winlog.event_data.LogonType, source.ip
+| SORT events DESC
+| LIMIT 30
+]]>
+        </Query>
+      </Step>
+      <Step order="12" name="Timeline Reconstruction">
+        <Purpose>Timeline Reconstruction</Purpose>
+        <Query platform="Elastic" language="ES|QL" id="Q-12">
+          <![CDATA[
+FROM logs-system.security-*
+| WHERE @timestamp >= NOW() - 4 hours
+    AND event.code == "4688" AND host.name == "$host" AND user.name == "$user"
+| KEEP @timestamp, process.parent.name, process.parent.pid, process.name, process.pid, process.executable
+| SORT @timestamp ASC
+| LIMIT 200
+]]>
+        </Query>
+      </Step>
+      <Step order="13" name="Lateral movement validation">
+        <Purpose>Lateral movement validation</Purpose>
+        <Query platform="Elastic" language="ES|QL" id="Q-13">
+          <![CDATA[
+FROM logs-system.security-*
+| WHERE @timestamp >= NOW() - 4 hours
+    AND event.code IN ("4624", "4648", "4768", "4769", "5140")
+    AND user.name == "$user"
+    AND host.name != "$host"
+| STATS events = COUNT(*) BY host.name, event.code, winlog.event_data.LogonType
+| SORT events DESC
+| LIMIT 30
+]]>
+        </Query>
+      </Step>
+      <Step order="14" name="Persistence validation">
+        <Purpose>Persistence validation</Purpose>
+        <Query platform="Elastic" language="ES|QL" id="Q-14">
+          <![CDATA[
+FROM logs-system.security-*
+| WHERE @timestamp >= NOW() - 4 hours
+    AND host.name == "$host"
+    AND (
+        (event.code == "4688" AND TO_LOWER(process.name) IN ("schtasks.exe", "reg.exe", "sc.exe", "at.exe", "powershell.exe", "wscript.exe", "cscript.exe", "rundll32.exe", "mshta.exe"))
+        OR event.code == "7045"
+        OR event.code == "4720"
+        OR event.code == "4698"
+    )
+| STATS events = COUNT(*) BY event.code, process.name, user.name
+| SORT events DESC
+| LIMIT 40
+]]>
+        </Query>
+      </Step>
+      <Step order="15" name="Privilege escalation validation">
+        <Purpose>Privilege escalation validation</Purpose>
+        <Query platform="Elastic" language="ES|QL" id="Q-15">
+          <![CDATA[
+FROM logs-system.security-*
+| WHERE @timestamp >= NOW() - 4 hours
+    AND event.code == "4672" AND host.name == "$host"
+| STATS special_priv_logons = COUNT(*) BY user.name
+| SORT special_priv_logons DESC
+| LIMIT 25
+]]>
+        </Query>
+      </Step>
+      <Step order="16" name="Defense evasion validation">
+        <Purpose>Defense evasion validation</Purpose>
+        <Query platform="Elastic" language="ES|QL" id="Q-16">
+          <![CDATA[
+FROM logs-system.security-*
+| WHERE @timestamp >= NOW() - 4 hours
+    AND host.name == "$host"
+    AND (
+        (event.code == "4688" AND TO_LOWER(process.name) IN ("wevtutil.exe", "fsutil.exe", "vssadmin.exe", "wmic.exe", "cipher.exe", "sdelete.exe", "sdelete64.exe"))
+        OR event.code == "1102"
+        OR event.code == "4719"
+    )
+| STATS events = COUNT(*) BY event.code, process.name, user.name
+| SORT events DESC
+| LIMIT 30
+]]>
+        </Query>
+      </Step>
+      <Step order="17" name="Impact assessment">
+        <Purpose>Impact assessment</Purpose>
+        <Query platform="Elastic" language="ES|QL" id="Q-17">
+          <![CDATA[
+FROM logs-system.security-*
+| WHERE event.code == "4688" AND host.name == "$host" AND @timestamp >= NOW() - 4 hours
+    AND (process.executable LIKE "*Temp*" OR process.executable LIKE "*AppData*"
+         OR process.executable LIKE "*Downloads*" OR process.executable LIKE "*Public*"
+         OR process.parent.name == "powershell.exe")
+| STATS spawns = COUNT(*), distinct_children = COUNT_DISTINCT(process.name), procs = VALUES(process.name)
+    BY process.parent.name, user.name
+| SORT spawns DESC
+| LIMIT 20
+]]>
+        </Query>
+      </Step>
+      <Step order="18" name="Finalize verdict">
+        <DecisionTree>
+        </DecisionTree>
+      </Step>
+    </Workflow>
+  </Investigation>
+  <ClassificationGuidance>
+    <TruePositive>
+      <Definition></Definition>
+    </TruePositive>
+    <FalsePositive>
+      <Definition></Definition>
+      <Indicators>
+        <Item>Administrator/software downloads - an engineer or a packaging script pulling an installer/tool from an internal repository or a signed vendor CDN to a normal location. Authorisation and source must be positively confirmed against the account's role and a change record, not assumed.</Item>
+        <Item>Deployment/management agents (SCCM-style, RMM, config-management) that use DownloadFile as packaged behaviour to fetch from a trusted source - often many hosts under one deployment parent.</Item>
+        <Item>Administrator or red/purple-team testing of ingress tooling - authorised malicious-technique execution, classified false_positive (blocked/authorised) only against a ticket or ROE, never dismissed on sight.</Item>
+        <Item>process.command_line/process.args is bimodal (~50% estate-wide). It is fully populated on the automation tier (nim-st-apv10/-apv11 ~100%) and frequently null on other hosts. A real DownloadFile on a command-line-blind host fires nothing on 4688 - so an empty section 14.2 does not clear the host; pivot to the PowerShell script-block log (section 15.2b).</Item>
+        <Item>PowerShell is common but DownloadFile is not. powershell.exe runs ~600×/4h estate-wide, dominated by machine-account automation (NIM-ST-APV10$/NIM-ST-APV11$ under a python.exe parent running -EncodedCommand); a literal DownloadFile had 0 in-window occurrences. A hit is therefore high-signal and must be judged on the URL, path, and execution - not dismissed as "just automation".</Item>
+        <Item>Script-block logging is live on the automation tier (logs-windows.powershell-*, ~1.1k 4104 events/4h on nim-st-apv10/-apv11), and powershell.file.script_block_text recovers the decoded call. Note its own user.name is SYSTEM and powershell.connected_user.name is null on NBI - key script-block pivots on host.name.</Item>
+        <Item>No historical NBI benign-true-positive is on record for this rule. Do not blanket-except a host/URL; scope any exception to the exact URL + destination + parent + account after a documented authorised cause.</Item>
+      </Indicators>
+    </FalsePositive>
+    <Misconfiguration>
+      <Definition></Definition>
+    </Misconfiguration>
+    <NeedsEscalation>
+      <Definition></Definition>
+    </NeedsEscalation>
+  </ClassificationGuidance>
+  <ResponseActions>
+    <Phase name="Containment">
+      <Action>Isolate $host (network-contain / quarantine) if a true_positive is confirmed, to stop the payload's C2 and any post-download activity.</Action>
+      <Action>Capture the downloaded file and its URL before eradication: retrieve the file from the destination path (section 14.2/section 15.10) for analysis, and record the URL/IP for blocking.</Action>
+      <Action>Terminate the PowerShell process and any child launched from the staging path (section 17.5) if the host cannot yet be isolated.</Action>
+      <Action>Suspend/disable $user and reset its credentials (section 20) if the account is implicated; for a machine/service account, coordinate with the owning team.</Action>
+      <Action>Block the source URL/domain/IP at the proxy/firewall once identified. Deploy changes only via the authorised human-approved DEPLOY path; investigation itself is read-only.</Action>
+    </Phase>
+    <Phase name="Eradication">
+      <Action>Remove the downloaded payload from the destination path and any copies, plus the persistence discovered in section 17.2 (services, scheduled tasks, Run keys, rogue accounts).</Action>
+      <Action>Block the delivery infrastructure (URL, domain, IP, hosting range) across the proxy/firewall and endpoints; add the payload hash to endpoint blocklists once computed (section 15.9).</Action>
+      <Action>Run a full anti-malware / EDR scan on $host and hunt the same URL/hash and download pattern across peers, especially hosts $user reached (section 15.4, section 17.1).</Action>
+      <Action>Remediate the initial-access vector that placed the foothold from which the download ran (macro, exploited service, prior credential compromise).</Action>
+    </Phase>
+    <Phase name="Recovery">
+      <Action>Reset $user's credentials and any exposed on $host during the window; if privileged accounts logged on there (section 17.3), rotate those too.</Action>
+      <Action>Restore $host from a known-good image if persistence or tampering was extensive; otherwise validate eradication holds after reboot.</Action>
+      <Action>Return the host/account to service only after section 22 closing criteria are met and monitoring confirms no recurrence of the download pattern or C2.</Action>
+      <Action>Recommend hardening (section 23): restrict outbound access from servers/workstations to approved destinations, enforce signed-script / Constrained Language Mode, ensure command-line and PowerShell script-block/module logging are enabled estate-wide, and baseline sanctioned DownloadFile-using automation so novel ingress stands out.</Action>
+    </Phase>
+  </ResponseActions>
+  <Escalation>
+    <Trigger>Escalate to Tier 3 / Incident Response (and notify the customer) when any of the following hold:
+
+- The download source is an untrusted URL / raw IP / paste-tunnelling service (section 14.2/section 15.2b), or the destination is a staging path (section 15.10).
+- The launcher is a delivery chain (Office/wscript/mshta/browser - section 15.3), or the payload executed (section 17.5).
+- Persistence (section 17.2), lateral movement (section 17.1), or privilege escalation (section 17.3) is observed, or the host is a server/DC/privileged workstation.
+- Log clearing / shadow-copy deletion appears (section 17.4).
+- The URL/destination or execution outcome cannot be established (command-line-blind host, no script-block, host unavailable) and the alert cannot be safely cleared - escalate as needs_escalation with the gaps named.</Trigger>
+    <To>SOC L2 / IR</To>
+  </Escalation>
+  <ClosureCriteria>
+    <Item>false_positive (authorised): the source URL, destination, parent, and account role are positively confirmed as sanctioned admin/software/deployment for this exact $host + $user + time. Record the reference; scope any exception to that exact tuple.</Item>
+    <Item>false_positive (blocked-malicious): the download or its payload's execution was positively proven prevented by EDR/network controls with no successful run; documented as blocked-malicious, never "benign" - still hunt the delivery vector.</Item>
+    <Item>misconfiguration: a legitimate script/agent fetches from a trusted source via DownloadFile as packaged behaviour and simply was not baselined; baseline it and prefer signed packages / approved repositories.</Item>
+    <Item>true_positive: payload ingress from an untrusted source (and/or execution) confirmed; containment/eradication/recovery completed, scope established, URL/infrastructure blocked, and no residual persistence or recurrence.</Item>
+    <Item>needs_escalation: handed to Tier 3/IR with the specific evidence gaps documented.</Item>
+  </ClosureCriteria>
+  <Limitations>
+    <Item>The URL, the path, and execution decide it. An untrusted source writing an executable to a staging path that then runs is the true-positive core; a trusted source to a normal path under a deployment parent with no follow-on is the benign shape. DownloadFile alone is neutral.</Item>
+    <Item>Command line is bimodal; the script-block log is the safety net. Recover the call from process.command_line/MV_CONCAT(process.args," ") (section 14.2) and, where those are null, from logs-windows.powershell-* 4104 script_block_text (section 15.2b). Key the script-block pivot on host.name - its user.name is SYSTEM and connected_user.name is null on NBI.</Item>
+    <Item>script_block_text is a wildcard field. Match it with TO_LOWER(...) LIKE "*…*", never full-text MATCH.</Item>
+    <Item>The rule is literal-string-bound; evasion is easy. Invoke-WebRequest/iwr, Start-BitsTransfer, curl.exe, certutil -urlcache, or hiding the call in -EncodedCommand all achieve the same ingress without the literal DownloadFile. The script-block markers in section 15.2b (and a complementary ingress-tool-transfer analytic) cover these; a null section 14.2 never clears the host.</Item>
+    <Item>winlog.event_data.TargetUserName is null on 4688 - key process/user pivots on user.name.</Item>
+    <Item>The bytes and the network are invisible here. Retrieve the file host-side for hashing/analysis and enrich the URL/IP externally; empty in-index network/hash results never clear the host.</Item>
+    <Item>KB-worthy (persist to NBI customer scope): (1) powershell.exe ~600/4h estate-wide, dominated by NIM-ST-APV10$/NIM-ST-APV11$ under python.exe running -EncodedCommand; literal DownloadFile = 0 in-window; (2) process.command_line/args ~50% bimodal, ~100% on nim-st-apv10/-apv11; (3) logs-windows.powershell-* 4104 ~1.1k/4h on those hosts, script_block_text wildcard, connected_user.name null → key on host; (4) winlog.event_data.TargetUserName null on 4688. Observed live 2026-08-19.</Item>
+  </Limitations>
+</Playbook>

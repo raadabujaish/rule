@@ -1,0 +1,362 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<Playbook xmlns="https://soc.example/playbooks" id="PB-fortiweb-encoded-sql-injection" name="FortiWeb — Encoded SQL Injection Attempt - SOC Playbook" version="3.0" status="Validated" classification="TLP:AMBER">
+  <Metadata>
+    <Owner>NBI SOC / Detection Engineering</Owner>
+    <LastUpdated>2026-08-19</LastUpdated>
+    <Severity default="high">high</Severity>
+    <Confidence default="Medium">Medium</Confidence>
+    <Category>Initial Access</Category>
+    <MitreAttack>
+      <Technique id="T1190"/>
+      <Tactic id="TA0001"/>
+      <Tactic id="TA0002"/>
+      <Tactic id="TA0003"/>
+    </MitreAttack>
+    <References>
+      <Reference title="MITRE ATT&amp;CK - Exploit Public-Facing Application (T1190)" url="https://attack.mitre.org/techniques/T1190/"/>
+      <Reference title="MITRE ATT&amp;CK - Initial Access tactic (TA0001)" url="https://attack.mitre.org/tactics/TA0001/"/>
+      <Reference title="OWASP - Blind SQL Injection" url="https://owasp.org/www-community/attacks/Blind_SQL_Injection"/>
+      <Reference title="OWASP - Testing for SQL Injection (WSTG, incl. time-based/blind)" url="https://owasp.org/www-project-web-security-testing-guide/latest/4-Web_Application_Security_Testing/07-Input_Validation_Testing/05-Testing_for_SQL_Injection"/>
+      <Reference title="OWASP - SQL Injection Prevention Cheat Sheet" url="https://cheatsheetseries.owasp.org/cheatsheets/SQL_Injection_Prevention_Cheat_Sheet.html"/>
+      <Reference title="PortSwigger Web Security Academy - Blind SQL injection" url="https://portswigger.net/web-security/sql-injection/blind"/>
+      <Reference title="Fortinet FortiWeb - Attack log and signature reference" url="https://docs.fortinet.com/product/fortiweb"/>
+      <Reference title="Elastic Security - ES|QL rules and query reference" url="https://www.elastic.co/guide/en/security/current/rules-ui-create.html"/>
+    </References>
+  </Metadata>
+  <AlertContext>
+    <RuleName>FortiWeb — Encoded SQL Injection Attempt</RuleName>
+    <RuleId>raad-07-encoded-sqli</RuleId>
+    <RuleType>esql</RuleType>
+    <Index>logs-tcp.generic-default</Index>
+    <TriggerLogic>The deployed rule is an ES|QL rule (verbatim from the rule definition):
+
+
+
+Plain English: lowercase and concatenate the URL, user-agent, and packet body, then fire when that surface matches any encoded/obfuscated or time-based SQLi primitive. It runs every 10 minutes over a now-30m look-back. The time-based patterns require a numeric argument (sleep(5), not bare sleep) to limit false positives. The rule reads FROM logs-*, but every FortiWeb record it can match lives in logs-tcp.generic-default, so this playbook scopes its investigation queries there (equivalent results, far faster than scanning all of logs-*); the three reused XML validation queries retain FROM logs-* as authored.
+
+One-line Kibana KQL filter for pivoting in Discover:</TriggerLogic>
+    <KeyAlertFields>data.type, data.http_url, data.http_agent, data.packet.packet, data.http_retcode, data.src, data.original_src, data.http_method, data.attack_type, data.action</KeyAlertFields>
+  </AlertContext>
+  <Inputs>
+    <Input name="$src"/>
+    <Input name="$host"/>
+  </Inputs>
+  <ExecutiveSummary>
+    <Overview>This playbook drives triage and investigation of the FortiWeb - Encoded SQL Injection Attempt detection on NBI's Elastic Security deployment. Unlike the companion Classic SQL Injection rule (in-band tautology/UNION patterns), this is an ES|QL rule that hunts encoded, obfuscated, and time-based/blind SQL-injection primitives across a concatenated surface of the request URL, user-agent, and packet body: time-based blind with a numeric argument (sleep(n), pg_sleep(n), benchmark(n,…), dbms_pipe.receive_message(, waitfor delay), comment/case-mutation bypasses (sel//ect, un//ion, sel%65ct, %75nion, /*!…select), data-extraction primitives (concat(0x…, group_concat(, load_file(, into outfile, xp_dirtree, xp_cmdshell), and hex-encoded keywords (0x73656c656374 = "select", 0x756e696f6e = "union").
+
+The analyst's job is to decide whether the injection was blocked by the WAF/application (false_positive, blocked-malicious, never "benign"), reached and was processed by the application with evidence of success/exposure (true_positive), was authorised testing or a benign token match (false_positive, other), or was processed-but-unclear (needs_escalation) - resolving the real client behind the FortiWeb SNAT source first.</Overview>
+    <BusinessImpact>An alert means: a request associated with front-end $src to $host carried an encoded/obfuscated or time-based SQL-injection primitive in its URL, user-agent, or packet body. These are *deliberate* database-attack attempts, not casual scanning - encoding and time-based techniques are chosen specifically to evade signature WAFs and to extract data blindly when the application returns no direct output. Two things decide the verdict:
+
+1. Was it processed or blocked? The data.http_retcode on the traffic record separates a WAF/app 403/4xx block from a 200 (processed - possible blind success) or a 500 (error-based reaching the DB). Time-based blind injection succeeds by delaying the response, which the WAF access log does not timestamp at sub-request granularity (there is no response-latency field here) - so blind success is inferred from the payload + processing and confirmed via the database audit, not from the log alone.
+2. Who really sent it? $src is a shared FortiWeb SNAT address; the attacker is the first hop of x_forwarded_for. Attribution and the "authorised tester" question key on the de-proxied client.</BusinessImpact>
+  </ExecutiveSummary>
+  <Investigation>
+    <Goal>Decide true_positive / false_positive / misconfiguration / needs_escalation for FortiWeb — Encoded SQL Injection Attempt.</Goal>
+    <Workflow>
+      <Step order="1" name="Reproduce the encoded-pattern match on the host">
+        <Purpose>Reproduce the encoded-pattern match on the host</Purpose>
+        <Query platform="Elastic" language="ES|QL" id="Q-01">
+          <![CDATA[
+FROM logs-tcp.generic-default
+| WHERE @timestamp >= NOW() - 4 hours AND data.type == "traffic" AND data.http_host == "$host"
+| EVAL u = TO_LOWER(COALESCE(data.http_url, "")), ua = TO_LOWER(COALESCE(data.http_agent, "")),
+       b = TO_LOWER(COALESCE(data.packet.packet, ""))
+| EVAL surf = CONCAT(u, " | ", ua, " | ", b), rc = TO_INTEGER(data.http_retcode)
+| WHERE surf LIKE "*sleep(*" OR surf LIKE "*pg_sleep(*" OR surf LIKE "*benchmark(*"
+    OR surf LIKE "*dbms_pipe.receive_message(*" OR surf LIKE "*waitfor*delay*"
+    OR surf LIKE "*sel/**/ect*" OR surf LIKE "*un/**/ion*" OR surf LIKE "*sel%65ct*" OR surf LIKE "*%75nion*"
+    OR surf LIKE "*concat(0x*" OR surf LIKE "*group_concat(*" OR surf LIKE "*load_file(*"
+    OR surf LIKE "*into outfile*" OR surf LIKE "*xp_dirtree*" OR surf LIKE "*xp_cmdshell*"
+    OR surf LIKE "*0x73656c656374*" OR surf LIKE "*0x756e696f6e*"
+| KEEP @timestamp, data.original_src, data.src, data.http_url, data.http_retcode, data.http_agent, data.packet.packet
+| SORT @timestamp DESC
+| LIMIT 100
+]]>
+        </Query>
+      </Step>
+      <Step order="2" name="Injection requests and their responses (anchor on $src + $host)">
+        <Purpose>Injection requests and their responses (anchor on $src + $host)</Purpose>
+        <Query platform="Elastic" language="ES|QL" id="Q-02">
+          <![CDATA[
+FROM logs-*
+| WHERE (data.src == "$src" OR data.original_src == "$src")
+    AND data.http_host == "$host"
+    AND data.http_method IS NOT NULL
+    AND @timestamp >= NOW() - 1 hours
+| EVAL rc = TO_INTEGER(data.http_retcode)
+| STATS requests = COUNT(*),
+        blocked_4xx = COUNT(CASE(rc >= 400 AND rc < 500, 1, null)),
+        ok_2xx = COUNT(CASE(rc >= 200 AND rc < 300, 1, null)),
+        err_5xx = COUNT(CASE(rc >= 500, 1, null))
+    BY data.http_url
+| SORT requests DESC
+| LIMIT 20
+]]>
+        </Query>
+      </Step>
+      <Step order="3" name="Entity pivoting">
+        <Purpose>Entity pivoting</Purpose>
+        <Query platform="Elastic" language="ES|QL" id="Q-03">
+          <![CDATA[
+FROM logs-tcp.generic-default
+| WHERE @timestamp >= NOW() - 4 hours AND data.type == "traffic"
+    AND (data.src == "$src" OR data.original_src == "$src") AND data.http_host == "$host"
+| EVAL real_client = COALESCE(TRIM(MV_FIRST(SPLIT(x_forwarded_for, ","))), data.src)
+| KEEP @timestamp, real_client, data.http_method, data.http_url, data.http_retcode, data.http_agent, data.packet.packet
+| SORT @timestamp DESC
+| LIMIT 50
+]]>
+        </Query>
+      </Step>
+      <Step order="4" name="Host investigation">
+        <Purpose>Host investigation</Purpose>
+        <Query platform="Elastic" language="ES|QL" id="Q-04">
+          <![CDATA[
+FROM logs-tcp.generic-default
+| WHERE @timestamp >= NOW() - 4 hours AND data.http_host == "$host"
+| EVAL rc = TO_INTEGER(data.http_retcode)
+| STATS records = COUNT(*), clients = COUNT_DISTINCT(x_forwarded_for), attacks = COUNT(data.attack_type),
+        served2xx = SUM(CASE(rc >= 200 AND rc < 300, 1, 0)),
+        rejected4xx = SUM(CASE(rc >= 400 AND rc < 500, 1, 0)),
+        err5xx = SUM(CASE(rc >= 500, 1, 0))
+    BY data.type
+| SORT records DESC
+| LIMIT 10
+]]>
+        </Query>
+      </Step>
+      <Step order="5" name="IP investigation">
+        <Purpose>IP investigation</Purpose>
+        <Query platform="Elastic" language="ES|QL" id="Q-05">
+          <![CDATA[
+FROM logs-*
+| WHERE (data.src == "$src" OR data.original_src == "$src")
+    AND data.http_method IS NOT NULL
+    AND @timestamp >= NOW() - 1 hours
+| STATS requests = COUNT(*), urls = COUNT_DISTINCT(data.http_url),
+        hosts = COUNT_DISTINCT(data.http_host)
+    BY data.http_agent
+| SORT requests DESC
+| LIMIT 10
+]]>
+        </Query>
+      </Step>
+      <Step order="6" name="Domain investigation">
+        <Purpose>Domain investigation</Purpose>
+        <Query platform="Elastic" language="ES|QL" id="Q-06">
+          <![CDATA[
+FROM logs-*
+| WHERE (data.src == "$src" OR data.original_src == "$src")
+    AND data.http_method IS NOT NULL
+    AND @timestamp >= NOW() - 1 hours
+| EVAL rc = TO_INTEGER(data.http_retcode)
+| STATS requests = COUNT(*)
+    BY data.http_host, rc
+| SORT requests DESC
+| LIMIT 20
+]]>
+        </Query>
+      </Step>
+      <Step order="7" name="URL investigation">
+        <Purpose>URL investigation</Purpose>
+        <Query platform="Elastic" language="ES|QL" id="Q-07">
+          <![CDATA[
+FROM logs-tcp.generic-default
+| WHERE @timestamp >= NOW() - 4 hours AND data.type == "traffic"
+    AND data.http_host == "$host" AND data.packet.packet IS NOT NULL
+| EVAL b = TO_LOWER(data.packet.packet), rc = TO_INTEGER(data.http_retcode),
+       endpoint = MV_FIRST(SPLIT(data.http_url, "?"))
+| WHERE b LIKE "*sleep(*" OR b LIKE "*benchmark(*" OR b LIKE "*waitfor*delay*" OR b LIKE "*group_concat(*"
+    OR b LIKE "*load_file(*" OR b LIKE "*into outfile*" OR b LIKE "*xp_cmdshell*" OR b LIKE "*concat(0x*"
+    OR b LIKE "*sel/**/ect*" OR b LIKE "*un/**/ion*"
+| STATS hits = COUNT(*), served2xx = SUM(CASE(rc >= 200 AND rc < 300, 1, 0)),
+        err5xx = SUM(CASE(rc >= 500, 1, 0)), blocked4xx = SUM(CASE(rc >= 400 AND rc < 500, 1, 0))
+    BY endpoint
+| SORT served2xx DESC
+| LIMIT 20
+]]>
+        </Query>
+      </Step>
+      <Step order="8" name="Authentication investigation">
+        <Purpose>Authentication investigation</Purpose>
+        <Query platform="Elastic" language="ES|QL" id="Q-08">
+          <![CDATA[
+FROM logs-tcp.generic-default
+| WHERE @timestamp >= NOW() - 4 hours AND data.type == "traffic" AND data.http_host == "$host"
+    AND (data.src == "$src" OR data.original_src == "$src")
+    AND (TO_LOWER(data.http_url) LIKE "*login*" OR TO_LOWER(data.http_url) LIKE "*auth*" OR TO_LOWER(data.http_url) LIKE "*token*")
+| EVAL rc = TO_INTEGER(data.http_retcode)
+| STATS reqs = COUNT(*), ok2xx = SUM(CASE(rc >= 200 AND rc < 300, 1, 0)),
+        rejected4xx = SUM(CASE(rc >= 400 AND rc < 500, 1, 0)) BY data.http_url
+| SORT reqs DESC
+| LIMIT 25
+]]>
+        </Query>
+      </Step>
+      <Step order="9" name="Timeline Reconstruction">
+        <Purpose>Timeline Reconstruction</Purpose>
+        <Query platform="Elastic" language="ES|QL" id="Q-09">
+          <![CDATA[
+FROM logs-tcp.generic-default
+| WHERE @timestamp >= NOW() - 4 hours AND data.type == "traffic"
+    AND (data.src == "$src" OR data.original_src == "$src") AND data.http_host == "$host"
+| EVAL real_client = COALESCE(TRIM(MV_FIRST(SPLIT(x_forwarded_for, ","))), data.src)
+| KEEP @timestamp, real_client, data.http_method, data.http_url, data.http_retcode, data.http_agent
+| SORT @timestamp ASC
+| LIMIT 200
+]]>
+        </Query>
+      </Step>
+      <Step order="10" name="Lateral movement validation">
+        <Purpose>Lateral movement validation</Purpose>
+        <Query platform="Elastic" language="ES|QL" id="Q-10">
+          <![CDATA[
+FROM logs-tcp.generic-default
+| WHERE @timestamp >= NOW() - 4 hours AND data.type == "traffic"
+    AND (data.src == "$src" OR data.original_src == "$src") AND data.http_host != "$host"
+| STATS reqs = COUNT(*), urls = COUNT_DISTINCT(data.http_url), attacks = COUNT(data.attack_type)
+    BY data.http_host
+| SORT reqs DESC
+| LIMIT 20
+]]>
+        </Query>
+      </Step>
+      <Step order="11" name="Persistence validation">
+        <Purpose>Persistence validation</Purpose>
+        <Query platform="Elastic" language="ES|QL" id="Q-11">
+          <![CDATA[
+FROM logs-tcp.generic-default
+| WHERE @timestamp >= NOW() - 4 hours AND data.type == "traffic" AND data.http_host == "$host"
+    AND (data.src == "$src" OR data.original_src == "$src")
+| EVAL b = TO_LOWER(COALESCE(data.packet.packet, "")), rc = TO_INTEGER(data.http_retcode)
+| WHERE b LIKE "*into outfile*" OR b LIKE "*load_file(*" OR TO_LOWER(data.http_method) IN ("post", "put")
+| STATS reqs = COUNT(*), served2xx = SUM(CASE(rc >= 200 AND rc < 300, 1, 0)) BY data.http_url, data.http_method
+| SORT reqs DESC
+| LIMIT 25
+]]>
+        </Query>
+      </Step>
+      <Step order="12" name="Privilege escalation validation">
+        <Purpose>Privilege escalation validation</Purpose>
+        <Query platform="Elastic" language="ES|QL" id="Q-12">
+          <![CDATA[
+FROM logs-tcp.generic-default
+| WHERE @timestamp >= NOW() - 4 hours AND data.type == "traffic"
+    AND data.http_host == "$host" AND data.packet.packet IS NOT NULL
+| EVAL b = TO_LOWER(data.packet.packet), rc = TO_INTEGER(data.http_retcode),
+       real_client = COALESCE(TRIM(MV_FIRST(SPLIT(x_forwarded_for, ","))), data.src)
+| WHERE b LIKE "*xp_cmdshell*" OR b LIKE "*xp_dirtree*" OR b LIKE "*into outfile*" OR b LIKE "*load_file(*"
+| KEEP @timestamp, real_client, data.http_url, data.http_retcode, data.packet.packet
+| SORT @timestamp DESC
+| LIMIT 50
+]]>
+        </Query>
+      </Step>
+      <Step order="13" name="Defense evasion validation">
+        <Purpose>Defense evasion validation</Purpose>
+        <Query platform="Elastic" language="ES|QL" id="Q-13">
+          <![CDATA[
+FROM logs-tcp.generic-default
+| WHERE @timestamp >= NOW() - 4 hours AND data.type == "attack" AND data.http_host == "$host"
+| STATS events = COUNT(*), denied = SUM(CASE(data.action == "Alert_Deny", 1, 0)),
+        alerted = SUM(CASE(data.action == "Alert", 1, 0)), erased = SUM(CASE(data.action == "Erase", 1, 0))
+    BY data.attack_type, data.main_type
+| SORT events DESC
+| LIMIT 25
+]]>
+        </Query>
+      </Step>
+      <Step order="14" name="Impact assessment">
+        <Purpose>Impact assessment</Purpose>
+        <Query platform="Elastic" language="ES|QL" id="Q-14">
+          <![CDATA[
+FROM logs-tcp.generic-default
+| WHERE @timestamp >= NOW() - 4 hours AND data.type == "traffic"
+    AND data.http_host == "$host" AND data.packet.packet IS NOT NULL
+| EVAL b = TO_LOWER(data.packet.packet), rc = TO_INTEGER(data.http_retcode)
+| WHERE b LIKE "*sleep(*" OR b LIKE "*benchmark(*" OR b LIKE "*waitfor*delay*" OR b LIKE "*group_concat(*"
+    OR b LIKE "*load_file(*" OR b LIKE "*into outfile*" OR b LIKE "*xp_cmdshell*" OR b LIKE "*concat(0x*"
+| STATS injected = COUNT(*), served2xx = SUM(CASE(rc >= 200 AND rc < 300, 1, 0)),
+        err5xx = SUM(CASE(rc >= 500, 1, 0)), blocked4xx = SUM(CASE(rc >= 400 AND rc < 500, 1, 0)),
+        clients = COUNT_DISTINCT(x_forwarded_for)
+| LIMIT 5
+]]>
+        </Query>
+      </Step>
+      <Step order="15" name="Finalize verdict">
+        <DecisionTree>
+        </DecisionTree>
+      </Step>
+    </Workflow>
+  </Investigation>
+  <ClassificationGuidance>
+    <TruePositive>
+      <Definition></Definition>
+    </TruePositive>
+    <FalsePositive>
+      <Definition></Definition>
+      <Indicators>
+        <Item>Authorised penetration tests / red-team exercising encoded and blind SQLi. Not benign - authorised malicious-technique execution; classified false_positive only once positively confirmed with the tester (de-proxied client + window + scope), never dismissed on sight.</Item>
+        <Item>Benign token matches. A legitimate value that incidentally contains a matched substring (a parameter containing benchmark, a value with concat(, a hex blob that coincidentally contains 0x73656c656374). The deployed rule mitigates the time-based case by requiring a numeric argument, but data-extraction/hex primitives can still match incidentally - confirm by reading the full request.</Item>
+        <Item>Scanners/libraries whose payloads are encoded SQLi - hostile even if unauthenticated; investigate on outcome, never whitelisted on the user-agent.</Item>
+        <Item>No encoded-SQLi payloads were present in the live window. A 4-hour scan of captured packets for the deployed primitives (sleep(n), benchmark(, waitfor delay, group_concat(, xp_cmdshell, union select, comment/hex mutations) returned zero matches estate-wide. Consistent with the rule's low/n/a alert volume - when it fires, it is a sharp, investigable anomaly against an otherwise clean baseline. Empty != safe (packet capture is ~34%).</Item>
+        <Item>The banking surfaces are app-dominated. Traffic to mobile.nbi.iq / businessonline.nbi.iq is overwhelmingly the NBI mobile app (Dart/3.8 (dart:io), national_bank_of_iraq/… CFNetwork/… Darwin/…) plus some desktop browsers; the app does not emit encoded SQL. An encoded primitive embedded in this traffic stands out.</Item>
+        <Item>$src is a FortiWeb SNAT address. The 185.56.154.0/24 and 159.60.162-170.0/24 pools front many clients; attribute only on the de-proxied x_forwarded_for client (section 15.6).</Item>
+        <Item>Packet capture ~34%. The rule matches on the captured slice (URL + user-agent are ~100%, but the packet body is ~34%). An encoded body delivered on an uncaptured record is invisible - corroborate impact from response codes and DB audit.</Item>
+      </Indicators>
+    </FalsePositive>
+    <Misconfiguration>
+      <Definition></Definition>
+    </Misconfiguration>
+    <NeedsEscalation>
+      <Definition></Definition>
+    </NeedsEscalation>
+  </ClassificationGuidance>
+  <ResponseActions>
+    <Phase name="Containment">
+      <Action>Block the de-proxied real client (from section 15.6/section 15.1) at the FortiWeb/edge - on the x_forwarded_for client, not the SNAT $src. Add the observed encoding to the block set (comment/hex/case variants).</Action>
+      <Action>Protect the vulnerable endpoint identified in section 15.8: engage the app owner to take it offline or tighten its WAF signature if an encoded payload was processed.</Action>
+      <Action>Engage the DBA immediately for any processed injection or extraction/OS primitive - review the database for unauthorised reads/modifications on the endpoint and time (blind extraction leaves DB-side traces even when the web log looks unremarkable).</Action>
+      <Action>Preserve evidence: the traffic + attack records (encoded packet, URL, response code, de-proxied client) and the DB audit for the window.</Action>
+      <Action>Blocks are applied only via the authorised human-approved DEPLOY path; investigation here is read-only.</Action>
+    </Phase>
+    <Phase name="Eradication">
+      <Action>Parameterise the injectable query (prepared statements) at the vulnerable endpoint - the root fix; WAF signatures alone are evaded by encoding, which is exactly what this rule catches.</Action>
+      <Action>Least-privilege the application's database account: remove xp_cmdshell, FILE/INTO OUTFILE, and DDL rights so a future encoded injection cannot reach the OS or write files.</Action>
+      <Action>Remove any planted artifact found in section 17.2 (web shell, stored procedure) and audit for others.</Action>
+      <Action>Tighten WAF SQLi signatures to normalise/decode before matching (canonicalisation) so encoded variants are caught, and add the observed encodings.</Action>
+    </Phase>
+    <Phase name="Recovery">
+      <Action>Rotate credentials reachable from the vulnerable query once the DBA scopes what a blind extraction could have reached.</Action>
+      <Action>Restore data integrity from backup if a state-changing encoded query was processed.</Action>
+      <Action>Return the endpoint to service only after section 22 closing criteria are met, the parameterised fix is deployed, and monitoring confirms encoded payloads now block.</Action>
+      <Action>Recommend raising FortiWeb packet capture on the banking policies (currently ~34%) and adding request canonicalisation so encoded payloads are decoded before signature matching.</Action>
+    </Phase>
+  </ResponseActions>
+  <Escalation>
+    <Trigger>Escalate to Tier 3 / IR (and the DBA + application owner) when any of the following hold:
+
+- An encoded payload was processed (200 on an injected parameter, or a payload-tied 500) on a customer-facing banking host.
+- Any extraction/OS primitive (load_file(, into outfile, xp_cmdshell, xp_dirtree) appears (section 17.3) - served or not.
+- A time-based blind burst is observed against one endpoint (section 16) - blind extraction in progress, which the web log cannot confirm complete.
+- The de-proxied client shows an estate campaign (section 17.1) or write-method / web-shell follow-on (section 17.2).
+- Evidence is incomplete because packet capture missed the payload, or blind success cannot be confirmed from web logs - escalate as needs_escalation for DBA/app audit, with the gaps named.</Trigger>
+    <To>SOC L2 / IR</To>
+  </Escalation>
+  <ClosureCriteria>
+    <Item>false_positive (authorised): an authorised pentest is positively matched to the exact de-proxied client + endpoint + window. Record the ROE/ticket.</Item>
+    <Item>false_positive (blocked-malicious): the encoded injection was positively proven blocked (all-4xx, nothing processed); documented as blocked, never "benign".</Item>
+    <Item>false_positive (benign token): the matched string is an incidental substring in a legitimate value, confirmed by reading the full request; refine the pattern.</Item>
+    <Item>misconfiguration: a benign automated client/parameter repeatedly matches an encoded token with no processed injection; tighten the pattern / baseline the client.</Item>
+    <Item>true_positive: an encoded injection was processed or an extraction/OS primitive appeared from an unauthorised client; containment/eradication/recovery completed, DBA impact assessment done, no residual access.</Item>
+    <Item>needs_escalation: handed to Tier 3/IR + DBA with the specific evidence gaps documented.</Item>
+  </ClosureCriteria>
+  <Limitations>
+    <Item>Encoding is the tell - treat any match as deliberate. Comment/hex/case mutation and time-based delays are chosen to evade signature WAFs; they do not occur in legitimate NBI app traffic. A match is a sharp anomaly against the app-dominated baseline.</Item>
+    <Item>No latency field → confirm blind success at the DB. Time-based blind injection is proven by response delay, which the FortiWeb access log does not record. Never conclude "no blind success" from the web log; corroborate with logs-microsoft_sqlserver.audit-* for the endpoint/time.</Item>
+    <Item>De-proxy first; the response code is the verdict. $src is a SNAT address (185.56.154.0/24, 159.60.162-170.0/24); the attacker is the x_forwarded_for first hop. 200/500 on an injected parameter (processed) vs all-4xx (blocked) separates true_positive from blocked-malicious.</Item>
+    <Item>**FROM logs-* vs the live index.** The deployed rule and the three reused XML queries read FROM logs-*; all FortiWeb records live in logs-tcp.generic-default, so added pivots scope there directly for speed - identical results for these entity-keyed filters.</Item>
+    <Item>~34% packet capture + numeric-arg constraint. The rule only fires on captured packets and requires a numeric argument on time-based patterns; an encoded body on an uncaptured record, or a bare sleep without digits, is missed. Empty != safe.</Item>
+    <Item>KB-worthy (persist to NBI customer scope): (1) no encoded-SQLi primitives present in a 4h live scan (clean baseline); (2) FortiWeb has no response-latency field → time-based blind timing not measurable in-log; (3) data.packet.packet ~34% populated; (4) x_forwarded_for = real client, data.src/original_src = SNAT pool; attack records lack client IP + retcode. Observed live 2026-08-17.</Item>
+  </Limitations>
+</Playbook>

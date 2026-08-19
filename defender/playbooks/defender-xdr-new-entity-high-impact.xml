@@ -1,0 +1,346 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<Playbook xmlns="https://soc.example/playbooks" id="PB-defender-xdr-new-entity-high-impact" name="Microsoft Defender XDR — New Entity Entering High-Severity High-Impact Status - SOC Playbook" version="3.0" status="Validated" classification="TLP:AMBER">
+  <Metadata>
+    <Owner>NBI SOC / Detection Engineering</Owner>
+    <LastUpdated>2026-08-19</LastUpdated>
+    <Severity default="high">high</Severity>
+    <Confidence default="Medium">Medium</Confidence>
+    <Category>Credential Access</Category>
+    <MitreAttack>
+      <Technique id="T1078"/>
+      <Technique id="T1110.003"/>
+      <Technique id="T1110"/>
+      <Tactic id="TA0006"/>
+      <Tactic id="TA0008"/>
+      <Tactic id="TA0010"/>
+    </MitreAttack>
+    <References>
+      <Reference title="MITRE ATT&amp;CK - Valid Accounts (T1078)" url="https://attack.mitre.org/techniques/T1078/"/>
+      <Reference title="MITRE ATT&amp;CK - Brute Force: Password Spraying (T1110.003)" url="https://attack.mitre.org/techniques/T1110/003/"/>
+      <Reference title="MITRE ATT&amp;CK - Credential Access tactic (TA0006)" url="https://attack.mitre.org/tactics/TA0006/"/>
+      <Reference title="MITRE ATT&amp;CK - Lateral Movement tactic (TA0008)" url="https://attack.mitre.org/tactics/TA0008/"/>
+      <Reference title="MITRE ATT&amp;CK - Exfiltration tactic (TA0010)" url="https://attack.mitre.org/tactics/TA0010/"/>
+      <Reference title="Microsoft Learn - Defender XDR: investigate alerts (severity and impact)" url="https://learn.microsoft.com/en-us/defender-xdr/investigate-alerts"/>
+      <Reference title="Elastic - New terms rule type" url="https://www.elastic.co/guide/en/security/current/rules-ui-create.html"/>
+      <Reference title="Elastic - ES|QL reference" url="https://www.elastic.co/guide/en/elasticsearch/reference/current/esql.html"/>
+    </References>
+  </Metadata>
+  <AlertContext>
+    <RuleName>Microsoft Defender XDR — New Entity Entering High-Severity High-Impact Status</RuleName>
+    <RuleId>nbi-b3-defender-new-victim</RuleId>
+    <RuleType>new_terms</RuleType>
+    <Index>logs-m365_defender.*</Index>
+    <TriggerLogic>The deployed rule is an Elastic new_terms rule over logs-m365_defender.*, with the new_terms field user.name. Conceptually it applies the filter:
+
+
+
+and fires when the user.name on such an alert has not been seen before over the rule's new-terms history.
+
+Plain English: a user identity never previously seen (at least not in this context) just appeared at severity 73 in Credential Access, Lateral Movement, or Exfiltration - a previously-quiet entity crossing for the first time into severe, high-impact status. It flags the *novelty of the entity at high impact*, not a specific technique. The specific severe behaviour is in m365_defender.alert.detector_id / title (for hani.khalil, xdr_RiskyLoginByTitanPasswordSprayIp - a password-spray login). Live reality (measured, see section 8): in NBI the high-severity high-impact stream is dominated by Credential Access (~202 of ~271 severity-73 alerts), and the entity population is riddled with case-variants (Wahab.Admin/wahab.admin, dc/DC), which can both manufacture false novelty and mask a known account.</TriggerLogic>
+    <KeyAlertFields>user.name, event.severity, threat.tactic.name, m365_defender.alert.detector_id, m365_defender.alert.evidence.device_dns_name, hani.khalil, source.ip, evidence.url, host.name, evidence.device_dns_name</KeyAlertFields>
+  </AlertContext>
+  <Inputs>
+    <Input name="$entity"/>
+  </Inputs>
+  <ExecutiveSummary>
+    <Overview>This playbook drives triage and investigation of the New Entity Entering High-Severity High-Impact Status detection on NBI's Elastic Security deployment. The rule fires when a previously-unseen user.name appears for the first time on an alert with severity ≥ 73 in a high-impact tactic (Exfiltration, Credential Access, or Lateral Movement). Novelty plus impact is a strong fresh-compromise signal: a new victim identity, a newly-compromised account, or an attacker's newly-created identity surfacing at the sharp end of the kill chain.
+
+The same trigger, however, also fires for a newly-onboarded admin/service account, a first-time authorised red-team / ScanWave identity, or - very common in NBI - a case-variant / renamed identity that makes a known account look new. The SOC job is to read what severe behaviour triggered it and decide whether this is a genuine new compromise (true_positive), a newly-authorised or otherwise-explained identity or a proven-blocked attempt (false_positive), a novelty / severity-normalisation artefact (misconfiguration), or unproven (needs_escalation). The discriminators are what severe behaviour triggered it, whether the entity is one of a cohort of newly-severe entities (a campaign), and whether the alert is new/unresolved on a sensitive device.</Overview>
+    <BusinessImpact>An alert means a user.name that the rule had not seen before turned up on a severity-73 alert in an impact tactic. For the canonical NBI case, hani.khalil - a regular-looking human identity with no prior severe history - authenticated from password-spraying infrastructure (xdr_RiskyLoginByTitanPasswordSprayIp, Credential Access, severity 73). That is the signature of a sprayed account: an identity that a password-spray campaign either compromised or targeted, now surfacing at high impact for the first time.
+
+Reading the meaning requires two judgements the rule cannot make itself:
+
+- Is it genuinely new, or a novelty artefact? NBI's identity naming is inconsistent - Wahab.Admin vs wahab.admin, dc vs DC - so a "new" entity can be a case-variant of a known account resurfacing (misconfiguration path), not a fresh victim. This must be reconciled with the identity team; a &lt;=4h query cannot re-derive the rule's full-history novelty.
+- Is it a victim, an attacker, or authorised? A newly-severe *regular* user (like hani.khalil) reads as a fresh victim; a newly-severe *admin/service* account may be onboarding; a first-time *scanner* (scanwave.ahmadjamal) may be an authorised assessment - inv</BusinessImpact>
+  </ExecutiveSummary>
+  <Investigation>
+    <Goal>Decide true_positive / false_positive / misconfiguration / needs_escalation for Microsoft Defender XDR — New Entity Entering High-Severity High-Impact Status.</Goal>
+    <Workflow>
+      <Step order="1" name="Read the severe high-impact trigger (reuse of the deployed investigation query XDRNEWENT-INV-01)">
+        <Purpose>Read the severe high-impact trigger (reuse of the deployed investigation query XDRNEWENT-INV-01)</Purpose>
+        <Query platform="Elastic" language="ES|QL" id="Q-01">
+          <![CDATA[
+FROM logs-m365_defender.*
+| MV_EXPAND threat.tactic.name
+| WHERE user.name == "$entity" AND event.severity >= 73
+    AND threat.tactic.name IN ("Exfiltration","CredentialAccess","LateralMovement")
+    AND @timestamp >= NOW() - 4 hours
+| STATS alerts = COUNT(*),
+        devices = COUNT_DISTINCT(m365_defender.alert.evidence.device_dns_name),
+        last_seen = MAX(@timestamp)
+    BY m365_defender.alert.detector_id, m365_defender.alert.title, threat.tactic.name
+| SORT alerts DESC
+| LIMIT 20
+]]>
+        </Query>
+      </Step>
+      <Step order="2" name="Check for a cohort of newly-severe entities (reuse of the deployed investigation query XDRNEWENT-INV-02)">
+        <Purpose>Check for a cohort of newly-severe entities (reuse of the deployed investigation query XDRNEWENT-INV-02)</Purpose>
+        <Query platform="Elastic" language="ES|QL" id="Q-02">
+          <![CDATA[
+FROM logs-m365_defender.*
+| MV_EXPAND threat.tactic.name
+| WHERE event.severity >= 73
+    AND threat.tactic.name IN ("Exfiltration","CredentialAccess","LateralMovement")
+    AND @timestamp >= NOW() - 4 hours
+| STATS alerts = COUNT(*), last_seen = MAX(@timestamp)
+    BY user.name, threat.tactic.name
+| SORT last_seen DESC
+| LIMIT 25
+]]>
+        </Query>
+      </Step>
+      <Step order="3" name="Entity pivoting">
+        <Purpose>Entity pivoting</Purpose>
+        <Query platform="Elastic" language="ES|QL" id="Q-03">
+          <![CDATA[
+FROM logs-m365_defender.*
+| WHERE @timestamp >= NOW() - 4 hours
+    AND event.kind == "alert" AND user.name == "$entity" AND event.severity >= 73
+| MV_EXPAND threat.tactic.name
+| WHERE threat.tactic.name IN ("Exfiltration","CredentialAccess","LateralMovement")
+| STATS alerts = COUNT(*), devices = COUNT_DISTINCT(m365_defender.alert.evidence.device_dns_name),
+        first_seen = MIN(@timestamp), last_seen = MAX(@timestamp)
+    BY m365_defender.alert.detector_id, m365_defender.alert.title, m365_defender.alert.status
+| SORT alerts DESC
+| LIMIT 25
+]]>
+        </Query>
+      </Step>
+      <Step order="4" name="User investigation">
+        <Purpose>User investigation</Purpose>
+        <Query platform="Elastic" language="ES|QL" id="Q-04">
+          <![CDATA[
+FROM logs-m365_defender.*
+| WHERE @timestamp >= NOW() - 4 hours
+    AND event.kind == "alert" AND user.name == "$entity"
+| MV_EXPAND threat.tactic.name
+| STATS alerts = COUNT(*), max_severity = MAX(event.severity),
+        devices = COUNT_DISTINCT(m365_defender.alert.evidence.device_dns_name),
+        first_seen = MIN(@timestamp), last_seen = MAX(@timestamp)
+    BY threat.tactic.name, m365_defender.alert.detector_id
+| SORT alerts DESC
+| LIMIT 30
+]]>
+        </Query>
+      </Step>
+      <Step order="5" name="Host investigation">
+        <Purpose>Host investigation</Purpose>
+        <Query platform="Elastic" language="ES|QL" id="Q-05">
+          <![CDATA[
+FROM logs-m365_defender.*
+| MV_EXPAND threat.tactic.name
+| WHERE user.name == "$entity" AND event.severity >= 73
+    AND threat.tactic.name IN ("Exfiltration","CredentialAccess","LateralMovement")
+    AND @timestamp >= NOW() - 4 hours
+| STATS alerts = COUNT(*), first_seen = MIN(@timestamp), last_seen = MAX(@timestamp)
+    BY m365_defender.alert.evidence.device_dns_name, m365_defender.alert.status
+| SORT alerts DESC
+| LIMIT 20
+]]>
+        </Query>
+      </Step>
+      <Step order="6" name="Authentication investigation">
+        <Purpose>Authentication investigation</Purpose>
+        <Query platform="Elastic" language="ES|QL" id="Q-06">
+          <![CDATA[
+FROM logs-m365_defender.*
+| WHERE @timestamp >= NOW() - 4 hours
+    AND event.kind == "alert" AND user.name == "$entity"
+| MV_EXPAND threat.tactic.name
+| WHERE threat.tactic.name == "CredentialAccess"
+| STATS alerts = COUNT(*), devices = COUNT_DISTINCT(m365_defender.alert.evidence.device_dns_name),
+        first_seen = MIN(@timestamp), last_seen = MAX(@timestamp)
+    BY m365_defender.alert.detector_id, m365_defender.alert.title, m365_defender.alert.status
+| SORT alerts DESC
+| LIMIT 20
+]]>
+        </Query>
+      </Step>
+      <Step order="7" name="Timeline Reconstruction">
+        <Purpose>Timeline Reconstruction</Purpose>
+        <Query platform="Elastic" language="ES|QL" id="Q-07">
+          <![CDATA[
+FROM logs-m365_defender.*
+| WHERE @timestamp >= NOW() - 4 hours
+    AND event.kind == "alert" AND user.name == "$entity"
+| MV_EXPAND threat.tactic.name
+| KEEP @timestamp, threat.tactic.name, event.severity, m365_defender.alert.detector_id,
+       m365_defender.alert.title, m365_defender.alert.status, m365_defender.alert.evidence.device_dns_name
+| SORT @timestamp ASC
+| LIMIT 200
+]]>
+        </Query>
+      </Step>
+      <Step order="8" name="Attack-Chain Validation">
+        <Purpose>Attack-Chain Validation</Purpose>
+        <Query platform="Elastic" language="ES|QL" id="Q-08">
+          <![CDATA[
+FROM logs-m365_defender.*
+| WHERE @timestamp >= NOW() - 4 hours
+    AND event.kind == "alert" AND user.name == "$entity"
+| MV_EXPAND threat.tactic.name
+| STATS alerts = COUNT(*), max_severity = MAX(event.severity),
+        detectors = VALUES(m365_defender.alert.detector_id)
+    BY threat.tactic.name
+| SORT alerts DESC
+| LIMIT 20
+]]>
+        </Query>
+      </Step>
+      <Step order="9" name="Lateral movement validation">
+        <Purpose>Lateral movement validation</Purpose>
+        <Query platform="Elastic" language="ES|QL" id="Q-09">
+          <![CDATA[
+FROM logs-m365_defender.*
+| WHERE @timestamp >= NOW() - 4 hours AND event.kind == "alert" AND user.name == "$entity"
+| MV_EXPAND threat.tactic.name
+| WHERE threat.tactic.name == "LateralMovement"
+| STATS alerts = COUNT(*), devices = COUNT_DISTINCT(m365_defender.alert.evidence.device_dns_name),
+        max_severity = MAX(event.severity)
+    BY m365_defender.alert.detector_id, m365_defender.alert.title
+| SORT alerts DESC
+| LIMIT 20
+]]>
+        </Query>
+      </Step>
+      <Step order="10" name="Persistence validation">
+        <Purpose>Persistence validation</Purpose>
+        <Query platform="Elastic" language="ES|QL" id="Q-10">
+          <![CDATA[
+FROM logs-m365_defender.*
+| WHERE @timestamp >= NOW() - 4 hours AND event.kind == "alert" AND user.name == "$entity"
+| MV_EXPAND threat.tactic.name
+| WHERE threat.tactic.name == "Persistence"
+| STATS alerts = COUNT(*), devices = COUNT_DISTINCT(m365_defender.alert.evidence.device_dns_name),
+        max_severity = MAX(event.severity)
+    BY m365_defender.alert.detector_id, m365_defender.alert.title
+| SORT alerts DESC
+| LIMIT 20
+]]>
+        </Query>
+      </Step>
+      <Step order="11" name="Privilege escalation validation">
+        <Purpose>Privilege escalation validation</Purpose>
+        <Query platform="Elastic" language="ES|QL" id="Q-11">
+          <![CDATA[
+FROM logs-m365_defender.*
+| WHERE @timestamp >= NOW() - 4 hours AND event.kind == "alert" AND user.name == "$entity"
+| MV_EXPAND threat.tactic.name
+| WHERE threat.tactic.name == "PrivilegeEscalation"
+| STATS alerts = COUNT(*), devices = COUNT_DISTINCT(m365_defender.alert.evidence.device_dns_name),
+        max_severity = MAX(event.severity)
+    BY m365_defender.alert.detector_id, m365_defender.alert.title
+| SORT alerts DESC
+| LIMIT 20
+]]>
+        </Query>
+      </Step>
+      <Step order="12" name="Defense evasion validation">
+        <Purpose>Defense evasion validation</Purpose>
+        <Query platform="Elastic" language="ES|QL" id="Q-12">
+          <![CDATA[
+FROM logs-m365_defender.*
+| WHERE @timestamp >= NOW() - 4 hours AND event.kind == "alert" AND user.name == "$entity"
+| MV_EXPAND threat.tactic.name
+| WHERE threat.tactic.name == "DefenseEvasion"
+| STATS alerts = COUNT(*), devices = COUNT_DISTINCT(m365_defender.alert.evidence.device_dns_name),
+        max_severity = MAX(event.severity)
+    BY m365_defender.alert.detector_id, m365_defender.alert.title
+| SORT alerts DESC
+| LIMIT 20
+]]>
+        </Query>
+      </Step>
+      <Step order="13" name="Impact assessment">
+        <Purpose>Impact assessment</Purpose>
+        <Query platform="Elastic" language="ES|QL" id="Q-13">
+          <![CDATA[
+FROM logs-m365_defender.*
+| WHERE @timestamp >= NOW() - 4 hours AND event.kind == "alert" AND user.name == "$entity" AND event.severity >= 73
+| MV_EXPAND threat.tactic.name
+| WHERE threat.tactic.name IN ("Exfiltration","CredentialAccess","LateralMovement")
+| STATS high_impact_alerts = COUNT(*), tactics = COUNT_DISTINCT(threat.tactic.name),
+        devices = COUNT_DISTINCT(m365_defender.alert.evidence.device_dns_name),
+        first_seen = MIN(@timestamp), last_seen = MAX(@timestamp)
+| LIMIT 1
+]]>
+        </Query>
+      </Step>
+      <Step order="14" name="Finalize verdict">
+        <DecisionTree>
+        </DecisionTree>
+      </Step>
+    </Workflow>
+  </Investigation>
+  <ClassificationGuidance>
+    <TruePositive>
+      <Definition></Definition>
+    </TruePositive>
+    <FalsePositive>
+      <Definition></Definition>
+      <Indicators>
+        <Item>Newly-onboarded admin/service accounts. A freshly-created admin or service identity performing legitimate privileged work can appear "new" and severe. Confirmed against the identity/onboarding register, this is authorised.</Item>
+        <Item>First-time authorised assessments. A red-team / ScanWave identity appearing for the first time (e.g. scanwave.ahmadjamal, 33 severity-73 credential-access alerts) is novel and severe by design. A sanctioned-test identity is investigated identically and never auto-trusted - authorisation is confirmed against the authorised-testing register by scope and window.</Item>
+        <Item>Novelty / severity-normalisation artefacts (very common in NBI). A case-variant (Wahab.Admin↔wahab.admin, dc↔DC) or renamed/duplicated identity, or a severity re-mapping, can surface a known, already-handled account as if it were new - no genuine new severe behaviour (section 6, misconfiguration).</Item>
+        <Item>Blocked impactful behaviour. If the severe action was positively proven blocked/unsuccessful (spray lockout, denied ticket), it is a *malicious attempt proven blocked* - recorded as blocked-malicious, never "benign".</Item>
+        <Item>Case-variants manufacture false novelty - the leading NBI artefact. Wahab.Admin (53 severe alerts) and wahab.admin (27) are the same human under two keys; dc and DC (1 each) are the same asset. Either casing can appear "new" to a new_terms rule keyed on user.name. Before treating an entity as a fresh victim, check whether it is a case-variant of a known account (section 15.4) - this is the single most common false-novelty cause here.</Item>
+        <Item>The high-impact cohort is credential-access. The severity-73 impact entities are almost all Credential Access: Wahab.Admin, wahab.admin, scanwave.ahmadjamal (scanner), jamal.admin, karrar.admin, ahmed.adminnnnnn, hani.khalil (spray), and the dc/DC variants. There are essentially no severity-73 Exfiltration entities (exfiltration is uniformly severity 47 in NBI - see the high-volume-exfiltration playbook).</Item>
+        <Item>A regular user at high impact is the real fresh-victim signal. hani.khalil stands out from the *.admin crowd: a non-admin identity authenticating from password-spraying infrastructure. That novelty-plus-victim-profile is the genuine "new victim" this rule is meant to catch - treat it as a potential fresh compromise.</Item>
+        <Item>Cohorts appear. Several entities entered severe status around 2026-08-05 (hani.khalil, ahmed.adminnnnnn, karrar.admin, dc/DC, a null-user bucket), consistent with a spray campaign - the cohort view (section 14.2) turns single alerts into a campaign picture.</Item>
+      </Indicators>
+    </FalsePositive>
+    <Misconfiguration>
+      <Definition></Definition>
+    </Misconfiguration>
+    <NeedsEscalation>
+      <Definition></Definition>
+    </NeedsEscalation>
+  </ClassificationGuidance>
+  <ResponseActions>
+    <Phase name="Containment">
+      <Action>Isolate the entity and any involved devices if a genuine fresh compromise is confirmed. For a spray victim (hani.khalil), disable the account and force credential reset immediately - a sprayed account that authenticated is compromised.</Action>
+      <Action>If a cohort is present (section 14.2), coordinate a campaign-level response - contain all the newly-severe victims, not just the first, and identify the spraying source.</Action>
+      <Action>Recover the spraying origin from logs-system.security* (4625/4624 source.ip) and block it at the perimeter (logs-fortinet_fortigate.log-* / identity provider) so the campaign is stopped, not just one victim.</Action>
+      <Action>De-duplicate identity first: confirm whether $entity is a case-variant of a known account before contentious containment (avoid isolating a mislabelled known-good account) - but do not delay containment of a genuine victim.</Action>
+      <Action>Preserve evidence: the alert set (section 14/section 15/section 16) and the raw logon trail. Deploy changes only via the authorised human-approved DEPLOY path; investigation is read-only.</Action>
+    </Phase>
+    <Phase name="Eradication">
+      <Action>Reset the compromised identity's credentials and any credentials it could reach; if it became a pivot (section 17.1), treat reached hosts as compromised and work the credential-access / multi-stage playbooks.</Action>
+      <Action>Remove any persistence the fresh victim established (section 17.2).</Action>
+      <Action>Eradicate the campaign, not the instance: block the spraying infrastructure, reset all victims in the cohort, and enforce lockout/MFA to defeat the spray.</Action>
+      <Action>Reconcile identity naming so case-variants stop manufacturing false novelty (a hardening action, but also eradicates a recurring noise source).</Action>
+    </Phase>
+    <Phase name="Recovery">
+      <Action>Return the identity/host to service only after section 22 closing criteria are met and monitoring shows no recurrence of severe alerts for the entity or cohort.</Action>
+      <Action>Harden against spraying: enforce MFA and smart lockout, monitor logs-system.security* 4625 spikes, and ensure the identity provider blocks known spray infrastructure.</Action>
+      <Action>Improve the rule's fidelity: normalise user.name casing so novelty is meaningful, and pre-register newly-onboarded and authorised-test identities so genuine new victims stand out from onboarding/assessment noise.</Action>
+    </Phase>
+  </ResponseActions>
+  <Escalation>
+    <Trigger>Escalate to Tier 3 / IR and the identity / AD team when any hold:
+
+- A genuine severe credential-access / lateral / exfil detector, new/unresolved, from a genuinely-new entity (section 14.1 / section 15.4 / section 15.5) - a fresh compromise.
+- $entity is within a cohort of newly-severe entities (section 14.2) - escalate as a campaign (e.g. the 2026-08-05 spray cluster).
+- The new entity is already progressing across impact tactics or has become a pivot (section 17).
+- The severe behaviour landed on a sensitive device (DC/server) and is new/unresolved.
+- Novelty, authorisation, or success cannot be established (case-variant ambiguity, no register match, unknown logon outcome) - escalate as needs_escalation for identity-team reconciliation.</Trigger>
+    <To>SOC L2 / IR</To>
+  </Escalation>
+  <ClosureCriteria>
+    <Item>false_positive (newly-authorised / onboarded): the identity/onboarding or authorised-testing register positively matches $entity (a new admin/service account or first-time sanctioned assessment) and the severe alert matches that activity. Add to the identity baseline; do not auto-trust the name.</Item>
+    <Item>false_positive (blocked malicious attempt): the severe behaviour is proven blocked/unsuccessful (spray lockout, denied ticket). Documented as blocked-malicious, never "benign"; keep watching.</Item>
+    <Item>misconfiguration: $entity resolves to a case-variant / renamed / re-scored known account with no genuine new severe behaviour; reconcile the identity (normalise the name) and baseline.</Item>
+    <Item>true_positive: a genuine fresh compromise confirmed; entity and involved devices isolated, credentials reset, entry point (spray source) and lateral movement hunted, cohort scoped if present, incident documented.</Item>
+    <Item>needs_escalation: novelty / authorisation / success undecidable - handed to the identity / AD team + Tier 3/IR with the gaps documented.</Item>
+  </ClosureCriteria>
+  <Limitations>
+    <Item>Reconcile novelty with the identity team - the rule cannot prove it in &lt;=4h. The new_terms novelty is asserted over the rule's full history; a bounded query only shows the *current* severe footprint. "Is it really new?" is an identity-team question.</Item>
+    <Item>Case-variants are the leading false-novelty cause in NBI. Wahab.Admin↔wahab.admin, dc↔DC - a known account resurfaces as "new". Always check case-variants (section 15.4) before treating an entity as a fresh victim; normalising user.name casing is the highest-value hardening ask for this rule.</Item>
+    <Item>A regular user at high impact is the real signal. hani.khalil (non-admin) authenticating from password-spraying infrastructure is the genuine fresh-victim shape, distinct from the *.admin overpass-the-hash crowd that dominates the severe cohort.</Item>
+    <Item>The cohort view turns alerts into campaigns. Several new severe entities clustering in time (the 2026-08-05 spray cluster) is a campaign creating multiple victims - respond broadly, and block the spraying source, not just the one account.</Item>
+    <Item>The alert is blind to the spray origin and outcome. source.ip is 0% even on the spray-IP detector, and the target device is null for spray logins - recover the source IP, the sprayed accounts, and whether the login *succeeded* from logs-system.security* (4625/4624). Empty in-index != safe.</Item>
+    <Item>Complementary detections: the credential-access and high-volume-exfiltration rules (which fire regardless of novelty), and the multi-stage correlation rule (a known entity spanning tactics), catch a compromise that hides behind a *familiar* identity - the exact case this novelty rule misses.</Item>
+    <Item>KB-worthy (persist to NBI customer scope): (1) severity-73 impact cohort is credential-access-dominated (~202/271); (2) user.name case-variant false novelty (Wahab.Admin/wahab.admin, dc/DC); (3) hani.khalil = spray victim (xdr_RiskyLoginByTitanPasswordSprayIp), device &amp; source.ip null; (4) 2026-08-05 newly-severe cohort (possible spray campaign); (5) new_terms novelty not re-derivable in &lt;=4h - reconcile with identity team. All observed live 2026-08-17.</Item>
+  </Limitations>
+</Playbook>

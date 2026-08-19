@@ -1,0 +1,307 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<Playbook xmlns="https://soc.example/playbooks" id="PB-cisco-ios-manual-config-change" name="Cisco IOS — Manual Network Device Configuration Change - SOC Playbook" version="3.0" status="Validated" classification="TLP:AMBER">
+  <Metadata>
+    <Owner>NBI SOC / Detection Engineering</Owner>
+    <LastUpdated>2026-08-19</LastUpdated>
+    <Severity default="medium">medium</Severity>
+    <Confidence default="Medium">Medium</Confidence>
+    <Category>Execution</Category>
+    <MitreAttack>
+      <Technique id="T1059.008"/>
+      <Technique id="T1059"/>
+      <Technique id="T1562.004"/>
+      <Technique id="T1562"/>
+      <Technique id="T1601"/>
+      <Tactic id="TA0002"/>
+      <Tactic id="TA0005"/>
+    </MitreAttack>
+    <References>
+      <Reference title="MITRE ATT&amp;CK - Command and Scripting Interpreter: Network Device CLI (T1059.008)" url="https://attack.mitre.org/techniques/T1059/008/"/>
+      <Reference title="MITRE ATT&amp;CK - Impair Defenses: Disable or Modify System Firewall (T1562.004)" url="https://attack.mitre.org/techniques/T1562/004/"/>
+      <Reference title="MITRE ATT&amp;CK - Modify System Image (T1601)" url="https://attack.mitre.org/techniques/T1601/"/>
+      <Reference title="MITRE ATT&amp;CK - Execution tactic (TA0002)" url="https://attack.mitre.org/tactics/TA0002/"/>
+      <Reference title="MITRE ATT&amp;CK - Defense Evasion tactic (TA0005)" url="https://attack.mitre.org/tactics/TA0005/"/>
+      <Reference title="Cisco - Configuration Change Notification and Logging (config-change logger)" url="https://www.cisco.com/c/en/us/td/docs/ios-xml/ios/csm/configuration/xe-16/csm-xe-16-book/csm-config-logger.html"/>
+      <Reference title="Cisco - TACACS+ Command Accounting" url="https://www.cisco.com/c/en/us/td/docs/ios-xml/ios/sec_usr_tacacs/configuration/xe-16/sec-usr-tacacs-xe-16-book/sec-cfg-tacacs.html"/>
+      <Reference title="Cisco Nexus - NX-OS System Messages Reference (VSHD_SYSLOG_CONFIG_I)" url="https://www.cisco.com/c/en/us/td/docs/switches/datacenter/nexus9000/sw/system_messages/reference/sysmsg_nxos.html"/>
+      <Reference title="Elastic - Cisco IOS integration (fields and datasets)" url="https://docs.elastic.co/integrations/cisco_ios"/>
+      <Reference title="Elastic - ES|QL language reference" url="https://www.elastic.co/guide/en/elasticsearch/reference/current/esql.html"/>
+    </References>
+  </Metadata>
+  <AlertContext>
+    <RuleName>Cisco IOS — Manual Network Device Configuration Change</RuleName>
+    <RuleId>nbi-cisco-config-change</RuleId>
+    <RuleType>query</RuleType>
+    <Index>logs-cisco_ios.log-*</Index>
+    <TriggerLogic>The deployed rule is a KQL query rule (verbatim from the rule definition):
+
+
+
+Intended plain-English logic: fire once per manual configuration-change event - classic Cisco IOS emits %SYS-5-CONFIG_I: Configured from console/vty by &lt;user&gt; when the running configuration is changed from a CLI session and the user exits configuration mode.
+
+Critical live-telemetry caveat (verified on NBI): the literal SYS-5-CONFIG_I string is absent from NBI's collected Cisco stream - message LIKE "*SYS-5-CONFIG_I*" returns 0 events estate-wide. NBI's data-centre/distribution devices run NX-OS-style logging and emit the change event under a different facility: %VSHD-5-VSHD_SYSLOG_CONFIG_I: Configured from vty by &lt;user&gt; on &lt;ip&gt;@&lt;tty&gt;. Consequently the deployed rule as written under-detects - it will not fire on the config changes NBI actually logs. This is a rule-tuning gap (recorded in section 23), not proof that changes are not occurring: they are, and they are fully attributed in the message.
+
+One-line Kibana KQL hunt filter that matches NBI's real events (use this for pivoting in Discover / Timeline):
+
+
+
+The change attribution - who (by sarmed.khalid), from where (10.12.30.1), and on which line (@pts</TriggerLogic>
+    <KeyAlertFields>log.syslog.hostname, log.source.address, cisco.ios.facility, event.severity, source.ip, source.user.name</KeyAlertFields>
+  </AlertContext>
+  <Inputs>
+    <Input name="$device"/>
+    <Input name="$user"/>
+    <Input name="$source_ip"/>
+  </Inputs>
+  <ExecutiveSummary>
+    <Overview>This playbook drives triage and investigation of the Cisco IOS - Manual Network Device Configuration Change detection on NBI's Elastic Security deployment. The rule is a query analytic intended to fire when a Cisco device reports a manual running-configuration change from a CLI session. Almost all such changes are authorised network operations inside a change window; a small number are the fingerprint of an attacker or rogue insider altering a device - adding an access route, weakening ACLs/AAA, opening a management path, mirroring traffic, or staging network-boundary bridging.
+
+The analyst's job is to decide whether the change matches an approved change record (false_positive - authorised), is an unauthorised/unexpected change on a sensitive device (true_positive), is routine automation not yet baselined (misconfiguration), or cannot be attributed from available telemetry (needs_escalation) - with the running-config diff and change record as the ground truth.</Overview>
+    <BusinessImpact>An alert (once the rule is tuned to the emitted facility, or when hunting with *CONFIG_I*) means: on $device, the running configuration was changed from a CLI session, and the device attributed the change to $user from $source_ip on a tty line. The presence of the Configured from vty by … line means a change was *committed* interactively - not merely attempted.
+
+What the alert does not tell you: *what* was changed (the line carries the actor and session, not the config diff), and whether the change was authorised. Those are answered by the running-config diff and the change record. A change on a data-centre core/ToR switch, or outside a maintenance window, or by an unexpected operator/line, is materially higher risk than a routine branch change by a known admin during a scheduled window.</BusinessImpact>
+  </ExecutiveSummary>
+  <Investigation>
+    <Goal>Decide true_positive / false_positive / misconfiguration / needs_escalation for Cisco IOS — Manual Network Device Configuration Change.</Goal>
+    <Workflow>
+      <Step order="1" name="Reproduce estate-wide (confirm the detection logic on the emitted facility)">
+        <Purpose>Reproduce estate-wide (confirm the detection logic on the emitted facility)</Purpose>
+        <Query platform="Elastic" language="ES|QL" id="Q-01">
+          <![CDATA[
+FROM logs-cisco_ios.log-*
+| WHERE @timestamp >= NOW() - 4 hours
+    AND event.dataset == "cisco_ios.log"
+    AND message LIKE "*CONFIG_I*"
+| STATS changes = COUNT(*), lines = VALUES(message), first_seen = MIN(@timestamp), last_seen = MAX(@timestamp) BY log.syslog.hostname
+| SORT changes DESC
+| LIMIT 25
+]]>
+        </Query>
+      </Step>
+      <Step order="2" name="Confirm on the alert device - the change lines and attribution">
+        <Purpose>Confirm on the alert device - the change lines and attribution</Purpose>
+        <Query platform="Elastic" language="ES|QL" id="Q-02">
+          <![CDATA[
+FROM logs-cisco_ios.log-*
+| WHERE @timestamp >= NOW() - 4 hours
+    AND log.syslog.hostname == "$device"
+    AND message LIKE "*CONFIG_I*"
+| KEEP @timestamp, log.syslog.hostname, log.source.address, cisco.ios.facility, message
+| SORT @timestamp DESC
+| LIMIT 30
+]]>
+        </Query>
+      </Step>
+      <Step order="3" name="Entity pivoting">
+        <Purpose>Entity pivoting</Purpose>
+        <Query platform="Elastic" language="ES|QL" id="Q-03">
+          <![CDATA[
+FROM logs-cisco_ios.log-*
+| WHERE @timestamp >= NOW() - 4 hours
+    AND log.syslog.hostname == "$device"
+    AND message LIKE "*Configured from*"
+| KEEP @timestamp, log.syslog.hostname, log.source.address, cisco.ios.facility, event.severity, message
+| SORT @timestamp DESC
+| LIMIT 30
+]]>
+        </Query>
+      </Step>
+      <Step order="4" name="User investigation">
+        <Purpose>User investigation</Purpose>
+        <Query platform="Elastic" language="ES|QL" id="Q-04">
+          <![CDATA[
+FROM logs-cisco_ios.log-*
+| WHERE @timestamp >= NOW() - 4 hours
+    AND message LIKE "*$user*"
+    AND message LIKE "*Configured from*"
+| STATS changes = COUNT(*), devices = COUNT_DISTINCT(log.syslog.hostname), first_seen = MIN(@timestamp), last_seen = MAX(@timestamp)
+| LIMIT 5
+]]>
+        </Query>
+      </Step>
+      <Step order="5" name="Host investigation">
+        <Purpose>Host investigation</Purpose>
+        <Query platform="Elastic" language="ES|QL" id="Q-05">
+          <![CDATA[
+FROM logs-cisco_ios.log-*
+| WHERE @timestamp >= NOW() - 4 hours
+    AND log.syslog.hostname == "$device"
+| STATS events = COUNT(*), distinct_messages = COUNT_DISTINCT(message), last_seen = MAX(@timestamp) BY cisco.ios.facility
+| SORT events DESC
+| LIMIT 20
+]]>
+        </Query>
+      </Step>
+      <Step order="6" name="IP investigation">
+        <Purpose>IP investigation</Purpose>
+        <Query platform="Elastic" language="ES|QL" id="Q-06">
+          <![CDATA[
+FROM logs-cisco_ios.log-*
+| WHERE @timestamp >= NOW() - 4 hours
+    AND message LIKE "*$source_ip*"
+    AND message LIKE "*Configured from*"
+| STATS changes = COUNT(*), devices = COUNT_DISTINCT(log.syslog.hostname), last_seen = MAX(@timestamp) BY log.syslog.hostname
+| SORT changes DESC
+| LIMIT 30
+]]>
+        </Query>
+      </Step>
+      <Step order="7" name="Authentication investigation">
+        <Purpose>Authentication investigation</Purpose>
+        <Query platform="Elastic" language="ES|QL" id="Q-07">
+          <![CDATA[
+FROM logs-cisco_ios.log-*
+| WHERE @timestamp >= NOW() - 4 hours
+    AND log.syslog.hostname == "$device"
+    AND (message LIKE "*Login Success*" OR message LIKE "*Login failed*" OR message LIKE "*Configured from*")
+| EVAL kind = CASE(message LIKE "*Configured from*", "config-change", message LIKE "*failed*", "login-failed", "login-success")
+| KEEP @timestamp, kind, log.source.address, message
+| SORT @timestamp ASC
+| LIMIT 200
+]]>
+        </Query>
+      </Step>
+      <Step order="8" name="Timeline Reconstruction">
+        <Purpose>Timeline Reconstruction</Purpose>
+        <Query platform="Elastic" language="ES|QL" id="Q-08">
+          <![CDATA[
+FROM logs-cisco_ios.log-*
+| WHERE @timestamp >= NOW() - 4 hours
+    AND log.syslog.hostname == "$device"
+    AND (message LIKE "*Configured from*" OR message LIKE "*Login Success*" OR message LIKE "*Login failed*")
+| KEEP @timestamp, log.source.address, cisco.ios.facility, message
+| SORT @timestamp ASC
+| LIMIT 300
+]]>
+        </Query>
+      </Step>
+      <Step order="9" name="Lateral movement validation">
+        <Purpose>Lateral movement validation</Purpose>
+        <Query platform="Elastic" language="ES|QL" id="Q-09">
+          <![CDATA[
+FROM logs-cisco_ios.log-*
+| WHERE @timestamp >= NOW() - 4 hours
+    AND message LIKE "*$source_ip*"
+    AND message LIKE "*Configured from*"
+| STATS changes = COUNT(*), first_seen = MIN(@timestamp), last_seen = MAX(@timestamp) BY log.syslog.hostname
+| SORT changes DESC
+| LIMIT 40
+]]>
+        </Query>
+      </Step>
+      <Step order="10" name="Persistence validation">
+        <Purpose>Persistence validation</Purpose>
+        <Query platform="Elastic" language="ES|QL" id="Q-10">
+          <![CDATA[
+FROM logs-cisco_ios.log-*
+| WHERE @timestamp >= NOW() - 4 hours
+    AND log.syslog.hostname == "$device"
+    AND message LIKE "*Configured from*"
+| KEEP @timestamp, log.source.address, cisco.ios.facility, message
+| SORT @timestamp DESC
+| LIMIT 30
+]]>
+        </Query>
+      </Step>
+      <Step order="11" name="Defense evasion validation">
+        <Purpose>Defense evasion validation</Purpose>
+        <Query platform="Elastic" language="ES|QL" id="Q-11">
+          <![CDATA[
+FROM logs-cisco_ios.log-*
+| WHERE @timestamp >= NOW() - 4 hours
+    AND log.syslog.hostname == "$device"
+    AND (message LIKE "*Configured from*" OR message LIKE "*logging*" OR message LIKE "*SEC-6-*" OR message LIKE "*shutdown*" OR message LIKE "*SYS-5-*")
+| STATS events = COUNT(*), last_seen = MAX(@timestamp) BY cisco.ios.facility
+| SORT events DESC
+| LIMIT 20
+]]>
+        </Query>
+      </Step>
+      <Step order="12" name="Impact assessment">
+        <Purpose>Impact assessment</Purpose>
+        <Query platform="Elastic" language="ES|QL" id="Q-12">
+          <![CDATA[
+FROM logs-cisco_ios.log-*
+| WHERE @timestamp >= NOW() - 4 hours
+    AND log.syslog.hostname == "$device"
+    AND message LIKE "*Configured from*"
+| STATS changes = COUNT(*), first_seen = MIN(@timestamp), last_seen = MAX(@timestamp) BY log.source.address
+| SORT changes DESC
+| LIMIT 20
+]]>
+        </Query>
+      </Step>
+      <Step order="13" name="Finalize verdict">
+        <DecisionTree>
+        </DecisionTree>
+      </Step>
+    </Workflow>
+  </Investigation>
+  <ClassificationGuidance>
+    <TruePositive>
+      <Definition></Definition>
+    </TruePositive>
+    <FalsePositive>
+      <Definition></Definition>
+      <Indicators>
+        <Item>Authorised change-window activity - the dominant benign cause. Network engineers making approved changes generate Configured from vty by &lt;user&gt; … lines routinely. These are false_positive (authorised) only when matched to an approved change record whose diff is consistent with the work - verified against the diff, not assumed from timing.</Item>
+        <Item>Routine automation/orchestration - a config-management or NetOps tool pushing expected templates from a fixed source. Legitimate, but a misconfiguration (baseline gap) until the automation source is recognised.</Item>
+        <Item>Console/local maintenance - Configured from console during physical maintenance.</Item>
+        <Item>Repeated/duplicate lines - NX-OS emits (message repeated N time) variants; count the distinct change events, not raw line repeats.</Item>
+        <Item>Config changes cluster on the data-centre / DR ToR switches. In the validation window the config-change lines were on NBI-KAR-DR-TOR.F-SW03, NBI-IRQ-DC-TOR.F.01, and NBI-IRQ-DC-TOR.F.02, attributed to named engineers (sarmed.khalid from 10.12.30.1@pts/5; mahmoud.akram from 10.11.30.1@pts/0). Named engineers changing DC switches from an internal management source during working hours is the expected authorised pattern - confirm against the change record and close as authorised; do not auto-clear.</Item>
+        <Item>Attribution is in the message, not in fields. $user and $source_ip are parsed from message; log.source.address is the syslog relay (ip:port), not the operator. Pivot with message LIKE.</Item>
+        <Item>cisco.ios.facility/event.severity are populated on these events (contrary to some legacy notes); the change events carry a facility of the VSHD_SYSLOG_CONFIG_I form.</Item>
+        <Item>No environment-specific allow-list is applied. If routine automation is confirmed, baseline that source in known_infrastructure scoped to the exact management host - never a blanket exception for a device.</Item>
+      </Indicators>
+    </FalsePositive>
+    <Misconfiguration>
+      <Definition></Definition>
+    </Misconfiguration>
+    <NeedsEscalation>
+      <Definition></Definition>
+    </NeedsEscalation>
+  </ClassificationGuidance>
+  <ResponseActions>
+    <Phase name="Containment">
+      <Action>If the change is unauthorised: coordinate with the network team to restrict the device's management plane (VTY access-class to the bastion/PAW), and prevent further changes from the implicated source/account pending investigation.</Action>
+      <Action>Preserve the running-config and syslog around the window before any remediation, so the diff and operator attribution survive.</Action>
+      <Action>Isolate/lock the implicated account ($user) and source ($source_ip) from device management if compromise is suspected; if $source_ip is a shared management host, coordinate rather than blanket-block.</Action>
+      <Action>Do not alter the device configuration outside the authorised, human-approved DEPLOY path; investigation is read-only.</Action>
+    </Phase>
+    <Phase name="Eradication">
+      <Action>Revert the unauthorised change under change control, using the config-archive diff to restore the known-good configuration and remove any rogue accounts, communities, routes, ACL relaxations, or management-access widenings.</Action>
+      <Action>Rotate device and AAA credentials the implicated session could have exposed - local passwords, enable secret, TACACS+/RADIUS keys.</Action>
+      <Action>Investigate and contain the source host/account - how $user/$source_ip obtained device-management access, and whether other devices were touched (section 17.1).</Action>
+      <Action>Baseline recognised automation (if that was the cause) so future expected pushes are attributable rather than alerting.</Action>
+    </Phase>
+    <Phase name="Recovery">
+      <Action>Restore and verify the device configuration from the archive; confirm it persists after reboot.</Action>
+      <Action>Fix the detection gap (section 23): tune the rule to match the emitted facility (message : "CONFIG_I" / the VSHD_SYSLOG_CONFIG_I form) so real changes fire, and forward classic %SYS-5-CONFIG_I from any IOS devices that use it.</Action>
+      <Action>Enable TACACS+ command accounting and config-diff archiving so future changes are attributable to the exact commands, and restrict device management to a bastion/PAW.</Action>
+      <Action>Return to service only after section 22 closing criteria are met and monitoring confirms no further unexpected changes.</Action>
+    </Phase>
+  </ResponseActions>
+  <Escalation>
+    <Trigger>Escalate to Tier 3 / IR + the network team when any of the following hold:
+
+- An unauthorised or unattributable change on a sensitive device (DC core/ToR) or a security-weakening diff (ACL/AAA/route/management/logging).
+- The change follows a login brute force / unexpected successful login on the same device (section 15.12).
+- The same operator/source is changing many devices with no matching bulk-change record (section 17.1).
+- Evidence of logging-disable or a non-CLI change path (section 17.4), or inability to obtain the config diff/change record while a core device was modified - escalate as needs_escalation with the gap named.</Trigger>
+    <To>SOC L2 / IR</To>
+  </Escalation>
+  <ClosureCriteria>
+    <Item>false_positive (authorised): matched to an approved change record whose diff is consistent with the work (verified, not assumed from timing); recorded.</Item>
+    <Item>false_positive (blocked/rolled-back): a change attempt positively proven prevented/rolled back with no committed security-relevant diff - documented as a blocked change, never "benign".</Item>
+    <Item>misconfiguration: a recognised automation source made expected pushes not yet baselined - source baselined in known_infrastructure.</Item>
+    <Item>true_positive: unauthorised change confirmed; reverted under change control, device/AAA credentials rotated, source host/account contained, estate-wide hunt completed, incident documented.</Item>
+    <Item>needs_escalation: handed to the network team + Tier 3 with the gaps documented (config diff/change record not yet obtained, non-CLI change path suspected, ambiguous attribution).</Item>
+  </ClosureCriteria>
+  <Limitations>
+    <Item>The deployed rule under-detects - this is the headline finding. message:"SYS-5-CONFIG_I" matches 0 events in NBI; the devices emit VSHD-5-VSHD_SYSLOG_CONFIG_I: Configured from vty by &lt;user&gt; on &lt;ip&gt;@&lt;tty&gt;. Hunt with *CONFIG_I* and raise a rule-tuning action to change the filter. KB-worthy (NBI): Cisco config-change facility is VSHD_SYSLOG_CONFIG_I, not SYS-5-CONFIG_I; the deployed nbi-cisco-config-change filter needs retuning.</Item>
+    <Item>The change events are fully attributed. Contrary to the earlier "attribution not available from syslog" assessment, the Configured from vty by &lt;user&gt; on &lt;ip&gt;@&lt;tty&gt; line carries operator, source, and tty - read them out of message (log.source.address is only the relay). KB-worthy (NBI): config-change operator/source/tty are message-embedded on VSHD_SYSLOG_CONFIG_I.</Item>
+    <Item>Changes cluster on DC/DR ToR switches by named engineers. sarmed.khalid/10.12.30.1 and mahmoud.akram/10.11.30.1 on NBI-KAR-DR-TOR.F-SW03 / NBI-IRQ-DC-TOR.F.0x are the observed authorised pattern - confirm against change control and close as authorised. KB-worthy (NBI): these operator/source pairs are the routine DC-switch change operators (verify, don't blanket-allow).</Item>
+    <Item>Non-CLI and logging-off changes are blind spots. SNMP/NETCONF/API config changes and logging-disable produce no CONFIG_I line; the config-archive diff and TACACS+ accounting are the compensating controls. Empty != safe.</Item>
+    <Item>The diff and TACACS+ accounting are the ground truth. Syslog says *a change happened and by whom*; the archive diff and command accounting say *what changed* and *which commands* - pull them whenever authorisation or impact is in question. All observations live on 2026-08-17.</Item>
+  </Limitations>
+</Playbook>

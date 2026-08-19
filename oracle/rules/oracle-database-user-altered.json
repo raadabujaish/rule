@@ -1,0 +1,72 @@
+{
+  "name": "Oracle DB — Database User Altered (Password/Privilege Change)",
+  "tags": [
+    "NBI-Database",
+    "Phase3",
+    "Oracle-DB"
+  ],
+  "interval": "5m",
+  "enabled": true,
+  "description": "Detects ALTER USER operations on Oracle accounts (password reset, account unlock, privilege/profile change) — used for account takeover or persistence.",
+  "risk_score": 56,
+  "severity": "medium",
+  "note": "## Investigation\n1. `SQL_TEXT` shows what changed (IDENTIFIED BY = password change; ACCOUNT UNLOCK; GRANT).\n2. Focus on changes to privileged accounts.\n## Response\nReverse unauthorised changes; investigate.",
+  "output_index": "",
+  "investigation_fields": {
+    "field_names": [
+      "ACTION_NAME",
+      "DBUSERNAME",
+      "CURRENT_USER",
+      "OS_USERNAME",
+      "SQL_TEXT",
+      "SYSTEM_PRIVILEGE_USED",
+      "CLIENT_PROGRAM_NAME",
+      "USERHOST",
+      "AUTHENTICATION_TYPE",
+      "type"
+    ]
+  },
+  "author": [
+    "raadabujaish"
+  ],
+  "false_positives": [],
+  "from": "now-9m",
+  "rule_id": "nbi-ora-alter-user",
+  "max_signals": 100,
+  "risk_score_mapping": [],
+  "severity_mapping": [],
+  "threat": [
+    {
+      "framework": "MITRE ATT&CK",
+      "tactic": {
+        "id": "TA0003",
+        "name": "Persistence",
+        "reference": "https://attack.mitre.org/tactics/TA0003/"
+      },
+      "technique": [
+        {
+          "id": "T1098",
+          "name": "Account Manipulation",
+          "reference": "https://attack.mitre.org/techniques/T1098/"
+        }
+      ]
+    }
+  ],
+  "to": "now",
+  "references": [
+    "https://attack.mitre.org/",
+    "https://docs.oracle.com/en/database/oracle/oracle-database/19/dbseg/"
+  ],
+  "version": 1,
+  "exceptions_list": [],
+  "related_integrations": [],
+  "required_fields": [],
+  "setup": "",
+  "type": "query",
+  "language": "kuery",
+  "index": [
+    "apps-*"
+  ],
+  "query": "ACTION_NAME:\"ALTER USER\"",
+  "actions": []
+}

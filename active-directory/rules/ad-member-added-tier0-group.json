@@ -1,0 +1,72 @@
+{
+  "name": "AD — Member Added to a Tier-0 Group (Domain/Enterprise/Schema Admins)",
+  "tags": [
+    "NBI-AD",
+    "Phase3",
+    "Active-Directory",
+    "Windows-Security"
+  ],
+  "interval": "5m",
+  "enabled": true,
+  "description": "Detects a member being added to a Tier-0 Active Directory group — Domain Admins (-512), Enterprise Admins (-519), Schema Admins (-518), Domain Controllers (-516), Group Policy Creator Owners (-520) or built-in Administrators (S-1-5-32-544). Tier-0 group membership grants full domain control.",
+  "risk_score": 90,
+  "severity": "critical",
+  "note": "## Investigation\n1. `SubjectUserName` (actor) added `MemberName`/`MemberSid` to the group `TargetUserName`.\n2. Confirm the change is authorised (change ticket) and the actor is a legitimate Tier-0 admin.\n3. Check whether the added member is a normal user, service account, or attacker-controlled account.\n## Response\nIf unauthorised: remove the membership, disable the added account, and investigate the actor account for compromise.",
+  "output_index": "",
+  "investigation_fields": {
+    "field_names": [
+      "winlog.event_data.SubjectUserName",
+      "winlog.event_data.SubjectDomainName",
+      "winlog.event_data.SubjectLogonId",
+      "winlog.event_data.MemberName",
+      "winlog.event_data.MemberSid",
+      "winlog.event_data.TargetUserName",
+      "winlog.event_data.TargetSid",
+      "host.name",
+      "event.code"
+    ]
+  },
+  "author": [
+    "raadabujaish"
+  ],
+  "false_positives": [],
+  "from": "now-9m",
+  "rule_id": "nbi-ad-tier0-group-add",
+  "max_signals": 100,
+  "risk_score_mapping": [],
+  "severity_mapping": [],
+  "threat": [
+    {
+      "framework": "MITRE ATT&CK",
+      "tactic": {
+        "id": "TA0003",
+        "name": "Persistence",
+        "reference": "https://attack.mitre.org/tactics/TA0003/"
+      },
+      "technique": [
+        {
+          "id": "T1098",
+          "name": "Account Manipulation",
+          "reference": "https://attack.mitre.org/techniques/T1098/"
+        }
+      ]
+    }
+  ],
+  "to": "now",
+  "references": [
+    "https://attack.mitre.org/",
+    "https://learn.microsoft.com/en-us/windows/security/threat-protection/auditing/"
+  ],
+  "version": 1,
+  "exceptions_list": [],
+  "related_integrations": [],
+  "required_fields": [],
+  "setup": "",
+  "type": "query",
+  "language": "kuery",
+  "index": [
+    "logs-system.security-*"
+  ],
+  "query": "event.code:(\"4728\" or \"4756\" or \"4732\") and winlog.event_data.TargetSid:(*-512 or *-519 or *-518 or *-516 or *-520 or \"S-1-5-32-544\")",
+  "actions": []
+}

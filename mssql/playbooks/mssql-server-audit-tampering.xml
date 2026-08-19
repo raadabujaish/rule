@@ -1,0 +1,361 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<Playbook xmlns="https://soc.example/playbooks" id="PB-mssql-server-audit-tampering" name="MS SQL — Server Audit Disabled, Altered or Dropped - SOC Playbook" version="3.0" status="Validated" classification="TLP:AMBER">
+  <Metadata>
+    <Owner>NBI SOC / Detection Engineering</Owner>
+    <LastUpdated>2026-08-19</LastUpdated>
+    <Severity default="High">High</Severity>
+    <Confidence default="Medium">Medium</Confidence>
+    <Category>Defense Evasion</Category>
+    <MitreAttack>
+      <Technique id="T1562"/>
+      <Technique id="T1562.001"/>
+      <Technique id="T1070"/>
+      <Tactic id="TA0005"/>
+    </MitreAttack>
+    <References>
+      <Reference title="MITRE ATT&amp;CK - Impair Defenses (T1562)" url="https://attack.mitre.org/techniques/T1562/"/>
+      <Reference title="MITRE ATT&amp;CK - Impair Defenses: Disable or Modify Tools (T1562.001)" url="https://attack.mitre.org/techniques/T1562/001/"/>
+      <Reference title="MITRE ATT&amp;CK - Indicator Removal (T1070)" url="https://attack.mitre.org/techniques/T1070/"/>
+      <Reference title="MITRE ATT&amp;CK - Defense Evasion tactic (TA0005)" url="https://attack.mitre.org/tactics/TA0005/"/>
+      <Reference title="Microsoft Learn - ALTER SERVER AUDIT (Transact-SQL)" url="https://learn.microsoft.com/en-us/sql/t-sql/statements/alter-server-audit-transact-sql"/>
+      <Reference title="Microsoft Learn - SQL Server Audit (Database Engine)" url="https://learn.microsoft.com/en-us/sql/relational-databases/security/auditing/sql-server-audit-database-engine"/>
+      <Reference title="Microsoft Learn - sys.server_audits (catalog view for audit state)" url="https://learn.microsoft.com/en-us/sql/relational-databases/system-catalog-views/sys-server-audits-transact-sql"/>
+      <Reference title="MITRE ATT&amp;CK - Data Sources (Sensor Health / Cloud &amp; Windows audit)" url="https://attack.mitre.org/datasources/"/>
+      <Reference title="Elastic Security - SQL Server audit integration (fields reference)" url="https://www.elastic.co/docs/reference/integrations/microsoft_sqlserver"/>
+    </References>
+  </Metadata>
+  <AlertContext>
+    <RuleName>MS SQL — Server Audit Disabled, Altered or Dropped</RuleName>
+    <RuleId>nbi-sql-audit-tampering</RuleId>
+    <RuleType>query</RuleType>
+    <Index>logs-microsoft_sqlserver.audit-*</Index>
+    <TriggerLogic>The deployed rule is an Elastic query rule over the SQL Server audit data stream. It fires when sqlserver.audit.statement contains an audit-management DDL statement. One-line Kibana KQL detection filter (for fast pivoting in Discover / Timeline):
+
+
+
+Plain English: any audited statement that alters or drops a server audit, or alters a server/database audit specification. The highest-risk sub-cases are STATE = OFF (the audit is switched off) and DROP SERVER AUDIT (it is removed) - both a direct loss of visibility. A change that keeps the audit ON while adding/removing an action group (a documented reconfiguration) is lower risk. The distinction is captured in the investigation queries by a turned_off flag (section 14.1).
+
+Why this is high-severity by design: audit management requires ALTER ANY SERVER AUDIT / CONTROL SERVER - a highly privileged action that a normal application workload never performs. On NBI the routine SQL workload contains no audit changes, so any hit is off-baseline.</TriggerLogic>
+    <KeyAlertFields>sqlserver.audit.session_server_principal_name, sqlserver.audit.server_principal_name, sqlserver.audit.statement, sqlserver.audit.client_ip, sqlserver.audit.application_name, sqlserver.audit.host_name, sqlserver.audit.succeeded, sqlserver.audit.database_name, host.name, sys.server_audits</KeyAlertFields>
+  </AlertContext>
+  <Inputs>
+    <Input name="$principal"/>
+    <Input name="$client_ip"/>
+    <Input name="$host"/>
+  </Inputs>
+  <ExecutiveSummary>
+    <Overview>This playbook drives triage and investigation of the MS SQL - Server Audit Disabled, Altered or Dropped detection on NBI's Elastic Security deployment. The rule fires when an audited statement contains ALTER SERVER AUDIT, DROP SERVER AUDIT, ALTER SERVER AUDIT SPECIFICATION, or ALTER DATABASE AUDIT SPECIFICATION - statements that change the auditing subsystem itself: turning an audit off (STATE = OFF), narrowing what it records, or dropping it entirely. Because that audit is the SOC's visibility into the database, tampering with it is a defense-evasion move - an attacker who blinds the logging can then act without being recorded, and on regulated banking databases the loss is simultaneously a compliance/evidence gap.
+
+The detection works because the change is self-reported by the same audit before it stops: the ALTER ... STATE = OFF is itself an audited event, so the last thing the audit records is its own disabling. The analyst's job is to decide whether this is authorised audit maintenance (a DBA rotating/redefining/temporarily disabling under change control) or deliberate blinding of the logging - and to classify the alert as true_positive, false_positive, misconfiguration, or needs_escalation with evidence attached. The decision is driven by whether the audit was turned OFF/dropped versus reconfigured ON, what the actor did while visibility was reduced, and whether auditing was promptly restored.</Overview>
+    <BusinessImpact>An alert means: on $host, principal $principal (from client $client_ip) executed a statement that altered, disabled, or dropped SQL Server auditing. The change took effect at the moment it was logged. What remains to be established is (a) was it OFF/dropped or a reconfiguration that stayed ON - the visibility-loss discriminator; (b) what happened in the blind window the change may have opened; and (c) was auditing restored promptly (a maintenance fingerprint) or left off (a blinding fingerprint).
+
+On NBI, session_server_principal_name is the authoritative acting identity (server_principal_name is null estate-wide - section 8). The critical, technique-specific caveat: if the audit was actually turned OFF, the actor's subsequent statements are not in this stream at all, by design. A suspiciously *quiet* blind window is therefore itself a red flag - corroborate from the SQL error log, sys.server_audits, and host/OS/EDR telemetry, and never conclude "nothing happened" from an empty result.</BusinessImpact>
+  </ExecutiveSummary>
+  <Investigation>
+    <Goal>Decide true_positive / false_positive / misconfiguration / needs_escalation for MS SQL — Server Audit Disabled, Altered or Dropped.</Goal>
+    <Workflow>
+      <Step order="1" name="Recover the audit change for this principal (confirm the alert)">
+        <Purpose>Recover the audit change for this principal (confirm the alert)</Purpose>
+        <Query platform="Elastic" language="ES|QL" id="Q-01">
+          <![CDATA[
+FROM logs-microsoft_sqlserver.audit-*
+| WHERE sqlserver.audit.session_server_principal_name == "$principal"
+    AND (sqlserver.audit.statement LIKE "*ALTER SERVER AUDIT*" OR sqlserver.audit.statement LIKE "*DROP SERVER AUDIT*" OR sqlserver.audit.statement LIKE "*ALTER DATABASE AUDIT SPECIFICATION*")
+    AND @timestamp >= NOW() - 2 hours
+| EVAL turned_off = CASE(sqlserver.audit.statement LIKE "*STATE = OFF*" OR sqlserver.audit.statement LIKE "*STATE=OFF*" OR sqlserver.audit.statement LIKE "*DROP SERVER AUDIT*", 1, 0)
+| STATS execs = COUNT(*), off_ops = SUM(turned_off), statements = VALUES(sqlserver.audit.statement)
+    BY sqlserver.audit.client_ip, sqlserver.audit.database_name, host.name
+| SORT execs DESC
+| LIMIT 10
+]]>
+        </Query>
+      </Step>
+      <Step order="2" name="Examine the blind window and whether auditing was restored (R6-INV-02)">
+        <Purpose>Examine the blind window and whether auditing was restored (R6-INV-02)</Purpose>
+        <Query platform="Elastic" language="ES|QL" id="Q-02">
+          <![CDATA[
+FROM logs-microsoft_sqlserver.audit-*
+| WHERE sqlserver.audit.session_server_principal_name == "$principal"
+    AND @timestamp >= NOW() - 2 hours
+| EVAL sensitive = CASE(sqlserver.audit.statement LIKE "*xp_cmdshell*" OR sqlserver.audit.statement LIKE "*sp_addsrvrolemember*" OR sqlserver.audit.statement LIKE "*ALTER SERVER ROLE*" OR sqlserver.audit.statement LIKE "*OPENROWSET*" OR sqlserver.audit.statement LIKE "*CREATE ASSEMBLY*" OR sqlserver.audit.statement LIKE "*sp_addlinkedserver*", 1, 0),
+       reenable = CASE((sqlserver.audit.statement LIKE "*ALTER SERVER AUDIT*" OR sqlserver.audit.statement LIKE "*ALTER SERVER AUDIT SPECIFICATION*") AND (sqlserver.audit.statement LIKE "*STATE = ON*" OR sqlserver.audit.statement LIKE "*STATE=ON*"), 1, 0)
+| STATS total = COUNT(*), sensitive_ops = SUM(sensitive), reenable_ops = SUM(reenable), clients = COUNT_DISTINCT(sqlserver.audit.client_ip)
+    BY sqlserver.audit.database_name
+| SORT sensitive_ops DESC
+| LIMIT 10
+]]>
+        </Query>
+      </Step>
+      <Step order="3" name="Confirm on the alert host (all principals changing the audit)">
+        <Purpose>Confirm on the alert host (all principals changing the audit)</Purpose>
+        <Query platform="Elastic" language="ES|QL" id="Q-03">
+          <![CDATA[
+FROM logs-microsoft_sqlserver.audit-*
+| WHERE host.name == "$host" AND event.action == "alter-object"
+    AND (sqlserver.audit.statement LIKE "*ALTER SERVER AUDIT*" OR sqlserver.audit.statement LIKE "*DROP SERVER AUDIT*" OR sqlserver.audit.statement LIKE "*ALTER DATABASE AUDIT SPECIFICATION*")
+    AND @timestamp >= NOW() - 4 hours
+| STATS execs = COUNT(*), statements = VALUES(sqlserver.audit.statement)
+    BY sqlserver.audit.session_server_principal_name, sqlserver.audit.client_ip, sqlserver.audit.application_name
+| SORT execs DESC
+| LIMIT 20
+]]>
+        </Query>
+      </Step>
+      <Step order="4" name="Entity pivoting">
+        <Purpose>Entity pivoting</Purpose>
+        <Query platform="Elastic" language="ES|QL" id="Q-04">
+          <![CDATA[
+FROM logs-microsoft_sqlserver.audit-*
+| WHERE sqlserver.audit.session_server_principal_name == "$principal"
+    AND @timestamp >= NOW() - 4 hours
+| STATS statements = COUNT(*), first_seen = MIN(@timestamp), last_seen = MAX(@timestamp)
+    BY sqlserver.audit.client_ip, host.name, sqlserver.audit.application_name, event.action
+| SORT statements DESC
+| LIMIT 30
+]]>
+        </Query>
+      </Step>
+      <Step order="5" name="Process investigation">
+        <Purpose>Process investigation</Purpose>
+        <Query platform="Elastic" language="ES|QL" id="Q-05">
+          <![CDATA[
+FROM logs-microsoft_sqlserver.audit-*
+| WHERE sqlserver.audit.session_server_principal_name == "$principal"
+    AND @timestamp >= NOW() - 4 hours
+| STATS statements = COUNT(*), dbs = COUNT_DISTINCT(sqlserver.audit.database_name)
+    BY sqlserver.audit.application_name, event.action
+| SORT statements DESC
+| LIMIT 20
+]]>
+        </Query>
+      </Step>
+      <Step order="6" name="User investigation">
+        <Purpose>User investigation</Purpose>
+        <Query platform="Elastic" language="ES|QL" id="Q-06">
+          <![CDATA[
+FROM logs-microsoft_sqlserver.audit-*
+| WHERE sqlserver.audit.session_server_principal_name == "$principal"
+    AND @timestamp >= NOW() - 4 hours
+| STATS statements = COUNT(*), hosts = COUNT_DISTINCT(host.name), clients = COUNT_DISTINCT(sqlserver.audit.client_ip)
+    BY sqlserver.audit.database_name
+| SORT statements DESC
+| LIMIT 25
+]]>
+        </Query>
+      </Step>
+      <Step order="7" name="Host investigation">
+        <Purpose>Host investigation</Purpose>
+        <Query platform="Elastic" language="ES|QL" id="Q-07">
+          <![CDATA[
+FROM logs-microsoft_sqlserver.audit-*
+| WHERE host.name == "$host"
+    AND @timestamp >= NOW() - 2 hours
+| STATS statements = COUNT(*), principals = COUNT_DISTINCT(sqlserver.audit.session_server_principal_name), clients = COUNT_DISTINCT(sqlserver.audit.client_ip)
+    BY event.action
+| SORT statements DESC
+| LIMIT 15
+]]>
+        </Query>
+      </Step>
+      <Step order="8" name="IP investigation">
+        <Purpose>IP investigation</Purpose>
+        <Query platform="Elastic" language="ES|QL" id="Q-08">
+          <![CDATA[
+FROM logs-microsoft_sqlserver.audit-*
+| WHERE sqlserver.audit.client_ip == "$client_ip"
+    AND @timestamp >= NOW() - 2 hours
+| STATS statements = COUNT(*), principals = COUNT_DISTINCT(sqlserver.audit.session_server_principal_name),
+        dbs = COUNT_DISTINCT(sqlserver.audit.database_name), apps = VALUES(sqlserver.audit.application_name)
+    BY sqlserver.audit.host_name, host.name
+| SORT statements DESC
+| LIMIT 10
+]]>
+        </Query>
+      </Step>
+      <Step order="9" name="Authentication investigation">
+        <Purpose>Authentication investigation</Purpose>
+        <Query platform="Elastic" language="ES|QL" id="Q-09">
+          <![CDATA[
+FROM logs-microsoft_sqlserver.audit-*
+| WHERE sqlserver.audit.client_ip == "$client_ip"
+    AND event.action IN ("login-succeeded", "login-failed")
+    AND @timestamp >= NOW() - 4 hours
+| STATS logins = COUNT(*), first_seen = MIN(@timestamp), last_seen = MAX(@timestamp)
+    BY event.action, sqlserver.audit.session_server_principal_name, user.name, host.name
+| SORT logins DESC
+| LIMIT 20
+]]>
+        </Query>
+      </Step>
+      <Step order="10" name="Timeline Reconstruction">
+        <Purpose>Timeline Reconstruction</Purpose>
+        <Query platform="Elastic" language="ES|QL" id="Q-10">
+          <![CDATA[
+FROM logs-microsoft_sqlserver.audit-*
+| WHERE sqlserver.audit.session_server_principal_name == "$principal"
+    AND host.name == "$host"
+    AND @timestamp >= NOW() - 4 hours
+| KEEP @timestamp, sqlserver.audit.client_ip, sqlserver.audit.database_name, event.action, sqlserver.audit.succeeded, sqlserver.audit.statement
+| SORT @timestamp ASC
+| LIMIT 200
+]]>
+        </Query>
+      </Step>
+      <Step order="11" name="Lateral movement validation">
+        <Purpose>Lateral movement validation</Purpose>
+        <Query platform="Elastic" language="ES|QL" id="Q-11">
+          <![CDATA[
+FROM logs-microsoft_sqlserver.audit-*
+| WHERE sqlserver.audit.session_server_principal_name == "$principal"
+    AND @timestamp >= NOW() - 4 hours
+    AND (host.name != "$host"
+         OR sqlserver.audit.statement LIKE "*addlinkedserver*"
+         OR sqlserver.audit.statement LIKE "*openquery*")
+| STATS statements = COUNT(*), actions = VALUES(event.action) BY host.name, sqlserver.audit.database_name
+| SORT statements DESC
+| LIMIT 25
+]]>
+        </Query>
+      </Step>
+      <Step order="12" name="Persistence validation">
+        <Purpose>Persistence validation</Purpose>
+        <Query platform="Elastic" language="ES|QL" id="Q-12">
+          <![CDATA[
+FROM logs-microsoft_sqlserver.audit-*
+| WHERE sqlserver.audit.session_server_principal_name == "$principal"
+    AND @timestamp >= NOW() - 4 hours
+    AND (sqlserver.audit.statement LIKE "*create login*" OR sqlserver.audit.statement LIKE "*create user*"
+         OR sqlserver.audit.statement LIKE "*sp_addsrvrolemember*" OR sqlserver.audit.statement LIKE "*add member*"
+         OR sqlserver.audit.statement LIKE "*create assembly*" OR sqlserver.audit.statement LIKE "*sp_addlinkedserver*"
+         OR sqlserver.audit.statement LIKE "*sp_add_job*" OR sqlserver.audit.statement LIKE "*xp_cmdshell*")
+| STATS hits = COUNT(*), statements = VALUES(sqlserver.audit.statement) BY sqlserver.audit.database_name, event.action
+| SORT hits DESC
+| LIMIT 25
+]]>
+        </Query>
+      </Step>
+      <Step order="13" name="Privilege escalation validation">
+        <Purpose>Privilege escalation validation</Purpose>
+        <Query platform="Elastic" language="ES|QL" id="Q-13">
+          <![CDATA[
+FROM logs-microsoft_sqlserver.audit-*
+| WHERE sqlserver.audit.session_server_principal_name == "$principal"
+    AND @timestamp >= NOW() - 4 hours
+    AND (sqlserver.audit.statement LIKE "*sp_addsrvrolemember*" OR sqlserver.audit.statement LIKE "*ALTER SERVER ROLE*"
+         OR sqlserver.audit.statement LIKE "*add member*" OR sqlserver.audit.statement LIKE "*sysadmin*"
+         OR sqlserver.audit.statement LIKE "*control server*" OR sqlserver.audit.statement LIKE "*grant*")
+| STATS hits = COUNT(*), statements = VALUES(sqlserver.audit.statement) BY sqlserver.audit.database_name, sqlserver.audit.succeeded
+| SORT hits DESC
+| LIMIT 25
+]]>
+        </Query>
+      </Step>
+      <Step order="14" name="Defense evasion validation">
+        <Purpose>Defense evasion validation</Purpose>
+        <Query platform="Elastic" language="ES|QL" id="Q-14">
+          <![CDATA[
+FROM logs-microsoft_sqlserver.audit-*
+| WHERE sqlserver.audit.session_server_principal_name == "$principal"
+    AND @timestamp >= NOW() - 4 hours
+    AND (sqlserver.audit.statement LIKE "*AUDIT SPECIFICATION*" OR sqlserver.audit.statement LIKE "*STATE = OFF*"
+         OR sqlserver.audit.statement LIKE "*STATE=OFF*" OR sqlserver.audit.statement LIKE "*STATE = ON*"
+         OR sqlserver.audit.statement LIKE "*DROP SERVER AUDIT*" OR sqlserver.audit.statement LIKE "*DROP*AUDIT*")
+| STATS hits = COUNT(*), statements = VALUES(sqlserver.audit.statement) BY event.action, sqlserver.audit.succeeded
+| SORT hits DESC
+| LIMIT 25
+]]>
+        </Query>
+      </Step>
+      <Step order="15" name="Impact assessment">
+        <Purpose>Impact assessment</Purpose>
+        <Query platform="Elastic" language="ES|QL" id="Q-15">
+          <![CDATA[
+FROM logs-microsoft_sqlserver.audit-*
+| WHERE sqlserver.audit.session_server_principal_name == "$principal"
+    AND @timestamp >= NOW() - 4 hours
+    AND (sqlserver.audit.statement LIKE "*xp_cmdshell*" OR sqlserver.audit.statement LIKE "*openrowset*"
+         OR sqlserver.audit.statement LIKE "*sp_addsrvrolemember*" OR sqlserver.audit.statement LIKE "*create assembly*"
+         OR sqlserver.audit.statement LIKE "*sp_oa*")
+| STATS sensitive_ops = COUNT(*), hosts = COUNT_DISTINCT(host.name), dbs = COUNT_DISTINCT(sqlserver.audit.database_name)
+    BY event.action
+| SORT sensitive_ops DESC
+| LIMIT 20
+]]>
+        </Query>
+      </Step>
+      <Step order="16" name="Finalize verdict">
+        <DecisionTree>
+        </DecisionTree>
+      </Step>
+    </Workflow>
+  </Investigation>
+  <ClassificationGuidance>
+    <TruePositive>
+      <Definition></Definition>
+    </TruePositive>
+    <FalsePositive>
+      <Definition></Definition>
+      <Indicators>
+        <Item>Authorised DBA audit maintenance. Rotating audit files, redefining an audit specification, or a temporary disable during a documented change window - performed by a recognised DBA from an admin host, promptly restored, with no sensitive activity in the gap. Authorised, not benign-by-default: confirm against the change record.</Item>
+        <Item>Legitimate automated maintenance jobs that toggle the audit (e.g. a patch/maintenance routine). If recognised, read-only of the audit's purpose, and it restores auditing, this is a baseline gap rather than an attack.</Item>
+        <Item>A proven-blocked attempt. If the ALTER/DROP errored (permission denied; sqlserver.audit.succeeded = "False") with the audit still active, that is a blocked attempt - documented as such, never "benign".</Item>
+        <Item>Audit changes are absent from NBI's routine workload. The SQL audit is dominated by the App_admin/TotalAgility application workload (select/insert/sp_executesql) - which never touches auditing. There is no benign baseline of audit changes to tune out, so any hit is off-baseline by construction and warrants review.</Item>
+        <Item>An application principal altering the audit is highly anomalous. Applications have no reason to manage auditing; an audit change by App_admin (or any data-provider application login) points to injection or a compromised app identity, not maintenance.</Item>
+        <Item>No environment-specific allow-list exists. Do not create a blanket exception off one alert. A sanctioned DBA-maintenance pattern, once confirmed, can be scoped narrowly (exact DBA principal + admin client + change-window schedule), but the audit-off period should still raise its own alert.</Item>
+      </Indicators>
+    </FalsePositive>
+    <Misconfiguration>
+      <Definition></Definition>
+    </Misconfiguration>
+    <NeedsEscalation>
+      <Definition></Definition>
+    </NeedsEscalation>
+  </ClassificationGuidance>
+  <ResponseActions>
+    <Phase name="Containment">
+      <Action>Re-enable the audit immediately if it is confirmed OFF/dropped (via sys.server_audits) - restoring visibility is the single most time-critical action, so you stop operating blind while you investigate. Do this through the authorised human-approved DEPLOY path.</Action>
+      <Action>Treat the blind-window as untrusted, not empty. Assume the actor performed the actions the blinding was meant to hide; drive containment from that assumption pending host-side reconstruction.</Action>
+      <Action>Contain $host and the actor. Isolate the SQL host from egress if a true positive is forming; suspend/disable $principal and treat it (and the SQL service account, if OLE/xp_cmdshell appeared) as compromised; block $client_ip at the app/network tier if it is an injection pivot.</Action>
+      <Action>Preserve the change record and host evidence first: the sys.server_audits state and history, the SQL error log (which records audit start/stop independently), and any audit files (including deleted/truncated ones) - these are your only windows into the gap.</Action>
+      <Action>Deploy/confirm changes only via the authorised human-approved DEPLOY path; investigation itself is read-only.</Action>
+    </Phase>
+    <Phase name="Eradication">
+      <Action>Reconstruct the blind window from other telemetry (sys.server_audits history, SQL error log, host/OS/EDR) and remediate everything found there - privilege grants, persistence, dropped tooling, exfiltration staging.</Action>
+      <Action>Reverse unauthorised changes the actor made under cover: remove rogue sysadmin/role memberships (section 17.3), new logins, Agent jobs, CLR assemblies, and linked servers (section 17.2).</Action>
+      <Action>Remediate the initial-access vector if $client_ip is an application server - parameterise/patch the injection point and strip audit-management rights from the application login.</Action>
+      <Action>Hunt the same pattern across peers - other DB hosts $principal touched (section 17.1) and any instance sharing the identity/service account - for audit changes and disable-then-act sequences.</Action>
+    </Phase>
+    <Phase name="Recovery">
+      <Action>Confirm auditing is fully restored to its intended definition (server audit + specifications, correct action groups, target) and validate it is recording again.</Action>
+      <Action>Rotate credentials for $principal, the SQL service account (if implicated), and any secrets that may have been accessed during the untrusted gap.</Action>
+      <Action>Restore $host from known-good backup if the blind-window activity or tampering was extensive; otherwise validate that all reversals hold and no persistence remains.</Action>
+      <Action>Return to service only after section 22 closing criteria are met and monitoring confirms no further audit-state changes recur.</Action>
+      <Action>Recommend hardening (section 23): restrict ALTER ANY SERVER AUDIT/CONTROL SERVER, forward audit-state transitions to the SIEM with a dedicated audit-off alert, and use write-once / off-host audit targets so that tampering is itself recorded off the box.</Action>
+    </Phase>
+  </ResponseActions>
+  <Escalation>
+    <Trigger>Escalate to Tier 3 / Incident Response (and notify the customer) when any of the following hold:
+
+- The audit was confirmed turned OFF or dropped (section 14.1) - a direct, deliberate loss of visibility on a regulated banking database.
+- Sensitive operations around the change (section 14.2/section 17.3/section 17.5) - disable-then-act - or an unexplained blind window that host telemetry cannot yet clear.
+- The audit change originated from an internet-facing application server (section 15.6).
+- Auditing was not restored (no re-enable), or the change is part of a broader intrusion (persistence/lateral movement in section 17).
+- The blind window cannot be reconstructed because host/OS telemetry is not yet available - escalate as needs_escalation with the gap named and treated as untrusted.</Trigger>
+    <To>SOC L2 / IR</To>
+  </Escalation>
+  <ClosureCriteria>
+    <Item>false_positive (authorised maintenance): a recognised DBA performed a documented reconfiguration/rotation from an admin host, promptly restored, with a positively-empty gap (corroborated host-side). Record the change ticket and gap duration. Any exception must still leave the audit-off period alerting.</Item>
+    <Item>false_positive (blocked attempt): the audit proves the ALTER/DROP was denied with the audit still active; documented as a blocked attempt (never "benign"), with the source still investigated.</Item>
+    <Item>misconfiguration: a recognised automated job toggles the audit and was not baselined; baseline it and ensure any audit-off period raises its own alert.</Item>
+    <Item>true_positive: deliberate blinding confirmed; audit restored, blind-window activity reconstructed from other telemetry and remediated, host/actor contained, scope established, and no recurrence.</Item>
+    <Item>needs_escalation: handed to Tier 3/IR with the gap treated as untrusted and the specific evidence still outstanding.</Item>
+  </ClosureCriteria>
+  <Limitations>
+    <Item>Re-enable first, investigate second. Every minute the audit is off is a minute of blindness on a regulated system; restoring it (via the approved DEPLOY path) is the priority action for a confirmed OFF.</Item>
+    <Item>A quiet blind window is a red flag, not an all-clear. This is the defining trap of the rule: once the audit is OFF the stream is silent *by design*. sys.server_audits, the SQL error log, and host/OS/EDR are the only ways to see the gap - treat an empty section 14.2/section 17 as untrusted.</Item>
+    <Item>OFF/dropped vs reconfigure-ON is the first fork. STATE = OFF / DROP is direct visibility loss; an ON-state action-group change is subtler and may be a legitimate reconfiguration - but narrowing the spec is also an evasion, so read the actual DDL.</Item>
+    <Item>Applications never manage auditing. An audit change from the App_admin/data-provider workload is off-baseline by construction and points to injection or a compromised app identity.</Item>
+    <Item>Key every statement LIKE on the principal (or narrow by event.action). On this ~2.5M-doc/hour index a host-only or client-only leading-wildcard LIKE circuit-breaks (verified live); section 14.1/section 14.2 key on the principal, section 14.3 narrows a host-scoped search by event.action == "alter-object". session_server_principal_name is authoritative; server_principal_name is null estate-wide; login-failed carries the attempted login in user.name.</Item>
+    <Item>KB-worthy (persist to NBI customer scope): (1) no server-audit changes in NBI routine workload (live-clean 2026-08-16 and 2026-08-19) - any hit is off-baseline; (2) audit-off destroys its own downstream evidence → mandatory host-side corroboration (sys.server_audits/error log); (3) recommend off-host/write-once audit targets + a dedicated audit-off SIEM alert; (4) same SQL-audit telemetry limits as the estate. Observed live 2026-08-19.</Item>
+  </Limitations>
+</Playbook>

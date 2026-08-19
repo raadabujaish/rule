@@ -1,0 +1,229 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<Playbook xmlns="https://soc.example/playbooks" id="PB-fortigate-primary-firewall-down" name="Primary Firewall's Down - SOC Playbook" version="3.0" status="Validated" classification="TLP:AMBER">
+  <Metadata>
+    <Owner>NBI SOC / Detection Engineering</Owner>
+    <LastUpdated>2026-08-19</LastUpdated>
+    <Severity default="critical">critical</Severity>
+    <Confidence default="Medium">Medium</Confidence>
+    <Category>Defense Evasion</Category>
+    <MitreAttack>
+      <Technique id="T1562.001"/>
+      <Technique id="T1562"/>
+      <Technique id="T1562.004"/>
+      <Tactic id="TA0005"/>
+    </MitreAttack>
+    <References>
+      <Reference title="MITRE ATT&amp;CK - Impair Defenses: Disable or Modify System Firewall (T1562.004)" url="https://attack.mitre.org/techniques/T1562/004/"/>
+      <Reference title="MITRE ATT&amp;CK - Impair Defenses: Disable or Modify Tools (T1562.001)" url="https://attack.mitre.org/techniques/T1562/001/"/>
+      <Reference title="MITRE ATT&amp;CK - Defense Evasion tactic (TA0005)" url="https://attack.mitre.org/tactics/TA0005/"/>
+      <Reference title="Fortinet - Logging and log forwarding / syslog configuration (FortiOS Administration Guide)" url="https://docs.fortinet.com/document/fortigate/7.4.0/administration-guide/357866/logging"/>
+      <Reference title="Elastic - Detect log source health / stale data (heartbeat monitoring guidance)" url="https://www.elastic.co/guide/en/security/current/alerts-ui-monitor.html"/>
+      <Reference title="Elastic - ES|QL reference (STATS / MAX / DATE_TRUNC / date math)" url="https://www.elastic.co/guide/en/elasticsearch/reference/current/esql.html"/>
+    </References>
+  </Metadata>
+  <AlertContext>
+    <RuleName>Primary Firewall's Down</RuleName>
+    <RuleId>34f251b8-1d3a-4031-bef8-ce57c462d7aa</RuleId>
+    <RuleType>esql</RuleType>
+    <Index>logs-fortinet_fortigate.log-*</Index>
+    <TriggerLogic>The deployed rule is an ES|QL analytic. Plain-English of the deployed logic: over a 24-hour window, group events by observer.name, take last_seen = MAX(@timestamp) per firewall, and fire for any observer whose last_seen is more than 30 minutes before now - i.e. a heartbeat gap.
+
+One-line Kibana KQL filter (scopes to a device's event stream for fast inspection - staleness itself is computed in ES|QL, not KQL):
+
+
+
+The three discriminators that turn "no logs" into a specific hypothesis: (1) is $observer logging again right now (transient/recovered vs ongoing); (2) did peer firewalls go silent at the same time (a shared pipeline/ingest cause vs a device-specific one); and (3) exactly when the gap started and whether it closed (a clean cliff aligned to a change vs an unexplained drop with no recovery). Those three are section 14/section 15/section 16 below.</TriggerLogic>
+    <KeyAlertFields>observer.name, fortinet.firewall.subtype, event.action</KeyAlertFields>
+  </AlertContext>
+  <Inputs>
+    <Input name="$observer"/>
+  </Inputs>
+  <ExecutiveSummary>
+    <Overview>This playbook drives triage and investigation of the Primary Firewall's Down detection on NBI's Elastic Security deployment. The rule is an ES|QL heartbeat/availability analytic: over a 24-hour look-back it computes the most recent event per firewall (last_seen = MAX(@timestamp) BY observer.name) and fires for any observer whose last_seen is older than 30 minutes - a firewall that has stopped sending logs for more than half an hour. For the primary (Firewall-DC-Prim) that silence is a critical-control signal: the device, or the path that carries its logs, has gone dark.
+
+"No logs" has several very different causes, and the analyst's first job is to decide which: the device has genuinely failed or been powered off (a real outage of a critical control), an attacker has deliberately disabled logging or the device to blind monitoring (defense evasion), the device is up but its log-forwarding/ingest path broke (a pipeline misconfiguration), or the silence was a transient ingest lag that has already recovered. Verdicts skew toward misconfiguration and needs_escalation for availability signals, but a confirmed, unexplained outage of the primary - especially with peers healthy - is treated as security-relevant. Classification set: true_positive / false_positive / misconfiguration / needs_escalation.</Overview>
+    <BusinessImpact>An alert asserts: $observer (the primary firewall) stopped sending logs for more than 30 minutes. It is an *availability* signal, not a traffic pivot - the "entity" is a device (observer.name), not an IP or a user. What the alert cannot tell you on its own is the *cause*, and the causes carry very different responses (device failure, deliberate silencing, pipeline break, transient lag).
+
+Two facts frame the investigation. First, empty is not healthy: if $observer returns zero events for the whole window, that is the *strongest* form of silence, not a clean bill of health, and must be confirmed against peers rather than assumed benign. Second, the device is both a control and a telemetry source: while the primary is dark, the SOC is blind to perimeter traffic and to every detection that depends on its logs (on NBI that is ~11M events / 4h of coverage - see section 17.5) - a window an attacker can exploit or may have deliberately engineered.</BusinessImpact>
+  </ExecutiveSummary>
+  <Investigation>
+    <Goal>Decide true_positive / false_positive / misconfiguration / needs_escalation for Primary Firewall's Down.</Goal>
+    <Workflow>
+      <Step order="1" name="Reproduce the rule - estate heartbeat (stalest firewall first)">
+        <Purpose>Reproduce the rule - estate heartbeat (stalest firewall first)</Purpose>
+        <Query platform="Elastic" language="ES|QL" id="Q-01">
+          <![CDATA[
+FROM logs-fortinet_fortigate.log-*
+| WHERE @timestamp >= NOW() - 4 hours AND observer.name IS NOT NULL
+| STATS events = COUNT(*), last_seen = MAX(@timestamp)
+    BY observer.name
+| SORT last_seen ASC
+| LIMIT 15
+]]>
+        </Query>
+      </Step>
+      <Step order="2" name="Confirm current liveness of the alert firewall">
+        <Purpose>Confirm current liveness of the alert firewall</Purpose>
+        <Query platform="Elastic" language="ES|QL" id="Q-02">
+          <![CDATA[
+FROM logs-fortinet_fortigate.log-*
+| WHERE observer.name == "$observer" AND @timestamp >= NOW() - 4 hours
+| STATS events = COUNT(*), last_seen = MAX(@timestamp), first_seen = MIN(@timestamp)
+| LIMIT 5
+]]>
+        </Query>
+      </Step>
+      <Step order="3" name="Entity pivoting">
+        <Purpose>Entity pivoting</Purpose>
+        <Query platform="Elastic" language="ES|QL" id="Q-03">
+          <![CDATA[
+FROM logs-fortinet_fortigate.log-*
+| WHERE observer.name == "$observer" AND @timestamp >= NOW() - 4 hours
+| STATS events = COUNT(*), last_seen = MAX(@timestamp), first_seen = MIN(@timestamp)
+| LIMIT 5
+]]>
+        </Query>
+      </Step>
+      <Step order="4" name="Host investigation">
+        <Purpose>Host investigation</Purpose>
+        <Query platform="Elastic" language="ES|QL" id="Q-04">
+          <![CDATA[
+FROM logs-fortinet_fortigate.log-*
+| WHERE @timestamp >= NOW() - 4 hours AND observer.name IS NOT NULL
+| STATS events = COUNT(*), last_seen = MAX(@timestamp)
+    BY observer.name
+| SORT last_seen ASC
+| LIMIT 15
+]]>
+        </Query>
+      </Step>
+      <Step order="5" name="Authentication investigation">
+        <Purpose>Authentication investigation</Purpose>
+        <Query platform="Elastic" language="ES|QL" id="Q-05">
+          <![CDATA[
+FROM logs-fortinet_fortigate.log-*
+| WHERE observer.name == "$observer" AND @timestamp >= NOW() - 4 hours
+    AND event.action IN ("login", "logout")
+| STATS events = COUNT(*), last_seen = MAX(@timestamp), first_seen = MIN(@timestamp)
+    BY event.action
+| SORT last_seen DESC
+| LIMIT 15
+]]>
+        </Query>
+      </Step>
+      <Step order="6" name="Timeline Reconstruction">
+        <Purpose>Timeline Reconstruction</Purpose>
+        <Query platform="Elastic" language="ES|QL" id="Q-06">
+          <![CDATA[
+FROM logs-fortinet_fortigate.log-*
+| WHERE observer.name == "$observer" AND @timestamp >= NOW() - 4 hours
+| STATS events = COUNT(*) BY bucket = DATE_TRUNC(15 minutes, @timestamp)
+| SORT bucket DESC
+| LIMIT 16
+]]>
+        </Query>
+      </Step>
+      <Step order="7" name="Defense evasion validation">
+        <Purpose>Defense evasion validation</Purpose>
+        <Query platform="Elastic" language="ES|QL" id="Q-07">
+          <![CDATA[
+FROM logs-fortinet_fortigate.log-*
+| WHERE observer.name == "$observer" AND @timestamp >= NOW() - 4 hours
+    AND (fortinet.firewall.subtype == "system" OR event.action IN ("login", "logout", "configuration"))
+| STATS events = COUNT(*), last_seen = MAX(@timestamp)
+    BY fortinet.firewall.subtype, event.action
+| SORT last_seen DESC
+| LIMIT 20
+]]>
+        </Query>
+      </Step>
+      <Step order="8" name="Impact assessment">
+        <Purpose>Impact assessment</Purpose>
+        <Query platform="Elastic" language="ES|QL" id="Q-08">
+          <![CDATA[
+FROM logs-fortinet_fortigate.log-*
+| WHERE @timestamp >= NOW() - 4 hours AND observer.name IN ("$observer", "firewall-dc-edge01")
+| STATS events = COUNT(*), last_seen = MAX(@timestamp), first_seen = MIN(@timestamp)
+    BY observer.name
+| SORT events DESC
+| LIMIT 5
+]]>
+        </Query>
+      </Step>
+      <Step order="9" name="Finalize verdict">
+        <DecisionTree>
+        </DecisionTree>
+      </Step>
+    </Workflow>
+  </Investigation>
+  <ClassificationGuidance>
+    <TruePositive>
+      <Definition></Definition>
+    </TruePositive>
+    <FalsePositive>
+      <Definition></Definition>
+      <Indicators>
+        <Item>Planned maintenance / change window. An authorised reboot, upgrade, or reconfiguration of $observer explains the gap - verified against a change record covering the device at the onset time.</Item>
+        <Item>Transient ingest lag that recovered. A brief collector/queue hiccup delayed events; $observer is logging again with a fresh last_seen and the gap has closed. Documented as a recovered transient condition, never a bare "benign".</Item>
+        <Item>Log-pipeline / forwarding break (device up). Broken syslog/forwarder, a collector/ingest outage, or an index-routing/observer.name change stops telemetry while the device still enforces policy - a misconfiguration, not an outage (section 13).</Item>
+        <Item>Look-back edge. The rule looks back 24h; this playbook's queries cap at 4h, so a firewall dark for &gt;4h reads as total silence without a precise onset in-window (section 8) - a measurement limitation, not a clearance.</Item>
+        <Item>The primary is very high-volume - a gap is stark. Firewall-DC-Prim runs ~11.03M events / 4h in steady ~700k-per-15-minute buckets. Against that baseline a real stop is an obvious cliff to zero, so onset detection (section 16) is high-fidelity for this device.</Item>
+        <Item>Peers to compare against: firewall-dc-edge01 (~11M/4h, the healthy high-volume peer), firewall-dc-edge02 (low-volume, ~2.5k/4h), and Firewall-DC-Sec (secondary). At validation time all traffic-bearing firewalls were logging within seconds - so the rule was not firing.</Item>
+        <Item>Firewall-DC-Sec is near-silent by baseline (only a handful of events in-window). Treat a low/again-silent secondary as an expected baseline unless the alert entity is the primary - do not confuse the secondary's quiet with a primary outage. (This is worth persisting to the NBI KB so the secondary's baseline is understood.)</Item>
+        <Item>observer.name is the only device identifier on these events - there is no device management IP or serial in the FortiGate flow record, and a subset of events carry a null observer.name, so device attribution depends entirely on that field being populated (section 8).</Item>
+      </Indicators>
+    </FalsePositive>
+    <Misconfiguration>
+      <Definition></Definition>
+    </Misconfiguration>
+    <NeedsEscalation>
+      <Definition></Definition>
+    </NeedsEscalation>
+  </ClassificationGuidance>
+  <ResponseActions>
+    <Phase name="Containment">
+      <Action>Engage the network/firewall team immediately to confirm $observer's state out of band (console/SNMP/heartbeat) and restore it - a primary that is dark while peers log, with no change record, is paged as a critical-control outage.</Action>
+      <Action>Verify perimeter enforcement is not degraded - a device that stopped logging may still enforce policy (pipeline break) or may be down (enforcement gap); establish which before assuming the perimeter is safe.</Action>
+      <Action>If silencing is suspected, treat the blind window as attacker-engineered and launch the intrusion hunt (section 17.1) in live telemetry, and preserve the device's admin/audit log before any reboot destroys volatile evidence.</Action>
+      <Action>Preserve evidence - the heartbeat/onset queries (section 14/section 16), peer comparison (section 15.5), and device config/admin events (section 17.4).</Action>
+      <Action>Deploy/confirm changes only via the authorised human-approved DEPLOY path; investigation itself is read-only.</Action>
+    </Phase>
+    <Phase name="Eradication">
+      <Action>Restore firewall logging and/or the device to a known-good state; if config tampering or an unauthorised admin account is found, remove it and rotate device admin credentials.</Action>
+      <Action>Fix the pipeline (misconfiguration verdict): repair the broken forwarding/syslog/ingest path or index-routing/observer.name change and confirm all firewalls resume.</Action>
+      <Action>Remediate the initial-access vector if the device was reached via a compromised management host or exposed management interface (restrict management access).</Action>
+      <Action>Remediate anything found in the blind-window hunt (section 17.1) in the relevant telemetry.</Action>
+    </Phase>
+    <Phase name="Recovery">
+      <Action>Confirm $observer is logging again (fresh last_seen, steady buckets restored to baseline) and that enforcement is verified.</Action>
+      <Action>Add resilience - the highest-value hardening from this rule: redundant log forwarding, independent device-health monitoring (SNMP/heartbeat), a per-log-type volume/heartbeat analytic so partial silencing is caught, an alert on log-volume drops before the 30-minute mark, and failover for the primary so a single device outage does not blind the SOC.</Action>
+      <Action>Return to service only after section 22 closing criteria are met and monitoring confirms the device stays healthy.</Action>
+    </Phase>
+  </ResponseActions>
+  <Escalation>
+    <Trigger>Escalate to the network/firewall team (device restoration) and SOC L2 / IR (blind-window intrusion check) when any of the following hold:
+
+- $observer is confirmed silent with the silence isolated to the primary (peers healthy) and no change record (section 14.2/section 15.5/section 16) - treat as possible deliberate silencing.
+- Device config/admin activity appears at the onset (section 17.4), or evidence of tampering.
+- The silence cannot be attributed (device-outage vs pipeline vs tampering) from telemetry - e.g. dark &gt;4h with onset predating the window (needs_escalation).
+- Any blind-window intrusion signal is found in live telemetry (section 17.1).
+
+Escalate with section 14/section 15/section 16/section 17 outputs, the onset time, the peer picture, and any device config/admin events.</Trigger>
+    <To>SOC L2 / IR</To>
+  </Escalation>
+  <ClosureCriteria>
+    <Item>false_positive (planned maintenance): an authorised change/maintenance record covers $observer at the onset; recorded.</Item>
+    <Item>false_positive (transient recovered): $observer is logging again with a fresh last_seen and the gap closed with no device impact; documented as a recovered transient lag, never a bare "benign"; recurring lags referred for ingest tuning.</Item>
+    <Item>misconfiguration: the device was up but telemetry stopped (broken forwarding/syslog/ingest or index-routing/observer.name change), typically with peers also silent; pipeline restored, all firewalls confirmed resuming.</Item>
+    <Item>true_positive: a real, unexplained outage/silencing of the primary (peers healthy, no change); device restored, perimeter enforcement verified, blind-window intrusion check completed, root cause identified, incident documented.</Item>
+    <Item>needs_escalation: device-outage vs pipeline vs tampering could not be distinguished; handed to network + logging teams with the gaps documented.</Item>
+  </ClosureCriteria>
+  <Limitations>
+    <Item>Empty is the strongest silence, not health. Zero events for $observer means dark ≥ the whole window - always confirm against peers (section 15.5) and out-of-band device status; never close a zero result as benign.</Item>
+    <Item>Peer isolation is the discriminator. Only-the-primary-dark → device-specific (failure or targeted silencing, security-relevant); all-firewalls-dark → shared pipeline (misconfiguration). This single comparison turns "no logs" into a hypothesis.</Item>
+    <Item>observer.name is the only device handle. No device IP/serial exists on these events, and a subset carry a null observer.name - device attribution depends on that field; reach the device out of band for ground truth.</Item>
+    <Item>The 4h/24h window mismatch matters. The rule looks back 24h; these queries cap at 4h, so a device dark &gt;4h shows total silence without an in-window onset - infer onset from peers and out-of-band status (section 8/section 16).</Item>
+    <Item>Partial silencing is the evasion gap. An attacker can disable specific subtypes while keeping a heartbeat (stays "alive" to this rule) or throttle to just under 30 minutes (never fires) - so a per-subtype volume/heartbeat analytic and independent device-health monitoring are required (section 20).</Item>
+    <Item>KB-worthy (persist to NBI customer scope): (1) firewall estate + baselines - Firewall-DC-Prim ~11.03M/4h (~700k per 15-min bucket), firewall-dc-edge01 ~11M/4h, firewall-dc-edge02 ~2.5k/4h, Firewall-DC-Sec near-silent secondary; (2) observer.name is the only device identifier (no device IP/serial), a subset of events null; (3) fortinet.firewall.subtype == "system" present for device config/admin activity (~62 events/4h on the primary). All observed live on 2026-08-17 (primary healthy - rule not firing).</Item>
+  </Limitations>
+</Playbook>

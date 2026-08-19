@@ -1,0 +1,350 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<Playbook xmlns="https://soc.example/playbooks" id="PB-waf-qa-potential-ddos" name="QA - Potential of DDoS Attack (WAF) - SOC Playbook" version="3.0" status="Validated" classification="TLP:AMBER">
+  <Metadata>
+    <Owner>NBI SOC / Detection Engineering</Owner>
+    <LastUpdated>2026-08-19</LastUpdated>
+    <Severity default="High">High</Severity>
+    <Confidence default="Medium">Medium</Confidence>
+    <Category>Impact</Category>
+    <MitreAttack>
+      <Technique id="T1498"/>
+      <Technique id="T1499"/>
+      <Technique id="T1499.003"/>
+      <Tactic id="TA0040"/>
+    </MitreAttack>
+    <References>
+      <Reference title="MITRE ATT&amp;CK - Network Denial of Service (T1498)" url="https://attack.mitre.org/techniques/T1498/"/>
+      <Reference title="MITRE ATT&amp;CK - Endpoint Denial of Service (T1499)" url="https://attack.mitre.org/techniques/T1499/"/>
+      <Reference title="MITRE ATT&amp;CK - Application Exhaustion Flood (T1499.003)" url="https://attack.mitre.org/techniques/T1499/003/"/>
+      <Reference title="MITRE ATT&amp;CK - Impact tactic (TA0040)" url="https://attack.mitre.org/tactics/TA0040/"/>
+      <Reference title="Elastic Security - Create a threshold rule" url="https://www.elastic.co/guide/en/security/current/rules-ui-create.html"/>
+      <Reference title="Elastic - ES|QL functions and operators (BUCKET, CASE, COUNT_DISTINCT)" url="https://www.elastic.co/guide/en/elasticsearch/reference/current/esql-functions-operators.html"/>
+      <Reference title="Fortinet - FortiWeb documentation (actions, DoS protection, signature policies)" url="https://docs.fortinet.com/product/fortiweb"/>
+      <Reference title="OWASP - Denial of Service" url="https://owasp.org/www-community/attacks/Denial_of_Service"/>
+      <Reference title="Cloudflare - Application-layer (L7) DDoS attacks" url="https://www.cloudflare.com/learning/ddos/application-layer-ddos-attack/"/>
+      <Reference title="MDN - X-Forwarded-For header (client-supplied, spoofable)" url="https://developer.mozilla.org/en-US/docs/Web/HTTP/Headers/X-Forwarded-For"/>
+      <Reference title="CISA - Understanding and Responding to Distributed Denial-of-Service Attacks" url="https://www.cisa.gov/resources-tools/resources/understanding-and-responding-distributed-denial-service-attacks"/>
+    </References>
+  </Metadata>
+  <AlertContext>
+    <RuleName>QA - Potential of DDoS Attack (WAF)</RuleName>
+    <RuleId>3d4eb3d8-4ec3-452c-bb82-a634ae314f09</RuleId>
+    <RuleType>threshold</RuleType>
+    <Index>logs-tcp.generic-*</Index>
+    <TriggerLogic>The deployed rule is an Elastic threshold rule with an empty, match-all Kibana query, grouped by the client identifier and counted over the lookback:
+
+
+
+- Group by: x_forwarded_for (the client IP the WAF records in the X-Forwarded-For header)
+- Threshold: count &gt;= 6000
+- Lookback: 35 minutes (now-35m), evaluated every 5 minutes
+- Index scope (rule): logs-* - but x_forwarded_for is carried only by the WAF/web-tier data streams in logs-tcp.generic-*, so the rule effectively counts web requests per client IP against NBI's internet-facing services and ignores everything else in logs-*.
+
+Plain English: any one x_forwarded_for value that produces at least 6000 web requests in 35 minutes trips the rule. There is no field condition, no method/URL/return-code filter, and no per-host scoping - the count is purely per-client-IP across all WAF-logged traffic. One-line Kibana-KQL detection filter for pivoting in Discover/Timeline (the WAF/web tier only):
+
+
+
+Because the grouping field is a client-supplied header value, the count is only as trustworthy as the XFF chain (see section 6 and section 23): a single value routinely fronts an entire mobile-carrier or CDN/NAT egress, and it can be spoofed</TriggerLogic>
+    <KeyAlertFields>data.type, data.src, data.original_src, data.http_host, mobile.nbi.iq, data.http_url, data.http_retcode, data.http_method, data.http_agent, data.dst, data.msg, data.action</KeyAlertFields>
+  </AlertContext>
+  <Inputs>
+    <Input name="$client_xff"/>
+    <Input name="$target_host"/>
+  </Inputs>
+  <ExecutiveSummary>
+    <Overview>This playbook drives triage and investigation of the QA - Potential of DDoS Attack (WAF) detection on NBI's Elastic Security deployment. The rule is a threshold analytic: it fires when a single x_forwarded_for value accounts for 6000 or more web requests in a 35-minute window against NBI's WAF-fronted, internet-facing services. That footprint is common to two very different realities - an application-layer (layer-7) denial-of-service flood or high-rate automation against the online and mobile banking channels, or a perfectly legitimate shared carrier/NAT/CDN egress under which thousands of real customers appear behind one public IP in the X-Forwarded-For header.
+
+The analyst's job is to separate those realities quickly and defensibly, and to classify the alert as true_positive, false_positive (authorised known egress or a hostile flood positively proven blocked - never "benign"), misconfiguration (legitimate spike or a mistuned threshold), or needs_escalation, with the evidence attached. The decision rests on three measurable facts: the true rate and what one client looks like behind that XFF, the request disposition (served vs challenged/blocked vs origin errors), and whether the target is driven by one source or many (single vs distributed load, and whether the origin is actually being harmed).</Overview>
+    <BusinessImpact>An alert means: over the last 35 minutes, one client identifier ($client_xff) sent 6000+ requests that reached NBI's WAF tier. Reaching the WAF is not the same as harming the application - the traffic may have been served, challenged, blocked, or may have exhausted the origin. So the alert does not by itself establish an incident; it establishes a volume anomaly on the banking front door that must be resolved to one of four dispositions:
+
+- a genuine availability-impacting flood that reached and degraded the application (true_positive);
+- a hostile flood the WAF positively blocked, or an authorised/known shared egress serving real customers (false_positive - recorded as *blocked-malicious* or *authorised egress*, never "benign");
+- legitimate traffic that merely crossed a fixed, per-source threshold that is too blunt for NBI's carrier-fronted traffic (misconfiguration);
+- or an undetermined case where rate, disposition, or distribution cannot be established (needs_escalation).
+
+Context that makes this consequential: mobile.nbi.iq and businessonline.nbi.iq are NBI's customer-facing banking front doors (live 2-hour sample: mobile.nbi.iq ~155k requests across ~7,400 client IPs; busine</BusinessImpact>
+  </ExecutiveSummary>
+  <Investigation>
+    <Goal>Decide true_positive / false_positive / misconfiguration / needs_escalation for QA - Potential of DDoS Attack (WAF).</Goal>
+    <Workflow>
+      <Step order="1" name="Reproduce the rule - per-client request counts (last 35m)">
+        <Purpose>Reproduce the rule - per-client request counts (last 35m)</Purpose>
+        <Query platform="Elastic" language="ES|QL" id="Q-01">
+          <![CDATA[
+FROM logs-tcp.generic-*
+| WHERE @timestamp >= NOW() - 35 minutes
+    AND data.type == "traffic" AND x_forwarded_for IS NOT NULL
+| STATS reqs = COUNT(*) BY x_forwarded_for
+| SORT reqs DESC
+| LIMIT 20
+]]>
+        </Query>
+      </Step>
+      <Step order="2" name="Confirm the alert's client and its true rate">
+        <Purpose>Confirm the alert's client and its true rate</Purpose>
+        <Query platform="Elastic" language="ES|QL" id="Q-02">
+          <![CDATA[
+FROM logs-tcp.generic-*
+| WHERE x_forwarded_for == "$client_xff"
+    AND @timestamp >= NOW() - 35 minutes
+| STATS reqs = COUNT(*), first_seen = MIN(@timestamp), last_seen = MAX(@timestamp)
+| EVAL threshold = 6000, over_by = reqs - 6000
+| LIMIT 5
+]]>
+        </Query>
+      </Step>
+      <Step order="3" name="Entity pivoting">
+        <Purpose>Entity pivoting</Purpose>
+        <Query platform="Elastic" language="ES|QL" id="Q-03">
+          <![CDATA[
+FROM logs-tcp.generic-*
+| WHERE x_forwarded_for == "$client_xff"
+    AND @timestamp >= NOW() - 35 minutes
+| STATS reqs = COUNT(*), first_seen = MIN(@timestamp), last_seen = MAX(@timestamp),
+        hosts = COUNT_DISTINCT(data.http_host), urls = COUNT_DISTINCT(data.http_url),
+        peer_srcs = COUNT_DISTINCT(data.src), agents = COUNT_DISTINCT(data.http_agent),
+        host_list = VALUES(data.http_host)
+| LIMIT 5
+]]>
+        </Query>
+      </Step>
+      <Step order="4" name="Process investigation">
+        <Purpose>Process investigation</Purpose>
+        <Query platform="Elastic" language="ES|QL" id="Q-04">
+          <![CDATA[
+FROM logs-tcp.generic-*
+| WHERE x_forwarded_for == "$client_xff"
+    AND @timestamp >= NOW() - 35 minutes
+| STATS reqs = COUNT(*), urls = COUNT_DISTINCT(data.http_url) BY data.http_agent, data.http_method
+| SORT reqs DESC
+| LIMIT 20
+]]>
+        </Query>
+      </Step>
+      <Step order="5" name="Parent-Child process analysis">
+        <Purpose>Parent-Child process analysis</Purpose>
+        <Query platform="Elastic" language="ES|QL" id="Q-05">
+          <![CDATA[
+FROM logs-tcp.generic-*
+| WHERE x_forwarded_for == "$client_xff"
+    AND @timestamp >= NOW() - 35 minutes
+| STATS reqs = COUNT(*) BY data.src, data.original_src, data.dst, data.http_host
+| SORT reqs DESC
+| LIMIT 25
+]]>
+        </Query>
+      </Step>
+      <Step order="6" name="Host investigation">
+        <Purpose>Host investigation</Purpose>
+        <Query platform="Elastic" language="ES|QL" id="Q-06">
+          <![CDATA[
+FROM logs-tcp.generic-*
+| WHERE data.http_host == "$target_host"
+    AND @timestamp >= NOW() - 2 hours AND data.type == "traffic"
+| STATS reqs = COUNT(*), sources = COUNT_DISTINCT(x_forwarded_for), peers = COUNT_DISTINCT(data.src) BY data.dst
+| SORT reqs DESC
+| LIMIT 15
+]]>
+        </Query>
+      </Step>
+      <Step order="7" name="IP investigation">
+        <Purpose>IP investigation</Purpose>
+        <Query platform="Elastic" language="ES|QL" id="Q-07">
+          <![CDATA[
+FROM logs-tcp.generic-*
+| WHERE x_forwarded_for == "$client_xff"
+    AND @timestamp >= NOW() - 35 minutes
+| STATS reqs = COUNT(*), hosts = COUNT_DISTINCT(data.http_host), agents = COUNT_DISTINCT(data.http_agent) BY data.src
+| SORT reqs DESC
+| LIMIT 25
+]]>
+        </Query>
+      </Step>
+      <Step order="8" name="Domain investigation">
+        <Purpose>Domain investigation</Purpose>
+        <Query platform="Elastic" language="ES|QL" id="Q-08">
+          <![CDATA[
+FROM logs-tcp.generic-*
+| WHERE x_forwarded_for == "$client_xff"
+    AND @timestamp >= NOW() - 35 minutes
+| STATS reqs = COUNT(*), urls = COUNT_DISTINCT(data.http_url) BY data.http_host
+| SORT reqs DESC
+| LIMIT 15
+]]>
+        </Query>
+      </Step>
+      <Step order="9" name="URL investigation">
+        <Purpose>URL investigation</Purpose>
+        <Query platform="Elastic" language="ES|QL" id="Q-09">
+          <![CDATA[
+FROM logs-tcp.generic-*
+| WHERE x_forwarded_for == "$client_xff"
+    AND @timestamp >= NOW() - 35 minutes
+| STATS reqs = COUNT(*) BY data.http_url, data.http_retcode, data.http_method
+| SORT reqs DESC
+| LIMIT 30
+]]>
+        </Query>
+      </Step>
+      <Step order="10" name="Hash investigation">
+        <Purpose>Hash investigation</Purpose>
+        <Query platform="Elastic" language="ES|QL" id="Q-10">
+          <![CDATA[
+FROM logs-tcp.generic-*
+| WHERE data.http_host == "$target_host"
+    AND @timestamp >= NOW() - 4 hours AND data.type == "attack"
+| STATS hits = COUNT(*), sources = COUNT_DISTINCT(data.src) BY data.action, data.policy, data.msg
+| SORT hits DESC
+| LIMIT 25
+]]>
+        </Query>
+      </Step>
+      <Step order="11" name="Authentication investigation">
+        <Purpose>Authentication investigation</Purpose>
+        <Query platform="Elastic" language="ES|QL" id="Q-11">
+          <![CDATA[
+FROM logs-tcp.generic-*
+| WHERE data.http_host == "$target_host"
+    AND @timestamp >= NOW() - 35 minutes AND data.type == "traffic"
+    AND data.http_retcode IN ("401", "403")
+| STATS reqs = COUNT(*), sources = COUNT_DISTINCT(x_forwarded_for) BY data.http_url, data.http_retcode
+| SORT reqs DESC
+| LIMIT 25
+]]>
+        </Query>
+      </Step>
+      <Step order="12" name="Timeline Reconstruction">
+        <Purpose>Timeline Reconstruction</Purpose>
+        <Query platform="Elastic" language="ES|QL" id="Q-12">
+          <![CDATA[
+FROM logs-tcp.generic-*
+| WHERE x_forwarded_for == "$client_xff"
+    AND @timestamp >= NOW() - 35 minutes
+| STATS reqs = COUNT(*), urls = COUNT_DISTINCT(data.http_url) BY minute = BUCKET(@timestamp, 1 minute)
+| SORT minute ASC
+| LIMIT 60
+]]>
+        </Query>
+      </Step>
+      <Step order="13" name="Lateral movement validation">
+        <Purpose>Lateral movement validation</Purpose>
+        <Query platform="Elastic" language="ES|QL" id="Q-13">
+          <![CDATA[
+FROM logs-tcp.generic-*
+| WHERE x_forwarded_for == "$client_xff"
+    AND @timestamp >= NOW() - 2 hours
+| STATS reqs = COUNT(*), urls = COUNT_DISTINCT(data.http_url), agents = COUNT_DISTINCT(data.http_agent) BY data.http_host, data.dst
+| SORT reqs DESC
+| LIMIT 20
+]]>
+        </Query>
+      </Step>
+      <Step order="14" name="Defense evasion validation">
+        <Purpose>Defense evasion validation</Purpose>
+        <Query platform="Elastic" language="ES|QL" id="Q-14">
+          <![CDATA[
+FROM logs-tcp.generic-*
+| WHERE data.http_host == "$target_host"
+    AND @timestamp >= NOW() - 35 minutes AND data.type == "traffic" AND x_forwarded_for IS NOT NULL
+| STATS reqs = COUNT(*) BY x_forwarded_for
+| STATS sources = COUNT(*), total_reqs = SUM(reqs), max_per_source = MAX(reqs), avg_per_source = AVG(reqs), sources_over_1000 = SUM(CASE(reqs >= 1000, 1, 0))
+| LIMIT 5
+]]>
+        </Query>
+      </Step>
+      <Step order="15" name="Impact assessment">
+        <Purpose>Impact assessment</Purpose>
+        <Query platform="Elastic" language="ES|QL" id="Q-15">
+          <![CDATA[
+FROM logs-tcp.generic-*
+| WHERE data.http_host == "$target_host"
+    AND @timestamp >= NOW() - 35 minutes
+| EVAL is5xx = CASE(data.http_retcode LIKE "5*", 1, 0),
+       isblock = CASE(data.http_retcode IN ("401","403","429"), 1, 0),
+       isok = CASE(data.http_retcode == "200", 1, 0)
+| STATS reqs = COUNT(*), sources = COUNT_DISTINCT(x_forwarded_for),
+        served = SUM(isok), blocked = SUM(isblock), err5xx = SUM(is5xx)
+    BY data.http_host
+| LIMIT 5
+]]>
+        </Query>
+      </Step>
+      <Step order="16" name="Finalize verdict">
+        <DecisionTree>
+        </DecisionTree>
+      </Step>
+    </Workflow>
+  </Investigation>
+  <ClassificationGuidance>
+    <TruePositive>
+      <Definition></Definition>
+    </TruePositive>
+    <FalsePositive>
+      <Definition></Definition>
+      <Indicators>
+        <Item>Carrier / mobile-network NAT. A single mobile operator or ISP NAT can present thousands of real customers behind one public IP. For a mobile-first bank this is the dominant benign cause of a per-XFF spike; the signature is many endpoints, several app/OS user agents, and a healthy served ratio.</Item>
+        <Item>CDN / reverse-proxy / corporate egress. If a real client hop terminates at a CDN or corporate proxy before the X-Forwarded-For is populated, one value aggregates many users. Confirm against known egress ranges - as context to verify, never as an automatic pass.</Item>
+        <Item>Legitimate traffic spikes. App releases and forced-update waves, marketing campaigns, salary/payday peaks, and month-end corporate-banking batches can push a shared egress past 6000 requests in 35 minutes with no malicious intent.</Item>
+        <Item>Health checks, synthetic monitors, and app polling. Aggressive client-side polling (dashboard refresh, notification pull, app-version checks) concentrates volume on read endpoints. On NBI, /api/AppVersion/GetCurrentAppVersion and /api/Messages/GetDashboardNotificationV2 are among the highest-volume URLs in normal operation.</Item>
+        <Item>Authorised load/performance testing or a WAF-blocked attempt. Sanctioned load tests are a tuning/authorised case (confirm against a change record); a hostile flood that the WAF positively blocked is a false_positive documented as blocked-malicious, never "benign".</Item>
+        <Item>NBI is mobile-first and carrier-NAT-heavy. mobile.nbi.iq alone drew ~155k requests across ~7,400 distinct x_forwarded_for values in 2 hours. Per-source peaks legitimately approach the 6000/35m line during app updates and peak hours, so benign firings are expected and must be reconciled, not assumed hostile.</Item>
+        <Item>Real clients arrive through a small shared edge pool. The immediate TCP peer (data.src / data.original_src) resolves to a handful of edge/SNAT addresses (observed 185.56.154.x, 159.60.162.x) that front all clients. One XFF commonly maps to dozens of these peers (the validated $client_xff showed ~100 distinct data.src peers in 35 minutes). Treat data.src as shared infrastructure, not an individual attacker identifier.</Item>
+        <Item>The busy endpoints are read/notification/login APIs. Top URLs in normal traffic are /api, /api/Documents/GetDynamicImage?ImageName=Splash, /api/AppVersion/GetCurrentAppVersion, /api/Account/GetAccountDetailsForDashboard, /api/Messages/GetDashboardNotificationV2, and /api/User/LoginUser. A broad spread across these at HTTP 200 is normal app usage; a narrow, high-rate focus (especially on login/OTP/transfer) is the concerning shape.</Item>
+      </Indicators>
+    </FalsePositive>
+    <Misconfiguration>
+      <Definition></Definition>
+    </Misconfiguration>
+    <NeedsEscalation>
+      <Definition></Definition>
+    </NeedsEscalation>
+  </ClassificationGuidance>
+  <ResponseActions>
+    <Phase name="Containment">
+      <Action>If the origin is being harmed (rising 5xx on $target_host, section 17.5) and the source is not a known shared egress: engage the WAF/network on-call to rate-limit, challenge (JS/CAPTCHA), or block the abusive source at the WAF, and enable the DoS-protection profile on the target virtual server. Capture $client_xff, $target_host, the true rate, and the disposition first.</Action>
+      <Action>For a distributed pattern (section 17.4): apply per-host rate controls and, for volumetric traffic, coordinate upstream ISP/CDN scrubbing - per-source blocking alone will not hold against many sources.</Action>
+      <Action>Prefer targeted controls over blunt blocks. Because a single XFF can front thousands of real customers, avoid blanket-blocking an XFF or edge peer without confirming it is not carrier/NAT/CDN aggregation; scope by ASN/geo/behaviour where possible to avoid dropping legitimate banking customers.</Action>
+      <Action>If the WAF is already blocking it (data.action = Alert_Deny, origin unaffected): keep the mitigation in place and monitor for source rotation or a shift to distribution rather than adding new blocks.</Action>
+      <Action>Preserve the evidence (INV/pivot results, rate, disposition, impact) on the alert before any tuning changes the picture.</Action>
+    </Phase>
+    <Phase name="Eradication">
+      <Action>True positive: sustain WAF rate-limiting / bot-management / ASN-or-geo throttling for the abusive source(s), keep the DoS-protection profile enabled on the target VIP, and maintain upstream scrubbing until the flood subsides; monitor 5xx recovery on $target_host.</Action>
+      <Action>Blocked-malicious false positive: keep the WAF block, and watch for the source rotating XFF/edge peers or shifting to a distributed pattern (re-run section 17.4 across subsequent windows).</Action>
+      <Action>If credential/OTP abuse was found hidden in the volume (section 15.12): treat it as its own workstream - force step-up auth / lock affected flows / rotate exposed OTP secrets in the banking application, coordinated with the app owner. The DoS mitigation does not eradicate the account-abuse objective.</Action>
+      <Action>Do not create a permanent XFF/host allow-exclusion to silence the rule; that blinds it to real abuse from the same egress. Remove any temporary control once the source is confirmed benign and documented.</Action>
+    </Phase>
+    <Phase name="Recovery">
+      <Action>Confirm service health: $target_host served ratio back to baseline and 5xx back to normal across the client population (section 15.5/section 17.5), sustained over monitoring.</Action>
+      <Action>Retune the detection (the recurring root cause here): base the threshold on the real client (trusted X-Forwarded-For first hop) and per-host baselines rather than a single fixed 6000/35m per-XFF count that is too blunt for NBI's carrier-fronted, mobile-first traffic; add per-endpoint rate limits on sensitive endpoints (login/OTP/transfer).</Action>
+      <Action>Harden XFF trust: ensure X-Forwarded-For is accepted only from the real edge so it cannot be spoofed from untrusted hops (this is what makes the grouping field trustworthy).</Action>
+      <Action>Add the complementary analytic the per-source rule misses: a per-data.http_host volumetric + 5xx-rate + distinct-source-spike detector to catch distributed floods (section 17.4), plus alerting on the WAF's own Alert_Deny surges.</Action>
+      <Action>Return the account/flows and any temporary controls to normal only after section 22 closing criteria are met.</Action>
+    </Phase>
+  </ResponseActions>
+  <Escalation>
+    <Trigger>Escalate to SOC L2 / IR, the WAF/network team, and the banking-application owner - attaching section 14 (rate), section 15.1 (source fingerprint), section 15.8/section 15.9 (disposition) and section 17.5 (distribution + 5xx) - when any of the following hold:
+
+- Confirmed availability impact: sustained 5xx / customer-facing degradation on a banking host (mobile.nbi.iq, businessonline.nbi.iq).
+- A hostile flood not fully mitigated: high-rate served traffic still reaching the origin, or a source that keeps firing through the applied controls.
+- A distributed pattern: many sources each below 6000 surging the same host (section 17.4) - this rule under-counts it and it needs a host-level response.
+- Abuse hidden in the flood: a 401/403 spike on login/OTP endpoints indicating credential stuffing or OTP abuse (section 15.12) - escalate as a Credential-Access finding in parallel.
+- Unresolvable e</Trigger>
+    <To>SOC L2 / IR</To>
+  </Escalation>
+  <ClosureCriteria>
+    <Item>false_positive (authorised egress): $client_xff confirmed as a carrier/NAT/CDN shared egress serving broad legitimate banking traffic, with the origin healthy across many sources (section 15.1/section 17.5); documented against known egress context; no blanket exclusion added.</Item>
+    <Item>false_positive (blocked-malicious): the flood proven WAF-blocked (data.action = Alert_Deny, section 15.9) with the origin unaffected - documented as a blocked malicious attempt, never "benign" - and monitoring for rotation/distribution in place.</Item>
+    <Item>misconfiguration: legitimate traffic tripped the fixed per-XFF threshold (spike or carrier aggregation), no impact and no attack; the retuning decision (real-client threshold + per-host baselines) is recorded.</Item>
+    <Item>true_positive: an application-layer flood or high-rate abuse that reached and harmed availability; abusive source(s) rate-limited/blocked, origin recovered (5xx to baseline), target endpoints and root cause documented, and the threshold/WAF rules hardened.</Item>
+    <Item>needs_escalation: handed to SOC L2 / IR and the WAF/network team with the specific evidence gaps named.</Item>
+  </ClosureCriteria>
+  <Limitations>
+    <Item>The count is a question, not a verdict. On this mobile-first, carrier-NAT-heavy estate, benign per-XFF spikes near 6000/35m are *expected*. Let disposition (section 15.8/section 15.9) and impact (section 17.5) decide - never the raw count.</Item>
+    <Item>Know where the block signal lives. On traffic records, disposition is data.http_retcode (200 served / 401-403-429 challenged / 5xx origin error). On attack records, the WAF's real decision is data.action (Alert_Deny = blocked) and x_forwarded_for/data.http_retcode are NULL - so prove *blocked-malicious* from data.action, keyed on $target_host/data.src, not the XFF.</Item>
+    <Item>401 is normal noise here. mobile.nbi.iq returns tens of thousands of 401s in ordinary operation; do not read 401 volume as "attack blocked". Weigh rate and endpoint concentration instead.</Item>
+    <Item>The immediate peer is shared infrastructure. data.src/data.original_src resolve to a small Cloudflare/SNAT edge pool (185.56.154.x, 159.60.162.x); one XFF maps to dozens of peers. Never treat the peer as an individual attacker; correlate XFF + peer + agent + endpoint.</Item>
+    <Item>The rule's blind spot is distribution. A per-source threshold cannot see a true DDoS (many XFFs each &lt;6000 on one host) or a low-and-slow/spoofed-XFF attacker. section 17.4 plus a per-host volumetric/5xx analytic is the required complement - the single highest-value hardening ask from this rule.</Item>
+    <Item>KB-worthy (persist to NBI customer scope; observed live 2026-08-19): (1) logs-tcp.generic-* = FortiWeb/WAF, single sensor syslog_location = 10.11.254.23, split by data.type traffic/attack/event (~199k / 2.6k / 0.5k per 2h). (2) traffic records: x_forwarded_for, data.src/data.original_src, data.http_host/_url/_retcode/_method/_agent, data.dst all ~100% populated. (3) attack records: x_forwarded_for and data.http_retcode NULL; disposition via data.action (Alert/Alert_Deny/Erase), data.policy (MobileBank-Prod-Link2, FCC.Prod-Link2, …), data.msg (signature text). (4) origin VIPs: mobile.nbi.iq → 10.11.204.30/.31, businessonline.nbi.iq → 10.11.207.130/.131. (5) edge pool 185.56.154.x/159.60.162.x = shared Cloudflare/SNAT. (6) mobile.nbi.iq normal load ~155k req / ~7,400 XFFs per 2h; 401 is high-volume-normal.</Item>
+    <Item>Scanners are never auto-trusted. ScanWave or any scanner/monitor that shows up as a high-volume XFF is investigated identically and confirmed from telemetry before it is used to downgrade an alert.</Item>
+  </Limitations>
+</Playbook>

@@ -1,0 +1,72 @@
+{
+  "name": "MS SQL — Windows Registry Access via xp_regread/xp_regwrite",
+  "tags": [
+    "NBI-Database",
+    "Phase3",
+    "MS-SQL-Server"
+  ],
+  "interval": "5m",
+  "enabled": true,
+  "description": "Detects SQL Server accessing the Windows registry via xp_reg* extended procedures — used for host reconnaissance, credential discovery, or persistence from within the database engine.",
+  "risk_score": 56,
+  "severity": "medium",
+  "note": "## Investigation\n1. Read the registry key in the statement; writes (xp_regwrite) are higher risk than reads.\n2. Some monitoring tools use xp_regread legitimately — baseline the source application.\n## Response\nIf unauthorised, investigate the principal and the registry keys touched.",
+  "output_index": "",
+  "investigation_fields": {
+    "field_names": [
+      "sqlserver.audit.statement",
+      "sqlserver.audit.server_principal_name",
+      "sqlserver.audit.session_server_principal_name",
+      "sqlserver.audit.database_name",
+      "sqlserver.audit.client_ip",
+      "sqlserver.audit.application_name",
+      "sqlserver.audit.host_name",
+      "event.action",
+      "host.name",
+      "user.name"
+    ]
+  },
+  "author": [
+    "raadabujaish"
+  ],
+  "false_positives": [],
+  "from": "now-9m",
+  "rule_id": "nbi-sql-registry-access",
+  "max_signals": 100,
+  "risk_score_mapping": [],
+  "severity_mapping": [],
+  "threat": [
+    {
+      "framework": "MITRE ATT&CK",
+      "tactic": {
+        "id": "TA0007",
+        "name": "Discovery",
+        "reference": "https://attack.mitre.org/tactics/TA0007/"
+      },
+      "technique": [
+        {
+          "id": "T1012",
+          "name": "Query Registry",
+          "reference": "https://attack.mitre.org/techniques/T1012/"
+        }
+      ]
+    }
+  ],
+  "to": "now",
+  "references": [
+    "https://attack.mitre.org/",
+    "https://learn.microsoft.com/en-us/sql/relational-databases/security/auditing/"
+  ],
+  "version": 1,
+  "exceptions_list": [],
+  "related_integrations": [],
+  "required_fields": [],
+  "setup": "",
+  "type": "query",
+  "language": "kuery",
+  "index": [
+    "logs-microsoft_sqlserver.audit-*"
+  ],
+  "query": "sqlserver.audit.statement:(\"xp_regread\" or \"xp_regwrite\" or \"xp_instance_regread\" or \"xp_instance_regwrite\" or \"xp_regdeletevalue\")",
+  "actions": []
+}

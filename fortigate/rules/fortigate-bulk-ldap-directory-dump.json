@@ -1,0 +1,78 @@
+{
+  "name": "Discovery/Collection — Bulk LDAP Directory Dump (large data, few sessions)",
+  "tags": [
+    "NBI",
+    "detection-recovery-2026-08",
+    "PT-validated",
+    "discovery",
+    "ldap",
+    "bloodhound",
+    "collection"
+  ],
+  "interval": "1h",
+  "enabled": true,
+  "description": "A client pulled a large volume of LDAP/LDAPS data (>=40 MB) from directory servers in very few sessions (<=200 flows) — the fingerprint of a directory dump (BloodHound/ldapsearch), as opposed to normal apps that make thousands of small LDAP lookups. Catches the confirmed 251 MB Aug-5 dump AND smaller partial dumps. Native (FortiGate), independent of Defender/MDI.",
+  "risk_score": 73,
+  "severity": "high",
+  "note": "### Investigation\n1. Is source.ip an identity-management/sync server (expected bulk LDAP) or a workstation/Kali/jump host?\n2. `ldap_mb` = data exfiltrated from the directory; `flows` low = single bulk operation.\n3. Correlate with spray/Kerberoast/lateral from same source (multi-stage rule).\n### Tuning\nRecurring legitimate bulk-LDAP servers (e.g. an IDM/proxy at 10.11.44.1) should be VALIDATED and suppressed by source.ip. FortiGate double-logs flows across 2 firewalls (~2x byte inflation) — thresholds account for this.",
+  "output_index": "",
+  "investigation_fields": {
+    "field_names": [
+      "source.ip",
+      "ldap_mb",
+      "sent_mb",
+      "flows",
+      "dst_dcs",
+      "last_seen"
+    ]
+  },
+  "author": [
+    "raadabujaish"
+  ],
+  "false_positives": [
+    "Identity-management / directory-sync / LDAP-proxy servers performing legitimate bulk reads (validate and suppress by source.ip)."
+  ],
+  "from": "now-6h",
+  "rule_id": "nbi-ldap-bulk-dump-from-dc",
+  "max_signals": 100,
+  "risk_score_mapping": [],
+  "severity_mapping": [],
+  "threat": [
+    {
+      "framework": "MITRE ATT&CK",
+      "tactic": {
+        "id": "TA0007",
+        "name": "Discovery",
+        "reference": "https://attack.mitre.org/tactics/TA0007/"
+      },
+      "technique": [
+        {
+          "id": "T1087.002",
+          "name": "Account Discovery: Domain",
+          "reference": "https://attack.mitre.org/techniques/T1087/002/"
+        },
+        {
+          "id": "T1069.002",
+          "name": "Permission Groups Discovery: Domain",
+          "reference": "https://attack.mitre.org/techniques/T1069/002/"
+        },
+        {
+          "id": "T1482",
+          "name": "Domain Trust Discovery",
+          "reference": "https://attack.mitre.org/techniques/T1482/"
+        }
+      ]
+    }
+  ],
+  "to": "now",
+  "references": [],
+  "version": 1,
+  "exceptions_list": [],
+  "related_integrations": [],
+  "required_fields": [],
+  "setup": "",
+  "type": "esql",
+  "language": "esql",
+  "query": "FROM logs-fortinet_fortigate.log-*\n| WHERE destination.port IN (389, 636) AND source.ip IS NOT NULL\n| STATS ldap_mb = SUM(destination.bytes)/1000000, sent_mb = SUM(source.bytes)/1000000, flows = COUNT(*), dst_dcs = VALUES(destination.ip), last_seen = MAX(@timestamp) BY source.ip\n| WHERE ldap_mb >= 40 AND flows <= 200\n| SORT ldap_mb DESC",
+  "actions": []
+}

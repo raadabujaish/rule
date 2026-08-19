@@ -1,0 +1,68 @@
+{
+  "name": "FortiWeb — Encoded SQL Injection Attempt",
+  "tags": [
+    "raad",
+    "redteam-2026-05",
+    "phase-3",
+    "web",
+    "variant-b",
+    "sqli"
+  ],
+  "interval": "10m",
+  "enabled": true,
+  "description": "Fires on encoded, comment-bypass, and time-based-blind SQL-injection patterns seen by FortiWeb across the request URL, user-agent, and body — time-based payloads (sleep(n)/pg_sleep/benchmark/waitfor), comment-obfuscated keywords (sel/**/ect), hex/union selects, and file/OS primitives (load_file/into outfile/xp_cmdshell). These indicate active exploitation attempts against public-facing banking apps. The rule lower-cases and concatenates URL+UA+body and regex-matches with numeric-argument gating to limit false positives. Maps to ATT&CK Initial Access T1190 (Exploit Public-Facing Application).",
+  "risk_score": 75,
+  "severity": "high",
+  "note": "### Investigation\n1. Read data.http_url (and the UA/body surface) to see the actual injection payload and which SQLi class it is.\n2. Check data.http_retcode and response timing — a 200 or a delayed response on a time-based payload suggests the injection worked.\n3. Identify the source (data.original_src) and target app (data.http_host); external unknown source against a sensitive app raises priority.\n4. Correlate with SQL Server audit alerts (xp_cmdshell/OLE, idx53/63) on the backing database for a successful pivot.\n5. Escalate on evidence of success (timing/retcode) or corroborating DB-side execution.\n\n### False positives / benign\nRare application or CAD traffic can contain literal sleep(...) substrings that match without being attacks. Distinguish by the surrounding syntax (the numeric-argument gate already filters bare words), whether multiple SQLi patterns co-occur, the response code/timing, and whether the source is a legitimate app client versus an external scanner. Investigate the payload rather than allowlisting the source or path, which an attacker can vary.\n\n### Notes\nInvestigation fields corrected to data.original_src (99% populated) vs the deployed query gate data.src; the query-level field fix is deferred to a validated Batch-2 change (unvalidated logic not deployed here). When the payload sits in UA/body, http_url is blank — surface the matched surface.",
+  "license": "",
+  "output_index": "",
+  "meta": {
+    "kibana_siem_app_url": ""
+  },
+  "investigation_fields": {
+    "field_names": [
+      "data.original_src",
+      "data.http_host",
+      "data.http_url",
+      "data.http_retcode"
+    ]
+  },
+  "author": [],
+  "false_positives": [
+    "Graphics/CAD apps with literal `sleep(...)` substring — rare;",
+    "Internal pentest from inside the network — exclude internal IPs at"
+  ],
+  "from": "now-30m",
+  "rule_id": "raad-07-encoded-sqli",
+  "max_signals": 100,
+  "risk_score_mapping": [],
+  "severity_mapping": [],
+  "threat": [
+    {
+      "framework": "MITRE ATT&CK",
+      "tactic": {
+        "id": "TA0001",
+        "name": "Initial Access",
+        "reference": "https://attack.mitre.org/tactics/TA0001/"
+      },
+      "technique": [
+        {
+          "id": "T1190",
+          "name": "Exploit Public-Facing Application",
+          "reference": "https://attack.mitre.org/techniques/T1190/"
+        }
+      ]
+    }
+  ],
+  "to": "now",
+  "references": [],
+  "version": 1,
+  "exceptions_list": [],
+  "related_integrations": [],
+  "required_fields": [],
+  "setup": "",
+  "type": "esql",
+  "language": "esql",
+  "query": "FROM logs-* METADATA _id, _version, _index\n| WHERE  @timestamp >= NOW() - 30 minutes\n  AND data.src IS NOT NULL\n| EVAL u  = TO_LOWER(COALESCE(data.http_url, \"\"))\n| EVAL ua = TO_LOWER(COALESCE(data.http_agent, \"\"))\n| EVAL b  = TO_LOWER(COALESCE(data.packet.packet, \"\"))\n| EVAL surf = CONCAT(u, \" | \", ua, \" | \", b)\n| WHERE\n        /* Time-based blind, REQUIRE numeric arg to limit FP */\n        surf RLIKE \"(?s).*sleep\\\\([0-9]+\\\\).*\"\n    OR surf RLIKE \".*pg_sleep\\\\([0-9]+\\\\).*\"\n    OR surf RLIKE \".*benchmark\\\\([0-9]+,.*\"\n    OR surf RLIKE \".*dbms_pipe\\\\.receive_message\\\\(.*\"\n    OR surf LIKE \"*waitfor*delay*\"\n    /* Comment / case-mutation bypass */\n    OR surf LIKE \"*/*!*select*\"\n    OR surf LIKE \"*sel/**/ect*\"\n    OR surf LIKE \"*un/**/ion*\"\n    OR surf LIKE \"*sel%65ct*\"\n    OR surf LIKE \"*%75nion*\"\n    /* Data-extraction primitives */\n    OR surf LIKE \"*concat(0x*\"\n    OR surf LIKE \"*group_concat(*\"\n    OR surf LIKE \"*load_file(*\"\n    OR surf LIKE \"*into outfile*\"\n    OR surf LIKE \"*xp_dirtree*\"\n    OR surf LIKE \"*xp_cmdshell*\"\n    /* Hex-encoded keywords */\n    OR surf LIKE \"*0x73656c656374*\"   /* hex 'select' */\n    OR surf LIKE \"*0x756e696f6e*\"      /* hex 'union' */\n| KEEP _id, _index, @timestamp, data.src, data.http_method, data.http_url,\n       data.http_agent, data.http_retcode \n| LIMIT 200",
+  "actions": []
+}

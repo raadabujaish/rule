@@ -1,0 +1,65 @@
+{
+  "name": "VMware vSphere — Virtual Machine Created (non-backup)",
+  "tags": [
+    "NBI-Virtualization",
+    "Phase3",
+    "VMware-vSphere"
+  ],
+  "interval": "5m",
+  "enabled": true,
+  "description": "Detects creation of a new virtual machine in vCenter by a non-backup principal (excludes routine Veeam.Backup restores). The message names the actor, the new VM and the target ESXi host. Rogue VM creation can be used to run unmonitored workloads or stage attacks inside the virtualization Tier-0.",
+  "risk_score": 56,
+  "severity": "medium",
+  "note": "## Investigation\n1. The `message` contains `[DOMAIN\\actor] [Datacenter] [taskid] Creating <VM> on <host>` — identify the actor and confirm the VM against change control.\n2. Human-admin VM creation outside a provisioning window is the concern.\n## Response\nIf unauthorised, power off/remove the VM and investigate the actor account.",
+  "output_index": "",
+  "investigation_fields": {
+    "field_names": [
+      "message",
+      "host.name",
+      "log.source.address",
+      "process.name"
+    ]
+  },
+  "author": [
+    "raadabujaish"
+  ],
+  "false_positives": [],
+  "from": "now-9m",
+  "rule_id": "nbi-vsphere-vm-created",
+  "max_signals": 100,
+  "risk_score_mapping": [],
+  "severity_mapping": [],
+  "threat": [
+    {
+      "framework": "MITRE ATT&CK",
+      "tactic": {
+        "id": "TA0003",
+        "name": "Persistence",
+        "reference": "https://attack.mitre.org/tactics/TA0003/"
+      },
+      "technique": [
+        {
+          "id": "T1136",
+          "name": "Create Account",
+          "reference": "https://attack.mitre.org/techniques/T1136/"
+        }
+      ]
+    }
+  ],
+  "to": "now",
+  "references": [
+    "https://attack.mitre.org/"
+  ],
+  "version": 1,
+  "exceptions_list": [],
+  "related_integrations": [],
+  "required_fields": [],
+  "setup": "",
+  "type": "query",
+  "language": "kuery",
+  "index": [
+    "logs-vsphere.log-*"
+  ],
+  "query": "event.dataset:\"vsphere.log\" and message:\"Creating\" and message:\"in NBI-Datacenter\" and not message:\"Veeam.Backup\"",
+  "actions": []
+}

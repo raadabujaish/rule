@@ -1,0 +1,436 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<Playbook xmlns="https://soc.example/playbooks" id="PB-windows-powershell-execution-policy-bypass" name="Malicious PowerShell Process - Execution Policy Bypass - SOC Playbook" version="3.0" status="Validated" classification="TLP:AMBER">
+  <Metadata>
+    <Owner>NBI SOC / Detection Engineering</Owner>
+    <LastUpdated>2026-08-19</LastUpdated>
+    <Severity default="high">high</Severity>
+    <Confidence default="Medium">Medium</Confidence>
+    <Category>Execution</Category>
+    <MitreAttack>
+      <Technique id="T1059"/>
+      <Technique id="T1059.001"/>
+      <Technique id="T1562"/>
+      <Technique id="T1562.001"/>
+      <Tactic id="TA0002"/>
+      <Tactic id="TA0005"/>
+    </MitreAttack>
+    <References>
+      <Reference title="MITRE ATT&amp;CK - Command and Scripting Interpreter: PowerShell (T1059.001)" url="https://attack.mitre.org/techniques/T1059/001/"/>
+      <Reference title="MITRE ATT&amp;CK - Impair Defenses: Disable or Modify Tools (T1562.001)" url="https://attack.mitre.org/techniques/T1562/001/"/>
+      <Reference title="MITRE ATT&amp;CK - Execution tactic (TA0002)" url="https://attack.mitre.org/tactics/TA0002/"/>
+      <Reference title="MITRE ATT&amp;CK - Defense Evasion tactic (TA0005)" url="https://attack.mitre.org/tactics/TA0005/"/>
+      <Reference title='Elastic - Prebuilt rule "Malicious PowerShell Process - Execution Policy Bypass"' url="https://www.elastic.co/docs/reference/security/prebuilt-rules/rules/windows/execution_command_powershell_execution_policy_bypass"/>
+      <Reference title="Microsoft Learn - about_Execution_Policies" url="https://learn.microsoft.com/en-us/powershell/module/microsoft.powershell.core/about/about_execution_policies"/>
+      <Reference title="Microsoft Learn - PowerShell script-block logging" url="https://learn.microsoft.com/en-us/powershell/scripting/security/security-features#script-block-logging"/>
+      <Reference title="Microsoft Learn - Command line process auditing (Event 4688 command-line GPO)" url="https://learn.microsoft.com/en-us/windows-server/identity/ad-ds/manage/component-updates/command-line-process-auditing"/>
+      <Reference title="MITRE ATT&amp;CK - PowerShell execution-policy bypass in the wild (T1059.001 procedure examples)" url="https://attack.mitre.org/techniques/T1059/001/"/>
+    </References>
+  </Metadata>
+  <AlertContext>
+    <RuleName>Malicious PowerShell Process - Execution Policy Bypass</RuleName>
+    <RuleId>f5924f82-0e7e-4679-a11f-5858f7cd0c6e</RuleId>
+    <RuleType>query</RuleType>
+    <Index>logs-system.security*</Index>
+    <TriggerLogic>The deployed rule is an Elastic query (KQL) rule. Reconstructed from the deployed trigger logic, the detection filter is:
+
+
+
+Plain English: any process creation where the image is powershell.exe and one of the arguments is an execution-policy-bypass switch. -ExecutionPolicy Bypass (and its -ep alias) tells PowerShell to ignore the machine's script-signing policy for that session; the bare Bypass token is matched anywhere in the argument vector, so it also catches Set-ExecutionPolicy Bypass and - importantly - unrelated arguments or paths that merely contain the word "Bypass", which inflate volume and must be read in full.
+
+Why this matters: the execution policy is the guardrail that would otherwise block an unsigned attacker script from running at all. Disabling it is the enabling step that lets a downstream loader, credential-theft, or lateral-movement script execute under the launching account's privileges. The rule deliberately casts wide and leans on the investigation (this playbook) to separate the malicious minority from the administrative majority.</TriggerLogic>
+    <KeyAlertFields>process.name, process.executable, process.parent.name, process.parent.executable, process.pid, process.parent.pid, process.entity_id, user.name, user.domain, process.command_line, process.args</KeyAlertFields>
+  </AlertContext>
+  <Inputs>
+    <Input name="$host"/>
+    <Input name="$user"/>
+    <Input name="$source_ip"/>
+  </Inputs>
+  <ExecutiveSummary>
+    <Overview>This playbook drives triage and investigation of the Malicious PowerShell Process - Execution Policy Bypass detection on NBI's Elastic Security deployment. The rule fires when a powershell.exe process is created with an execution-policy-bypass argument (-ExecutionPolicy, the -ep alias, or the bare Bypass token). Those switches disable the PowerShell execution-policy guardrail so the interpreter will run unsigned or untrusted scripts without prompting - a near-universal precursor in script-based attacks, and simultaneously a common (if discouraged) habit in legitimate admin and installer scripts.
+
+On its own the flag is weak signal. The analyst's job is to decide, quickly and defensibly, whether this bypass ran an untrusted or stealthy script under a suspicious launcher (true_positive), an authorised administrative or deployment script or a positively proven-blocked attempt (false_positive), a legitimate installer that simply was not baselined (misconfiguration), or an event whose script target and launcher cannot be resolved (needs_escalation). The decision rests on the surrounding context - the full flag combination, the script the bypass ran, the launching parent, and whether this is normal for the account - not on the bypass token alone.</Overview>
+    <BusinessImpact>An alert means: on $host, the account $user started powershell.exe with an execution-policy bypass in its arguments. It does *not* by itself mean a malicious script ran - it means the guardrail that gates unsigned scripts was removed for that invocation. Everything of consequence is in what the bypass was used to run and who ran it.
+
+Three questions convert the alert into a verdict:
+
+1. What flags accompanied the bypass? A bypass paired with -nop/-NoProfile, -w hidden/-WindowStyle Hidden, -noni/-NonInteractive, or -EncodedCommand/-enc is the classic *stealth-runner* pattern and is strongly malicious. A lone -ExecutionPolicy Bypass on an otherwise ordinary admin command is weak signal.
+2. What script or command did it run? What follows -File or -Command matters most: a script under C:\Users\...\Downloads, \AppData\Local\Temp, \Public, or a UNC/WebDAV path is untrusted; a signed script from a software-deployment share is likely benign.
+3. Who launched it? The parent process separates a delivery chain (Office app, script host, browser) from legitimate management (deployment agent, scheduled-task host, explorer.exe).
+
+Because NBI captures process.command_line on only ~50% of 4688 event</BusinessImpact>
+  </ExecutiveSummary>
+  <Investigation>
+    <Goal>Decide true_positive / false_positive / misconfiguration / needs_escalation for Malicious PowerShell Process - Execution Policy Bypass.</Goal>
+    <Workflow>
+      <Step order="1" name="Reproduce the rule estate-wide (confirm the detection logic)">
+        <Purpose>Reproduce the rule estate-wide (confirm the detection logic)</Purpose>
+        <Query platform="Elastic" language="ES|QL" id="Q-01">
+          <![CDATA[
+FROM logs-system.security*
+| WHERE @timestamp >= NOW() - 4 hours
+    AND event.code == "4688"
+    AND host.os.type == "windows"
+    AND TO_LOWER(process.name) == "powershell.exe"
+| EVAL cl = TO_LOWER(CONCAT(COALESCE(process.command_line, ""), " ", COALESCE(MV_CONCAT(process.args, " "), "")))
+| WHERE cl LIKE "*executionpolicy*" OR cl LIKE "*-ep *" OR cl LIKE "*bypass*"
+| KEEP @timestamp, host.name, user.name, process.command_line, process.parent.name
+| SORT @timestamp DESC
+| LIMIT 100
+]]>
+        </Query>
+      </Step>
+      <Step order="2" name="Confirm on the alert host/user (recover the bypass invocations and the script) - reused from the deployed playbook">
+        <Purpose>Confirm on the alert host/user (recover the bypass invocations and the script) - reused from the deployed playbook</Purpose>
+        <Query platform="Elastic" language="ES|QL" id="Q-02">
+          <![CDATA[
+FROM logs-system.security*
+| WHERE event.code == "4688" AND process.name == "powershell.exe"
+    AND host.name == "$host" AND user.name == "$user"
+    AND (process.command_line LIKE "*ExecutionPolicy*" OR process.command_line LIKE "*-ep *"
+         OR process.command_line LIKE "*Bypass*")
+    AND @timestamp >= NOW() - 4 hours
+| KEEP @timestamp, process.command_line, process.parent.name
+| SORT @timestamp DESC
+| LIMIT 20
+]]>
+        </Query>
+      </Step>
+      <Step order="3" name="Entity pivoting">
+        <Purpose>Entity pivoting</Purpose>
+        <Query platform="Elastic" language="ES|QL" id="Q-03">
+          <![CDATA[
+FROM logs-system.security*
+| WHERE @timestamp >= NOW() - 4 hours
+    AND event.code == "4688"
+    AND host.name == "$host"
+    AND user.name == "$user"
+    AND TO_LOWER(process.name) == "powershell.exe"
+| KEEP @timestamp, host.name, user.name, user.domain, process.command_line, process.parent.name, process.pid, process.parent.pid
+| SORT @timestamp DESC
+| LIMIT 50
+]]>
+        </Query>
+      </Step>
+      <Step order="4" name="Process investigation">
+        <Purpose>Process investigation</Purpose>
+        <Query platform="Elastic" language="ES|QL" id="Q-04">
+          <![CDATA[
+FROM logs-system.security*
+| WHERE @timestamp >= NOW() - 4 hours
+    AND event.code == "4688"
+    AND TO_LOWER(process.name) == "powershell.exe"
+| EVAL cl = TO_LOWER(CONCAT(COALESCE(process.command_line, ""), " ", COALESCE(MV_CONCAT(process.args, " "), "")))
+| WHERE cl LIKE "*executionpolicy*" OR cl LIKE "*bypass*"
+| STATS execs = COUNT(*), hosts = COUNT_DISTINCT(host.name), users = COUNT_DISTINCT(user.name) BY process.parent.name
+| SORT execs DESC
+| LIMIT 25
+]]>
+        </Query>
+      </Step>
+      <Step order="5" name="Process investigation">
+        <Purpose>Process investigation</Purpose>
+        <Query platform="Elastic" language="ES|QL" id="Q-05">
+          <![CDATA[
+FROM logs-system.security*
+| WHERE @timestamp >= NOW() - 4 hours
+    AND event.code == "4688"
+    AND host.name == "$host"
+    AND user.name == "$user"
+    AND TO_LOWER(process.name) == "powershell.exe"
+    AND process.args IS NOT NULL
+| EVAL arguments = MV_CONCAT(process.args, " ")
+| KEEP @timestamp, host.name, user.name, process.parent.name, arguments
+| SORT @timestamp DESC
+| LIMIT 50
+]]>
+        </Query>
+      </Step>
+      <Step order="6" name="Parent-Child process analysis">
+        <Purpose>Parent-Child process analysis</Purpose>
+        <Query platform="Elastic" language="ES|QL" id="Q-06">
+          <![CDATA[
+FROM logs-system.security*
+| WHERE @timestamp >= NOW() - 4 hours
+    AND event.code == "4688"
+    AND host.name == "$host"
+    AND (TO_LOWER(process.parent.name) == "powershell.exe" OR TO_LOWER(process.name) == "powershell.exe")
+| KEEP @timestamp, user.name, process.parent.name, process.parent.pid, process.name, process.pid, process.executable
+| SORT @timestamp DESC
+| LIMIT 50
+]]>
+        </Query>
+      </Step>
+      <Step order="7" name="Parent-Child process analysis">
+        <Purpose>Parent-Child process analysis</Purpose>
+        <Query platform="Elastic" language="ES|QL" id="Q-07">
+          <![CDATA[
+FROM logs-system.security*
+| WHERE @timestamp >= NOW() - 4 hours
+    AND event.code == "4688"
+    AND host.name == "$host"
+    AND TO_LOWER(process.parent.name) == "powershell.exe"
+| STATS execs = COUNT(*), users = COUNT_DISTINCT(user.name) BY process.name, process.executable
+| SORT execs DESC
+| LIMIT 30
+]]>
+        </Query>
+      </Step>
+      <Step order="8" name="User investigation">
+        <Purpose>User investigation</Purpose>
+        <Query platform="Elastic" language="ES|QL" id="Q-08">
+          <![CDATA[
+FROM logs-system.security*
+| WHERE @timestamp >= NOW() - 4 hours
+    AND event.code == "4688"
+    AND user.name == "$user"
+| STATS executions = COUNT(*), distinct_procs = COUNT_DISTINCT(process.name) BY host.name
+| SORT executions DESC
+| LIMIT 20
+]]>
+        </Query>
+      </Step>
+      <Step order="9" name="Host investigation">
+        <Purpose>Host investigation</Purpose>
+        <Query platform="Elastic" language="ES|QL" id="Q-09">
+          <![CDATA[
+FROM logs-system.security*
+| WHERE @timestamp >= NOW() - 4 hours
+    AND event.code == "4688"
+    AND host.name == "$host"
+| STATS executions = COUNT(*), users = COUNT_DISTINCT(user.name) BY process.name, process.parent.name
+| SORT executions ASC
+| LIMIT 40
+]]>
+        </Query>
+      </Step>
+      <Step order="10" name="IP investigation">
+        <Purpose>IP investigation</Purpose>
+        <Query platform="Elastic" language="ES|QL" id="Q-10">
+          <![CDATA[
+FROM logs-system.security*
+| WHERE @timestamp >= NOW() - 4 hours
+    AND event.code == "4624"
+    AND host.name == "$host" AND user.name == "$user"
+    AND source.ip IS NOT NULL
+| STATS logons = COUNT(*) BY source.ip, winlog.event_data.LogonType
+| SORT logons DESC
+| LIMIT 20
+]]>
+        </Query>
+      </Step>
+      <Step order="11" name="IP investigation">
+        <Purpose>IP investigation</Purpose>
+        <Query platform="Elastic" language="ES|QL" id="Q-11">
+          <![CDATA[
+FROM logs-system.security*
+| WHERE @timestamp >= NOW() - 4 hours
+    AND event.code == "4624"
+    AND source.ip == "$source_ip"
+| STATS logons = COUNT(*) BY user.name, host.name, winlog.event_data.LogonType
+| SORT logons DESC
+| LIMIT 25
+]]>
+        </Query>
+      </Step>
+      <Step order="12" name="File investigation">
+        <Purpose>File investigation</Purpose>
+        <Query platform="Elastic" language="ES|QL" id="Q-12">
+          <![CDATA[
+FROM logs-system.security*
+| WHERE @timestamp >= NOW() - 4 hours
+    AND event.code == "4688"
+    AND host.name == "$host"
+    AND TO_LOWER(process.parent.name) == "powershell.exe"
+| STATS execs = COUNT(*), first_seen = MIN(@timestamp), last_seen = MAX(@timestamp) BY process.executable
+| SORT execs DESC
+| LIMIT 30
+]]>
+        </Query>
+      </Step>
+      <Step order="13" name="Authentication investigation">
+        <Purpose>Authentication investigation</Purpose>
+        <Query platform="Elastic" language="ES|QL" id="Q-13">
+          <![CDATA[
+FROM logs-system.security*
+| WHERE @timestamp >= NOW() - 4 hours
+    AND event.code IN ("4624", "4625", "4634", "4647")
+    AND host.name == "$host" AND user.name == "$user"
+| STATS events = COUNT(*), first_seen = MIN(@timestamp), last_seen = MAX(@timestamp) BY event.code, winlog.event_data.LogonType, source.ip
+| SORT events DESC
+| LIMIT 30
+]]>
+        </Query>
+      </Step>
+      <Step order="14" name="Timeline Reconstruction">
+        <Purpose>Timeline Reconstruction</Purpose>
+        <Query platform="Elastic" language="ES|QL" id="Q-14">
+          <![CDATA[
+FROM logs-system.security*
+| WHERE @timestamp >= NOW() - 4 hours
+    AND event.code == "4688"
+    AND host.name == "$host"
+    AND user.name == "$user"
+| KEEP @timestamp, process.parent.name, process.parent.pid, process.name, process.pid, process.executable, process.command_line
+| SORT @timestamp ASC
+| LIMIT 200
+]]>
+        </Query>
+      </Step>
+      <Step order="15" name="Lateral movement validation">
+        <Purpose>Lateral movement validation</Purpose>
+        <Query platform="Elastic" language="ES|QL" id="Q-15">
+          <![CDATA[
+FROM logs-system.security*
+| WHERE @timestamp >= NOW() - 4 hours
+    AND event.code IN ("4624", "4648", "4768", "4769", "5140")
+    AND user.name == "$user"
+    AND host.name != "$host"
+| STATS events = COUNT(*) BY host.name, event.code, winlog.event_data.LogonType
+| SORT events DESC
+| LIMIT 30
+]]>
+        </Query>
+      </Step>
+      <Step order="16" name="Persistence validation">
+        <Purpose>Persistence validation</Purpose>
+        <Query platform="Elastic" language="ES|QL" id="Q-16">
+          <![CDATA[
+FROM logs-system.security*
+| WHERE @timestamp >= NOW() - 4 hours
+    AND host.name == "$host"
+    AND (
+        (event.code == "4688" AND TO_LOWER(process.name) IN ("schtasks.exe", "reg.exe", "sc.exe", "at.exe", "wscript.exe", "cscript.exe", "rundll32.exe", "mshta.exe", "certutil.exe", "bitsadmin.exe"))
+        OR event.code == "7045"
+        OR event.code == "4720"
+        OR event.code == "4698"
+    )
+| STATS events = COUNT(*) BY event.code, process.name, user.name
+| SORT events DESC
+| LIMIT 40
+]]>
+        </Query>
+      </Step>
+      <Step order="17" name="Privilege escalation validation">
+        <Purpose>Privilege escalation validation</Purpose>
+        <Query platform="Elastic" language="ES|QL" id="Q-17">
+          <![CDATA[
+FROM logs-system.security*
+| WHERE @timestamp >= NOW() - 4 hours
+    AND event.code == "4672"
+    AND host.name == "$host"
+| STATS special_priv_logons = COUNT(*) BY user.name
+| SORT special_priv_logons DESC
+| LIMIT 25
+]]>
+        </Query>
+      </Step>
+      <Step order="18" name="Defense evasion validation">
+        <Purpose>Defense evasion validation</Purpose>
+        <Query platform="Elastic" language="ES|QL" id="Q-18">
+          <![CDATA[
+FROM logs-system.security*
+| WHERE @timestamp >= NOW() - 4 hours
+    AND host.name == "$host"
+    AND (
+        (event.code == "4688" AND TO_LOWER(process.name) IN ("wevtutil.exe", "fsutil.exe", "vssadmin.exe", "wmic.exe", "cipher.exe", "sdelete.exe", "sdelete64.exe"))
+        OR event.code == "1102"
+        OR event.code == "4719"
+    )
+| STATS events = COUNT(*) BY event.code, process.name, user.name
+| SORT events DESC
+| LIMIT 30
+]]>
+        </Query>
+      </Step>
+      <Step order="19" name="Impact assessment">
+        <Purpose>Impact assessment</Purpose>
+        <Query platform="Elastic" language="ES|QL" id="Q-19">
+          <![CDATA[
+FROM logs-system.security*
+| WHERE @timestamp >= NOW() - 4 hours
+    AND host.name == "$host"
+    AND event.code == "4688"
+    AND TO_LOWER(process.parent.name) == "powershell.exe"
+| STATS children = COUNT(*), distinct_children = COUNT_DISTINCT(process.name) BY process.name
+| SORT children DESC
+| LIMIT 30
+]]>
+        </Query>
+      </Step>
+      <Step order="20" name="Finalize verdict">
+        <DecisionTree>
+        </DecisionTree>
+      </Step>
+    </Workflow>
+  </Investigation>
+  <ClassificationGuidance>
+    <TruePositive>
+      <Definition></Definition>
+    </TruePositive>
+    <FalsePositive>
+      <Definition></Definition>
+      <Indicators>
+        <Item>Legitimate admin and deployment scripts. Administrators and packaged installers routinely set -ExecutionPolicy Bypass so their own unsigned scripts run non-interactively. This is the single largest benign source.</Item>
+        <Item>Software installers / management agents (SCCM/Intune, vendor setup routines) that shell out to PowerShell with a bypass as packaged behaviour, often under a deployment parent and across many hosts at once (a fleet-wide rollout shape).</Item>
+        <Item>Scheduled tasks and login/monitoring scripts launched by taskeng.exe/svchost.exe/services.exe that use a bypass to run maintenance logic.</Item>
+        <Item>Substring artifact on the bare Bypass token. A path or parameter that merely contains the word "Bypass" (not as the -ExecutionPolicy value) is a match inflator - discount it after reading the full line.</Item>
+        <Item>Red/purple-team or admin self-testing. These are *not* benign - they are authorised execution of a suspicious technique and must be matched to a change ticket or exercise ROE before being classified false_positive (authorised), never dismissed on sight.</Item>
+        <Item>No execution-policy-bypass invocation was present in the validated 4-hour window, although powershell.exe itself runs across the estate (hundreds of executions per 4h, concentrated on service-tier hosts such as nim-st-apv10/-apv11 where PowerShell runs under the machine account in a service/scheduled context). A bypass by one of those service identities is more likely automation than intrusion - but is still confirmed, never assumed.</Item>
+        <Item>The jump/VDI tier is the higher-risk locus. Hosts such as nim-jump-apv02/-apv03/-apv22 carry real interactive user sessions. A bypass launched there by a named interactive user under an Office/script-host/browser parent is the intrusion shape and outranks a service-account bypass on a server.</Item>
+        <Item>Command-line capture is bimodal (see section 8). On hosts without the command-line GPO (which includes much of the jump/VDI tier) the flag set and script target are simply absent from 4688 - expect null process.command_line/process.args exactly where an interactive bypass is most plausible, and lean on the parent chain and PowerShell script-block logs.</Item>
+      </Indicators>
+    </FalsePositive>
+    <Misconfiguration>
+      <Definition></Definition>
+    </Misconfiguration>
+    <NeedsEscalation>
+      <Definition></Definition>
+    </NeedsEscalation>
+  </ClassificationGuidance>
+  <ResponseActions>
+    <Phase name="Containment">
+      <Action>Isolate $host (network-contain / quarantine) if a true_positive is confirmed, to stop post-execution activity. On a shared jump/VDI host, coordinate with IT to avoid dropping unrelated user sessions, but prioritise containment.</Action>
+      <Action>Suspend or force-logoff $user's session on $host and disable the account pending investigation if the user context is implicated; reset its credentials (section 20).</Action>
+      <Action>Terminate the PowerShell process and its descendants (the $user PowerShell tree from section 15.3/section 17.5) if the host cannot yet be isolated.</Action>
+      <Action>Preserve volatile evidence first where feasible - running process list, PowerShell console history / script-block logs, and any dropped script from the -File path - since NBI's 4688 will not retain the script content.</Action>
+      <Action>Deploy/confirm changes only via the authorised human-approved DEPLOY path; investigation itself is read-only.</Action>
+    </Phase>
+    <Phase name="Eradication">
+      <Action>Remove the persistence discovered in section 17.2 (services, scheduled tasks, Run keys, rogue accounts) and any dropped payload identified via section 15.10 (process.executable path).</Action>
+      <Action>Delete the malicious script(s) the bypass ran, and any staged tooling downloaded by it; recover the -File/-Command target from the command line or PowerShell logs.</Action>
+      <Action>Run a full anti-malware / EDR scan on $host and hunt for the same script hash and persistence across peers, especially other jump/VDI hosts and any host $user touched (section 15.4, section 17.1).</Action>
+      <Action>Remediate the initial-access vector (phishing, macro, downloaded script) that delivered the script the bypass executed.</Action>
+    </Phase>
+    <Phase name="Recovery">
+      <Action>Reset $user's password and any credentials accessible from $host during the session; if privileged accounts logged on there (section 17.3), rotate those too and review for Kerberos/NTLM secret exposure.</Action>
+      <Action>Restore $host from a known-good image if persistence or tampering was extensive; otherwise validate that all eradication actions hold after reboot.</Action>
+      <Action>Return the host/account to service only after section 22 closing criteria are met and monitoring confirms no recurrence of the bypass with untrusted scripts.</Action>
+      <Action>Recommend hardening (section 23): enforce signed-script policy (RemoteSigned/AllSigned), WDAC/AppLocker for PowerShell, deny PowerShell to non-admin/service accounts, and enable command-line + PowerShell script-block/module logging on the jump/workstation tier.</Action>
+    </Phase>
+  </ResponseActions>
+  <Escalation>
+    <Trigger>Escalate to Tier 3 / Incident Response (and notify the customer) when any of the following hold:
+
+- An untrusted or stealth-flagged script is confirmed executed via the bypass (section 15.2, section 14.2), especially with a document/script-host/browser delivery parent (section 15.3).
+- The PowerShell session spawned recon, credential-access, download-execution, or persistence tooling (section 17.5), or persistence was installed (section 17.2).
+- Lateral movement from $host/$user is observed (section 17.1), especially toward domain controllers or other privileged systems.
+- Log clearing or audit-policy tampering appears (section 17.4), or the acting account is a service/privileged identity that should not be running scripts.
+- Evidence is incomplete because the command line is null and script-block logs are unavailable - escalate as needs_escalation with the gap named.</Trigger>
+    <To>SOC L2 / IR</To>
+  </Escalation>
+  <ClosureCriteria>
+    <Item>false_positive (authorised): a change ticket, known installer/agent, or sanctioned red/purple-team ROE is positively matched to the exact script + parent + $user + $host + time. Record the reference; scope any exception to the exact script path + parent + account, never a blanket host/user allow.</Item>
+    <Item>false_positive (blocked/authorised): the downstream script was positively proven blocked (EDR/WDAC prevention, no successful execution) or was an authorised technique test - documented as blocked/authorised, never "benign".</Item>
+    <Item>misconfiguration: a legitimate installer/agent produced the bypass as packaged behaviour without attacker involvement; a baseline/hardening action is raised.</Item>
+    <Item>true_positive: an untrusted/stealthy script executed via the bypass; containment/eradication/recovery completed, scope of $user/$host/peers established, no residual persistence or recurrence.</Item>
+    <Item>needs_escalation: handed to Tier 3/IR with the specific evidence gaps documented.</Item>
+  </ClosureCriteria>
+  <Limitations>
+    <Item>The flag combination is the story. A lone -ExecutionPolicy Bypass is weak; -ep bypass paired with -nop -w hidden -noni -enc (or a -File under Downloads/Temp/Public/UNC) is the stealth-runner and is strongly malicious. Always read the whole line.</Item>
+    <Item>Command-line capture is bimodal and the "wrong" tier for this attack. It is ~100% on some servers (e.g. nim-est-apv07) but absent on much of the jump/VDI tier where interactive bypass is most plausible. Expect null process.command_line/process.args exactly where you most want them; lean on the parent chain, PID lineage, child image paths, and logs-windows.powershell* script-block logs.</Item>
+    <Item>PowerShell script-block logging is the durable control. The execution policy can be defeated with no bypass token at all (stdin piping, Get-Content | IEX, in-process Set-ExecutionPolicy -Scope Process, or pwsh.exe). A complementary script-block/AMSI analytic that inspects executed script *content* in logs-windows.powershell* is required for real coverage - this rule catches only the flagged invocation.</Item>
+    <Item>No Sysmon → PID-based lineage. With process.entity_id unavailable, reconstruct trees with process.pid/process.parent.pid in a tight window and corroborate with process.parent.name (PIDs are reused).</Item>
+    <Item>source.ip is shared infrastructure. A single VDI/jump egress IP (validated example: 10.11.102.15) fronts many users, including admins. Never treat source.ip as an individual identifier; correlate IP + user + host.</Item>
+    <Item>KB-worthy (persist to NBI customer scope): (1) no execution-policy-bypass invocation over 4h in-window while powershell.exe runs ~hundreds/4h (concentrated as machine-account service PowerShell on nim-st-apv10/-apv11); (2) command-line/process.args host-bimodality (nim-est-apv07=populated vs jump tier=null); (3) process.hash.* absent on 4688; (4) logs-windows.powershell* present (~103k/24h) as the script-content source; (5) 10.11.102.15 = shared VDI/admin egress fronting nim-jump-apv02. Observed live 2026-08-19.</Item>
+  </Limitations>
+</Playbook>

@@ -1,0 +1,276 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<Playbook xmlns="https://soc.example/playbooks" id="PB-fortigate-dos-ddos-isp-destinations" name="Potential DoS/DDoS Attack on ISP-Managed External Destinations - SOC Playbook" version="3.0" status="Validated" classification="TLP:AMBER">
+  <Metadata>
+    <Owner>NBI SOC / Detection Engineering</Owner>
+    <LastUpdated>2026-08-19</LastUpdated>
+    <Severity default="high">high</Severity>
+    <Confidence default="Medium">Medium</Confidence>
+    <Category>Impact</Category>
+    <MitreAttack>
+      <Technique id="T1498"/>
+      <Technique id="T1498.001"/>
+      <Technique id="T1499"/>
+      <Tactic id="TA0040"/>
+    </MitreAttack>
+    <References>
+      <Reference title="MITRE ATT&amp;CK - Network Denial of Service (T1498)" url="https://attack.mitre.org/techniques/T1498/"/>
+      <Reference title="MITRE ATT&amp;CK - Direct Network Flood (T1498.001)" url="https://attack.mitre.org/techniques/T1498/001/"/>
+      <Reference title="MITRE ATT&amp;CK - Endpoint Denial of Service (T1499)" url="https://attack.mitre.org/techniques/T1499/"/>
+      <Reference title="MITRE ATT&amp;CK - Impact tactic (TA0040)" url="https://attack.mitre.org/tactics/TA0040/"/>
+      <Reference title="CISA - Understanding and Responding to Distributed Denial-of-Service Attacks" url="https://www.cisa.gov/news-events/alerts/2022/12/13/understanding-and-responding-distributed-denial-service-attacks"/>
+      <Reference title="Cloudflare - IP ranges (for CDN/edge source attribution)" url="https://www.cloudflare.com/ips/"/>
+      <Reference title="Fortinet - DoS policy and protection profiles (FortiOS Administration Guide)" url="https://docs.fortinet.com/document/fortigate/7.4.0/administration-guide/553739/dos-policy"/>
+      <Reference title="Elastic - ES|QL reference (STATS / CIDR_MATCH / date math)" url="https://www.elastic.co/guide/en/elasticsearch/reference/current/esql.html"/>
+    </References>
+  </Metadata>
+  <AlertContext>
+    <RuleName>Potential DoS/DDoS Attack on ISP-Managed External Destinations</RuleName>
+    <RuleId>6c63e680-95f4-465c-b555-2f29437c9425</RuleId>
+    <RuleType>esql</RuleType>
+    <Index>logs-fortinet_fortigate.log-*</Index>
+    <TriggerLogic>The deployed rule is an ES|QL analytic. Plain-English of the deployed logic: filter FortiGate flows to destination.ip IN (the four ISP IPs) from sources not in 10.0.0.0/8 / 192.168.0.0/16 / 172.16.0.0/12; aggregate per destination+source; keep a source with event_count &gt;= 500; then fire when the summed per-group volume breaches Group-A (≥ 40000) or Group-B (≥ 15000).
+
+One-line Kibana KQL detection filter (scopes to the traffic reaching a target for fast pivoting):
+
+
+
+Why the accept-vs-deny split is decisive: event.action is the mitigation lens. accept means traffic reached the destination (potential impact); deny / client-rst / server-rst / timeout mean the firewall or endpoint refused or tore down the connection (the flood is being blocked). A large accept count on one service port (443/8443/9443) from a huge or coordinated source set is the volumetric-impact shape; a large deny/reset count is mitigation already engaging. Because these destinations legitimately front high-traffic services and much of the source space is CDN/edge infrastructure, the accept/deny counts and per-port concentration are more reliable than raw source counts.</TriggerLogic>
+    <KeyAlertFields>destination.ip, source.ip, destination.port, event.action, source.user.name, url.domain, url.full</KeyAlertFields>
+  </AlertContext>
+  <Inputs>
+    <Input name="$dest_ip"/>
+    <Input name="$source_ip"/>
+  </Inputs>
+  <ExecutiveSummary>
+    <Overview>This playbook drives triage and investigation of the Potential DoS/DDoS Attack on ISP-Managed External Destinations detection on NBI's Elastic Security deployment. The rule is an ES|QL volumetric aggregation over FortiGate flow logs: over a 15-minute window it aggregates traffic to a fixed set of ISP-managed external destination IPs (185.27.117.243, 109.224.43.214, 109.224.43.213, 185.27.117.246) from non-internal sources, retains a source contributing ≥ 500 events, and fires when a per-group volume threshold is breached - Group-A (185.27.117.243 / 109.224.43.214) at ≥ 40000, Group-B (109.224.43.213 / 185.27.117.246) at ≥ 15000 - flagging a potential volumetric flood against those destinations.
+
+The analyst's job is to decide four things and classify accordingly: is the volume a genuine flood, is it one source or many, is the firewall accepting the traffic to the target or denying/resetting it (is mitigation already working), and is the pattern an attack or an operational fault. Verdicts: a confirmed volumetric flood that reached/degraded the target (true_positive); authorised high traffic or a firewall-blocked flood (false_positive); an operational fault generating volume (misconfiguration); or attack-vs-legitimate that cannot be resolved (needs_escalation).</Overview>
+    <BusinessImpact>An alert asserts: FortiGate saw a high volume of traffic to an ISP-managed external destination ($dest_ip) from external sources, crossing the rule's volumetric thresholds. These IPs are ISP-managed and front high-traffic services, so a threshold breach is a *hypothesis of a flood*, not a confirmed one. The investigation must separate a genuine DoS/DDoS from legitimate CDN/edge load and from operational faults (retry storms, health-check loops, NAT/hairpin artifacts).
+
+Two opposite failure modes carry real business cost, which is why the evidence matters: a missed volumetric attack degrades or severs NBI's internet-facing connectivity (online/mobile banking, branch links, payment channels) and can be a smokescreen for a concurrent intrusion; but misreading legitimate CDN traffic as an attack and null-routing it would cause a self-inflicted outage. The accept-vs-deny disposition and the source-shape evidence are what keep the verdict defensible.</BusinessImpact>
+  </ExecutiveSummary>
+  <Investigation>
+    <Goal>Decide true_positive / false_positive / misconfiguration / needs_escalation for Potential DoS/DDoS Attack on ISP-Managed External Destinations.</Goal>
+    <Workflow>
+      <Step order="1" name="Reproduce the rule intent across the ISP destination set">
+        <Purpose>Reproduce the rule intent across the ISP destination set</Purpose>
+        <Query platform="Elastic" language="ES|QL" id="Q-01">
+          <![CDATA[
+FROM logs-fortinet_fortigate.log-*
+| WHERE destination.ip IN ("185.27.117.243", "109.224.43.214", "109.224.43.213", "185.27.117.246")
+    AND @timestamp >= NOW() - 2 hours
+    AND NOT CIDR_MATCH(source.ip, "10.0.0.0/8", "192.168.0.0/16", "172.16.0.0/12")
+| STATS events = COUNT(*), sources = COUNT_DISTINCT(source.ip),
+        accepts = COUNT(*) WHERE event.action == "accept"
+    BY destination.ip, event.action
+| SORT events DESC
+| LIMIT 25
+]]>
+        </Query>
+      </Step>
+      <Step order="2" name="Confirm the volume and firewall disposition on the alert destination">
+        <Purpose>Confirm the volume and firewall disposition on the alert destination</Purpose>
+        <Query platform="Elastic" language="ES|QL" id="Q-02">
+          <![CDATA[
+FROM logs-fortinet_fortigate.log-*
+| WHERE destination.ip == "$dest_ip" AND @timestamp >= NOW() - 2 hours
+    AND NOT CIDR_MATCH(source.ip, "10.0.0.0/8", "192.168.0.0/16", "172.16.0.0/12")
+| STATS events = COUNT(*), sources = COUNT_DISTINCT(source.ip)
+    BY event.action, destination.port
+| SORT events DESC
+| LIMIT 20
+]]>
+        </Query>
+      </Step>
+      <Step order="3" name="Entity pivoting">
+        <Purpose>Entity pivoting</Purpose>
+        <Query platform="Elastic" language="ES|QL" id="Q-03">
+          <![CDATA[
+FROM logs-fortinet_fortigate.log-*
+| WHERE destination.ip == "$dest_ip" AND @timestamp >= NOW() - 2 hours
+    AND NOT CIDR_MATCH(source.ip, "10.0.0.0/8", "192.168.0.0/16", "172.16.0.0/12")
+| STATS events = COUNT(*), sources = COUNT_DISTINCT(source.ip)
+    BY event.action, destination.port
+| SORT events DESC
+| LIMIT 20
+]]>
+        </Query>
+      </Step>
+      <Step order="4" name="Host investigation">
+        <Purpose>Host investigation</Purpose>
+        <Query platform="Elastic" language="ES|QL" id="Q-04">
+          <![CDATA[
+FROM logs-fortinet_fortigate.log-*
+| WHERE destination.ip == "$dest_ip" AND @timestamp >= NOW() - 2 hours
+| STATS events = COUNT(*), sources = COUNT_DISTINCT(source.ip),
+        accepts = COUNT(*) WHERE event.action == "accept"
+    BY destination.port
+| SORT events DESC
+| LIMIT 15
+]]>
+        </Query>
+      </Step>
+      <Step order="5" name="IP investigation">
+        <Purpose>IP investigation</Purpose>
+        <Query platform="Elastic" language="ES|QL" id="Q-05">
+          <![CDATA[
+FROM logs-fortinet_fortigate.log-*
+| WHERE destination.ip == "$dest_ip" AND @timestamp >= NOW() - 2 hours
+    AND NOT CIDR_MATCH(source.ip, "10.0.0.0/8", "192.168.0.0/16", "172.16.0.0/12")
+| STATS events = COUNT(*), accepts = COUNT(*) WHERE event.action == "accept"
+    BY source.ip
+| SORT events DESC
+| LIMIT 20
+]]>
+        </Query>
+      </Step>
+      <Step order="6" name="IP investigation">
+        <Purpose>IP investigation</Purpose>
+        <Query platform="Elastic" language="ES|QL" id="Q-06">
+          <![CDATA[
+FROM logs-fortinet_fortigate.log-*
+| WHERE source.ip == "$source_ip" AND @timestamp >= NOW() - 2 hours
+| STATS events = COUNT(*), dests = COUNT_DISTINCT(destination.ip)
+    BY destination.ip, destination.port, event.action
+| SORT events DESC
+| LIMIT 20
+]]>
+        </Query>
+      </Step>
+      <Step order="7" name="Timeline Reconstruction">
+        <Purpose>Timeline Reconstruction</Purpose>
+        <Query platform="Elastic" language="ES|QL" id="Q-07">
+          <![CDATA[
+FROM logs-fortinet_fortigate.log-*
+| WHERE destination.ip == "$dest_ip" AND @timestamp >= NOW() - 4 hours
+    AND NOT CIDR_MATCH(source.ip, "10.0.0.0/8", "192.168.0.0/16", "172.16.0.0/12")
+| STATS events = COUNT(*), accepts = COUNT(*) WHERE event.action == "accept",
+        sources = COUNT_DISTINCT(source.ip)
+    BY bucket = DATE_TRUNC(15 minutes, @timestamp)
+| SORT bucket ASC
+| LIMIT 20
+]]>
+        </Query>
+      </Step>
+      <Step order="8" name="Lateral movement validation">
+        <Purpose>Lateral movement validation</Purpose>
+        <Query platform="Elastic" language="ES|QL" id="Q-08">
+          <![CDATA[
+FROM logs-fortinet_fortigate.log-*
+| WHERE source.ip == "$source_ip" AND @timestamp >= NOW() - 4 hours
+    AND destination.ip != "$dest_ip"
+| STATS events = COUNT(*), dst_ports = COUNT_DISTINCT(destination.port),
+        accepts = COUNT(*) WHERE event.action == "accept"
+    BY destination.ip
+| SORT events DESC
+| LIMIT 20
+]]>
+        </Query>
+      </Step>
+      <Step order="9" name="Defense evasion validation">
+        <Purpose>Defense evasion validation</Purpose>
+        <Query platform="Elastic" language="ES|QL" id="Q-09">
+          <![CDATA[
+FROM logs-fortinet_fortigate.log-*
+| WHERE destination.ip == "$dest_ip" AND @timestamp >= NOW() - 4 hours
+    AND NOT CIDR_MATCH(source.ip, "10.0.0.0/8", "192.168.0.0/16", "172.16.0.0/12")
+| STATS total_events = COUNT(*), sources = COUNT_DISTINCT(source.ip),
+        accepts = COUNT(*) WHERE event.action == "accept"
+    BY destination.port
+| SORT total_events DESC
+| LIMIT 15
+]]>
+        </Query>
+      </Step>
+      <Step order="10" name="Impact assessment">
+        <Purpose>Impact assessment</Purpose>
+        <Query platform="Elastic" language="ES|QL" id="Q-10">
+          <![CDATA[
+FROM logs-fortinet_fortigate.log-*
+| WHERE destination.ip == "$dest_ip" AND event.action == "accept"
+    AND @timestamp >= NOW() - 4 hours
+    AND NOT CIDR_MATCH(source.ip, "10.0.0.0/8", "192.168.0.0/16", "172.16.0.0/12")
+| STATS accepted_events = COUNT(*), sources = COUNT_DISTINCT(source.ip), last_seen = MAX(@timestamp)
+    BY destination.port
+| SORT accepted_events DESC
+| LIMIT 15
+]]>
+        </Query>
+      </Step>
+      <Step order="11" name="Finalize verdict">
+        <DecisionTree>
+        </DecisionTree>
+      </Step>
+    </Workflow>
+  </Investigation>
+  <ClassificationGuidance>
+    <TruePositive>
+      <Definition></Definition>
+    </TruePositive>
+    <FalsePositive>
+      <Definition></Definition>
+      <Indicators>
+        <Item>Legitimate CDN/edge traffic. These destinations front high-traffic services; recognised provider ranges (e.g. Cloudflare 162.158.0.0/15, and 159.60.0.0/16-adjacent edge blocks) reaching a service port with normal accept ratios are legitimate high volume, not an attack. Confirm ownership/reputation of the top sources out of band; a provider match is context to verify, never an automatic pass.</Item>
+        <Item>Sanctioned load tests / synthetic monitoring generating high request volume against the service. Authorised - confirm against the test schedule/owner.</Item>
+        <Item>Firewall-blocked floods. Predominantly deny/reset with little reaching the target is a flood being mitigated - recorded as false_positive (blocked-malicious), never "benign".</Item>
+        <Item>Opportunistic scan noise on odd ports (22/23) denied at the edge - a side-show to the volumetric question, not the impact.</Item>
+        <Item>These destinations carry heavy, mixed traffic. In the validation window 109.224.43.214 alone showed ~44k accepts (from ~630 distinct sources) plus ~32k server-rst on 443 - a large, high-cardinality baseline. Volume alone is *expected* here; the shape (concentration, accept ratio, source ownership) is what distinguishes attack from load.</Item>
+        <Item>Cloudflare/edge ranges dominate the source space. The top external sources to these IPs in-window were Cloudflare 162.158.x addresses (e.g. 162.158.8.188 / 162.158.28.146 / 162.158.12.174) reaching 185.27.117.246 with 0 accepts (denied), and 159.60.x edge addresses reaching 185.27.117.243 with high accepts - i.e. a single "source" is frequently a CDN/edge or carrier-NAT egress fronting many real clients. Do not equate one source IP with one attacker.</Item>
+        <Item>Service ports are 443/8443/9443. Accepts concentrate on TLS service ports; resets/denies scatter across the sibling ISP IPs and alt-TLS ports. A genuine flood shows sustained accepts on one service port, not just resets.</Item>
+        <Item>No NBI allow-list of CDN/edge ranges is encoded in the rule. Maintain one operationally (see section 20) so legitimate high traffic is not repeatedly re-investigated - but never auto-trust an IP on reputation alone during an active alert.</Item>
+      </Indicators>
+    </FalsePositive>
+    <Misconfiguration>
+      <Definition></Definition>
+    </Misconfiguration>
+    <NeedsEscalation>
+      <Definition></Definition>
+    </NeedsEscalation>
+  </ClassificationGuidance>
+  <ResponseActions>
+    <Phase name="Containment">
+      <Action>Engage the ISP/upstream and network team for scrubbing/rate-limiting when a flood reaching $dest_ip is confirmed - upstream mitigation is the primary lever for a volumetric attack the on-prem firewall cannot absorb.</Action>
+      <Action>Apply firewall rate controls / DoS-protection profiles to the target destination as a stopgap, being careful not to null-route legitimate CDN/edge ranges (verify ownership first - section 15.6/section 20).</Action>
+      <Action>Preserve flow evidence (section 14/section 15/section 16) for the ISP and for post-incident review.</Action>
+      <Action>Run the concurrent-intrusion check (section 17.1) - treat the flood window as potential cover.</Action>
+      <Action>Deploy/confirm changes only via the authorised human-approved DEPLOY path; investigation itself is read-only.</Action>
+    </Phase>
+    <Phase name="Eradication">
+      <Action>Sustain upstream scrubbing/rate-limiting until the flood subsides; tune firewall DoS profiles and connection-rate limits on the target.</Action>
+      <Action>Block/deny positively-attributed hostile source ranges at the edge (not CDN/edge ranges serving legitimate clients).</Action>
+      <Action>Fix any operational fault identified (retry storm, health-check loop, NAT hairpin, replication loop) with the responsible network/service owner if the verdict was misconfiguration.</Action>
+      <Action>Hunt for a concurrent intrusion surfaced by section 17.1 and remediate it in the relevant telemetry.</Action>
+    </Phase>
+    <Phase name="Recovery">
+      <Action>Verify service recovery (accepts return to baseline, resets subside, customer-facing channels healthy) before standing down.</Action>
+      <Action>Right-size DoS protection on the destinations, arrange/validate upstream ISP DDoS mitigation, and maintain an operational allow-list of known CDN/edge ranges so legitimate high traffic is not repeatedly misread - without auto-trusting any IP during an active alert.</Action>
+      <Action>Recommend widening rule coverage beyond the four hard-coded IPs (section 23) and adding the aggregate-rate analytic (section 17.4).</Action>
+      <Action>Return to service only after section 22 closing criteria are met and monitoring confirms no recurrence.</Action>
+    </Phase>
+  </ResponseActions>
+  <Escalation>
+    <Trigger>Escalate to the network team and ISP/upstream (immediately) and SOC L2 / IR when any of the following hold:
+
+- A confirmed flood reaching $dest_ip with service impact (section 17.5) or beyond firewall capacity.
+- A distributed attack (many coordinated unknown sources) or a low-and-slow pattern surfaced by the aggregate-rate analytic (section 17.4).
+- A concurrent-intrusion signal in the flood window (section 17.1).
+- Volume confirmed but source ownership / impact cannot be established (needs_escalation).
+
+Escalate with section 14/section 15/section 17 outputs, the destination, group, source shape, attribution, and impact evidence for a scrubbing/rate-limiting decision.</Trigger>
+    <To>SOC L2 / IR</To>
+  </Escalation>
+  <ClosureCriteria>
+    <Item>false_positive (authorised): top sources positively attributed to known CDN/edge providers (or a sanctioned load test) with healthy accept ratios; ownership documented; CDN/edge ranges recorded.</Item>
+    <Item>false_positive (blocked-malicious): the flood was predominantly denied/reset with negligible traffic reaching $dest_ip; documented as a blocked attempt, never "benign"; monitoring continued for escalation.</Item>
+    <Item>misconfiguration: an operational fault (retry storm, health-check loop, NAT hairpin, replication) generated the volume; referred to and fixed by the network/service owner.</Item>
+    <Item>true_positive: a volumetric flood reached/degraded the destination; mitigated via scrubbing/rate-limiting, service recovered, evidence preserved, concurrent-intrusion check completed, incident documented.</Item>
+    <Item>needs_escalation: handed to the network team/ISP with the specific gaps (attribution/impact) documented.</Item>
+  </ClosureCriteria>
+  <Limitations>
+    <Item>Accept-vs-deny is the verdict, not raw volume. These destinations are high-baseline by design; the mitigation lens (event.action) and per-port concentration decide impact more reliably than source counts (section 14.2/section 17.5).</Item>
+    <Item>One source IP != one attacker. CDN/edge (162.158.x, 159.60.x) and carrier-NAT egress aggregate many clients; attribute by ownership/ASN before treating a "top source" as hostile - and before null-routing anything (self-inflicted-outage risk).</Item>
+    <Item>The rule has two structural blind spots. It only watches four hard-coded destinations (a flood elsewhere is invisible), and it is defeated by a distributed low-and-slow flood under the per-source/per-group thresholds - hence the aggregate-rate analytic (section 17.4) and a coverage-widening recommendation (section 20).</Item>
+    <Item>Treat a confirmed flood as possible cover. Always run the concurrent-intrusion check (section 17.1) during and after the flood window.</Item>
+    <Item>KB-worthy (persist to NBI customer scope): (1) the four ISP-managed destinations and their live baselines (109.224.43.214 ≈ 44k accepts/630 sources + 32k server-rst on 443 per 2h); (2) service ports 443/8443/9443; (3) dominant CDN/edge source ranges (Cloudflare 162.158.0.0/15, 159.60.0.0/16-adjacent) and that a source IP can aggregate many clients; (4) flow logs carry no client-identity/process/user context. All observed live on 2026-08-17.</Item>
+  </Limitations>
+</Playbook>

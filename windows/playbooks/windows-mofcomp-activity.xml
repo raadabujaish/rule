@@ -1,0 +1,406 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<Playbook xmlns="https://soc.example/playbooks" id="PB-windows-mofcomp-activity" name="Mofcomp Activity [NBI-4688] - SOC Playbook" version="3.0" status="Validated" classification="TLP:AMBER">
+  <Metadata>
+    <Owner>NBI SOC / Detection Engineering</Owner>
+    <LastUpdated>2026-08-19</LastUpdated>
+    <Severity default="low">low</Severity>
+    <Confidence default="Medium">Medium</Confidence>
+    <Category>Persistence</Category>
+    <MitreAttack>
+      <Technique id="T1546.003"/>
+      <Technique id="T1546"/>
+      <Technique id="T1047"/>
+      <Tactic id="TA0003"/>
+    </MitreAttack>
+    <References>
+      <Reference title="MITRE ATT&amp;CK - Event Triggered Execution: WMI Event Subscription (T1546.003)" url="https://attack.mitre.org/techniques/T1546/003/"/>
+      <Reference title="MITRE ATT&amp;CK - Windows Management Instrumentation (T1047)" url="https://attack.mitre.org/techniques/T1047/"/>
+      <Reference title="MITRE ATT&amp;CK - Persistence tactic (TA0003)" url="https://attack.mitre.org/tactics/TA0003/"/>
+      <Reference title="Microsoft Learn - mofcomp.exe (MOF compiler) reference" url="https://learn.microsoft.com/en-us/windows/win32/wmisdk/mofcomp"/>
+      <Reference title="Microsoft Learn - Receiving a WMI event / permanent event subscriptions (__EventFilter/__EventConsumer)" url="https://learn.microsoft.com/en-us/windows/win32/wmisdk/receiving-a-wmi-event"/>
+      <Reference title="Mandiant/FireEye - WMI persistence and offensive/defensive considerations" url="https://www.mandiant.com/resources/blog/wmi-vs-wmi-monitoring-for-malicious-activity"/>
+      <Reference title="LOLBAS - Mofcomp.exe" url="https://lolbas-project.github.io/lolbas/Binaries/Mofcomp/"/>
+    </References>
+  </Metadata>
+  <AlertContext>
+    <RuleName>Mofcomp Activity [NBI-4688]</RuleName>
+    <RuleId>nbi-b2-mofcomp-activity</RuleId>
+    <RuleType>eql</RuleType>
+    <Index>logs-system.security*</Index>
+    <TriggerLogic>The deployed rule is a custom EQL analytic. A faithful representation of its logic:
+
+
+
+Plain English: a non-SYSTEM account runs mofcomp.exe against a .mof file, and it is not the SQL Server installer path (ScenarioEngine.exe compiling MSSQL/OLAP MOFs, which is carved out as known-good). The user.id != "S-1-5-18" clause is important - routine system-context MOF compilation (Windows/agents running as SYSTEM) is excluded, so the rule targets user-driven compilation, which is the anomalous case.
+
+On NBI the MOF path is read from process.args (MV_CONCAT) because process.command_line is only ~50% populated (0% on the jump tier). The registered subscription itself is not visible on NBI (no WMI-Activity / Sysmon 19-21 events, section 8) - the MOF path and process ancestry are the local signals.</TriggerLogic>
+    <KeyAlertFields>mofcomp.exe, wmic.exe, wbemtest.exe, powershell.exe, process.name, process.parent.name, user.id, user.name, host.name, process.command_line, process.args</KeyAlertFields>
+  </AlertContext>
+  <Inputs>
+    <Input name="$host"/>
+    <Input name="$user"/>
+    <Input name="$parent"/>
+    <Input name="$source_ip"/>
+  </Inputs>
+  <ExecutiveSummary>
+    <Overview>This playbook drives triage and investigation of the Mofcomp Activity detection on NBI's Elastic Security deployment. The rule fires on a non-SYSTEM (user.id not S-1-5-18) Windows process start (Event 4688) for mofcomp.exe with a .mof argument - i.e. compiling a Managed Object Format file into the WMI repository - excluding the known-legitimate SQL Server case (parent ScenarioEngine.exe compiling MSSQL/OLAP .mof files). In short: someone other than the system (and other than the SQL installer) is loading a MOF into WMI.
+
+MOF compilation is how software and administrators register WMI classes - but it is also a classic WMI persistence and defense-evasion technique: an attacker compiles a MOF that registers a permanent __EventFilter / __EventConsumer / FilterToConsumerBinding, so arbitrary code runs on a trigger (boot, time, logon) entirely inside WMI, with no file on disk and no Run key. The analyst decides whether this is a sanctioned software install/admin action (false_positive), attacker WMI persistence (true_positive), a legacy/unmanaged installer not yet baselined (misconfiguration), or unresolved (needs_escalation). The MOF's content/location and the launching parent decide it.</Overview>
+    <BusinessImpact>An alert means: on $host, a non-SYSTEM account ($user) ran mofcomp.exe to compile a .mof file into the WMI repository, launched by $parent, and it was not the excluded SQL installer. The compile *registers* whatever the MOF defines - which may be benign WMI classes for software, or a malicious __EventFilter/__EventConsumer/FilterToConsumerBinding that re-executes attacker code on a trigger.
+
+Because the subscription is written *inside* WMI and is not captured on NBI, the alert sees the compile action, not the registered object. The investigation therefore leans on two locally-available signals: where the MOF came from (a vendor install directory vs a user Temp/AppData/Downloads/UNC/random path) and what launched the compile (an installer/admin context vs a shell/script host). A MOF from a user-writable path, compiled by a script host, is WMI persistence until proven otherwise.</BusinessImpact>
+  </ExecutiveSummary>
+  <Investigation>
+    <Goal>Decide true_positive / false_positive / misconfiguration / needs_escalation for Mofcomp Activity [NBI-4688].</Goal>
+    <Workflow>
+      <Step order="1" name="Confirm the MOF compile and its file (reuse of deployed INV-01)">
+        <Purpose>Confirm the MOF compile and its file (reuse of deployed INV-01)</Purpose>
+        <Query platform="Elastic" language="ES|QL" id="Q-01">
+          <![CDATA[
+FROM logs-system.security*
+| WHERE @timestamp >= NOW() - 4 hours
+    AND event.code == "4688" AND host.name == "$host"
+    AND TO_LOWER(process.name) == "mofcomp.exe" AND user.id != "S-1-5-18"
+| EVAL argline = MV_CONCAT(process.args, " ")
+| KEEP @timestamp, user.name, user.id, process.parent.name, argline, process.command_line
+| SORT @timestamp DESC
+| LIMIT 20
+]]>
+        </Query>
+      </Step>
+      <Step order="2" name="Characterise the launching parent (reuse of deployed INV-02)">
+        <Purpose>Characterise the launching parent (reuse of deployed INV-02)</Purpose>
+        <Query platform="Elastic" language="ES|QL" id="Q-02">
+          <![CDATA[
+FROM logs-system.security*
+| WHERE @timestamp >= NOW() - 4 hours
+    AND event.code == "4688" AND host.name == "$host"
+    AND TO_LOWER(process.parent.name) == "$parent"
+| STATS spawned = COUNT(*), users = COUNT_DISTINCT(user.name), distinct_children = COUNT_DISTINCT(process.name) BY process.name
+| SORT spawned DESC
+| LIMIT 20
+]]>
+        </Query>
+      </Step>
+      <Step order="3" name="Entity pivoting">
+        <Purpose>Entity pivoting</Purpose>
+        <Query platform="Elastic" language="ES|QL" id="Q-03">
+          <![CDATA[
+FROM logs-system.security*
+| WHERE @timestamp >= NOW() - 4 hours
+    AND event.code == "4688"
+    AND host.name == "$host"
+    AND TO_LOWER(process.name) == "mofcomp.exe"
+    AND user.id != "S-1-5-18"
+| KEEP @timestamp, host.name, user.name, user.id, process.name, process.executable, process.parent.name, process.pid, process.parent.pid, process.command_line
+| SORT @timestamp DESC
+| LIMIT 50
+]]>
+        </Query>
+      </Step>
+      <Step order="4" name="Process investigation">
+        <Purpose>Process investigation</Purpose>
+        <Query platform="Elastic" language="ES|QL" id="Q-04">
+          <![CDATA[
+FROM logs-system.security*
+| WHERE @timestamp >= NOW() - 4 hours
+    AND event.code == "4688"
+    AND TO_LOWER(process.name) == "mofcomp.exe"
+| STATS executions = COUNT(*), hosts = COUNT_DISTINCT(host.name), users = COUNT_DISTINCT(user.name) BY process.executable, process.parent.name, user.id
+| SORT executions DESC
+| LIMIT 50
+]]>
+        </Query>
+      </Step>
+      <Step order="5" name="Process investigation">
+        <Purpose>Process investigation</Purpose>
+        <Query platform="Elastic" language="ES|QL" id="Q-05">
+          <![CDATA[
+FROM logs-system.security*
+| WHERE @timestamp >= NOW() - 4 hours
+    AND event.code == "4688"
+    AND host.name == "$host" AND user.name == "$user"
+    AND TO_LOWER(process.name) IN ("wmic.exe", "wbemtest.exe", "mofcomp.exe")
+| STATS execs = COUNT(*) BY process.name, process.parent.name
+| SORT execs DESC
+| LIMIT 20
+]]>
+        </Query>
+      </Step>
+      <Step order="6" name="Parent-Child process analysis">
+        <Purpose>Parent-Child process analysis</Purpose>
+        <Query platform="Elastic" language="ES|QL" id="Q-06">
+          <![CDATA[
+FROM logs-system.security*
+| WHERE @timestamp >= NOW() - 4 hours
+    AND event.code == "4688"
+    AND host.name == "$host"
+    AND (TO_LOWER(process.name) == "mofcomp.exe" OR TO_LOWER(process.parent.name) == "mofcomp.exe")
+| KEEP @timestamp, user.name, process.parent.name, process.parent.pid, process.name, process.pid, process.executable
+| SORT @timestamp DESC
+| LIMIT 50
+]]>
+        </Query>
+      </Step>
+      <Step order="7" name="User investigation">
+        <Purpose>User investigation</Purpose>
+        <Query platform="Elastic" language="ES|QL" id="Q-07">
+          <![CDATA[
+FROM logs-system.security*
+| WHERE @timestamp >= NOW() - 4 hours
+    AND event.code == "4688"
+    AND user.name == "$user"
+| STATS executions = COUNT(*), distinct_procs = COUNT_DISTINCT(process.name) BY host.name
+| SORT executions DESC
+| LIMIT 20
+]]>
+        </Query>
+      </Step>
+      <Step order="8" name="Host investigation">
+        <Purpose>Host investigation</Purpose>
+        <Query platform="Elastic" language="ES|QL" id="Q-08">
+          <![CDATA[
+FROM logs-system.security*
+| WHERE @timestamp >= NOW() - 4 hours
+    AND event.code == "4688"
+    AND host.name == "$host"
+| STATS executions = COUNT(*), users = COUNT_DISTINCT(user.name) BY process.name, process.parent.name
+| SORT executions ASC
+| LIMIT 40
+]]>
+        </Query>
+      </Step>
+      <Step order="9" name="IP investigation">
+        <Purpose>IP investigation</Purpose>
+        <Query platform="Elastic" language="ES|QL" id="Q-09">
+          <![CDATA[
+FROM logs-system.security*
+| WHERE @timestamp >= NOW() - 4 hours
+    AND event.code == "4624"
+    AND host.name == "$host" AND user.name == "$user"
+    AND source.ip IS NOT NULL
+| STATS logons = COUNT(*) BY source.ip, winlog.event_data.LogonType
+| SORT logons DESC
+| LIMIT 20
+]]>
+        </Query>
+      </Step>
+      <Step order="10" name="IP investigation">
+        <Purpose>IP investigation</Purpose>
+        <Query platform="Elastic" language="ES|QL" id="Q-10">
+          <![CDATA[
+FROM logs-system.security*
+| WHERE @timestamp >= NOW() - 4 hours
+    AND event.code == "4624"
+    AND source.ip == "$source_ip"
+| STATS logons = COUNT(*) BY user.name, host.name, winlog.event_data.LogonType
+| SORT logons DESC
+| LIMIT 25
+]]>
+        </Query>
+      </Step>
+      <Step order="11" name="File investigation">
+        <Purpose>File investigation</Purpose>
+        <Query platform="Elastic" language="ES|QL" id="Q-11">
+          <![CDATA[
+FROM logs-system.security*
+| WHERE @timestamp >= NOW() - 4 hours
+    AND event.code == "4688"
+    AND host.name == "$host"
+    AND TO_LOWER(process.name) == "mofcomp.exe"
+| EVAL argline = MV_CONCAT(process.args, " ")
+| STATS executions = COUNT(*), first_seen = MIN(@timestamp), last_seen = MAX(@timestamp) BY process.executable, argline
+| SORT executions DESC
+| LIMIT 30
+]]>
+        </Query>
+      </Step>
+      <Step order="12" name="Authentication investigation">
+        <Purpose>Authentication investigation</Purpose>
+        <Query platform="Elastic" language="ES|QL" id="Q-12">
+          <![CDATA[
+FROM logs-system.security*
+| WHERE @timestamp >= NOW() - 4 hours
+    AND event.code IN ("4624", "4625", "4634", "4647")
+    AND host.name == "$host" AND user.name == "$user"
+| STATS events = COUNT(*), first_seen = MIN(@timestamp), last_seen = MAX(@timestamp) BY event.code, winlog.event_data.LogonType, source.ip
+| SORT events DESC
+| LIMIT 30
+]]>
+        </Query>
+      </Step>
+      <Step order="13" name="Timeline Reconstruction">
+        <Purpose>Timeline Reconstruction</Purpose>
+        <Query platform="Elastic" language="ES|QL" id="Q-13">
+          <![CDATA[
+FROM logs-system.security*
+| WHERE @timestamp >= NOW() - 4 hours
+    AND event.code == "4688"
+    AND host.name == "$host"
+    AND user.name == "$user"
+| KEEP @timestamp, process.parent.name, process.parent.pid, process.name, process.pid, process.executable
+| SORT @timestamp ASC
+| LIMIT 200
+]]>
+        </Query>
+      </Step>
+      <Step order="14" name="Lateral movement validation">
+        <Purpose>Lateral movement validation</Purpose>
+        <Query platform="Elastic" language="ES|QL" id="Q-14">
+          <![CDATA[
+FROM logs-system.security*
+| WHERE @timestamp >= NOW() - 4 hours
+    AND event.code IN ("4624", "4648", "4768", "4769", "5140")
+    AND user.name == "$user"
+    AND host.name != "$host"
+| STATS events = COUNT(*) BY host.name, event.code, winlog.event_data.LogonType
+| SORT events DESC
+| LIMIT 30
+]]>
+        </Query>
+      </Step>
+      <Step order="15" name="Persistence validation">
+        <Purpose>Persistence validation</Purpose>
+        <Query platform="Elastic" language="ES|QL" id="Q-15">
+          <![CDATA[
+FROM logs-system.security*
+| WHERE @timestamp >= NOW() - 4 hours
+    AND host.name == "$host"
+    AND (
+        (event.code == "4688" AND TO_LOWER(process.name) IN ("wmic.exe", "mofcomp.exe", "wbemtest.exe", "schtasks.exe", "reg.exe", "sc.exe", "powershell.exe"))
+        OR event.code == "7045"
+        OR event.code == "4720"
+        OR event.code == "4698"
+    )
+| STATS events = COUNT(*) BY event.code, process.name, user.name
+| SORT events DESC
+| LIMIT 40
+]]>
+        </Query>
+      </Step>
+      <Step order="16" name="Privilege escalation validation">
+        <Purpose>Privilege escalation validation</Purpose>
+        <Query platform="Elastic" language="ES|QL" id="Q-16">
+          <![CDATA[
+FROM logs-system.security*
+| WHERE @timestamp >= NOW() - 4 hours
+    AND event.code == "4672"
+    AND host.name == "$host"
+| STATS special_priv_logons = COUNT(*) BY user.name
+| SORT special_priv_logons DESC
+| LIMIT 25
+]]>
+        </Query>
+      </Step>
+      <Step order="17" name="Defense evasion validation">
+        <Purpose>Defense evasion validation</Purpose>
+        <Query platform="Elastic" language="ES|QL" id="Q-17">
+          <![CDATA[
+FROM logs-system.security*
+| WHERE @timestamp >= NOW() - 4 hours
+    AND host.name == "$host"
+    AND (
+        (event.code == "4688" AND TO_LOWER(process.name) IN ("wevtutil.exe", "fsutil.exe", "vssadmin.exe", "wmic.exe", "cipher.exe", "sdelete.exe", "sdelete64.exe"))
+        OR event.code == "1102"
+        OR event.code == "4719"
+    )
+| STATS events = COUNT(*) BY event.code, process.name, user.name
+| SORT events DESC
+| LIMIT 30
+]]>
+        </Query>
+      </Step>
+      <Step order="18" name="Impact assessment">
+        <Purpose>Impact assessment</Purpose>
+        <Query platform="Elastic" language="ES|QL" id="Q-18">
+          <![CDATA[
+FROM logs-system.security*
+| WHERE @timestamp >= NOW() - 4 hours
+    AND event.code == "4688"
+    AND host.name == "$host" AND user.name == "$user"
+| EVAL n = TO_LOWER(process.name)
+| EVAL cl = TO_LOWER(COALESCE(process.command_line, MV_CONCAT(process.args, " ")))
+| WHERE n IN ("wmic.exe", "wbemtest.exe", "mofcomp.exe") OR (n IN ("powershell.exe", "pwsh.exe") AND (cl LIKE "*eventfilter*" OR cl LIKE "*eventconsumer*" OR cl LIKE "*subscription*" OR cl LIKE "*__filtertoconsumer*" OR cl LIKE "*.mof*"))
+| STATS execs = COUNT(*) BY process.name
+| SORT execs DESC
+| LIMIT 20
+]]>
+        </Query>
+      </Step>
+      <Step order="19" name="Finalize verdict">
+        <DecisionTree>
+        </DecisionTree>
+      </Step>
+    </Workflow>
+  </Investigation>
+  <ClassificationGuidance>
+    <TruePositive>
+      <Definition></Definition>
+    </TruePositive>
+    <FalsePositive>
+      <Definition></Definition>
+      <Indicators>
+        <Item>Documented software installs / admin actions. Legitimate installers and agents (monitoring, hardware, management tools) register WMI classes by compiling a MOF from their vendor install directory, often via msiexec/a vendor setup.exe. Confirm the vendor path, installer parent, and a change/install window.</Item>
+        <Item>Unmanaged/legacy installers that compile a MOF from an uncatalogued location with no persistence content or malicious parent - usually a misconfiguration/baseline gap (section 6).</Item>
+        <Item>The SQL Server case is already excluded (parent ScenarioEngine.exe compiling MSSQL/OLAP MOFs). If that is *not* what you see, the carve-out does not apply.</Item>
+        <Item>Proven-failed compiles - a syntax error / access denied with nothing registered. Recorded as a blocked attempt, never a bare "benign"; still inspect the parent/account.</Item>
+        <Item>mofcomp.exe is near-absent here. In the validation window there were 0 mofcomp.exe executions on the 4688 stream across the estate. User-driven MOF compilation does not occur in normal operation, so a firing is genuinely notable - but low-severity, because a legitimate install can also trigger it.</Item>
+        <Item>nim-jump-apv02 is a plausible interactive locus. A hands-on operator planting WMI persistence would do so from an interactive/jump host or a compromised server. A MOF compile there by a non-SYSTEM user, launched from a shell, is the archetypal malicious case; a vendor installer on a server is the benign one.</Item>
+        <Item>Command-line auditing is 0% on the jump tier. On nim-jump-apv02 process.command_line/process.args are null, so the MOF path - the primary classification signal - may be unreadable from telemetry. Recover the MOF file host-side, or read the path on a command-line-audited host (nim-est-apv07 ~100%).</Item>
+        <Item>The registered subscription is invisible on NBI. There is no WMI-Activity or Sysmon 19/20/21 telemetry, so you cannot see the __EventFilter/__EventConsumer/binding from this index - only the compile. Empty-in-index is not proof nothing was registered; inspect WMI on the host during response.</Item>
+      </Indicators>
+    </FalsePositive>
+    <Misconfiguration>
+      <Definition></Definition>
+    </Misconfiguration>
+    <NeedsEscalation>
+      <Definition></Definition>
+    </NeedsEscalation>
+  </ClassificationGuidance>
+  <ResponseActions>
+    <Phase name="Containment">
+      <Action>Enumerate and remove the malicious WMI subscription if a true_positive is confirmed: on $host, list __EventFilter, __EventConsumer, and __FilterToConsumerBinding (Get-WmiObject -Namespace root\subscription ...) and delete the malicious binding and its filter/consumer - this stops the re-execution.</Action>
+      <Action>Isolate $host (network-contain / quarantine) if the consumer executes a network payload or wider intrusion is evident. On a shared jump host, coordinate with IT but prioritise containment.</Action>
+      <Action>Suspend $user's session and disable the account pending investigation if implicated; reset its credentials (section 20).</Action>
+      <Action>Preserve volatile evidence first - the MOF file, the WMI subscription state, and running processes - since NBI collects neither the MOF write nor the subscription; host-side capture is the only way to recover them.</Action>
+      <Action>Deploy/confirm changes only via the authorised human-approved DEPLOY path; investigation itself is read-only.</Action>
+    </Phase>
+    <Phase name="Eradication">
+      <Action>Remove the malicious __EventFilter/__EventConsumer/FilterToConsumerBinding and delete the staged MOF (section 15.10 path) and any payload the consumer runs.</Action>
+      <Action>Hunt WMI persistence across the estate (section 17.1): a MOF-based subscription is commonly planted on multiple hosts - enumerate root\subscription on peers $user touched and on other jump/Tier-0 hosts.</Action>
+      <Action>Remove any other persistence (section 17.2) and remediate the foothold that let the actor compile the MOF (any prior privilege escalation, section 17.3).</Action>
+      <Action>Run a full anti-malware / EDR scan on $host and hunt for the consumer's payload hash and the same subscription elsewhere.</Action>
+    </Phase>
+    <Phase name="Recovery">
+      <Action>Verify no residual WMI subscriptions remain on $host (and swept peers) after removal, and that the consumer no longer fires on its trigger.</Action>
+      <Action>Reset $user's password and any credentials exposed on $host; if privileged accounts logged on there (section 17.3), rotate those too.</Action>
+      <Action>Restore $host from a known-good image if persistence or tampering was extensive; otherwise validate that eradication holds after reboot (WMI persistence is designed to survive reboots - re-check).</Action>
+      <Action>Harden: baseline legitimate MOF sources/installers, enable WMI-subscription monitoring (Sysmon 19/20/21 or WMI-Activity logs - currently a telemetry gap, section 8), restrict mofcomp on servers via application control, and enable command-line/PowerShell script-block logging on the jump/workstation class.</Action>
+    </Phase>
+  </ResponseActions>
+  <Escalation>
+    <Trigger>Escalate to SOC L2 / IR when any of the following hold:
+
+- The MOF defines event consumers and sits in a user/Temp/AppData/UNC/random path (section 14.1, section 15.10), or was launched by a script-host/Office parent (section 14.2, section 15.3).
+- Surrounding WMI-subscription activity (section 15.2b, section 17.5) accompanies the compile, or the same subscription/MOF appears on multiple hosts (section 17.1).
+- Other persistence (section 17.2), privilege escalation (section 17.3), or defence evasion / log clearing (section 17.4) is present, or $host is Tier-0/critical.
+- The MOF content or the registered subscription cannot be established from telemetry (cmdline null, no WMI/EDR) - escalate as needs_escalation with a request to pull the MOF and root\subscription from the host.</Trigger>
+    <To>SOC L2 / IR</To>
+  </Escalation>
+  <ClosureCriteria>
+    <Item>false_positive (authorised install/admin MOF): a documented software install or admin action (vendor MOF path, installer parent, change record) matched. Documented; catalogue the MOF/parent.</Item>
+    <Item>false_positive (proven-failed compile): the compile positively failed (syntax error / access denied) with nothing registered - recorded as a blocked attempt, never a bare "benign"; the parent/account still inspected.</Item>
+    <Item>misconfiguration: a recognised unmanaged/legacy installer or agent compiled its MOF from an uncatalogued location, no persistence content, no malicious parent; catalogue it.</Item>
+    <Item>true_positive: WMI event-subscription persistence planted; subscription removed, host contained/cleaned, consumer payload hunted, estate swept, intrusion investigated, incident documented.</Item>
+    <Item>needs_escalation: handed to SOC L2 / IR with the MOF content and registered subscription unresolved.</Item>
+  </ClosureCriteria>
+  <Limitations>
+    <Item>The MOF location and the parent decide it. A MOF from a vendor install dir with an installer parent is likely benign; a MOF from Temp/AppData/Downloads/UNC/random path with a shell/script-host parent, defining event consumers, is WMI persistence. The .mof content (recovered host-side) is the clincher.</Item>
+    <Item>The subscription is invisible on NBI. No WMI-Activity / Sysmon 19-21 telemetry, so the rule and this playbook see the compile, not the registered object. Never conclude "nothing registered" from the index - inspect root\subscription on the host.</Item>
+    <Item>The SYSTEM and SQL exclusions shape the signal. The rule already drops S-1-5-18 (system-context) compiles and the ScenarioEngine.exe MSSQL/OLAP path. If you see the SQL parent, the carve-out applies; if not, it does not.</Item>
+    <Item>Command-line auditing is 0% on the jump tier, so the MOF path - the primary signal - is often unreadable exactly where a hands-on operator would work; recover it host-side or read it on a command-line-audited host.</Item>
+    <Item>Evasion / coverage gap. WMI persistence can be registered via PowerShell/wmic without mofcomp, run as SYSTEM (excluded), or mimic the SQL parent (excluded). Complement with WMI-subscription-creation monitoring and PowerShell script-block logging - a genuine gap to raise.</Item>
+    <Item>source.ip is shared infrastructure (validated 10.11.102.2 fronts PAM/DC identities); correlate IP + user + host.</Item>
+    <Item>KB-worthy (persist to NBI customer scope): (1) mofcomp.exe zero-baseline over 4h on 4688; (2) no WMI-Activity / Sysmon 19-21 telemetry - subscription not provable in-index; (3) command-line 0% on nim-jump-apv02 vs ~100% on nim-est-apv07; (4) rule excludes S-1-5-18 and ScenarioEngine.exe/MSSQL-OLAP; (5) 10.11.102.2 = shared PAM/DC/VDI network-logon source. All observed live on 2026-08-19.</Item>
+  </Limitations>
+</Playbook>

@@ -1,0 +1,440 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<Playbook xmlns="https://soc.example/playbooks" id="PB-linux-container-escape-tooling" name="Linux — Container Escape Tooling Executed (nsenter/unshare/capsh) - SOC Playbook" version="3.0" status="Validated" classification="TLP:AMBER">
+  <Metadata>
+    <Owner>NBI SOC / Detection Engineering</Owner>
+    <LastUpdated>2026-08-19</LastUpdated>
+    <Severity default="High">High</Severity>
+    <Confidence default="Medium">Medium</Confidence>
+    <Category>Privilege Escalation</Category>
+    <MitreAttack>
+      <Technique id="T1611"/>
+      <Technique id="T1610"/>
+      <Tactic id="TA0004"/>
+    </MitreAttack>
+    <References>
+      <Reference title="MITRE ATT&amp;CK - Escape to Host (T1611)" url="https://attack.mitre.org/techniques/T1611/"/>
+      <Reference title="MITRE ATT&amp;CK - Deploy Container (T1610)" url="https://attack.mitre.org/techniques/T1610/"/>
+      <Reference title="MITRE ATT&amp;CK - Privilege Escalation tactic (TA0004)" url="https://attack.mitre.org/tactics/TA0004/"/>
+      <Reference title="man7.org - nsenter(1) (enter another process's namespaces)" url="https://man7.org/linux/man-pages/man1/nsenter.1.html"/>
+      <Reference title="man7.org - unshare(1) (run with unshared namespaces)" url="https://man7.org/linux/man-pages/man1/unshare.1.html"/>
+      <Reference title="man7.org - capsh(1) (capability shell wrapper)" url="https://man7.org/linux/man-pages/man1/capsh.1.html"/>
+      <Reference title="man7.org - capabilities(7) (Linux capability model)" url="https://man7.org/linux/man-pages/man7/capabilities.7.html"/>
+      <Reference title="Elastic - Auditd Manager integration (fields and setup)" url="https://docs.elastic.co/integrations/auditd_manager"/>
+    </References>
+  </Metadata>
+  <AlertContext>
+    <RuleName>Linux — Container Escape Tooling Executed (nsenter/unshare/capsh)</RuleName>
+    <RuleId>nbi-lnx-container-escape-tools</RuleId>
+    <RuleType>query</RuleType>
+    <Index>logs-auditd.log-*</Index>
+    <TriggerLogic>The deployed rule is a KQL match query over Linux auditd process telemetry, matching on the namespace/capability tool name only.
+
+One-line Kibana KQL detection filter (for fast pivoting in Discover / Timeline):
+
+
+
+Plain English: any process execution on a Linux host where the image name is nsenter, unshare, or capsh. These are the classic container-escape primitives. They have an effectively zero baseline across NBI's Linux fleet (no execution observed in the trailing 30 days) even though the same hosts actively run container runtimes - so a firing on a container node is high-signal. Every runnable investigation query below is ES|QL over the _query API, keyed on the alert entity and bounded to @timestamp &gt;= NOW() - 4 hours.</TriggerLogic>
+    <KeyAlertFields>source.ip, user.name, event.action, process.name, process.executable, process.args, process.working_directory, process.pid, process.parent.pid, user.id, user.effective.id, container.id</KeyAlertFields>
+  </AlertContext>
+  <Inputs>
+    <Input name="$host"/>
+    <Input name="$user"/>
+    <Input name="$source_ip"/>
+    <Input name="$suspicious_pid"/>
+  </Inputs>
+  <ExecutiveSummary>
+    <Overview>This playbook drives triage and investigation of the Linux - Container Escape Tooling Executed (nsenter/unshare/capsh) detection on NBI's Elastic Security deployment. The rule fires when a Linux execve records a process.name of nsenter, unshare, or capsh. nsenter enters another process's namespaces (entering PID 1's namespaces breaks out of a container onto the host); unshare creates or detaches namespaces (used to build an escape context); capsh manipulates and reports Linux capabilities (used to check or exploit an over-privileged container).
+
+The rule matches the binary name; whether it is an escape depends on the arguments and on whether the host is a container node. The analyst's job is to recover the command and namespace target, confirm whether $host runs a container runtime, trace whether the actor then acted in the host namespace, and classify the alert as true_positive, false_positive (authorised OR proven-failed), misconfiguration, or needs_escalation - with evidence attached.</Overview>
+    <BusinessImpact>An alert means: on $host, one of nsenter/unshare/capsh was executed. These are the tools an attacker uses to step out of a container and onto the node as root:
+
+- nsenter -t 1 -m -u -i -n -p enters the mount/UTS/IPC/network/PID namespaces of PID 1 - the host's init - from inside a container, landing a shell on the host. This is the textbook break-out.
+- unshare --mount --pid --fork creates a fresh namespace context to build or complete an escape, typically executing a shell in the new context.
+- capsh --print enumerates the process's Linux capabilities (reconnaissance of an over-privileged container); capsh --gid=0 --uid=0 --caps=... actively wields them.
+
+The alert captures the *tool*; the investigation recovers the *namespace target* (does it aim at PID 1 / all namespaces / a shell?), the *node role* (is $host a container node?), and the *payoff* (did the actor then operate the host namespace as root?). On NBI infrastructure that runs banking workloads in containers, a confirmed escape is a direct path from an app-tier foothold to host-level compromise and lateral movement.</BusinessImpact>
+  </ExecutiveSummary>
+  <Investigation>
+    <Goal>Decide true_positive / false_positive / misconfiguration / needs_escalation for Linux — Container Escape Tooling Executed (nsenter/unshare/capsh).</Goal>
+    <Workflow>
+      <Step order="1" name="Reproduce the rule estate-wide (confirm the detection logic)">
+        <Purpose>Reproduce the rule estate-wide (confirm the detection logic)</Purpose>
+        <Query platform="Elastic" language="ES|QL" id="Q-01">
+          <![CDATA[
+FROM logs-auditd.log-*,logs-auditd_manager.auditd-*
+| WHERE @timestamp >= NOW() - 4 hours
+    AND event.category == "process"
+    AND process.name IN ("nsenter","unshare","capsh")
+| EVAL argline = MV_CONCAT(process.args, " ")
+| KEEP @timestamp, host.name, user.name, user.id, user.effective.id, process.name, process.executable, argline
+| SORT @timestamp DESC
+| LIMIT 100
+]]>
+        </Query>
+      </Step>
+      <Step order="2" name="Confirm on the alert host - recover command and namespace target">
+        <Purpose>Confirm on the alert host - recover command and namespace target</Purpose>
+        <Query platform="Elastic" language="ES|QL" id="Q-02">
+          <![CDATA[
+FROM logs-auditd.log-*,logs-auditd_manager.auditd-*
+| WHERE event.category=="process" AND host.name=="$host"
+    AND process.name IN ("nsenter","unshare","capsh")
+    AND @timestamp >= NOW() - 4 hours
+| EVAL argline = MV_CONCAT(process.args, " ")
+| KEEP @timestamp, host.name, user.name, user.id, user.effective.id, process.name, process.executable, argline, process.working_directory
+| SORT @timestamp DESC
+| LIMIT 50
+]]>
+        </Query>
+      </Step>
+      <Step order="3" name="Entity pivoting">
+        <Purpose>Entity pivoting</Purpose>
+        <Query platform="Elastic" language="ES|QL" id="Q-03">
+          <![CDATA[
+FROM logs-auditd.log-*,logs-auditd_manager.auditd-*
+| WHERE @timestamp >= NOW() - 4 hours
+    AND event.category == "process"
+    AND host.name == "$host"
+    AND process.name IN ("nsenter","unshare","capsh")
+| EVAL argline = MV_CONCAT(process.args, " ")
+| KEEP @timestamp, host.name, user.id, user.effective.id, process.name, process.executable, argline, process.pid, process.parent.pid, process.working_directory
+| SORT @timestamp DESC
+| LIMIT 50
+]]>
+        </Query>
+      </Step>
+      <Step order="4" name="Process investigation">
+        <Purpose>Process investigation</Purpose>
+        <Query platform="Elastic" language="ES|QL" id="Q-04">
+          <![CDATA[
+FROM logs-auditd.log-*,logs-auditd_manager.auditd-*
+| WHERE @timestamp >= NOW() - 4 hours
+    AND event.category == "process"
+    AND process.name IN ("nsenter","unshare","capsh")
+| STATS execs = COUNT(*), hosts = COUNT_DISTINCT(host.name), users = COUNT_DISTINCT(user.id) BY process.name, process.executable
+| SORT execs DESC
+| LIMIT 25
+]]>
+        </Query>
+      </Step>
+      <Step order="5" name="Process investigation">
+        <Purpose>Process investigation</Purpose>
+        <Query platform="Elastic" language="ES|QL" id="Q-05">
+          <![CDATA[
+FROM logs-auditd.log-*,logs-auditd_manager.auditd-*
+| WHERE @timestamp >= NOW() - 4 hours
+    AND event.category == "process"
+    AND host.name == "$host"
+    AND process.name IN ("nsenter","unshare","capsh")
+    AND process.args IS NOT NULL
+| EVAL arguments = MV_CONCAT(process.args, " ")
+| KEEP @timestamp, host.name, user.id, user.effective.id, process.executable, arguments, process.working_directory
+| SORT @timestamp DESC
+| LIMIT 50
+]]>
+        </Query>
+      </Step>
+      <Step order="6" name="Parent-Child process analysis">
+        <Purpose>Parent-Child process analysis</Purpose>
+        <Query platform="Elastic" language="ES|QL" id="Q-06">
+          <![CDATA[
+FROM logs-auditd.log-*,logs-auditd_manager.auditd-*
+| WHERE @timestamp >= NOW() - 4 hours
+    AND event.category == "process"
+    AND host.name == "$host"
+    AND user.name == "$user"
+| STATS execs = COUNT(*), distinct_children = COUNT_DISTINCT(process.name) BY process.parent.pid
+| SORT execs DESC
+| LIMIT 40
+]]>
+        </Query>
+      </Step>
+      <Step order="7" name="Parent-Child process analysis">
+        <Purpose>Parent-Child process analysis</Purpose>
+        <Query platform="Elastic" language="ES|QL" id="Q-07">
+          <![CDATA[
+FROM logs-auditd.log-*,logs-auditd_manager.auditd-*
+| WHERE @timestamp >= NOW() - 4 hours
+    AND event.category == "process"
+    AND host.name == "$host"
+    AND process.parent.pid == $suspicious_pid
+| EVAL argline = MV_CONCAT(process.args, " ")
+| KEEP @timestamp, user.id, user.effective.id, process.parent.pid, process.name, process.pid, process.executable, argline, process.working_directory
+| SORT @timestamp ASC
+| LIMIT 100
+]]>
+        </Query>
+      </Step>
+      <Step order="8" name="User investigation">
+        <Purpose>User investigation</Purpose>
+        <Query platform="Elastic" language="ES|QL" id="Q-08">
+          <![CDATA[
+FROM logs-auditd.log-*,logs-auditd_manager.auditd-*
+| WHERE @timestamp >= NOW() - 4 hours
+    AND event.category == "process"
+    AND host.name == "$host"
+    AND user.name == "$user"
+| STATS execs = COUNT(*) BY process.name, user.id, user.effective.id
+| SORT execs DESC
+| LIMIT 25
+]]>
+        </Query>
+      </Step>
+      <Step order="9" name="User investigation">
+        <Purpose>User investigation</Purpose>
+        <Query platform="Elastic" language="ES|QL" id="Q-09">
+          <![CDATA[
+FROM logs-auditd.log-*,logs-auditd_manager.auditd-*
+| WHERE @timestamp >= NOW() - 4 hours
+    AND event.category == "process"
+    AND user.name == "$user"
+| STATS execs = COUNT(*), distinct_procs = COUNT_DISTINCT(process.name) BY host.name
+| SORT execs DESC
+| LIMIT 20
+]]>
+        </Query>
+      </Step>
+      <Step order="10" name="Host investigation">
+        <Purpose>Host investigation</Purpose>
+        <Query platform="Elastic" language="ES|QL" id="Q-10">
+          <![CDATA[
+FROM logs-auditd.log-*,logs-auditd_manager.auditd-*
+| WHERE event.category=="process" AND host.name=="$host"
+    AND process.name IN ("podman","dockerd","containerd","runc","conmon","containerd-shim","crio","kubelet")
+    AND @timestamp >= NOW() - 4 hours
+| STATS c=COUNT(*), first_seen=MIN(@timestamp), last_seen=MAX(@timestamp) BY process.name
+| SORT c DESC
+| LIMIT 15
+]]>
+        </Query>
+      </Step>
+      <Step order="11" name="Host investigation">
+        <Purpose>Host investigation</Purpose>
+        <Query platform="Elastic" language="ES|QL" id="Q-11">
+          <![CDATA[
+FROM logs-auditd.log-*,logs-auditd_manager.auditd-*
+| WHERE @timestamp >= NOW() - 4 hours
+    AND event.category == "process"
+    AND host.name == "$host"
+| STATS execs = COUNT(*), users = COUNT_DISTINCT(user.id) BY process.name
+| SORT execs ASC
+| LIMIT 40
+]]>
+        </Query>
+      </Step>
+      <Step order="12" name="IP investigation">
+        <Purpose>IP investigation</Purpose>
+        <Query platform="Elastic" language="ES|QL" id="Q-12">
+          <![CDATA[
+FROM logs-system.auth-*
+| WHERE @timestamp >= NOW() - 4 hours
+    AND host.name == "$host"
+    AND user.name == "$user"
+    AND source.ip IS NOT NULL
+| STATS logons = COUNT(*) BY source.ip, event.action
+| SORT logons DESC
+| LIMIT 20
+]]>
+        </Query>
+      </Step>
+      <Step order="13" name="File investigation">
+        <Purpose>File investigation</Purpose>
+        <Query platform="Elastic" language="ES|QL" id="Q-13">
+          <![CDATA[
+FROM logs-auditd.log-*,logs-auditd_manager.auditd-*
+| WHERE @timestamp >= NOW() - 4 hours
+    AND event.category == "process"
+    AND host.name == "$host"
+    AND process.name IN ("nsenter","unshare","capsh")
+| STATS execs = COUNT(*), first_seen = MIN(@timestamp), last_seen = MAX(@timestamp) BY process.executable, process.working_directory
+| SORT execs DESC
+| LIMIT 30
+]]>
+        </Query>
+      </Step>
+      <Step order="14" name="Authentication investigation">
+        <Purpose>Authentication investigation</Purpose>
+        <Query platform="Elastic" language="ES|QL" id="Q-14">
+          <![CDATA[
+FROM logs-system.auth-*
+| WHERE @timestamp >= NOW() - 4 hours
+    AND host.name == "$host"
+    AND user.name == "$user"
+| STATS events = COUNT(*), first_seen = MIN(@timestamp), last_seen = MAX(@timestamp) BY event.action, source.ip, process.name
+| SORT events DESC
+| LIMIT 30
+]]>
+        </Query>
+      </Step>
+      <Step order="15" name="Timeline Reconstruction">
+        <Purpose>Timeline Reconstruction</Purpose>
+        <Query platform="Elastic" language="ES|QL" id="Q-15">
+          <![CDATA[
+FROM logs-auditd.log-*,logs-auditd_manager.auditd-*
+| WHERE @timestamp >= NOW() - 4 hours
+    AND event.category == "process"
+    AND host.name == "$host"
+    AND user.name == "$user"
+| EVAL argline = MV_CONCAT(process.args, " ")
+| KEEP @timestamp, process.parent.pid, process.pid, process.name, process.executable, argline, user.id, user.effective.id
+| SORT @timestamp ASC
+| LIMIT 200
+]]>
+        </Query>
+      </Step>
+      <Step order="16" name="Lateral movement validation">
+        <Purpose>Lateral movement validation</Purpose>
+        <Query platform="Elastic" language="ES|QL" id="Q-16">
+          <![CDATA[
+FROM logs-system.auth-*
+| WHERE @timestamp >= NOW() - 4 hours
+    AND (user.name == "$user" OR source.ip == "$source_ip")
+    AND host.name != "$host"
+    AND source.ip IS NOT NULL
+| STATS events = COUNT(*) BY host.name, source.ip, user.name, event.action
+| SORT events DESC
+| LIMIT 30
+]]>
+        </Query>
+      </Step>
+      <Step order="17" name="Persistence validation">
+        <Purpose>Persistence validation</Purpose>
+        <Query platform="Elastic" language="ES|QL" id="Q-17">
+          <![CDATA[
+FROM logs-auditd.log-*,logs-auditd_manager.auditd-*
+| WHERE @timestamp >= NOW() - 4 hours
+    AND event.category == "process"
+    AND host.name == "$host"
+    AND process.name IN ("crontab","at","batch","systemctl","systemd-run","cron","crond","update-rc.d")
+| EVAL argline = MV_CONCAT(process.args, " ")
+| KEEP @timestamp, process.name, argline, user.id, user.effective.id
+| SORT @timestamp DESC
+| LIMIT 30
+]]>
+        </Query>
+      </Step>
+      <Step order="18" name="Privilege escalation validation">
+        <Purpose>Privilege escalation validation</Purpose>
+        <Query platform="Elastic" language="ES|QL" id="Q-18">
+          <![CDATA[
+FROM logs-auditd.log-*,logs-auditd_manager.auditd-*
+| WHERE @timestamp >= NOW() - 4 hours
+    AND event.category == "process"
+    AND host.name == "$host"
+    AND process.name IN ("nsenter","unshare","capsh","sudo","su","pkexec","setuid")
+| EVAL argline = MV_CONCAT(process.args, " ")
+| KEEP @timestamp, user.name, user.id, user.effective.id, process.name, argline
+| SORT @timestamp DESC
+| LIMIT 30
+]]>
+        </Query>
+      </Step>
+      <Step order="19" name="Defense evasion validation">
+        <Purpose>Defense evasion validation</Purpose>
+        <Query platform="Elastic" language="ES|QL" id="Q-19">
+          <![CDATA[
+FROM logs-auditd.log-*,logs-auditd_manager.auditd-*
+| WHERE @timestamp >= NOW() - 4 hours
+    AND event.category == "process"
+    AND host.name == "$host"
+    AND process.name IN ("shred","truncate","auditctl","journalctl","rm","unlink","chattr")
+| EVAL argline = MV_CONCAT(process.args, " ")
+| KEEP @timestamp, process.name, argline, user.id
+| SORT @timestamp DESC
+| LIMIT 30
+]]>
+        </Query>
+      </Step>
+      <Step order="20" name="Impact assessment">
+        <Purpose>Impact assessment</Purpose>
+        <Query platform="Elastic" language="ES|QL" id="Q-20">
+          <![CDATA[
+FROM logs-auditd.log-*,logs-auditd_manager.auditd-*
+| WHERE event.category=="process" AND host.name=="$host" AND user.name=="$user"
+    AND process.name IN ("mount","chroot","nsenter","docker","crictl","kubectl","ctr","cat","find")
+    AND @timestamp >= NOW() - 4 hours
+| EVAL argline = MV_CONCAT(process.args, " ")
+| KEEP @timestamp, process.name, argline, user.id, user.effective.id, process.working_directory
+| SORT @timestamp DESC
+| LIMIT 30
+]]>
+        </Query>
+      </Step>
+      <Step order="21" name="Finalize verdict">
+        <DecisionTree>
+        </DecisionTree>
+      </Step>
+    </Workflow>
+  </Investigation>
+  <ClassificationGuidance>
+    <TruePositive>
+      <Definition></Definition>
+    </TruePositive>
+    <FalsePositive>
+      <Definition></Definition>
+      <Indicators>
+        <Item>Platform-engineering namespace work. A named administrator or automation identity legitimately using nsenter/unshare for approved diagnostics or maintenance under change control.</Item>
+        <Item>Benign build/diagnostic steps. Tooling that invokes these binaries for a narrow, non-escape purpose (for example a build step creating a mount namespace) outside its usual window.</Item>
+        <Item>Administrator / red-team / purple-team exercises deliberately exercising an escape. Authorised malicious-technique execution - confirm against a change ticket or exercise ROE before classifying as false_positive (blocked/authorised), never dismiss on sight.</Item>
+        <Item>The escape tools have a true zero baseline; the runtimes do not. nsenter/unshare/capsh executed 0 times across the fleet in the trailing 30 days and 0 in the live 4-hour window - while podman, runc, and conmon are actively running on the PAM/PostgreSQL container nodes (nim-pam-dbv06/-dbv07) this hour, and the devops Kubernetes masters/workers run their own runtimes. So the escape hypothesis is live on these nodes: the tools that would break out are absent, but the containers they would break out of are present.</Item>
+        <Item>$host = nim-pam-dbv07 is a confirmed container node. podman/runc/conmon are live on it, so an nsenter/unshare from a workload there is far more likely an escape than sysadmin namespace work.</Item>
+        <Item>The actor is almost always root, and user.name is frequently null. Process activity on these nodes runs overwhelmingly as root (user.id == 0) with a null user.name. Corroborate the actor with user.id/user.effective.id; do not read a null user.name as "no actor".</Item>
+        <Item>The originating container/pod is not in this stream. These events do not carry container.id/image, so the specific pod must be resolved from the runtime (correlate by timing against container-start events). No environment-specific allow-list applies; scope any exception to an exact operator + arguments + change reference.</Item>
+      </Indicators>
+    </FalsePositive>
+    <Misconfiguration>
+      <Definition></Definition>
+    </Misconfiguration>
+    <NeedsEscalation>
+      <Definition></Definition>
+    </NeedsEscalation>
+  </ClassificationGuidance>
+  <ResponseActions>
+    <Phase name="Containment">
+      <Action>Isolate the node and the originating container/pod. Network-contain $host and stop/quarantine the originating pod (resolved from the runtime). Treat the node and all co-located containers as compromised.</Action>
+      <Action>Capture the container image and the runtime's start record for the originating pod before it is destroyed, for forensics.</Action>
+      <Action>Kill the escape process tree ($suspicious_pid and descendants, section 15.3b) and any host-namespace shell if the node cannot yet be isolated.</Action>
+      <Action>Rotate secrets exposed to the workload and the node on priority (see section 20) - a break-out exposes everything mounted or reachable from the node.</Action>
+      <Action>Deploy/confirm changes only via the authorised human-approved DEPLOY path; investigation itself is read-only.</Action>
+    </Phase>
+    <Phase name="Eradication">
+      <Action>Remove the originating workload and rebuild it from a known-good image; do not simply restart the same container.</Action>
+      <Action>Remove any persistence the escaped actor installed on the node (section 17.2) and any dropped payload identified via section 15.10.</Action>
+      <Action>Close the escape path: drop the container capabilities and privileged mode that enabled it, remove host-path/socket mounts, and enforce user namespaces and a seccomp/AppArmor/SELinux profile (see section 20).</Action>
+      <Action>Run a node IR sweep and hunt for the same escape tooling and host-secret access across peers, especially the other PAM/DB nodes and any host $user/$source_ip touched (section 15.4b, section 17.1).</Action>
+      <Action>Remediate the initial-access vector that compromised the workload in the first place.</Action>
+    </Phase>
+    <Phase name="Recovery">
+      <Action>Rotate everything exposed to the node: the node's credentials and SSH keys, secrets mounted into the originating and co-located containers, and - because this is a PAM/DB node - treat vaulted/DB secrets as potentially exposed and rotate on priority.</Action>
+      <Action>Restore the node from a known-good image if the host filesystem was modified; otherwise validate that capability/mount hardening holds and that no escape path remains.</Action>
+      <Action>Return the node and workloads to service only after section 22 closing criteria are met and monitoring confirms no recurrence.</Action>
+      <Action>Harden (section 23): remove unnecessary container capabilities and privileged mode, enforce user namespaces and a mandatory-access-control profile, and restrict the host paths and sockets mounted into workloads so escape primitives cannot reach PID 1.</Action>
+    </Phase>
+  </ResponseActions>
+  <Escalation>
+    <Trigger>Escalate to Tier 3 / Incident Response (and notify the customer) when any of the following hold:
+
+- argline shows host-namespace targeting (nsenter -t 1, unshare escape context, or capsh capability abuse) on a confirmed container node (section 15.5a).
+- Root-level host-namespace actions follow (section 17.5) - mount/chroot/secret-access/runtime-control as user.effective.id == 0.
+- Lateral movement from the node (section 17.1), especially toward other PAM/DB nodes or privileged systems.
+- Persistence or defense evasion on the node follows the escape (section 17.2/section 17.4).
+- Node role or host follow-on cannot be established because of telemetry gaps and the alert cannot be safely cleared - escalate as needs_escalation with the gaps named.</Trigger>
+    <To>SOC L2 / IR</To>
+  </Escalation>
+  <ClosureCriteria>
+    <Item>false_positive (authorised): a change record positively matches a named admin/automation performing benign namespace work. Record the reference. Do not create a broad exception; if warranted, scope it to the exact operator + arguments.</Item>
+    <Item>false_positive (proven-failed attempt): the escape was positively proven to have failed (tool errored / insufficient capabilities / no host-namespace effect) - documented as a blocked attempt, never "benign".</Item>
+    <Item>misconfiguration: a legitimate tool/automation used these binaries benignly with no PID 1 targeting and no host follow-on, simply not yet baselined; document and baseline it (and drop the capabilities that made the tools available).</Item>
+    <Item>true_positive: container escape confirmed; node and originating pod isolated, image captured, exposed secrets rotated, lateral movement hunted, container privileges hardened, incident documented.</Item>
+    <Item>needs_escalation: handed to Tier 3/IR (container platform) with the specific evidence gaps documented.</Item>
+  </ClosureCriteria>
+  <Limitations>
+    <Item>Zero baseline on a live container fleet = high fidelity. nsenter/unshare/capsh never run in NBI's baseline, yet podman/runc/conmon run continuously on the PAM nodes. That combination is exactly what makes a firing here high-signal: the break-out tools are absent, the containers to break out of are present.</Item>
+    <Item>The namespace target is the whole investigation. nsenter -t 1 and a spawned shell is a break-out; a narrow unshare with no host follow-on may be benign. Read argline, then confirm the payoff in section 17.5.</Item>
+    <Item>user.name is unreliable; user.id/user.effective.id are not. The actor on these nodes is root with a null user.name. effective.id == 0 after nsenter -t 1 is the success signal.</Item>
+    <Item>No container.id here → resolve the pod from the runtime. These events do not carry container/image; correlate by host, PID, and timing against the runtime's container-start events. No parent path either - lineage is by process.parent.pid.</Item>
+    <Item>A quiet result is not an all-clear. Only the tool from section 14.2 with no section 17.5 host follow-on leaves the escape unproven - push toward needs_escalation, not "benign". A runtime present without emitting in-window does not clear the host.</Item>
+    <Item>The rule is name-based and evadable. Escape does not require these three binaries - a mounted docker.sock, a privileged/hostPID pod writing host paths, a core_pattern/release_agent cgroup trick, or a kernel exploit all reach the host. Complementary signal: alert on writes to /var/run/docker.sock and runtime sockets, on privileged/hostPID pod creation, and on host-path mounts from workloads, and correlate node-level root process spawns with container-start events.</Item>
+    <Item>KB-worthy (persist to NBI customer scope): (1) nsenter/unshare/capsh zero-baseline over 4h fleet-wide and 30d; (2) nim-pam-dbv06/-dbv07 are confirmed container nodes (podman/runc/conmon live); (3) actor on these nodes = root, user.name largely null; (4) no container.id/image on the auditd stream (resolve pod from runtime); (5) logs-system.auth-* carries SSH source.ip for session origin. All observed live on 2026-08-17.</Item>
+  </Limitations>
+</Playbook>

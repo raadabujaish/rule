@@ -1,0 +1,96 @@
+{
+  "name": "FortiGate — VPN Brute Force From External Source",
+  "tags": [
+    "NBI",
+    "Perimeter",
+    "FortiGate",
+    "Brute Force",
+    "Credential Access",
+    "class:primary",
+    "PROPOSED"
+  ],
+  "interval": "6h",
+  "enabled": true,
+  "description": "An external source IP generated 500 or more FortiGate VPN authentication failures in a 6-hour window — external brute-force against the IPsec VPN. FortiGate VPN failures carry NO user attribution (user.name and xauthuser both 0%), so this is necessarily a source-volume detection, not user-based. NBI's baseline is a persistent floor of ~4 loud external IPs (peaks 400-820 failures/hour) far above internet background (<1/hour), so the 500/6h threshold cleanly isolates real brute-force. Internal sources are excluded (RFC1918) — this is the external attack surface. Basic license does not enforce suppression, so a persistent source re-alerts hourly; the correct response is to block the source IP (which also stops the alert).",
+  "risk_score": 47,
+  "severity": "medium",
+  "note": "### Investigation — external VPN brute force\n1. **WHO / FROM WHERE** `source.ip` — an external IP hammering the VPN. Check geo/reputation; NBI's known persistent offenders include 185.217.76.86 / 193.122.51.47 / 185.112.188.197 / 130.193.131.98.\n2. **DID WHAT** >=500 VPN auth failures in a 6h window against the FortiGate. No username is logged (IKE), so treat as source-level brute-force.\n3. **WHY suspicious** volume far above background; sustained targeting of the remote-access surface.\n4. **Escalate / act**: block the source IP at the perimeter (stops the attack and the recurring alert). Check whether the same source ever produced a VPN SUCCESS (would indicate the brute-force worked).",
+  "output_index": "",
+  "meta": {
+    "standard": {
+      "lifecycle": "PROPOSED",
+      "analytic_class": "primary",
+      "primitive": "threshold",
+      "rule_type_rationale": "D0 observable = count of VPN failures per external source crossing a baselined number; no user attribution exists so cardinality-of-users is impossible; New Terms fires on ubiquitous internet background (23 new sources/day). D2 -> Threshold on volume. Baseline: 4 sources at 400-820/hr vs <1/hr background.",
+      "baseline": "top4 external sources 19k-88k fails/7d (peak 406-820/hr); background <=62/7d",
+      "supersedes": [
+        "raad-12-credential-stuffing-burst",
+        "raad-17-vpn-rdp-citrix-spray"
+      ]
+    }
+  },
+  "investigation_fields": {
+    "field_names": [
+      "source.ip"
+    ]
+  },
+  "author": [],
+  "false_positives": [],
+  "from": "now-370m",
+  "rule_id": "nbi-fgt-vpn-bruteforce-external",
+  "max_signals": 100,
+  "risk_score_mapping": [],
+  "severity_mapping": [],
+  "threat": [
+    {
+      "framework": "MITRE ATT&CK",
+      "tactic": {
+        "id": "TA0006",
+        "name": "Credential Access",
+        "reference": "https://attack.mitre.org/tactics/TA0006/"
+      },
+      "technique": [
+        {
+          "id": "T1110",
+          "name": "Brute Force",
+          "reference": "https://attack.mitre.org/techniques/T1110/"
+        }
+      ]
+    },
+    {
+      "framework": "MITRE ATT&CK",
+      "tactic": {
+        "id": "TA0001",
+        "name": "Initial Access",
+        "reference": "https://attack.mitre.org/tactics/TA0001/"
+      },
+      "technique": [
+        {
+          "id": "T1133",
+          "name": "External Remote Services",
+          "reference": "https://attack.mitre.org/techniques/T1133/"
+        }
+      ]
+    }
+  ],
+  "to": "now",
+  "references": [],
+  "version": 1,
+  "exceptions_list": [],
+  "related_integrations": [],
+  "required_fields": [],
+  "setup": "",
+  "type": "threshold",
+  "language": "kuery",
+  "index": [
+    "logs-fortinet_fortigate.log-*"
+  ],
+  "query": "fortinet.firewall.subtype:\"vpn\" and event.outcome:\"failure\" and source.ip:* and not source.ip:\"10.0.0.0/8\" and not source.ip:\"172.16.0.0/12\" and not source.ip:\"192.168.0.0/16\"",
+  "threshold": {
+    "field": [
+      "source.ip"
+    ],
+    "value": 500
+  },
+  "actions": []
+}

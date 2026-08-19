@@ -1,0 +1,420 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<Playbook xmlns="https://soc.example/playbooks" id="PB-windows-webdav-share-execution" name="Suspicious Execution from a WebDav Share [NBI-4688] - SOC Playbook" version="3.0" status="Validated" classification="TLP:AMBER">
+  <Metadata>
+    <Owner>NBI SOC / Detection Engineering</Owner>
+    <LastUpdated>2026-08-19</LastUpdated>
+    <Severity default="high">high</Severity>
+    <Confidence default="Medium">Medium</Confidence>
+    <Category>Execution</Category>
+    <MitreAttack>
+      <Technique id="T1105"/>
+      <Technique id="T1572"/>
+      <Tactic id="TA0002"/>
+      <Tactic id="TA0011"/>
+    </MitreAttack>
+    <References>
+      <Reference title="MITRE ATT&amp;CK - Ingress Tool Transfer (T1105)" url="https://attack.mitre.org/techniques/T1105/"/>
+      <Reference title="MITRE ATT&amp;CK - Protocol Tunneling (T1572)" url="https://attack.mitre.org/techniques/T1572/"/>
+      <Reference title="MITRE ATT&amp;CK - Execution tactic (TA0002)" url="https://attack.mitre.org/tactics/TA0002/"/>
+      <Reference title="MITRE ATT&amp;CK - Command and Control tactic (TA0011)" url="https://attack.mitre.org/tactics/TA0011/"/>
+      <Reference title="Microsoft Learn - 4688(S): A new process has been created" url="https://learn.microsoft.com/en-us/windows/security/threat-protection/auditing/event-4688"/>
+      <Reference title="Microsoft Learn - WebClient service / WebDAV Redirector" url="https://learn.microsoft.com/en-us/windows-server/storage/file-server/troubleshoot/webdav-redirector"/>
+      <Reference title="The DFIR Report - WebDAV / fileless delivery tradecraft (search-execution over WebDAV)" url="https://thedfirreport.com/"/>
+      <Reference title="LOLBAS - Bitsadmin.exe" url="https://lolbas-project.github.io/lolbas/Binaries/Bitsadmin/"/>
+      <Reference title="LOLBAS - Certutil.exe" url="https://lolbas-project.github.io/lolbas/Binaries/Certutil/"/>
+    </References>
+  </Metadata>
+  <AlertContext>
+    <RuleName>Suspicious Execution from a WebDav Share [NBI-4688]</RuleName>
+    <RuleId>nbi-b2-suspicious-execution-from-a-webdav-share</RuleId>
+    <RuleType>eql</RuleType>
+    <Index>logs-system.security*</Index>
+    <TriggerLogic>The deployed rule is an EQL process rule on Windows Event 4688. Plain-English logic: a process start where process.name is one of the exec/download binaries and the command line (with process.args folded in) contains a WebDAV/remote-share token - trycloudflare.com, @ssl, webdav, davwwwroot, or @80/@443/@8080/@8443 - excluding the benign SharePoint *.sharepoint.com@SSL\DavWWWRoot\ path.
+
+Because NBI's 4688 command line is only intermittently populated, the investigation logic concatenates process.command_line with MV_CONCAT(process.args," ") before matching (see section 14.1). One-line Kibana-KQL filter for fast Discover pivoting:
+
+
+
+The filter depends on process.command_line; on a command-line-blind host it is empty - an empty result there is a telemetry gap, not evidence of safety (section 8).</TriggerLogic>
+    <KeyAlertFields>process.name, process.executable, process.parent.name, process.parent.pid, python.exe, svchost.exe, user.name, user.id, process.command_line, process.args, trycloudflare.com</KeyAlertFields>
+  </AlertContext>
+  <Inputs>
+    <Input name="$host"/>
+    <Input name="$user"/>
+  </Inputs>
+  <ExecutiveSummary>
+    <Overview>This playbook drives triage and investigation of the Suspicious Execution from a WebDav Share [NBI-4688] detection on NBI's Elastic Security deployment. The rule fires when Windows Event 4688 records a common execution/download binary (cmd, powershell, conhost, wscript, mshta, curl, msiexec, bitsadmin, net) whose command line references a WebDAV / tunnelled remote-share path: trycloudflare.com, @SSL, \webdav\, \DavWWWRoot\, or a UNC host on a non-standard port (@8080/@80/@8443/@443). The deployed rule excludes the SharePoint WebDAV path (\\?\UNC\*.sharepoint.com@SSL\DavWWWRoot\).
+
+Executing content directly from a remote WebDAV mount lets an attacker run a payload without first writing it to local disk - a fileless delivery/evasion pattern that defeats disk-based AV. The analyst's goal is to decide whether this is legitimate access to a sanctioned internal/cloud share (false_positive - authorised, e.g. a real SharePoint tenant), fileless execution from an attacker-controlled share/tunnel (true_positive), an un-baselined legitimate WebDAV workflow (misconfiguration), or an unresolved case (needs_escalation).</Overview>
+    <BusinessImpact>An alert means: on $host, one of the exec/download binaries ran with a command line pointing at a WebDAV or tunnelled remote share. If the source is an external tunnel (trycloudflare.com) or a UNC host on a non-standard port, the binary very likely executed an attacker-hosted payload straight from the remote mount - fileless remote execution that already ran, minimal local footprint.
+
+The investigative pivots are three: the remote source (sanctioned SharePoint/internal WebDAV vs. external tunnel / UNC-on-port), what executed (a msiexec/bitsadmin/curl pull, or a cmd/powershell/wscript running a binary under \DavWWWRoot\), and the mount-then-fetch chain (a net use mounting the share followed by curl/bitsadmin/certutil). The SharePoint @SSL path is the common benign case - but verify it is the bank's tenant, do not auto-trust the string.</BusinessImpact>
+  </ExecutiveSummary>
+  <Investigation>
+    <Goal>Decide true_positive / false_positive / misconfiguration / needs_escalation for Suspicious Execution from a WebDav Share [NBI-4688].</Goal>
+    <Workflow>
+      <Step order="1" name="Reproduce the rule estate-wide (confirm the detection logic)">
+        <Purpose>Reproduce the rule estate-wide (confirm the detection logic)</Purpose>
+        <Query platform="Elastic" language="ES|QL" id="Q-01">
+          <![CDATA[
+FROM logs-system.security-*
+| WHERE event.code == "4688" AND @timestamp >= NOW() - 4 hours
+    AND TO_LOWER(process.name) IN ("cmd.exe", "powershell.exe", "conhost.exe", "wscript.exe", "mshta.exe", "curl.exe", "msiexec.exe", "bitsadmin.exe", "net.exe")
+| EVAL cl = TO_LOWER(CONCAT(COALESCE(process.command_line, ""), " ", COALESCE(MV_CONCAT(process.args, " "), "")))
+| WHERE (cl LIKE "*trycloudflare.com*" OR cl LIKE "*@ssl*" OR cl LIKE "*webdav*" OR cl LIKE "*davwwwroot*" OR cl LIKE "*@8080*" OR cl LIKE "*@443*" OR cl LIKE "*@8443*" OR cl LIKE "*@80*")
+    AND NOT cl LIKE "*sharepoint.com@ssl*"
+| KEEP @timestamp, host.name, user.name, process.name, process.parent.name, process.command_line, process.args
+| SORT @timestamp DESC
+| LIMIT 50
+]]>
+        </Query>
+      </Step>
+      <Step order="2" name="Confirm the WebDAV-referencing execution on the alert host">
+        <Purpose>Confirm the WebDAV-referencing execution on the alert host</Purpose>
+        <Query platform="Elastic" language="ES|QL" id="Q-02">
+          <![CDATA[
+FROM logs-system.security-*
+| WHERE event.code == "4688" AND host.name == "$host" AND @timestamp >= NOW() - 4 hours
+    AND TO_LOWER(process.name) IN ("cmd.exe", "powershell.exe", "conhost.exe", "wscript.exe", "mshta.exe", "curl.exe", "msiexec.exe", "bitsadmin.exe", "net.exe")
+| EVAL cl = TO_LOWER(CONCAT(COALESCE(process.command_line, ""), " ", COALESCE(MV_CONCAT(process.args, " "), "")))
+| WHERE cl LIKE "*trycloudflare.com*" OR cl LIKE "*@ssl*" OR cl LIKE "*webdav*" OR cl LIKE "*davwwwroot*" OR cl LIKE "*@8080*" OR cl LIKE "*@443*" OR cl LIKE "*@8443*" OR cl LIKE "*@80*"
+| KEEP @timestamp, user.name, process.name, process.parent.name, process.command_line, process.args
+| SORT @timestamp DESC
+| LIMIT 20
+]]>
+        </Query>
+      </Step>
+      <Step order="3" name="Entity pivoting">
+        <Purpose>Entity pivoting</Purpose>
+        <Query platform="Elastic" language="ES|QL" id="Q-03">
+          <![CDATA[
+FROM logs-system.security*
+| WHERE @timestamp >= NOW() - 4 hours
+    AND event.code == "4688"
+    AND host.name == "$host"
+    AND user.name == "$user"
+    AND TO_LOWER(process.name) IN ("cmd.exe", "powershell.exe", "conhost.exe", "wscript.exe", "mshta.exe", "curl.exe", "msiexec.exe", "bitsadmin.exe", "net.exe")
+| KEEP @timestamp, host.name, user.name, user.id, process.name, process.executable, process.parent.name, process.pid, process.parent.pid, process.command_line
+| SORT @timestamp DESC
+| LIMIT 50
+]]>
+        </Query>
+      </Step>
+      <Step order="4" name="Process investigation">
+        <Purpose>Process investigation</Purpose>
+        <Query platform="Elastic" language="ES|QL" id="Q-04">
+          <![CDATA[
+FROM logs-system.security*
+| WHERE @timestamp >= NOW() - 4 hours
+    AND event.code == "4688"
+    AND host.name == "$host"
+    AND TO_LOWER(process.name) IN ("cmd.exe", "powershell.exe", "conhost.exe", "wscript.exe", "mshta.exe", "curl.exe", "msiexec.exe", "bitsadmin.exe", "net.exe")
+| STATS executions = COUNT(*), users = COUNT_DISTINCT(user.name) BY process.name, process.parent.name
+| SORT executions DESC
+| LIMIT 40
+]]>
+        </Query>
+      </Step>
+      <Step order="5" name="Process investigation">
+        <Purpose>Process investigation</Purpose>
+        <Query platform="Elastic" language="ES|QL" id="Q-05">
+          <![CDATA[
+FROM logs-system.security*
+| WHERE @timestamp >= NOW() - 4 hours
+    AND event.code == "4688"
+    AND host.name == "$host"
+    AND TO_LOWER(process.name) IN ("cmd.exe", "powershell.exe", "wscript.exe", "mshta.exe", "curl.exe", "msiexec.exe", "bitsadmin.exe", "net.exe")
+| EVAL cl = TO_LOWER(CONCAT(COALESCE(process.command_line, ""), " ", COALESCE(MV_CONCAT(process.args, " "), "")))
+| EVAL source_type = CASE(
+    cl LIKE "*sharepoint.com@ssl*", "sharepoint-webdav-verify",
+    cl LIKE "*trycloudflare.com*", "cloudflare-tunnel-external",
+    cl LIKE "*@8080*" OR cl LIKE "*@8443*" OR cl LIKE "*@443*" OR cl LIKE "*@80*", "unc-nonstandard-port",
+    cl LIKE "*davwwwroot*" OR cl LIKE "*webdav*" OR cl LIKE "*@ssl*", "generic-webdav",
+    "other")
+| KEEP @timestamp, user.name, process.name, process.parent.name, source_type, process.command_line
+| SORT @timestamp DESC
+| LIMIT 30
+]]>
+        </Query>
+      </Step>
+      <Step order="6" name="Parent-Child process analysis">
+        <Purpose>Parent-Child process analysis</Purpose>
+        <Query platform="Elastic" language="ES|QL" id="Q-06">
+          <![CDATA[
+FROM logs-system.security*
+| WHERE @timestamp >= NOW() - 4 hours
+    AND event.code == "4688"
+    AND host.name == "$host"
+    AND TO_LOWER(process.name) IN ("cmd.exe", "powershell.exe", "wscript.exe", "mshta.exe", "curl.exe", "msiexec.exe", "bitsadmin.exe", "net.exe")
+| STATS execs = COUNT(*), users = COUNT_DISTINCT(user.name) BY process.parent.name, process.name
+| SORT execs DESC
+| LIMIT 30
+]]>
+        </Query>
+      </Step>
+      <Step order="7" name="Parent-Child process analysis">
+        <Purpose>Parent-Child process analysis</Purpose>
+        <Query platform="Elastic" language="ES|QL" id="Q-07">
+          <![CDATA[
+FROM logs-system.security*
+| WHERE @timestamp >= NOW() - 4 hours
+    AND event.code == "4688"
+    AND host.name == "$host" AND user.name == "$user"
+| EVAL cl = TO_LOWER(CONCAT(COALESCE(process.command_line, ""), " ", COALESCE(MV_CONCAT(process.args, " "), "")))
+| WHERE (TO_LOWER(process.name) == "net.exe" AND cl LIKE "*use*")
+     OR cl LIKE "*trycloudflare*" OR cl LIKE "*webdav*" OR cl LIKE "*davwwwroot*" OR cl LIKE "*@ssl*"
+     OR TO_LOWER(process.name) IN ("curl.exe", "bitsadmin.exe", "certutil.exe")
+| STATS execs = COUNT(*), last_seen = MAX(@timestamp) BY process.name
+| SORT execs DESC
+| LIMIT 20
+]]>
+        </Query>
+      </Step>
+      <Step order="8" name="User investigation">
+        <Purpose>User investigation</Purpose>
+        <Query platform="Elastic" language="ES|QL" id="Q-08">
+          <![CDATA[
+FROM logs-system.security*
+| WHERE @timestamp >= NOW() - 4 hours
+    AND event.code == "4688"
+    AND user.name == "$user"
+| STATS executions = COUNT(*), distinct_procs = COUNT_DISTINCT(process.name) BY host.name
+| SORT executions DESC
+| LIMIT 20
+]]>
+        </Query>
+      </Step>
+      <Step order="9" name="Host investigation">
+        <Purpose>Host investigation</Purpose>
+        <Query platform="Elastic" language="ES|QL" id="Q-09">
+          <![CDATA[
+FROM logs-system.security*
+| WHERE @timestamp >= NOW() - 4 hours
+    AND event.code == "4688"
+    AND host.name == "$host"
+| STATS executions = COUNT(*), users = COUNT_DISTINCT(user.name) BY process.name, process.parent.name
+| SORT executions ASC
+| LIMIT 40
+]]>
+        </Query>
+      </Step>
+      <Step order="10" name="IP investigation">
+        <Purpose>IP investigation</Purpose>
+        <Query platform="Elastic" language="ES|QL" id="Q-10">
+          <![CDATA[
+FROM logs-system.security*
+| WHERE @timestamp >= NOW() - 4 hours
+    AND event.code == "4624"
+    AND host.name == "$host"
+    AND source.ip IS NOT NULL
+| STATS logons = COUNT(*) BY source.ip, user.name, winlog.event_data.LogonType
+| SORT logons DESC
+| LIMIT 25
+]]>
+        </Query>
+      </Step>
+      <Step order="11" name="File investigation">
+        <Purpose>File investigation</Purpose>
+        <Query platform="Elastic" language="ES|QL" id="Q-11">
+          <![CDATA[
+FROM logs-system.security*
+| WHERE @timestamp >= NOW() - 4 hours
+    AND event.code == "4688"
+    AND host.name == "$host"
+    AND TO_LOWER(process.name) IN ("cmd.exe", "powershell.exe", "wscript.exe", "mshta.exe", "curl.exe", "msiexec.exe", "bitsadmin.exe", "net.exe", "certutil.exe")
+| STATS executions = COUNT(*), first_seen = MIN(@timestamp), last_seen = MAX(@timestamp) BY process.name, process.executable
+| SORT executions DESC
+| LIMIT 30
+]]>
+        </Query>
+      </Step>
+      <Step order="12" name="Authentication investigation">
+        <Purpose>Authentication investigation</Purpose>
+        <Query platform="Elastic" language="ES|QL" id="Q-12">
+          <![CDATA[
+FROM logs-system.security*
+| WHERE @timestamp >= NOW() - 4 hours
+    AND event.code IN ("4624", "4625", "4634", "4647")
+    AND host.name == "$host" AND user.name == "$user"
+| STATS events = COUNT(*), first_seen = MIN(@timestamp), last_seen = MAX(@timestamp) BY event.code, winlog.event_data.LogonType, source.ip
+| SORT events DESC
+| LIMIT 30
+]]>
+        </Query>
+      </Step>
+      <Step order="13" name="Timeline Reconstruction">
+        <Purpose>Timeline Reconstruction</Purpose>
+        <Query platform="Elastic" language="ES|QL" id="Q-13">
+          <![CDATA[
+FROM logs-system.security*
+| WHERE @timestamp >= NOW() - 4 hours
+    AND event.code == "4688"
+    AND host.name == "$host"
+    AND user.name == "$user"
+| KEEP @timestamp, process.parent.name, process.parent.pid, process.name, process.pid, process.command_line
+| SORT @timestamp ASC
+| LIMIT 200
+]]>
+        </Query>
+      </Step>
+      <Step order="14" name="Lateral movement validation">
+        <Purpose>Lateral movement validation</Purpose>
+        <Query platform="Elastic" language="ES|QL" id="Q-14">
+          <![CDATA[
+FROM logs-system.security*
+| WHERE @timestamp >= NOW() - 4 hours
+    AND event.code IN ("4624", "4648", "4768", "4769", "5140")
+    AND user.name == "$user"
+    AND host.name != "$host"
+| STATS events = COUNT(*) BY host.name, event.code, winlog.event_data.LogonType
+| SORT events DESC
+| LIMIT 30
+]]>
+        </Query>
+      </Step>
+      <Step order="15" name="Persistence validation">
+        <Purpose>Persistence validation</Purpose>
+        <Query platform="Elastic" language="ES|QL" id="Q-15">
+          <![CDATA[
+FROM logs-system.security*
+| WHERE @timestamp >= NOW() - 4 hours
+    AND host.name == "$host"
+    AND (
+        (event.code == "4688" AND TO_LOWER(process.name) IN ("sc.exe", "schtasks.exe", "reg.exe", "at.exe", "powershell.exe", "wscript.exe", "cscript.exe", "rundll32.exe", "mshta.exe"))
+        OR event.code == "7045"
+        OR event.code == "4720"
+        OR event.code == "4698"
+    )
+| STATS events = COUNT(*) BY event.code, process.name, user.name
+| SORT events DESC
+| LIMIT 40
+]]>
+        </Query>
+      </Step>
+      <Step order="16" name="Privilege escalation validation">
+        <Purpose>Privilege escalation validation</Purpose>
+        <Query platform="Elastic" language="ES|QL" id="Q-16">
+          <![CDATA[
+FROM logs-system.security*
+| WHERE @timestamp >= NOW() - 4 hours
+    AND event.code == "4672"
+    AND host.name == "$host"
+| STATS special_priv_logons = COUNT(*) BY user.name
+| SORT special_priv_logons DESC
+| LIMIT 25
+]]>
+        </Query>
+      </Step>
+      <Step order="17" name="Defense evasion validation">
+        <Purpose>Defense evasion validation</Purpose>
+        <Query platform="Elastic" language="ES|QL" id="Q-17">
+          <![CDATA[
+FROM logs-system.security*
+| WHERE @timestamp >= NOW() - 4 hours
+    AND host.name == "$host"
+    AND (
+        (event.code == "4688" AND TO_LOWER(process.name) IN ("wevtutil.exe", "fsutil.exe", "vssadmin.exe", "wmic.exe", "cipher.exe", "sdelete.exe", "sdelete64.exe"))
+        OR event.code == "1102"
+        OR event.code == "4719"
+    )
+| STATS events = COUNT(*) BY event.code, process.name, user.name
+| SORT events DESC
+| LIMIT 30
+]]>
+        </Query>
+      </Step>
+      <Step order="18" name="Impact assessment">
+        <Purpose>Impact assessment</Purpose>
+        <Query platform="Elastic" language="ES|QL" id="Q-18">
+          <![CDATA[
+FROM logs-system.security*
+| WHERE @timestamp >= NOW() - 4 hours
+    AND host.name == "$host"
+    AND event.code == "4688"
+    AND TO_LOWER(process.parent.name) IN ("cmd.exe", "powershell.exe", "wscript.exe", "mshta.exe", "curl.exe", "msiexec.exe", "bitsadmin.exe")
+| STATS children = COUNT(*), distinct_children = COUNT_DISTINCT(process.name) BY process.parent.name, process.name
+| SORT children DESC
+| LIMIT 30
+]]>
+        </Query>
+      </Step>
+      <Step order="19" name="Finalize verdict">
+        <DecisionTree>
+        </DecisionTree>
+      </Step>
+    </Workflow>
+  </Investigation>
+  <ClassificationGuidance>
+    <TruePositive>
+      <Definition></Definition>
+    </TruePositive>
+    <FalsePositive>
+      <Definition></Definition>
+      <Indicators>
+        <Item>Sanctioned SharePoint / internal WebDAV access. The dominant benign cause: a user or service reaching the bank's real SharePoint tenant (*.sharepoint.com@SSL\DavWWWRoot\, already excluded) or an approved internal WebDAV share. Confirm the tenant/owner, not merely the string.</Item>
+        <Item>Legitimate WebDAV-based business workflows not yet baselined - a real internal process that references a WebDAV path this rule flags (misconfiguration until excluded).</Item>
+        <Item>Proven-blocked attempts - the mount or fetch was denied and nothing executed. Recorded as a blocked malicious attempt, never "benign".</Item>
+        <Item>Command-line coincidences - a benign command that happens to contain a token like @443 in an unrelated context; read the full path before judging.</Item>
+        <Item>Zero WebDAV baseline. No trycloudflare.com / @SSL / \DavWWWRoot\ / webdav / UNC-on-nonstandard-port reference matched across the estate in the validated 4-hour window (section 14.1 returned 0 live). There is no noisy legitimate source to tune out - any match is a strong anomaly.</Item>
+        <Item>This rule is command-line-capable on server-class hosts, blind on interactive ones. nim-st-apv10 (and peers like nim-st-apv11, nim-cfs-apv01, nim-dc-dbap01) populate process.command_line ~100%, so the WebDAV token can be matched there. The jump/VDI hosts (nim-jump-apv02/03, nim-fti-apv01) populate 0%, so a WebDAV execution launched interactively there would be invisible to this rule - a critical gap, since hands-on-keyboard WebDAV execution is most plausible on exactly those interactive hosts.</Item>
+        <Item>Benign encoded PowerShell is normal here - do not equate encoding with malice. nim-st-apv10 runs a python.exe→powershell.exe -NoProfile -EncodedCommand … automation pipeline (validated: the encoded blobs decode to timezone/registry reads such as tzutil /g). Encoded PowerShell and batch shell-outs (cmd /c "C:\Scipts\SwiftImage.bat") are the host's routine SWIFT workflow; the WebDAV remote-source token - not the shell itself - is the finding.</Item>
+        <Item>No NBI benign-true-positive is on record for this rule. Do not blanket-exclude a host/user off one alert; scope any exclusion to a verified sanctioned share path (tenant/owner documented).</Item>
+      </Indicators>
+    </FalsePositive>
+    <Misconfiguration>
+      <Definition></Definition>
+    </Misconfiguration>
+    <NeedsEscalation>
+      <Definition></Definition>
+    </NeedsEscalation>
+  </ClassificationGuidance>
+  <ResponseActions>
+    <Phase name="Containment">
+      <Action>Isolate $host (network-contain / quarantine) if a true_positive is confirmed, to sever access to the remote share and stop the payload's activity. On a server, coordinate with IT but prioritise containment.</Action>
+      <Action>Block the remote source at the FortiGate/proxy - the tunnel host (*.trycloudflare.com), the UNC host/IP, or the WebDAV FQDN identified in section 14/section 15.7 - as an immediate estate-wide stop-gap while $host is contained.</Action>
+      <Action>Terminate the payload tree - the exec/download binary and its descendants (section 17.5) - if the host cannot yet be isolated.</Action>
+      <Action>Suspend/disable $user if the account is implicated, and reset its credentials (section 20).</Action>
+      <Action>Preserve volatile evidence first where feasible - running processes, any locally-dropped copy of the payload, the mounted-drive state (net use), and FortiGate egress records to the remote host. Because the payload may be fileless, host memory and the WebDAV source are the best recovery points.</Action>
+      <Action>Investigation is read-only; make changes only via the authorised human-approved DEPLOY path.</Action>
+    </Phase>
+    <Phase name="Eradication">
+      <Action>Remove fetched payloads and persistence discovered in section 17.2/section 17.5 - services (7045), scheduled tasks, Run keys, dropped binaries - and unmount any attacker WebDAV share (net use … /delete).</Action>
+      <Action>Block the remote host/tunnel permanently at the perimeter and add the tunnelling provider (e.g. *.trycloudflare.com) to egress deny where not needed for business.</Action>
+      <Action>Hunt the same source across peers - pivot the remote host/IP in FortiGate for other NBI hosts that reached it, and the payload hash across the estate.</Action>
+      <Action>Disable the WebClient/WebDAV service on hosts that do not need it (this is what enables @SSL/\DavWWWRoot\ mounts) as a hardening step.</Action>
+      <Action>Remediate the initial-access vector that led $user/$host to the WebDAV link.</Action>
+    </Phase>
+    <Phase name="Recovery">
+      <Action>Reset credentials used interactively on $host during the execution window; if privileged accounts were present (section 17.3), rotate those and review for secret exposure.</Action>
+      <Action>Restore $host from a known-good image if persistence/tampering was extensive; otherwise validate that eradication holds after reboot and that no outbound to the remote source recurs.</Action>
+      <Action>Return the host/account to service only after section 22 closing criteria are met and monitoring confirms no new WebDAV-source execution.</Action>
+      <Action>Fleet hardening: disable WebClient where unused; block tunnelling providers at egress; baseline sanctioned WebDAV/SharePoint paths so genuine access is distinguishable; and - highest value - enable command-line auditing on the jump/VDI host class, where this rule is currently blind to the WebDAV token.</Action>
+    </Phase>
+  </ResponseActions>
+  <Escalation>
+    <Trigger>Escalate to Tier 3 / Incident Response (and notify the customer) when any of the following hold:
+
+- The source is an external tunnel (trycloudflare.com) or a UNC host on a non-standard port (section 15.2b) - high-confidence malicious delivery.
+- A mount-then-fetch chain executed (net use → curl/bitsadmin/certutil, section 15.3b).
+- The acting account is privileged or the host is a server / DC / Tier-0 system.
+- The payload spawned recon, credential-access, persistence, or C2-adjacent tooling (section 17.5), or persistence was installed (section 17.2).
+- Lateral movement from $host/$user follows (section 17.1).
+- The remote host/payload cannot be resolved from available telemetry and the alert cannot be safely cleared - escalate as needs_escalation with the gaps named.</Trigger>
+    <To>SOC L2 / IR</To>
+  </Escalation>
+  <ClosureCriteria>
+    <Item>false_positive (authorised): the source is a verified sanctioned share (confirmed SharePoint tenant / internal WebDAV - owner documented, not merely the string) with a legitimate action and no fetch chain. Record the reference; scope any exclusion to the exact verified path, never a whole host/user.</Item>
+    <Item>false_positive (proven-blocked attempt): the mount/fetch was denied and nothing executed - documented as a blocked malicious attempt, never "benign".</Item>
+    <Item>misconfiguration: a legitimate WebDAV business workflow trips the rule and was not yet baselined; the sanctioned path is documented and excluded.</Item>
+    <Item>true_positive: fileless execution from an attacker-controlled WebDAV share/tunnel occurred; host contained, remote source blocked, fetched payloads/persistence removed, credentials reset, scope established, no recurrence on monitoring.</Item>
+    <Item>needs_escalation: handed to L2/IR with the remote-host/payload gaps documented.</Item>
+  </ClosureCriteria>
+  <Limitations>
+    <Item>The remote source is the verdict. cloudflare-tunnel-external and unc-nonstandard-port are near-certain true positives; sharepoint-webdav-verify is benign only after the tenant is confirmed - never trust the sharepoint string alone. Bucket every command line with section 15.2b before deciding.</Item>
+    <Item>Command-line capture decides whether this rule can even fire. It is ~100% on nim-st-apv10-class servers (rule capable) and 0% on jump/VDI hosts (rule blind). A WebDAV execution launched interactively on a jump host will not alert - cover that gap with FortiGate egress and WebClient-service monitoring.</Item>
+    <Item>The remote host lives in FortiGate, not Windows. No 5156/network on logs-system.security*; resolve trycloudflare.com / the UNC host and confirm the fetch by pivoting $host's IP in logs-fortinet_fortigate.log-*.</Item>
+    <Item>Encoding != malice here. nim-st-apv10 runs a benign python→powershell -EncodedCommand (timezone/registry reads) and cmd /c SWIFT batch pipeline. The WebDAV remote token, not the shell or the encoding, is the finding.</Item>
+    <Item>Read defence-evasion binaries in context. This host runs a little benign wevtutil/reg; section 17.4 will surface them, so weigh the account and command line rather than the binary name.</Item>
+    <Item>KB-worthy (persist to NBI customer scope): (1) WebDAV/tunnel token zero-baseline across the estate in 4h; (2) process.command_line ~100% on nim-st-apv10/nim-st-apv11/nim-cfs-apv01/nim-dc-dbap01 vs 0% on jump/VDI - rule capable on servers, blind on interactive hosts; (3) nim-st-apv10 = SWIFT automation (python→powershell -EncodedCommand, cmd /c C:\Scipts\*.bat), benign baseline; (4) 4672 on that host held by SYSTEM/NSLCL/machine account; (5) no 5156/process-network on NBI - remote WebDAV host confirmable only via FortiGate. All observed live on 2026-08-19.</Item>
+  </Limitations>
+</Playbook>

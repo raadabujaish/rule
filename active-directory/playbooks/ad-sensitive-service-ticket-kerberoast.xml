@@ -1,0 +1,381 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<Playbook xmlns="https://soc.example/playbooks" id="PB-ad-sensitive-service-ticket-kerberoast" name="AD — Service Ticket for Sensitive Service Account - SOC Playbook" version="3.0" status="Validated" classification="TLP:AMBER">
+  <Metadata>
+    <Owner>NBI SOC / Detection Engineering</Owner>
+    <LastUpdated>2026-08-19</LastUpdated>
+    <Severity default="medium">medium</Severity>
+    <Confidence default="Medium">Medium</Confidence>
+    <Category>Credential Access</Category>
+    <MitreAttack>
+      <Technique id="T1558"/>
+      <Technique id="T1558.003"/>
+      <Tactic id="TA0006"/>
+    </MitreAttack>
+    <References>
+      <Reference title="MITRE ATT&amp;CK - Steal or Forge Kerberos Tickets: Kerberoasting (T1558.003)" url="https://attack.mitre.org/techniques/T1558/003/"/>
+      <Reference title="MITRE ATT&amp;CK - Steal or Forge Kerberos Tickets (T1558)" url="https://attack.mitre.org/techniques/T1558/"/>
+      <Reference title="MITRE ATT&amp;CK - Credential Access tactic (TA0006)" url="https://attack.mitre.org/tactics/TA0006/"/>
+      <Reference title="Microsoft Learn - 4769: A Kerberos service ticket was requested (Ticket Encryption Type / Failure Codes)" url="https://learn.microsoft.com/en-us/previous-versions/windows/it-pro/windows-10/security/threat-protection/auditing/event-4769"/>
+      <Reference title="Microsoft Learn - Group Managed Service Accounts (gMSA) overview" url="https://learn.microsoft.com/en-us/windows-server/security/group-managed-service-accounts/group-managed-service-accounts-overview"/>
+      <Reference title="The Hacker Recipes - Kerberoasting" url="https://www.thehacker.recipes/ad/movement/kerberos/kerberoast"/>
+      <Reference title="Sean Metcalf (ADSecurity) - Detecting Kerberoasting Activity" url="https://adsecurity.org/?p=3458"/>
+      <Reference title="Elastic Security - Kerberoasting / 4769 detection guidance" url="https://www.elastic.co/guide/en/security/current/prebuilt-rules.html"/>
+      <Reference title="Rubeus - Kerberos abuse toolkit (kerberoast)" url="https://github.com/GhostPack/Rubeus"/>
+    </References>
+  </Metadata>
+  <AlertContext>
+    <RuleName>AD — Service Ticket for Sensitive Service Account</RuleName>
+    <RuleId>nbi-kerberoast-sensitive-service-ticket</RuleId>
+    <RuleType>query</RuleType>
+    <Index>logs-system.security*</Index>
+    <TriggerLogic>The deployed rule is a bare ES|QL/query match on event.code == "4769" - it fires on every Kerberos service-ticket request. Plain English: someone requested a Kerberos service ticket. The alert carries the requested SPN (winlog.event_data.ServiceName), the requester (winlog.event_data.TargetUserName), the ticket encryption (winlog.event_data.TicketEncryptionType), the source (source.ip), and the DC (host.name).
+
+One-line Kibana KQL detection filter (this is literally the deployed logic - note its over-breadth):
+
+
+
+Faithful ES|QL form with the standard 4-hour window, scoped to the alert SPN so it is usable rather than matching ~2M rows:
+
+
+
+Because the rule has no SPN/encryption/cardinality condition, the event's mere existence carries almost no signal - ~97.5% of NBI's 4769 are routine machine-SPN (…$) requests at AES. All discrimination happens in triage (section 11): RC4 encryption, distinct-SPN cardinality, SPN sensitivity, and whether the ticketed account is then used.</TriggerLogic>
+    <KeyAlertFields>source.ip, host.name</KeyAlertFields>
+  </AlertContext>
+  <Inputs>
+    <Input name="$service_name"/>
+    <Input name="$requester"/>
+    <Input name="$source_ip"/>
+    <Input name="$dc_host"/>
+  </Inputs>
+  <ExecutiveSummary>
+    <Overview>This playbook drives triage and investigation of the AD - Service Ticket for Sensitive Service Account detection on NBI's Elastic Security deployment. The rule fires on Windows Security Event 4769 (*a Kerberos service ticket was requested*). Its *intended* target is a ticket request for a sensitive/Tier-0 service SPN or a Kerberoasting harvest - an attacker requesting service tickets to crack service-account passwords offline. The deployed rule is a known over-broad defect: it matches every 4769 with no discriminator, so it is extremely noisy and most alerts are ordinary Kerberos operation.
+
+The analyst's job is therefore twofold: (1) rapidly separate genuine roasting/sensitive-SPN abuse (true_positive) from normal Kerberos surfaced only by the over-broad rule (false_positive - benign-by-design noise / detection defect), using encryption, cardinality, and subsequent use; and (2) feed the rule-redesign case so the analytic becomes a sensitive-SPN watchlist / RC4 / high-cardinality trigger. Verdicts are true_positive, false_positive, misconfiguration (the rule's own over-breadth), or needs_escalation, with evidence attached.</Overview>
+    <BusinessImpact>An alert means only: a Kerberos TGS-REQ (4769) occurred - for $service_name, requested by $requester, from $source_ip, seen on $dc_host. On its own that is a normal step in Kerberos authentication and happens millions of times a day. The alert becomes meaningful only when one or more of these hold:
+
+- Encryption is RC4 (0x17). NBI issues AES256 (0x12) as normal; RC4 is anomalous and is the classic Kerberoasting/downgrade tell (attackers request RC4 because its hash is far faster to crack). (A third value, 0xffffffff, appears on ticket failures/renewals and is not RC4.)
+- The SPN is user-style / sensitive. A ServiceName ending in $ is a machine account (routine). A user-style service-account SPN (e.g. SP.admin, WSS.User, an MSSQLSvc/…) is the roastable target - its password is a human-set string that can be cracked offline. A sensitive/Tier-0 service SPN (DC, backup, PKI, database) elevates priority even at AES.
+- Cardinality is high. One source requesting many distinct SPNs in a short window is a harvest (roasting), not normal operation - with the caveat that a busy monitoring/aggregator tier can legitimately request many *machine* SPNs at AES.
+- The account is then used from an un</BusinessImpact>
+  </ExecutiveSummary>
+  <Investigation>
+    <Goal>Decide true_positive / false_positive / misconfiguration / needs_escalation for AD — Service Ticket for Sensitive Service Account.</Goal>
+    <Workflow>
+      <Step order="1" name="Detection Summary">
+        <Purpose>Detection Summary</Purpose>
+        <Query platform="Elastic" language="ES|QL" id="Q-01">
+          <![CDATA[
+FROM logs-system.security*
+| WHERE @timestamp >= NOW() - 4 hours
+    AND event.code == "4769"
+    AND winlog.event_data.ServiceName == "$service_name"
+| KEEP @timestamp, host.name, winlog.event_data.TargetUserName, winlog.event_data.ServiceName, winlog.event_data.TicketEncryptionType, source.ip
+| SORT @timestamp DESC
+| LIMIT 100
+]]>
+        </Query>
+      </Step>
+      <Step order="2" name="Characterise the specific request (encryption, requester, source)">
+        <Purpose>Characterise the specific request (encryption, requester, source)</Purpose>
+        <Query platform="Elastic" language="ES|QL" id="Q-02">
+          <![CDATA[
+FROM logs-system.security*
+| WHERE @timestamp >= NOW() - 4 hours
+    AND event.code == "4769"
+    AND winlog.event_data.ServiceName == "$service_name"
+| STATS requests = COUNT(*) BY winlog.event_data.TargetUserName, source.ip, winlog.event_data.TicketEncryptionType
+| SORT requests DESC
+| LIMIT 15
+]]>
+        </Query>
+      </Step>
+      <Step order="3" name="Harvest test - cardinality and RC4 from the source">
+        <Purpose>Harvest test - cardinality and RC4 from the source</Purpose>
+        <Query platform="Elastic" language="ES|QL" id="Q-03">
+          <![CDATA[
+FROM logs-system.security*
+| WHERE @timestamp >= NOW() - 4 hours
+    AND event.code == "4769"
+    AND source.ip == "$source_ip"
+| STATS distinct_spns = COUNT_DISTINCT(winlog.event_data.ServiceName),
+        total = COUNT(*),
+        rc4 = COUNT(CASE(winlog.event_data.TicketEncryptionType == "0x17", 1, null))
+| LIMIT 1
+]]>
+        </Query>
+      </Step>
+      <Step order="4" name="Entity pivoting">
+        <Purpose>Entity pivoting</Purpose>
+        <Query platform="Elastic" language="ES|QL" id="Q-04">
+          <![CDATA[
+FROM logs-system.security*
+| WHERE @timestamp >= NOW() - 4 hours
+    AND event.code == "4769"
+    AND winlog.event_data.ServiceName == "$service_name"
+    AND host.name == "$dc_host"
+| KEEP @timestamp, winlog.event_data.TargetUserName, source.ip, winlog.event_data.TicketEncryptionType
+| SORT @timestamp DESC
+| LIMIT 50
+]]>
+        </Query>
+      </Step>
+      <Step order="5" name="User investigation">
+        <Purpose>User investigation</Purpose>
+        <Query platform="Elastic" language="ES|QL" id="Q-05">
+          <![CDATA[
+FROM logs-system.security*
+| WHERE @timestamp >= NOW() - 4 hours
+    AND event.code == "4769"
+    AND winlog.event_data.TargetUserName == "$requester"
+| STATS requests = COUNT(*),
+        distinct_spns = COUNT_DISTINCT(winlog.event_data.ServiceName),
+        rc4 = COUNT(CASE(winlog.event_data.TicketEncryptionType == "0x17", 1, null))
+    BY source.ip
+| SORT distinct_spns DESC
+| LIMIT 15
+]]>
+        </Query>
+      </Step>
+      <Step order="6" name="Host investigation">
+        <Purpose>Host investigation</Purpose>
+        <Query platform="Elastic" language="ES|QL" id="Q-06">
+          <![CDATA[
+FROM logs-system.security*
+| WHERE @timestamp >= NOW() - 4 hours
+    AND event.code == "4769"
+    AND host.name == "$dc_host"
+| STATS requests = COUNT(*), distinct_spns = COUNT_DISTINCT(winlog.event_data.ServiceName), sources = COUNT_DISTINCT(source.ip) BY winlog.event_data.TicketEncryptionType
+| SORT requests DESC
+| LIMIT 10
+]]>
+        </Query>
+      </Step>
+      <Step order="7" name="IP investigation">
+        <Purpose>IP investigation</Purpose>
+        <Query platform="Elastic" language="ES|QL" id="Q-07">
+          <![CDATA[
+FROM logs-system.security*
+| WHERE @timestamp >= NOW() - 4 hours
+    AND event.code == "4769"
+    AND source.ip == "$source_ip"
+    AND NOT winlog.event_data.ServiceName LIKE "*$"
+| STATS user_spns = COUNT_DISTINCT(winlog.event_data.ServiceName),
+        total_user_requests = COUNT(*),
+        rc4 = COUNT(CASE(winlog.event_data.TicketEncryptionType == "0x17", 1, null))
+| LIMIT 1
+]]>
+        </Query>
+      </Step>
+      <Step order="8" name="IP investigation">
+        <Purpose>IP investigation</Purpose>
+        <Query platform="Elastic" language="ES|QL" id="Q-08">
+          <![CDATA[
+FROM logs-system.security*
+| WHERE @timestamp >= NOW() - 4 hours
+    AND event.code == "4769"
+    AND source.ip == "$source_ip"
+| STATS requests = COUNT(*), spns = COUNT_DISTINCT(winlog.event_data.ServiceName) BY winlog.event_data.TargetUserName
+| SORT requests DESC
+| LIMIT 20
+]]>
+        </Query>
+      </Step>
+      <Step order="9" name="File investigation">
+        <Purpose>File investigation</Purpose>
+        <Query platform="Elastic" language="ES|QL" id="Q-09">
+          <![CDATA[
+FROM logs-system.security*
+| WHERE @timestamp >= NOW() - 4 hours
+    AND event.code == "4769"
+    AND winlog.event_data.TargetUserName == "$requester"
+| STATS requests = COUNT(*), first_seen = MIN(@timestamp), last_seen = MAX(@timestamp) BY winlog.event_data.ServiceName, winlog.event_data.TicketEncryptionType
+| SORT requests DESC
+| LIMIT 30
+]]>
+        </Query>
+      </Step>
+      <Step order="10" name="Authentication investigation">
+        <Purpose>Authentication investigation</Purpose>
+        <Query platform="Elastic" language="ES|QL" id="Q-10">
+          <![CDATA[
+FROM logs-system.security*
+| WHERE @timestamp >= NOW() - 4 hours
+    AND event.code == "4624"
+    AND winlog.event_data.TargetUserName == "$service_name"
+    AND winlog.event_data.LogonType IN ("3", "10")
+| STATS logons = COUNT(*), hosts = COUNT_DISTINCT(host.name) BY source.ip, winlog.event_data.LogonType
+| SORT logons DESC
+| LIMIT 15
+]]>
+        </Query>
+      </Step>
+      <Step order="11" name="Timeline Reconstruction">
+        <Purpose>Timeline Reconstruction</Purpose>
+        <Query platform="Elastic" language="ES|QL" id="Q-11">
+          <![CDATA[
+FROM logs-system.security*
+| WHERE @timestamp >= NOW() - 4 hours
+    AND (
+        (event.code == "4769" AND winlog.event_data.TargetUserName == "$requester")
+        OR (event.code == "4624" AND winlog.event_data.TargetUserName == "$service_name")
+    )
+| KEEP @timestamp, event.code, winlog.event_data.TargetUserName, winlog.event_data.ServiceName, winlog.event_data.TicketEncryptionType, source.ip, winlog.event_data.LogonType
+| SORT @timestamp ASC
+| LIMIT 200
+]]>
+        </Query>
+      </Step>
+      <Step order="12" name="Lateral movement validation">
+        <Purpose>Lateral movement validation</Purpose>
+        <Query platform="Elastic" language="ES|QL" id="Q-12">
+          <![CDATA[
+FROM logs-system.security*
+| WHERE @timestamp >= NOW() - 4 hours
+    AND event.code IN ("4624", "4625")
+    AND source.ip == "$source_ip"
+    AND winlog.event_data.LogonType IN ("3", "10")
+| STATS logons = COUNT(*), hosts = COUNT_DISTINCT(host.name) BY winlog.event_data.TargetUserName, event.code
+| SORT logons DESC
+| LIMIT 25
+]]>
+        </Query>
+      </Step>
+      <Step order="13" name="Persistence validation">
+        <Purpose>Persistence validation</Purpose>
+        <Query platform="Elastic" language="ES|QL" id="Q-13">
+          <![CDATA[
+FROM logs-system.security*
+| WHERE @timestamp >= NOW() - 4 hours
+    AND event.code IN ("7045", "4698", "4728", "4756")
+    AND winlog.event_data.SubjectUserName == "$service_name"
+| STATS events = COUNT(*), hosts = COUNT_DISTINCT(host.name) BY event.code
+| SORT events DESC
+| LIMIT 15
+]]>
+        </Query>
+      </Step>
+      <Step order="14" name="Privilege escalation validation">
+        <Purpose>Privilege escalation validation</Purpose>
+        <Query platform="Elastic" language="ES|QL" id="Q-14">
+          <![CDATA[
+FROM logs-system.security*
+| WHERE @timestamp >= NOW() - 4 hours
+    AND event.code == "4672"
+    AND winlog.event_data.SubjectUserName == "$service_name"
+| STATS special_priv_logons = COUNT(*), hosts = COUNT_DISTINCT(host.name) BY winlog.event_data.SubjectUserName
+| SORT special_priv_logons DESC
+| LIMIT 10
+]]>
+        </Query>
+      </Step>
+      <Step order="15" name="Defense evasion validation">
+        <Purpose>Defense evasion validation</Purpose>
+        <Query platform="Elastic" language="ES|QL" id="Q-15">
+          <![CDATA[
+FROM logs-system.security*
+| WHERE @timestamp >= NOW() - 4 hours
+    AND event.code == "4769"
+    AND winlog.event_data.TargetUserName == "$requester"
+| STATS requests = COUNT(*) BY winlog.event_data.TicketEncryptionType
+| SORT requests DESC
+| LIMIT 10
+]]>
+        </Query>
+      </Step>
+      <Step order="16" name="Impact assessment">
+        <Purpose>Impact assessment</Purpose>
+        <Query platform="Elastic" language="ES|QL" id="Q-16">
+          <![CDATA[
+FROM logs-system.security*
+| WHERE @timestamp >= NOW() - 4 hours
+    AND event.code == "4769"
+    AND source.ip == "$source_ip"
+    AND NOT winlog.event_data.ServiceName LIKE "*$"
+| STATS roastable_spns = COUNT_DISTINCT(winlog.event_data.ServiceName),
+        requests = COUNT(*),
+        rc4 = COUNT(CASE(winlog.event_data.TicketEncryptionType == "0x17", 1, null)),
+        requesters = COUNT_DISTINCT(winlog.event_data.TargetUserName)
+| LIMIT 1
+]]>
+        </Query>
+      </Step>
+      <Step order="17" name="Finalize verdict">
+        <DecisionTree>
+        </DecisionTree>
+      </Step>
+    </Workflow>
+  </Investigation>
+  <ClassificationGuidance>
+    <TruePositive>
+      <Definition></Definition>
+    </TruePositive>
+    <FalsePositive>
+      <Definition></Definition>
+      <Indicators>
+        <Item>Machine-account service tickets. ~97.5% of NBI 4769 are for …$ machine SPNs at AES - pure routine Kerberos. A lone AES machine-SPN request is *never* roasting.</Item>
+        <Item>Busy monitoring/aggregator tiers. A single source can legitimately request hundreds of distinct machine SPNs at AES (validated: 10.11.18.3 / NIM-KC-APV07$ requests 316 distinct SPNs, all AES, all machine accounts). High cardinality alone is not roasting when the targets are machine SPNs at AES.</Item>
+        <Item>Service accounts authenticating to their own services. A user-style service account (e.g. SP.admin) requesting AES tickets from its own server farm and being used from its usual hosts is normal (validated below).</Item>
+        <Item>0xffffffff encryption on 4769 (failures/renewals) is not RC4 and is not a roast indicator.</Item>
+        <Item>NBI is an AES-only domain. In the validation window, 4769 encryption was 0x12 (AES256) overwhelmingly, with no 0x17 (RC4) at all (0xffffffff appears only on failures/renewals). This makes RC4 a high-fidelity roast signal here - any 0x17 is immediately notable.</Item>
+        <Item>SP.admin is a legitimate service account (the validated benign anchor). It requests AES tickets for its own SPN from 10.11.15.42 on nim-dc-dbap01, and is then used normally from its 10.11.15.x server farm (10.11.15.44, .43, .42, LogonType 3). This is normal Kerberos - the detection-defect false positive - not roasting.</Item>
+        <Item>High-cardinality sources are usually benign monitoring tiers. 10.11.18.3 (NIM-KC-APV07$) requests 316 distinct machine SPNs at AES; 10.11.18.21 (the SolarWinds tier) requests ~575 distinct SPNs at AES. Both are legitimate - cardinality must be weighed with encryption and target-SPN style, not alone.</Item>
+        <Item>source.ip is fully populated now. Contrary to the historical caveat, 4769 source.ip was 100% populated in the validation window - the source-cardinality test is reliable. Keep the account-based fallback (section 15.4) in case this regresses.</Item>
+      </Indicators>
+    </FalsePositive>
+    <Misconfiguration>
+      <Definition></Definition>
+    </Misconfiguration>
+    <NeedsEscalation>
+      <Definition></Definition>
+    </NeedsEscalation>
+  </ClassificationGuidance>
+  <ResponseActions>
+    <Phase name="Containment">
+      <Action>Rotate the affected service-account password ($service_name) immediately if roasting is confirmed - prefer converting it to a gMSA (group Managed Service Account) so the password is machine-managed and effectively un-crackable. A rotated password makes any offline-cracked hash useless.</Action>
+      <Action>Revoke issued tickets for the account and force re-authentication where feasible.</Action>
+      <Action>Investigate the source ($source_ip) and the requester ($requester) for compromise; isolate the requester host if it is harvesting broadly.</Action>
+      <Action>Watch for subsequent use (section 15.12) - if the account already authenticated from an unexpected origin, treat as active compromise and contain those hosts.</Action>
+      <Action>Preserve volatile evidence on the requester host (the roasting tool, cracked output) - the crack itself is not captured in telemetry.</Action>
+      <Action>Deploy/confirm changes only via the authorised human-approved DEPLOY path; investigation itself is read-only.</Action>
+    </Phase>
+    <Phase name="Eradication">
+      <Action>Rotate all roasted service-account credentials (the roastable SPN set from section 17.5), prioritising privileged/Tier-0 accounts, and convert them to gMSA where possible.</Action>
+      <Action>Remove any persistence the compromised account established (section 17.2) and revert unauthorised group memberships.</Action>
+      <Action>Enforce AES and disable RC4 for the affected accounts/domain where compatible, removing the downgrade avenue.</Action>
+      <Action>Remediate the initial-access vector that gave the attacker the domain foothold to request tickets, and hunt for RC4/bulk-SPN harvesting from other sources.</Action>
+    </Phase>
+    <Phase name="Recovery">
+      <Action>Complete service-account rotation to gMSA and validate dependent services after rotation.</Action>
+      <Action>Redesign the detection (the durable fix): replace bare event.code:4769 with a sensitive-SPN watchlist, an RC4-in-AES-domain flag, and a high distinct-SPN cardinality Threshold/ES|QL trigger; suppress routine machine-SPN noise. This closes the ~2M/24h false-positive firehose.</Action>
+      <Action>Enforce AES / disable RC4 domain-wide where compatible.</Action>
+      <Action>Return accounts to service only after section 22 closing criteria are met and monitoring confirms no further roasting or unexpected use.</Action>
+    </Phase>
+  </ResponseActions>
+  <Escalation>
+    <Trigger>Escalate to Tier 3 / Incident Response (and notify the customer) when any of the following hold:
+
+- RC4 (0x17) tickets appear in this AES-only domain (section 14, section 17.4).
+- Bulk distinct user-style SPN requests from one source (section 15.6a, section 17.5) - a roasting harvest.
+- The requested SPN is sensitive/Tier-0 (section 17.3).
+- The ticketed account is subsequently used from an unexpected origin (section 15.12) - harvest-to-use closure.
+- Evidence is incomplete because of NBI's telemetry gaps (the roasting tool and offline crack are not captured) and the alert cannot be safely cleared - escalate as needs_escalation with the gaps named.
+
+In all cases, benign or not, route the over-broad rule to Detection Engineering for redesign.</Trigger>
+    <To>SOC L2 / IR</To>
+  </Escalation>
+  <ClosureCriteria>
+    <Item>false_positive (detection defect / normal Kerberos): a single/low-cardinality AES request for a routine machine/application SPN with normal subsequent use; documented explicitly as normal Kerberos surfaced by the over-broad rule (never a silent "benign") and contributed to the rule-redesign case.</Item>
+    <Item>false_positive (blocked malicious attempt): a roasting attempt positively proven to fail (4769 denial, no ticket issued); documented as blocked-malicious, never "benign".</Item>
+    <Item>misconfiguration (detection-engineering defect): the alert reflects the rule's own over-breadth; the rule is referred for redesign (sensitive-SPN / RC4 / cardinality) and the individual benign alert closed.</Item>
+    <Item>true_positive: Kerberoasting / sensitive-SPN abuse confirmed (RC4, user-SPN bulk harvest, sensitive SPN, or subsequent use); affected credentials rotated (gMSA), tickets revoked, source investigated, subsequent-use hunted, incident documented.</Item>
+    <Item>needs_escalation: SPN sensitivity, encryption/cardinality, or subsequent use unresolved; AD team confirms SPN sensitivity and the rule is referred to Detection Engineering.</Item>
+  </ClosureCriteria>
+  <Limitations>
+    <Item>The rule is a known defect - triage is the detection. Bare event.code:4769 (~2M/24h) has no discriminator; the three signals that matter (RC4 encryption, user-SPN cardinality, subsequent use) live entirely in this playbook. Every benign closure is rule-redesign evidence.</Item>
+    <Item>RC4 is gold in an AES-only domain. Validated: NBI 4769 is 0x12 (AES) with no 0x17 (RC4) in the window (0xffffffff = failure/renewal, not RC4). Any RC4 is high-fidelity roasting/downgrade - do not confuse 0xffffffff for it.</Item>
+    <Item>Cardinality needs the machine-SPN filter. Strip …$ SPNs before judging cardinality: 10.11.18.3/NIM-KC-APV07$ (316 machine SPNs) and the SolarWinds tier (~575) are benign high-cardinality monitoring sources. Roasting targets user-style SPNs (section 15.6a/section 17.5 apply the filter).</Item>
+    <Item>source.ip is populated now - but keep the account fallback. Validated 100% populated on 4769 (a drift from the historical "frequently unpopulated" note); section 15.4 pivots on $requester if it ever regresses.</Item>
+    <Item>Realm suffix quirk. On 4769, TargetUserName is realm-qualified (SP.admin@NBIRQ.COM), while on 4624 the same account is bare (SP.admin). Use $requester (qualified) for 4769 pivots and $service_name (bare) for the subsequent-use 4624 pivot - as this playbook's subs do.</Item>
+    <Item>KB-worthy (persist to NBI customer scope): (1) NBI is AES-only - 4769 0x12 dominant, no 0x17, 0xffffffff=failure/renewal; (2) SP.admin/WSS.User = real user-style (roastable) service SPNs; SP.admin benign from farm 10.11.15.42/43/44; (3) benign high-cardinality sources: 10.11.18.3/NIM-KC-APV07$ (316 machine SPNs), 10.11.18.21 SolarWinds (~575); (4) 4769 source.ip now 100% populated; ~97.5% of 4769 are machine-SPN; (5) this rule (bare 4769) is an over-broad defect pending redesign. All observed live on 2026-08-17.</Item>
+  </Limitations>
+</Playbook>

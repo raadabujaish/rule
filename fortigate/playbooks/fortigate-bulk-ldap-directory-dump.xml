@@ -1,0 +1,278 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<Playbook xmlns="https://soc.example/playbooks" id="PB-fortigate-bulk-ldap-directory-dump" name="Discovery/Collection — Bulk LDAP Directory Dump (large data, few sessions) - SOC Playbook" version="3.0" status="Validated" classification="TLP:AMBER">
+  <Metadata>
+    <Owner>NBI SOC / Detection Engineering</Owner>
+    <LastUpdated>2026-08-19</LastUpdated>
+    <Severity default="high">high</Severity>
+    <Confidence default="Medium">Medium</Confidence>
+    <Category>Discovery</Category>
+    <MitreAttack>
+      <Technique id="T1087.002"/>
+      <Technique id="T1087"/>
+      <Technique id="T1069.002"/>
+      <Technique id="T1069"/>
+      <Technique id="T1119"/>
+      <Tactic id="TA0007"/>
+      <Tactic id="TA0009"/>
+    </MitreAttack>
+    <References>
+      <Reference title="MITRE ATT&amp;CK - Account Discovery: Domain Account (T1087.002)" url="https://attack.mitre.org/techniques/T1087/002/"/>
+      <Reference title="MITRE ATT&amp;CK - Permission Groups Discovery: Domain Groups (T1069.002)" url="https://attack.mitre.org/techniques/T1069/002/"/>
+      <Reference title="MITRE ATT&amp;CK - Automated Collection (T1119)" url="https://attack.mitre.org/techniques/T1119/"/>
+      <Reference title="MITRE ATT&amp;CK - Discovery tactic (TA0007)" url="https://attack.mitre.org/tactics/TA0007/"/>
+      <Reference title="MITRE ATT&amp;CK - Collection tactic (TA0009)" url="https://attack.mitre.org/tactics/TA0009/"/>
+      <Reference title="SpecterOps - BloodHound / SharpHound collection" url="https://bloodhound.readthedocs.io/en/latest/data-collection/sharphound.html"/>
+      <Reference title="Microsoft Learn - Configure directory service access auditing (Event 4662)" url="https://learn.microsoft.com/en-us/windows/security/threat-protection/auditing/event-4662"/>
+      <Reference title="Microsoft Learn - Enable LDAP signing and channel binding on domain controllers" url="https://learn.microsoft.com/en-us/troubleshoot/windows-server/active-directory/enable-ldap-signing-in-windows-server"/>
+      <Reference title="Elastic - ES|QL reference (STATS / aggregations / date math)" url="https://www.elastic.co/guide/en/elasticsearch/reference/current/esql.html"/>
+    </References>
+  </Metadata>
+  <AlertContext>
+    <RuleName>Discovery/Collection — Bulk LDAP Directory Dump (large data, few sessions)</RuleName>
+    <RuleId>nbi-ldap-bulk-dump-from-dc</RuleId>
+    <RuleType>esql</RuleType>
+    <Index>logs-fortinet_fortigate.log-*</Index>
+    <TriggerLogic>The deployed rule is an ES|QL analytic. Plain-English of the deployed logic: over the look-back window, group FortiGate flows to destination.port IN (389, 636) by source.ip; compute ldap_mb = SUM(destination.bytes)/1000000, sent_mb = SUM(source.bytes)/1000000, flows = COUNT(*), and the distinct target directory servers; retain a source when ldap_mb &gt;= 40 AND flows &lt;= 200 - a lot of directory data, very few sessions.
+
+One-line Kibana KQL detection filter (for fast pivoting in Discover / Timeline - it is *not* the rule, which is an aggregation, but it scopes you to the same flows):
+
+
+
+Why "large data + few sessions" is the discriminator: a normal LDAP client (a workstation authenticating a user, an app doing per-request binds) issues many small queries - high flow count, low bytes-per-flow. A directory export tool (SharpHound/BloodHound, ldapsearch -x -b, ADExplorer, an IAM sync appliance) issues one or a few very large queries that stream the whole directory back - low flow count, very high bytes-per-flow. The rule is tuned to that shape, and the destination.bytes volume is meaningful only on accepted flows (see section 8) - denied/reset probes return near-zero bytes.</TriggerLogic>
+    <KeyAlertFields>source.ip, destination.ip, destination.port, destination.bytes, source.bytes, event.action, source.user.name, dns.question.name, url.full, url.domain</KeyAlertFields>
+  </AlertContext>
+  <Inputs>
+    <Input name="$source_ip"/>
+  </Inputs>
+  <ExecutiveSummary>
+    <Overview>This playbook drives triage and investigation of the Bulk LDAP Directory Dump detection on NBI's Elastic Security deployment. The rule is an ES|QL aggregation over FortiGate flow logs: for each external-or-internal source.ip talking to the directory ports (389/LDAP, 636/LDAPS) it sums the bytes returned by the directory (destination.bytes) and counts flows, firing when one source pulls a large volume of LDAP data (≥ 40 MB) across a small number of sessions (&lt;= 200 flows). Large directory data delivered in very few sessions is the network signature of a bulk directory export - one or a few queries returning the entire directory - as opposed to normal, chatty per-user application binds which are small and numerous.
+
+The analyst's job is to decide, quickly and defensibly, whether the pull is an authorised directory-sync/backup integration (false_positive), a reconnaissance/collection of the directory ahead of an attack (true_positive), a legitimate-but-unbaselined new integration (misconfiguration), or unprovable from the current perimeter telemetry (needs_escalation) - and to classify the alert as true_positive, false_positive, misconfiguration, or needs_escalation with evidence attached.</Overview>
+    <BusinessImpact>An alert means: $source_ip received a large amount of LDAP/LDAPS data from one or more NBI directory servers in only a handful of sessions. On NBI, the served directory servers observed live are the domain controllers 10.11.18.1 and 10.11.18.2 (LDAP/389). Because the whole directory - every user, group, computer, ACL, SPN, and trust relationship - is the map an attacker needs to plan privilege escalation and lateral movement, a genuine bulk pull is a Discovery + Collection event with immediate downstream consequences even though no endpoint control was touched.
+
+It is important to state what the alert does not tell you: the FortiGate flow record proves *volume, ports, target, and disposition (accept/deny)* but not the LDAP query filter or the binding account. On 636/LDAPS the payload is encrypted end-to-end and opaque on the wire. So "a bulk pull happened" is what the alert asserts; *who* bound and *what* they asked for must be recovered from the directory servers' own logs (section 8, section 15.12).</BusinessImpact>
+  </ExecutiveSummary>
+  <Investigation>
+    <Goal>Decide true_positive / false_positive / misconfiguration / needs_escalation for Discovery/Collection — Bulk LDAP Directory Dump (large data, few sessions).</Goal>
+    <Workflow>
+      <Step order="1" name="Reproduce the rule estate-wide (confirm the detection logic)">
+        <Purpose>Reproduce the rule estate-wide (confirm the detection logic)</Purpose>
+        <Query platform="Elastic" language="ES|QL" id="Q-01">
+          <![CDATA[
+FROM logs-fortinet_fortigate.log-*
+| WHERE @timestamp >= NOW() - 4 hours
+    AND destination.port IN (389, 636) AND source.ip IS NOT NULL
+| STATS ldap_mb = SUM(destination.bytes)/1000000, sent_mb = SUM(source.bytes)/1000000,
+        flows = COUNT(*), dst_dcs = COUNT_DISTINCT(destination.ip), last_seen = MAX(@timestamp)
+    BY source.ip
+| WHERE ldap_mb >= 40 AND flows <= 200
+| SORT ldap_mb DESC
+| LIMIT 25
+]]>
+        </Query>
+      </Step>
+      <Step order="2" name="Confirm the pull on the alert source (accepted volume vs blocked probes)">
+        <Purpose>Confirm the pull on the alert source (accepted volume vs blocked probes)</Purpose>
+        <Query platform="Elastic" language="ES|QL" id="Q-02">
+          <![CDATA[
+FROM logs-fortinet_fortigate.log-*
+| WHERE source.ip == "$source_ip" AND destination.port IN (389, 636)
+    AND @timestamp >= NOW() - 4 hours
+| STATS flows = COUNT(*), ldap_in_mb = SUM(destination.bytes)/1000000,
+        sent_mb = SUM(source.bytes)/1000000, last_seen = MAX(@timestamp)
+    BY event.action, destination.ip, destination.port
+| SORT flows DESC
+| LIMIT 25
+]]>
+        </Query>
+      </Step>
+      <Step order="3" name="Entity pivoting">
+        <Purpose>Entity pivoting</Purpose>
+        <Query platform="Elastic" language="ES|QL" id="Q-03">
+          <![CDATA[
+FROM logs-fortinet_fortigate.log-*
+| WHERE source.ip == "$source_ip" AND destination.port IN (389, 636)
+    AND @timestamp >= NOW() - 4 hours
+| STATS flows = COUNT(*), ldap_in_mb = SUM(destination.bytes)/1000000,
+        sent_mb = SUM(source.bytes)/1000000, last_seen = MAX(@timestamp)
+    BY event.action, destination.ip, destination.port
+| SORT flows DESC
+| LIMIT 25
+]]>
+        </Query>
+      </Step>
+      <Step order="4" name="Host investigation">
+        <Purpose>Host investigation</Purpose>
+        <Query platform="Elastic" language="ES|QL" id="Q-04">
+          <![CDATA[
+FROM logs-fortinet_fortigate.log-*
+| WHERE source.ip == "$source_ip" AND @timestamp >= NOW() - 4 hours
+| STATS flows = COUNT(*), in_mb = SUM(destination.bytes)/1000000, dst_hosts = COUNT_DISTINCT(destination.ip)
+    BY destination.port, event.action
+| SORT flows DESC
+| LIMIT 25
+]]>
+        </Query>
+      </Step>
+      <Step order="5" name="IP investigation">
+        <Purpose>IP investigation</Purpose>
+        <Query platform="Elastic" language="ES|QL" id="Q-05">
+          <![CDATA[
+FROM logs-fortinet_fortigate.log-*
+| WHERE destination.port IN (389, 636) AND event.action == "accept" AND source.ip IS NOT NULL
+    AND @timestamp >= NOW() - 2 hours
+| STATS ldap_in_mb = SUM(destination.bytes)/1000000, flows = COUNT(*)
+    BY source.ip
+| SORT ldap_in_mb DESC
+| LIMIT 15
+]]>
+        </Query>
+      </Step>
+      <Step order="6" name="IP investigation">
+        <Purpose>IP investigation</Purpose>
+        <Query platform="Elastic" language="ES|QL" id="Q-06">
+          <![CDATA[
+FROM logs-fortinet_fortigate.log-*
+| WHERE destination.ip IN ("10.11.18.1", "10.11.18.2") AND destination.port IN (389, 636)
+    AND event.action == "accept" AND @timestamp >= NOW() - 2 hours
+| STATS ldap_in_mb = SUM(destination.bytes)/1000000, flows = COUNT(*)
+    BY source.ip, destination.ip
+| SORT ldap_in_mb DESC
+| LIMIT 20
+]]>
+        </Query>
+      </Step>
+      <Step order="7" name="Timeline Reconstruction">
+        <Purpose>Timeline Reconstruction</Purpose>
+        <Query platform="Elastic" language="ES|QL" id="Q-07">
+          <![CDATA[
+FROM logs-fortinet_fortigate.log-*
+| WHERE source.ip == "$source_ip" AND destination.port IN (389, 636)
+    AND @timestamp >= NOW() - 4 hours
+| STATS flows = COUNT(*), in_mb = SUM(destination.bytes)/1000000
+    BY bucket = DATE_TRUNC(15 minutes, @timestamp), event.action, destination.ip
+| SORT bucket ASC
+| LIMIT 100
+]]>
+        </Query>
+      </Step>
+      <Step order="8" name="Lateral movement validation">
+        <Purpose>Lateral movement validation</Purpose>
+        <Query platform="Elastic" language="ES|QL" id="Q-08">
+          <![CDATA[
+FROM logs-fortinet_fortigate.log-*
+| WHERE source.ip == "$source_ip" AND @timestamp >= NOW() - 4 hours
+    AND destination.port NOT IN (389, 636)
+| STATS flows = COUNT(*), dst_hosts = COUNT_DISTINCT(destination.ip),
+        accepts = COUNT(*) WHERE event.action == "accept"
+    BY destination.port
+| SORT flows DESC
+| LIMIT 25
+]]>
+        </Query>
+      </Step>
+      <Step order="9" name="Defense evasion validation">
+        <Purpose>Defense evasion validation</Purpose>
+        <Query platform="Elastic" language="ES|QL" id="Q-09">
+          <![CDATA[
+FROM logs-fortinet_fortigate.log-*
+| WHERE source.ip == "$source_ip" AND destination.port IN (389, 636)
+    AND @timestamp >= NOW() - 4 hours
+| STATS flows = COUNT(*), in_mb = SUM(destination.bytes)/1000000,
+        avg_bytes_per_flow = SUM(destination.bytes)/COUNT(*)
+    BY destination.port
+| SORT in_mb DESC
+| LIMIT 10
+]]>
+        </Query>
+      </Step>
+      <Step order="10" name="Impact assessment">
+        <Purpose>Impact assessment</Purpose>
+        <Query platform="Elastic" language="ES|QL" id="Q-10">
+          <![CDATA[
+FROM logs-fortinet_fortigate.log-*
+| WHERE source.ip == "$source_ip" AND destination.port IN (389, 636)
+    AND event.action == "accept" AND @timestamp >= NOW() - 4 hours
+| STATS served_mb = SUM(destination.bytes)/1000000, flows = COUNT(*), last_seen = MAX(@timestamp)
+    BY destination.ip
+| SORT served_mb DESC
+| LIMIT 10
+]]>
+        </Query>
+      </Step>
+      <Step order="11" name="Finalize verdict">
+        <DecisionTree>
+        </DecisionTree>
+      </Step>
+    </Workflow>
+  </Investigation>
+  <ClassificationGuidance>
+    <TruePositive>
+      <Definition></Definition>
+    </TruePositive>
+    <FalsePositive>
+      <Definition></Definition>
+      <Indicators>
+        <Item>Sanctioned directory-sync integrations. IAM/IGA platforms, metadirectories, mail/groupware directory connectors, VPN/NAC appliances, and backup tools legitimately read large slices of the directory on a schedule. These are the primary benign hits and often show the same "large data, few sessions" shape.</Item>
+        <Item>Security/inventory tooling that snapshots AD (asset-management, AD backup, some vulnerability scanners with an authenticated AD collector). Authorised, but investigated identically - a scanner is never auto-trusted.</Item>
+        <Item>Blocked/denied pulls. A source whose LDAP flows were denied or reset at the firewall/DC returns near-zero destination.bytes; if it trips the rule at all it is a blocked attempt, recorded as false_positive (blocked-malicious), never "benign".</Item>
+        <Item>LDAPS opacity mistaken for volume. Large 636 flows are encrypted; volume alone on 636 from an unknown source is suspicious, not exculpatory.</Item>
+        <Item>The directory servers are 10.11.18.1 and 10.11.18.2 (LDAP/389). In the validation window these two IPs were the LDAP-serving endpoints. The busiest LDAP *client* observed, 10.11.18.10, produced ~6,900 flows for ~0 MB - the classic chatty-app profile (many tiny binds), the exact opposite of a bulk dump and not what this rule targets.</Item>
+        <Item>Most internal LDAP clients sit in 10.11.101.0/24 and pull single-digit-to-~30 MB across ~1,000+ flows - high flow counts, moderate bytes. Those are ordinary application/authentication clients and do not match the flows &lt;= 200 half of the rule. A source that inverts this ratio (tens of MB in &lt;= 200 flows) is the anomaly.</Item>
+        <Item>Byte volume is only populated on accepted flows. The validation anchor 10.10.11.92 showed ~29 MB against 10.11.18.2:389 dominated by server-rst with a smaller accepted remainder - read event.action before concluding "29 MB of directory left the DC".</Item>
+        <Item>No NBI allow-list of sanctioned LDAP integrations is encoded in this rule. Do not clear a source just because it "looks like infrastructure" - confirm the integration's owner/schedule, or treat it as unproven.</Item>
+      </Indicators>
+    </FalsePositive>
+    <Misconfiguration>
+      <Definition></Definition>
+    </Misconfiguration>
+    <NeedsEscalation>
+      <Definition></Definition>
+    </NeedsEscalation>
+  </ClassificationGuidance>
+  <ResponseActions>
+    <Phase name="Containment">
+      <Action>Isolate/quarantine $source_ip if a true_positive is confirmed, to stop follow-on enumeration and any staged movement. On a shared host, coordinate with IT to avoid dropping unrelated services, but prioritise containment.</Action>
+      <Action>Identify and disable/reset the binding account recovered from the DC logs (section 15.12); if it is a service or privileged account, escalate its rotation.</Action>
+      <Action>Treat the directory contents as exposed. Once a bulk pull is served, assume the attacker holds the full account/group/ACL/SPN map; prioritise hardening the exposed attack paths (see section 19/section 20) rather than only cleaning the source.</Action>
+      <Action>Preserve evidence - the flow records (section 14/section 15), the DC-side bind logs, and any export artifact on the host - before remediation.</Action>
+      <Action>Deploy/confirm changes only via the authorised human-approved DEPLOY path; investigation itself is read-only.</Action>
+    </Phase>
+    <Phase name="Eradication">
+      <Action>Reset the binding account's credentials and any credentials reachable from the source host during the window; rotate service-account secrets exposed by the dump.</Action>
+      <Action>Harden the exposed attack paths the dump reveals: remediate Kerberoastable SPNs (strong/managed service-account passwords or gMSA), remove unnecessary privileged group nesting, fix abusable ACLs, and review unconstrained/constrained delegation on the accounts the attacker now knows about.</Action>
+      <Action>Restrict who may bulk-read the directory: firewall policy limiting 389/636 to known DCs and sanctioned integration sources; enforce LDAP signing and channel binding on the DCs.</Action>
+      <Action>Hunt peers for the same source behaviour and for follow-on Kerberoasting/DCSync across the estate (section 17.1/section 17.3).</Action>
+    </Phase>
+    <Phase name="Recovery">
+      <Action>Confirm the exposed accounts are secured (rotations complete, delegation/ACL fixes applied) before returning the source host/account to service.</Action>
+      <Action>Enable directory-service query auditing on the DCs so bulk reads are attributable to a principal at the source, independent of network volume (this is the single highest-value hardening ask from this rule).</Action>
+      <Action>Return to service only after section 22 closing criteria are met and monitoring confirms no recurrence of the bulk-pull pattern or downstream ticketing abuse.</Action>
+    </Phase>
+  </ResponseActions>
+  <Escalation>
+    <Trigger>Escalate to SOC L2 / IR and the AD team when any of the following hold:
+
+- An accepted large LDAP pull from a non-integration $source_ip is confirmed (section 14.2/section 17.5) - treat directory contents as exposed and page the AD team.
+- The source shows a concurrent LDAP/service sweep or targets multiple DCs (section 15.6b/section 17.1).
+- Follow-on Kerberoasting/DCSync/lateral movement appears from the source or the exposed accounts (section 17.3).
+- The pull is over 636/LDAPS from an unknown source and cannot be attributed without DC-side logs (needs_escalation).
+
+Escalate with $source_ip, target DC(s), accepted volume (section 17.5), source nature (section 15.5), and the binding account once recovered.</Trigger>
+    <To>SOC L2 / IR</To>
+  </Escalation>
+  <ClosureCriteria>
+    <Item>false_positive (authorised): a documented directory-sync/backup integration (owner + schedule + expected volume) is positively matched to $source_ip; record the reference. Scope any exception narrowly (source IP + DC + expected volume window), never a blanket allow.</Item>
+    <Item>false_positive (blocked-malicious): the LDAP pull was denied/reset with near-zero bytes served; documented as a blocked attempt, never "benign"; the source is still investigated/monitored.</Item>
+    <Item>misconfiguration: a legitimate new/changed integration performed a real bulk sync that was simply not yet baselined; baseline it and tune the volume/schedule expectation.</Item>
+    <Item>true_positive: an unauthorised bulk directory export was served; source contained, binding account reset, exposed attack paths hardened, follow-on abuse hunted, incident documented.</Item>
+    <Item>needs_escalation: handed to SOC L2 / AD team with the specific gaps (source nature unknown / LDAPS opacity / DC logs pending) documented.</Item>
+  </ClosureCriteria>
+  <Limitations>
+    <Item>Read event.action before believing the byte count. destination.bytes is only meaningful on accepted flows; the validation anchor 10.10.11.92 showed ~29 MB dominated by server-rst, so "served" and "attempted" must be separated (section 14.2/section 17.5).</Item>
+    <Item>The binding account is the missing key. The flow proves volume and target; it never proves *who*. Always recover the principal from the DC's 4662/directory-service logs (section 15.12) before final attribution - this is the difference between "a bulk pull happened" and "account X exported the directory".</Item>
+    <Item>636/LDAPS is opaque. Large 636 volume from an unknown source is suspicious, not exculpatory; escalate rather than clear on opacity.</Item>
+    <Item>Shape beats identity for the network signal. The reliable discriminator on NBI is bytes-per-flow (few, huge accepted flows = export) versus many tiny binds (application auth, e.g. the ~6,900-flow/~0 MB profile of 10.11.18.10).</Item>
+    <Item>KB-worthy (persist to NBI customer scope): (1) NBI LDAP-serving DCs observed at 10.11.18.1 / 10.11.18.2 (389); (2) chatty-client baseline 10.11.18.10 ≈ 6,900 flows / ~0 MB and the 10.11.101.0/24 client cohort; (3) FortiGate flow logs carry no LDAP filter/binding account, source.user.name ~1.4% (FSSO/VPN only), dns.question.name 0% populated, url.full absent; (4) destination.bytes populated on accepted flows only. All observed live on 2026-08-17.</Item>
+  </Limitations>
+</Playbook>

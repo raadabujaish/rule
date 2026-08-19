@@ -1,0 +1,80 @@
+{
+  "name": "Potential File Transfer via Curl for Windows [NBI-4688]",
+  "tags": [
+    "Domain: Endpoint",
+    "OS: Windows",
+    "Use Case: Threat Detection",
+    "Tactic: Command and Control",
+    "Data Source: Elastic Endgame",
+    "Data Source: Elastic Defend",
+    "Data Source: Windows Security Event Logs",
+    "Data Source: Microsoft Defender for Endpoint",
+    "Data Source: SentinelOne",
+    "Data Source: Crowdstrike",
+    "Data Source: Sysmon",
+    "Resources: Investigation Guide",
+    "NBI-Recovered",
+    "Phase2-Batch2",
+    "Windows-4688",
+    "coverage:partial-29pct"
+  ],
+  "interval": "5m",
+  "enabled": true,
+  "description": "Identifies Curl for Windows making an HTTP request. Adversaries could abuse Curl to download files or upload data to a remote URL.",
+  "risk_score": 21,
+  "severity": "low",
+  "note": "## Coverage\nThis rule runs on Windows Security 4688 process-creation events. Command-line-dependent conditions currently apply to hosts where command-line auditing is enabled.\n\n## Detection guidance\n## Triage and analysis\n\n### Investigating Potential File Transfer via Curl for Windows\n\nThis rule identifies the use of Curl for Windows to download files from a remote URL or post data to a remote site.\n\n#### Possible investigation steps\n\n- Investigate the process execution chain (parent process tree) for unknown processes. Examine their executable files for prevalence, whether they are located in expected locations, and if they are signed with valid digital signatures.\n- Identify the user account that performed the action and whether it should perform this kind of action.\n- Contact the account owner and confirm whether they are aware of this activity.\n- Investigate other alerts associated with the user/host during the past 48 hours.\n- Assess whether this behavior is prevalent in the environment by looking for similar occurrences across hosts.\n- Examine the details of the dropped file, and whether it was executed.\n- Check the reputation of the domain or IP address used to host the downloaded file or if the user downloaded the file from an internal system.\n- Retrieve the files' SHA-256 hash values using the PowerShell `Get-FileHash` cmdlet and search for the existence and reputatio",
+  "output_index": "",
+  "investigation_fields": {
+    "field_names": [
+      "user.name",
+      "process.name",
+      "process.parent.name",
+      "process.command_line",
+      "host.name"
+    ]
+  },
+  "author": [
+    "raadabujaish"
+  ],
+  "false_positives": [],
+  "from": "now-9m",
+  "rule_id": "nbi-b2-potential-file-transfer-via-curl-for-windows",
+  "max_signals": 100,
+  "risk_score_mapping": [],
+  "severity_mapping": [],
+  "threat": [
+    {
+      "framework": "MITRE ATT&CK",
+      "tactic": {
+        "id": "TA0011",
+        "name": "Command and Control",
+        "reference": "https://attack.mitre.org/tactics/TA0011/"
+      },
+      "technique": [
+        {
+          "id": "T1105",
+          "name": "Ingress Tool Transfer",
+          "reference": "https://attack.mitre.org/techniques/T1105/"
+        }
+      ]
+    }
+  ],
+  "to": "now",
+  "references": [
+    "https://attack.mitre.org/techniques/T1105/",
+    "https://www.elastic.co/guide/en/security/current/prebuilt-rules.html"
+  ],
+  "version": 1,
+  "exceptions_list": [],
+  "related_integrations": [],
+  "required_fields": [],
+  "setup": "",
+  "type": "eql",
+  "language": "eql",
+  "index": [
+    "logs-system.security-*"
+  ],
+  "query": "process where host.os.type == \"windows\" and event.type == \"start\" and\n  process.executable : (\n    \"?:\\\\Windows\\\\System32\\\\curl.exe\",\n    \"?:\\\\Windows\\\\SysWOW64\\\\curl.exe\"\n  ) and\n  process.command_line : \"*http*\" and\n  process.parent.name : (\n    \"cmd.exe\", \"powershell.exe\",\n    \"rundll32.exe\", \"explorer.exe\",\n    \"conhost.exe\", \"forfiles.exe\",\n    \"wscript.exe\", \"cscript.exe\",\n    \"mshta.exe\", \"hh.exe\", \"mmc.exe\"\n  ) and \n  not (\n    ?user.id == \"S-1-5-18\" and\n    /* Don't apply the user.id exclusion to Sysmon for compatibility */\n    not event.dataset : (\"windows.sysmon_operational\", \"windows.sysmon\")\n  ) and\n  /* Exclude System Integrity Processes for Sysmon */\n  not ?winlog.event_data.IntegrityLevel == \"System\"\n",
+  "actions": []
+}

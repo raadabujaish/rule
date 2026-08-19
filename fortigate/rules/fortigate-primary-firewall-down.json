@@ -1,0 +1,39 @@
+{
+  "name": "Primary Firewall's Down",
+  "tags": [],
+  "interval": "5m",
+  "enabled": true,
+  "description": "Detects When The Primary Firewall's are Down ",
+  "risk_score": 99,
+  "severity": "critical",
+  "license": "",
+  "output_index": "",
+  "meta": {
+    "kibana_siem_app_url": "https://nbi.scanwave.local:8008/app/security"
+  },
+  "investigation_fields": {
+    "field_names": [
+      "observer.name",
+      "last_seen"
+    ]
+  },
+  "author": [],
+  "false_positives": [],
+  "from": "now-15m",
+  "rule_id": "34f251b8-1d3a-4031-bef8-ce57c462d7aa",
+  "max_signals": 100,
+  "risk_score_mapping": [],
+  "severity_mapping": [],
+  "threat": [],
+  "to": "now",
+  "references": [],
+  "version": 1,
+  "exceptions_list": [],
+  "related_integrations": [],
+  "required_fields": [],
+  "setup": "",
+  "type": "esql",
+  "language": "esql",
+  "query": "FROM logs-*\r\n| WHERE @timestamp > NOW() - 24 hours \r\n| STATS last_seen = MAX(@timestamp) BY observer.name\r\n| WHERE last_seen < NOW() - 30 minutes",
+  "actions": []
+}

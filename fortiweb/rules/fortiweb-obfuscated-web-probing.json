@@ -1,0 +1,47 @@
+{
+  "name": "FortiWeb — Obfuscated Web Probing",
+  "tags": [
+    "raad",
+    "redteam-2026-05",
+    "phase-2",
+    "web",
+    "variant-b"
+  ],
+  "interval": "10m",
+  "enabled": true,
+  "description": "Detects obfuscated/encoded web-attack payloads — SQL injection, path traversal, Log4Shell/JNDI, XSS and SSTI — in FortiWeb web traffic by lowercasing and concatenating the request URL, User-Agent and Referer, then matching double-encoded (%25xx) and hex-encoded signatures that commonly evade signature engines. Protects the internet-facing banking applications (businessonline/mobile/mename).",
+  "risk_score": 60,
+  "severity": "medium",
+  "output_index": "",
+  "investigation_fields": {
+    "field_names": [
+      "data.original_src",
+      "data.http_host",
+      "data.http_url",
+      "data.http_agent",
+      "data.http_retcode"
+    ]
+  },
+  "author": [],
+  "false_positives": [
+    "Application paths that genuinely contain the substring (rare).",
+    "WAF rule documentation pages echoed back in request bodies — exclude"
+  ],
+  "from": "now-30m",
+  "rule_id": "raad-05-encoded-payload-probe",
+  "max_signals": 100,
+  "risk_score_mapping": [],
+  "severity_mapping": [],
+  "threat": [],
+  "to": "now",
+  "references": [],
+  "version": 1,
+  "exceptions_list": [],
+  "related_integrations": [],
+  "required_fields": [],
+  "setup": "",
+  "type": "esql",
+  "language": "esql",
+  "query": "FROM logs-tcp.generic-default\n| WHERE @timestamp >= NOW() - 30 minutes AND data.type == \"traffic\" AND data.original_src IS NOT NULL AND data.http_url IS NOT NULL\n| EVAL surf = TO_LOWER(CONCAT(COALESCE(data.http_url,\"\"),\" | \",COALESCE(data.http_agent,\"\"),\" | \",COALESCE(data.http_refer,\"\")))\n| WHERE surf LIKE \"*%2527*\" OR surf LIKE \"*%252522*\" OR surf LIKE \"*%2520or%2520*\" OR surf LIKE \"*%75%6e%69%6f%6e*\" OR surf LIKE \"*%73%65%6c%65%63%74*\" OR surf LIKE \"*%2f%2a*\" OR surf LIKE \"*%2e%2e%2f*\" OR surf LIKE \"*%252e%252e%252f*\" OR surf LIKE \"*..%c0%af*\" OR surf LIKE \"*..%2f*\" OR surf LIKE \"*${jndi:*\" OR surf LIKE \"*%24%7bjndi%3a*\" OR surf LIKE \"*<svg*onload*\" OR surf LIKE \"*%3csvg*onload*\" OR surf LIKE \"*javascript%3a*\" OR surf LIKE \"*<script*src*\" OR surf LIKE \"*<img*onerror*\" OR surf LIKE \"*${{*}}*\" OR surf LIKE \"*{{*system*}}*\"\n| KEEP @timestamp, data.original_src, data.http_method, data.http_url, data.http_agent, data.http_retcode, data.http_host\n| LIMIT 200",
+  "actions": []
+}

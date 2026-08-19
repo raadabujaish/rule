@@ -1,0 +1,86 @@
+{
+  "name": "Browser Process Spawned from an Unusual Parent [NBI-4688]",
+  "tags": [
+    "Domain: Endpoint",
+    "OS: Windows",
+    "Use Case: Threat Detection",
+    "Tactic: Credential Access",
+    "Data Source: Elastic Endgame",
+    "Data Source: Elastic Defend",
+    "Data Source: Windows Security Event Logs",
+    "Data Source: Microsoft Defender for Endpoint",
+    "Data Source: Sysmon",
+    "Data Source: SentinelOne",
+    "Resources: Investigation Guide",
+    "NBI-Recovered",
+    "Phase2-Batch2",
+    "Windows-4688",
+    "coverage:partial-29pct"
+  ],
+  "interval": "5m",
+  "enabled": true,
+  "description": "Identifies instances where an unusual process spawns a chrome browser child process. This behavior could be related to malware stealing browser information.",
+  "risk_score": 73,
+  "severity": "high",
+  "note": "## Coverage\nThis rule runs on Windows Security 4688 process-creation events. Command-line-dependent conditions currently apply to hosts where command-line auditing is enabled.\n\n## Detection guidance\n## Triage and analysis\n\n> **Disclaimer**:\n> This investigation guide was created using generative AI technology and has been reviewed to improve its accuracy and relevance. While every effort has been made to ensure its quality, we recommend validating the content and adapting it to suit your specific environment and operational needs.\n\n### Investigating Browser Process Spawned from an Unusual Parent\n\n### Possible investigation steps\n\n- Review the process execution details to confirm that a web browser process (e.g., chrome.exe, msedge.exe, firefox.exe) has an unusual or suspicious parent process. Focus on the process.parent.name, process.name, and process.args fields.\n- Examine the command line arguments for signs of remote debugging flags (e.g., --remote-debugging-port, --remote-debugging-pipe) or injected DLLs that could indicate attempts to hijack browser sessions.\n- Check whether the parent process is a scripting host (e.g., wscript.exe, cscript.exe), system utility, or unexpected binary (e.g., cmd.exe, rundll32.exe, powershell.exe) rather than the legitimate browser updater or system launcher.\n- Investigate if the suspicious parent process has a known reputation or hash linke",
+  "output_index": "",
+  "investigation_fields": {
+    "field_names": [
+      "user.name",
+      "process.name",
+      "process.parent.name",
+      "process.command_line",
+      "host.name"
+    ]
+  },
+  "author": [
+    "raadabujaish"
+  ],
+  "false_positives": [],
+  "from": "now-9m",
+  "rule_id": "nbi-b2-browser-process-spawned-from-an-unusual-parent",
+  "max_signals": 100,
+  "risk_score_mapping": [],
+  "severity_mapping": [],
+  "threat": [
+    {
+      "framework": "MITRE ATT&CK",
+      "tactic": {
+        "id": "TA0006",
+        "name": "Credential Access",
+        "reference": "https://attack.mitre.org/tactics/TA0006/"
+      },
+      "technique": [
+        {
+          "id": "T1555",
+          "name": "Credentials from Password Stores",
+          "reference": "https://attack.mitre.org/techniques/T1555/",
+          "subtechnique": [
+            {
+              "id": "T1555.003",
+              "name": "Credentials from Web Browsers",
+              "reference": "https://attack.mitre.org/techniques/T1555/003/"
+            }
+          ]
+        }
+      ]
+    }
+  ],
+  "to": "now",
+  "references": [
+    "https://www.elastic.co/security-labs/katz-and-mouse-game",
+    "https://www.elastic.co/guide/en/security/current/prebuilt-rules.html"
+  ],
+  "version": 1,
+  "exceptions_list": [],
+  "related_integrations": [],
+  "required_fields": [],
+  "setup": "",
+  "type": "eql",
+  "language": "eql",
+  "index": [
+    "logs-system.security-*"
+  ],
+  "query": "process where host.os.type == \"windows\" and event.type == \"start\" and\n  process.name : (\"chrome.exe\", \"msedge.exe\") and\n  process.parent.executable != null and process.command_line != null and\n  (\n  process.command_line :\n           (\"\\\"C:\\\\Program Files (x86)\\\\Microsoft\\\\Edge\\\\Application\\\\msedge.exe\\\"\",\n            \"\\\"C:\\\\Program Files\\\\Google\\\\Chrome\\\\Application\\\\chrome.exe\\\"\",\n            \"\\\"C:\\\\Program Files\\\\Google\\\\Chrome\\\\Application\\\\chrome.exe\\\" --headless --disable-logging --log-level=3 --v=0\",\n            \"\\\"C:\\\\Program Files\\\\Google\\\\Chrome\\\\Application\\\\chrome.exe\\\" --headless --log-level=3\",\n            \"\\\"C:\\\\Program Files\\\\Google\\\\Chrome\\\\Application\\\\chrome.exe\\\" --headless\",\n            \"\\\"C:\\\\Program Files\\\\Google\\\\Chrome\\\\Application\\\\chrome.exe\\\" --remote-debugging-port=922? --profile-directory=\\\"Default\\\"*\",\n            \"\\\"C:\\\\Program Files\\\\Google\\\\Chrome\\\\Application\\\\chrome.exe\\\" --headless --restore-last-session --remote-debugging-port=45452*\") or\n\n  (process.args : \"--remote-debugging-port=922?\" and process.args : \"--window-position=-*,-*\")\n   ) and\n  not process.parent.executable :\n                         (\"C:\\\\Windows\\\\explorer.exe\",\n                          \"C:\\\\Program Files (x86)\\\\*.exe\",\n                          \"C:\\\\Program Files\\\\*.exe\",\n                          \"C:\\\\Windows\\\\System32\\\\rdpinit.exe\",\n                          \"C:\\\\Windows\\\\System32\\\\sihost.exe\",\n                          \"C:\\\\Windows\\\\System32\\\\RuntimeBroker.exe\",\n                          \"C:\\\\Windows\\\\System32\\\\SECOCL64.exe\")\n",
+  "actions": []
+}

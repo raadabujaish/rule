@@ -1,0 +1,46 @@
+{
+  "name": "FortiWeb — IDOR Sequential ID Enumeration",
+  "tags": [
+    "raad",
+    "redteam-2026-05",
+    "phase-3",
+    "web",
+    "idor"
+  ],
+  "interval": "10m",
+  "enabled": true,
+  "description": "Detects Insecure Direct Object Reference (IDOR) / object enumeration against the banking web applications: a single external source (data.original_src) requesting 20+ distinct numeric identifiers (e.g. account numbers) on the same endpoint within 30 minutes. Legitimate corporate-banking sessions access only a handful of accounts (observed max ~8 over 6h), so high-cardinality identifier access from one source indicates authorization-bypass enumeration. Enriched with success vs forbidden/not-found counts for triage.",
+  "risk_score": 70,
+  "severity": "high",
+  "output_index": "",
+  "investigation_fields": {
+    "field_names": [
+      "data.original_src",
+      "data.http_host",
+      "data.http_url",
+      "data.http_retcode"
+    ]
+  },
+  "author": [],
+  "false_positives": [
+    "Internal admin tools that legitimately page through resource IDs",
+    "Search-engine crawlers with sitemaps containing many ID paths —"
+  ],
+  "from": "now-30m",
+  "rule_id": "raad-14-idor-sequential-enumeration",
+  "max_signals": 100,
+  "risk_score_mapping": [],
+  "severity_mapping": [],
+  "threat": [],
+  "to": "now",
+  "references": [],
+  "version": 1,
+  "exceptions_list": [],
+  "related_integrations": [],
+  "required_fields": [],
+  "setup": "",
+  "type": "esql",
+  "language": "esql",
+  "query": "FROM logs-tcp.generic-default\n| WHERE @timestamp >= NOW() - 30 minutes AND data.type == \"traffic\" AND data.original_src IS NOT NULL AND data.http_url IS NOT NULL AND data.http_url RLIKE \".*=[0-9][0-9][0-9]+.*\"\n| EVAL endpoint = MV_FIRST(SPLIT(data.http_url, \"?\")), rc = TO_INTEGER(data.http_retcode)\n| WHERE NOT endpoint RLIKE \".*rb_.*\"\n| STATS distinct_ids = COUNT_DISTINCT(data.http_url), attempts = COUNT(*), success = SUM(CASE(rc < 400, 1, 0)), forbidden = SUM(CASE(rc == 401 OR rc == 403 OR rc == 404, 1, 0)) BY data.original_src, data.http_host, endpoint\n| WHERE distinct_ids >= 20\n| SORT distinct_ids DESC\n| KEEP data.original_src, data.http_host, endpoint, distinct_ids, attempts, success, forbidden\n| LIMIT 100",
+  "actions": []
+}

@@ -1,0 +1,277 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<Playbook xmlns="https://soc.example/playbooks" id="PB-fortigate-external-port-scan" name="FortiGate — External Port Scan - SOC Playbook" version="3.0" status="Validated" classification="TLP:AMBER">
+  <Metadata>
+    <Owner>NBI SOC / Detection Engineering</Owner>
+    <LastUpdated>2026-08-19</LastUpdated>
+    <Severity default="medium">medium</Severity>
+    <Confidence default="Medium">Medium</Confidence>
+    <Category>Reconnaissance</Category>
+    <MitreAttack>
+      <Technique id="T1595.001"/>
+      <Technique id="T1595"/>
+      <Technique id="T1046"/>
+      <Tactic id="TA0043"/>
+    </MitreAttack>
+    <References>
+      <Reference title="MITRE ATT&amp;CK - Active Scanning: Scanning IP Blocks (T1595.001)" url="https://attack.mitre.org/techniques/T1595/001/"/>
+      <Reference title="MITRE ATT&amp;CK - Network Service Discovery (T1046)" url="https://attack.mitre.org/techniques/T1046/"/>
+      <Reference title="MITRE ATT&amp;CK - Reconnaissance tactic (TA0043)" url="https://attack.mitre.org/tactics/TA0043/"/>
+      <Reference title="SANS - Understanding and detecting port scans" url="https://www.sans.org/white-papers/detecting-port-scans/"/>
+      <Reference title="Fortinet - DoS/anomaly and IPS sensors (FortiOS Administration Guide)" url="https://docs.fortinet.com/document/fortigate/7.4.0/administration-guide/198625/ips"/>
+      <Reference title="Nmap - Port scanning techniques (reference for scan shapes)" url="https://nmap.org/book/man-port-scanning-techniques.html"/>
+      <Reference title="Elastic - ES|QL reference (STATS / COUNT_DISTINCT / CIDR_MATCH / date math)" url="https://www.elastic.co/guide/en/elasticsearch/reference/current/esql.html"/>
+    </References>
+  </Metadata>
+  <AlertContext>
+    <RuleName>FortiGate — External Port Scan</RuleName>
+    <RuleId>raad-01-port-scan</RuleId>
+    <RuleType>esql</RuleType>
+    <Index>logs-fortinet_fortigate.log-default</Index>
+    <TriggerLogic>The deployed rule is an ES|QL analytic. Plain-English of the deployed logic: filter to external source.ip (RFC1918/loopback/link-local excluded) with event.action IN ("accept","deny","drop","reset"); per source.ip compute unique_ports = COUNT_DISTINCT(destination.port), unique_dst = COUNT_DISTINCT(destination.ip), and the allowed/denied split; fire when unique_ports &gt;= 100; classify vertical (many ports, one host) / horizontal (one/few ports, many hosts) / block (many of both) from the ports-per-destination ratio.
+
+One-line Kibana KQL detection filter (leads with the priority - did the scan reach anything):
+
+
+
+Why the accept/deny split is the whole game: a scan with allowed == 0 and high unique_ports is reconnaissance the firewall fully blocked; allowed &gt; 0 means the source reached a live service, which is where risk begins. A very high unique_dst is a block/subnet sweep (horizontal); a single destination with many ports is a targeted host scan (vertical). FortiGate double-logs flows across two firewalls (~2× inflation), so read *ratios and dispositions*, not exact raw counts.</TriggerLogic>
+    <KeyAlertFields>source.ip, destination.ip, destination.port, event.action, source.user.name, url.domain, url.full</KeyAlertFields>
+  </AlertContext>
+  <Inputs>
+    <Input name="$source_ip"/>
+  </Inputs>
+  <ExecutiveSummary>
+    <Overview>This playbook drives triage and investigation of the External Port Scan detection on NBI's Elastic Security deployment. The rule is an ES|QL aggregation over FortiGate/CEF traffic: over a short window it groups by external (non-RFC1918/loopback/link-local) source.ip with event.action in accept/deny/drop/reset, firing when one external source reaches ≥ 100 distinct destination ports; the scan is classified vertical/horizontal/block by the ports-per-destination ratio.
+
+Scanning is reconnaissance, not compromise. The analyst's job is to decide whether every probe was denied at the firewall (false_positive - blocked reconnaissance, documented, never "benign"), whether the scan reached open services and the source then engaged them (true_positive - recon progressing to access), whether the source is an authorised scanner (false_positive - authorised), whether it is a benign wide-connection service (misconfiguration), or whether the reached-service follow-up cannot be established (needs_escalation). Internet-facing scanning is constant background noise; the priority is the small fraction that finds a reachable service - so triage leads with the allowed count.</Overview>
+    <BusinessImpact>An alert asserts: one external $source_ip connected to ≥ 100 distinct destination ports/hosts through the FortiGate in a short window. That is a network port scan - service discovery to map NBI's external attack surface. On its own it is pre-compromise: mapping, not breach.
+
+The consequential distinction the flow record *can* make is blocked vs reached. In the validation window 74.242.255.116 produced ~970 distinct ports across ~469 hosts with every connection denied - the textbook blocked-recon shape: a broad sweep that found nothing reachable. The alert becomes materially serious only when allowed &gt; 0 - the scan touched an open service - and more serious still when the source then sustains interaction with that service (exploitation follow-through, section 17.1). The investigation therefore moves from "how broad" (context) to "did it reach anything, and did it stay" (risk).</BusinessImpact>
+  </ExecutiveSummary>
+  <Investigation>
+    <Goal>Decide true_positive / false_positive / misconfiguration / needs_escalation for FortiGate — External Port Scan.</Goal>
+    <Workflow>
+      <Step order="1" name="Reproduce the rule estate-wide (external high-port-count sources)">
+        <Purpose>Reproduce the rule estate-wide (external high-port-count sources)</Purpose>
+        <Query platform="Elastic" language="ES|QL" id="Q-01">
+          <![CDATA[
+FROM logs-fortinet_fortigate.log-default,logs-cef.log-default
+| WHERE @timestamp >= NOW() - 30 minutes AND source.ip IS NOT NULL AND destination.port IS NOT NULL
+    AND NOT CIDR_MATCH(source.ip, "10.0.0.0/8", "192.168.0.0/16", "172.16.0.0/12", "127.0.0.0/8", "169.254.0.0/16")
+| STATS unique_ports = COUNT_DISTINCT(destination.port), unique_dst = COUNT_DISTINCT(destination.ip),
+        total = COUNT(*),
+        allowed = COUNT(CASE(event.action == "accept", 1, null)),
+        denied = COUNT(CASE(event.action IN ("deny","drop","reset"), 1, null))
+    BY source.ip
+| SORT unique_ports DESC
+| LIMIT 15
+]]>
+        </Query>
+      </Step>
+      <Step order="2" name="Confirm the scan on the alert source (breadth + accept/deny split)">
+        <Purpose>Confirm the scan on the alert source (breadth + accept/deny split)</Purpose>
+        <Query platform="Elastic" language="ES|QL" id="Q-02">
+          <![CDATA[
+FROM logs-fortinet_fortigate.log-default,logs-cef.log-default
+| WHERE source.ip == "$source_ip"
+    AND destination.port IS NOT NULL
+    AND @timestamp >= NOW() - 30 minutes
+| STATS total = COUNT(*),
+        unique_ports = COUNT_DISTINCT(destination.port),
+        unique_dst = COUNT_DISTINCT(destination.ip),
+        allowed = COUNT(CASE(event.action == "accept", 1, null)),
+        denied = COUNT(CASE(event.action IN ("deny","drop","reset"), 1, null))
+]]>
+        </Query>
+      </Step>
+      <Step order="3" name="Entity pivoting">
+        <Purpose>Entity pivoting</Purpose>
+        <Query platform="Elastic" language="ES|QL" id="Q-03">
+          <![CDATA[
+FROM logs-fortinet_fortigate.log-default,logs-cef.log-default
+| WHERE source.ip == "$source_ip"
+    AND destination.port IS NOT NULL
+    AND @timestamp >= NOW() - 30 minutes
+| STATS total = COUNT(*),
+        unique_ports = COUNT_DISTINCT(destination.port),
+        unique_dst = COUNT_DISTINCT(destination.ip),
+        allowed = COUNT(CASE(event.action == "accept", 1, null)),
+        denied = COUNT(CASE(event.action IN ("deny","drop","reset"), 1, null))
+]]>
+        </Query>
+      </Step>
+      <Step order="4" name="Host investigation">
+        <Purpose>Host investigation</Purpose>
+        <Query platform="Elastic" language="ES|QL" id="Q-04">
+          <![CDATA[
+FROM logs-fortinet_fortigate.log-default,logs-cef.log-default
+| WHERE source.ip == "$source_ip" AND @timestamp >= NOW() - 30 minutes
+| STATS attempts = COUNT(*), ports = COUNT_DISTINCT(destination.port),
+        allowed = COUNT(CASE(event.action == "accept", 1, null))
+    BY destination.ip
+| SORT attempts DESC
+| LIMIT 25
+]]>
+        </Query>
+      </Step>
+      <Step order="5" name="IP investigation">
+        <Purpose>IP investigation</Purpose>
+        <Query platform="Elastic" language="ES|QL" id="Q-05">
+          <![CDATA[
+FROM logs-fortinet_fortigate.log-default,logs-cef.log-default
+| WHERE source.ip == "$source_ip" AND destination.port IS NOT NULL
+    AND @timestamp >= NOW() - 30 minutes
+| STATS attempts = COUNT(*), dsts = COUNT_DISTINCT(destination.ip)
+    BY destination.port, event.action
+| SORT attempts DESC
+| LIMIT 25
+]]>
+        </Query>
+      </Step>
+      <Step order="6" name="IP investigation">
+        <Purpose>IP investigation</Purpose>
+        <Query platform="Elastic" language="ES|QL" id="Q-06">
+          <![CDATA[
+FROM logs-fortinet_fortigate.log-default,logs-cef.log-default
+| WHERE source.ip == "$source_ip"
+    AND event.action == "accept"
+    AND @timestamp >= NOW() - 30 minutes
+| STATS connections = COUNT(*) BY destination.ip, destination.port
+| SORT connections DESC
+| LIMIT 20
+]]>
+        </Query>
+      </Step>
+      <Step order="7" name="Timeline Reconstruction">
+        <Purpose>Timeline Reconstruction</Purpose>
+        <Query platform="Elastic" language="ES|QL" id="Q-07">
+          <![CDATA[
+FROM logs-fortinet_fortigate.log-default,logs-cef.log-default
+| WHERE source.ip == "$source_ip" AND @timestamp >= NOW() - 4 hours
+| STATS attempts = COUNT(*), ports = COUNT_DISTINCT(destination.port),
+        allowed = COUNT(CASE(event.action == "accept", 1, null))
+    BY bucket = DATE_TRUNC(15 minutes, @timestamp)
+| SORT bucket ASC
+| LIMIT 16
+]]>
+        </Query>
+      </Step>
+      <Step order="8" name="Lateral movement validation">
+        <Purpose>Lateral movement validation</Purpose>
+        <Query platform="Elastic" language="ES|QL" id="Q-08">
+          <![CDATA[
+FROM logs-fortinet_fortigate.log-default,logs-cef.log-default
+| WHERE source.ip == "$source_ip"
+    AND event.action == "accept"
+    AND @timestamp >= NOW() - 4 hours
+| STATS connections = COUNT(*), first_seen = MIN(@timestamp), last_seen = MAX(@timestamp)
+    BY destination.ip, destination.port
+| SORT connections DESC
+| LIMIT 20
+]]>
+        </Query>
+      </Step>
+      <Step order="9" name="Defense evasion validation">
+        <Purpose>Defense evasion validation</Purpose>
+        <Query platform="Elastic" language="ES|QL" id="Q-09">
+          <![CDATA[
+FROM logs-fortinet_fortigate.log-default,logs-cef.log-default
+| WHERE source.ip == "$source_ip" AND @timestamp >= NOW() - 4 hours
+| STATS attempts = COUNT(*), ports = COUNT_DISTINCT(destination.port),
+        hosts = COUNT_DISTINCT(destination.ip),
+        allowed = COUNT(CASE(event.action == "accept", 1, null))
+    BY fortinet.firewall.subtype
+| SORT attempts DESC
+| LIMIT 15
+]]>
+        </Query>
+      </Step>
+      <Step order="10" name="Impact assessment">
+        <Purpose>Impact assessment</Purpose>
+        <Query platform="Elastic" language="ES|QL" id="Q-10">
+          <![CDATA[
+FROM logs-fortinet_fortigate.log-default,logs-cef.log-default
+| WHERE source.ip == "$source_ip" AND event.action == "accept"
+    AND @timestamp >= NOW() - 4 hours
+| STATS accepted_connections = COUNT(*), reached_ports = COUNT_DISTINCT(destination.port),
+        reached_hosts = COUNT_DISTINCT(destination.ip), last_seen = MAX(@timestamp)
+| LIMIT 5
+]]>
+        </Query>
+      </Step>
+      <Step order="11" name="Finalize verdict">
+        <DecisionTree>
+        </DecisionTree>
+      </Step>
+    </Workflow>
+  </Investigation>
+  <ClassificationGuidance>
+    <TruePositive>
+      <Definition></Definition>
+    </TruePositive>
+    <FalsePositive>
+      <Definition></Definition>
+      <Indicators>
+        <Item>Authorised external assessment / scanners. A contracted penetration test or attack-surface-management scan produces exactly this pattern. Authorised - but confirmed against the engagement/ROE, never auto-trusted on sight.</Item>
+        <Item>Fully blocked reconnaissance. allowed == 0 with high unique_ports is a scan the perimeter blocked - recorded as false_positive (blocked-malicious reconnaissance), never "benign"; the source is still logged/monitored.</Item>
+        <Item>Benign wide-connection services. A legitimate peer, CDN health-check, or misconfigured client can produce a wide connection fan-out without hostile intent - a misconfiguration/tuning condition, distinguished by recognised source and no sensitive-service engagement.</Item>
+        <Item>Internet background noise. Constant, low-value, blocked scanning from research/opportunistic sources - high volume, no reached service; prioritise the allowed count over raw scan breadth.</Item>
+        <Item>Blocked scanning is the norm; reached services are rare. Every high-port-count external source observed in the validation window had allowed == 0 - e.g. 74.242.255.116 (~970 ports, 0 accepted), 72.145.59.250 (~228 ports, 0 accepted), 141.98.67.10 (~167 ports across 3 hosts, 0 accepted). The perimeter is blocking these sweeps; the alert's value is isolating the exception where allowed &gt; 0.</Item>
+        <Item>Both scan shapes are present. 74.242.255.116 swept ~469 hosts (horizontal/block sweep); 141.98.67.10 concentrated ~167 ports on 3 hosts (toward vertical) - read unique_dst vs unique_ports to classify.</Item>
+        <Item>~2× double-logging. NBI fronts traffic with two firewalls (Firewall-DC-Prim, firewall-dc-edge01), so a flow is often logged twice; treat raw counts as inflated and lean on ratios and the accept/deny split.</Item>
+        <Item>No NBI allow-list of authorised scanners is encoded in the rule. Maintain one operationally (assessment source IPs + engagement windows) so contracted assessments are recognised - but confirm authorisation during the alert, never pre-clear.</Item>
+      </Indicators>
+    </FalsePositive>
+    <Misconfiguration>
+      <Definition></Definition>
+    </Misconfiguration>
+    <NeedsEscalation>
+      <Definition></Definition>
+    </NeedsEscalation>
+  </ClassificationGuidance>
+  <ResponseActions>
+    <Phase name="Containment">
+      <Action>Block $source_ip at the perimeter when the scan reached a service and/or engaged it (true_positive), and add it to the deny/threat-intel list.</Action>
+      <Action>Examine the reached destination host(s) (section 15.6b/section 17.1) directly for exploitation/compromise, prioritising sensitive/non-public services.</Action>
+      <Action>Restrict or remove the unnecessary exposure the scan discovered (close the port, firewall it to known peers) in coordination with the service owner.</Action>
+      <Action>Preserve flow evidence (section 14/section 15/section 16) and any IPS signatures for the source.</Action>
+      <Action>Deploy/confirm changes only via the authorised human-approved DEPLOY path; investigation itself is read-only.</Action>
+    </Phase>
+    <Phase name="Eradication">
+      <Action>Remediate any compromise found on a reached host (per the relevant host/IR playbook) and remove attacker footholds.</Action>
+      <Action>Close or restrict the exposed service so the same scan cannot reach it again; review why it was exposed.</Action>
+      <Action>Block positively-hostile source ranges at the edge; for a blocked-recon verdict, monitor the source rather than only dropping it.</Action>
+      <Action>Hunt for the same source across IPS/exploit telemetry and for other sources targeting the same exposed service.</Action>
+    </Phase>
+    <Phase name="Recovery">
+      <Action>Confirm the reached host is clean (or restored) and the unnecessary exposure is removed before standing down.</Action>
+      <Action>Reduce external attack surface (close/restrict exposed services), tune scan-detection thresholds if noisy, and maintain an allow-list of authorised assessment sources with their windows so contracted tests are recognised (without pre-clearing during an alert).</Action>
+      <Action>Return to service only after section 22 closing criteria are met and monitoring confirms no engagement recurrence.</Action>
+    </Phase>
+  </ResponseActions>
+  <Escalation>
+    <Trigger>Escalate to SOC L2 / IR and the perimeter/network team + service owner when any of the following hold:
+
+- The scan reached a sensitive/non-public service (section 15.6b) from an unauthorised source.
+- The source sustained engagement with a reached service (section 17.1) - exploitation follow-through; examine the host directly.
+- IPS/exploit signatures accompany the scan (section 17.4).
+- The scan reached a service but engagement/authorisation cannot be established (needs_escalation).
+
+Escalate with the scan profile (section 14.2/section 15.1), accepted exposure (section 15.6b), engagement (section 17.1), and any IPS evidence.</Trigger>
+    <To>SOC L2 / IR</To>
+  </Escalation>
+  <ClosureCriteria>
+    <Item>false_positive (authorised): $source_ip confirmed as a documented, authorised assessment/scanner matched to an engagement window; recorded.</Item>
+    <Item>false_positive (blocked-malicious): allowed == 0 - the scan was fully blocked; documented as blocked reconnaissance, never "benign"; source logged/monitored.</Item>
+    <Item>misconfiguration: a benign wide-connection source (legit peer / CDN health-check / misconfigured client) with no sensitive-service engagement; baselined/tuned.</Item>
+    <Item>true_positive: the scan reached a live service and the source engaged it; source blocked, reached host examined/remediated, unnecessary exposure removed, incident documented.</Item>
+    <Item>needs_escalation: reached-service follow-up or authorisation could not be established; handed to the perimeter/network team + service owner with the gaps documented.</Item>
+  </ClosureCriteria>
+  <Limitations>
+    <Item>Lead with allowed, not breadth. Internet scanning is constant; the alert's value is the rare allowed &gt; 0. A ~970-port, 0-accepted sweep (74.242.255.116) is blocked reconnaissance; a 5-port scan that reaches 3389 is the real problem.</Item>
+    <Item>Blocked != benign. allowed == 0 is documented as a blocked malicious reconnaissance attempt and the source is monitored - never closed as "benign".</Item>
+    <Item>Classify by ratio. unique_dst ≫ unique_ports is a horizontal/block sweep; many ports on one host is a vertical scan; read the ratio (section 15.5), not raw counts, because NBI double-logs flows ~2×.</Item>
+    <Item>Engagement is the tell. A reached service touched once is recon; sustained/growing accepted connections (section 17.1) are exploitation follow-through - examine the host.</Item>
+    <Item>The rule's blind spots are structural. A scan under 100 distinct ports, slow-and-low across intervals, distributed across source IPs, or a single-port horizontal sweep stays under threshold - so prioritise the allowed count, correlate with IPS/exploit signatures, and treat a low-port scan that reaches a service as still significant.</Item>
+    <Item>KB-worthy (persist to NBI customer scope): (1) blocked-scan baseline - high-port external sources (74.242.255.116 ~970 ports/469 hosts, 141.98.67.10 ~167 ports/3 hosts) all allowed == 0; (2) ~2× double-logging across Firewall-DC-Prim / firewall-dc-edge01; (3) event.action ~100% populated (the blocked-vs-reached split is reliable); (4) flow logs carry no process/user/host/URL context - reached-host exam is out of band. All observed live on 2026-08-17.</Item>
+  </Limitations>
+</Playbook>

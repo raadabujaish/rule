@@ -1,0 +1,80 @@
+{
+  "name": "Proxy Execution via Windows OpenSSH [NBI-4688]",
+  "tags": [
+    "Domain: Endpoint",
+    "OS: Windows",
+    "Use Case: Threat Detection",
+    "Tactic: Defense Evasion",
+    "Data Source: Elastic Endgame",
+    "Data Source: Elastic Defend",
+    "Data Source: Windows Security Event Logs",
+    "Data Source: Microsoft Defender for Endpoint",
+    "Data Source: Sysmon",
+    "Data Source: SentinelOne",
+    "Data Source: Crowdstrike",
+    "Resources: Investigation Guide",
+    "NBI-Recovered",
+    "Phase2-Batch2",
+    "Windows-4688",
+    "coverage:partial-29pct"
+  ],
+  "interval": "5m",
+  "enabled": true,
+  "description": "Identifies attempts to execute commands via proxy using the Windows OpenSSH client. This may indicate an attempt to bypass application control via trusted windows binaries.",
+  "risk_score": 73,
+  "severity": "high",
+  "note": "## Coverage\nThis rule runs on Windows Security 4688 process-creation events. Command-line-dependent conditions currently apply to hosts where command-line auditing is enabled.\n\n## Detection guidance\n## Triage and analysis\n\n### Investigating Proxy Execution via Windows OpenSSH\n\n### Possible investigation steps\n\n- Review the ssh child processes and the parent process to identify the initial vector.\n- Identify the user account that performed the action and whether it should perform this kind of action.\n- Investigate other alerts associated with the user/host during the past 48 hours.\n- Validate the activity is not related to planned patches, updates, network administrator activity, or legitimate software installations.\n- Assess whether this behavior is prevalent in the environment by looking for similar occurrences across hosts.\n\n### False positive analysis\n\n- This is a dual-use tool, meaning its usage is not inherently malicious. Analysts can dismiss the alert if the administrator is aware of the activity, no other suspicious activity was identified.\n\n### Response and Remediation\n\n- Initiate the incident response process based on the outcome of the triage.\n- Isolate the involved host to prevent further post-compromise behavior.\n- Run a full antimalware scan. This may reveal additional artifacts left in the system, persistence mechanisms, and malware components.\n- Investigate cre",
+  "output_index": "",
+  "investigation_fields": {
+    "field_names": [
+      "user.name",
+      "process.name",
+      "process.parent.name",
+      "process.command_line",
+      "host.name"
+    ]
+  },
+  "author": [
+    "raadabujaish"
+  ],
+  "false_positives": [],
+  "from": "now-9m",
+  "rule_id": "nbi-b2-proxy-execution-via-windows-openssh",
+  "max_signals": 100,
+  "risk_score_mapping": [],
+  "severity_mapping": [],
+  "threat": [
+    {
+      "framework": "MITRE ATT&CK",
+      "tactic": {
+        "id": "TA0005",
+        "name": "Defense Evasion",
+        "reference": "https://attack.mitre.org/tactics/TA0005/"
+      },
+      "technique": [
+        {
+          "id": "T1202",
+          "name": "Indirect Command Execution",
+          "reference": "https://attack.mitre.org/techniques/T1202/"
+        }
+      ]
+    }
+  ],
+  "to": "now",
+  "references": [
+    "https://lolbas-project.github.io/lolbas/Binaries/Ssh/",
+    "https://www.elastic.co/guide/en/security/current/prebuilt-rules.html"
+  ],
+  "version": 1,
+  "exceptions_list": [],
+  "related_integrations": [],
+  "required_fields": [],
+  "setup": "",
+  "type": "eql",
+  "language": "eql",
+  "index": [
+    "logs-system.security-*"
+  ],
+  "query": "process where host.os.type == \"windows\" and event.type == \"start\" and process.name : (\"ssh.exe\", \"sftp.exe\") and\n process.command_line : (\"*Command=*powershell*\", \"*schtasks*\", \"*Command=*@echo off*\", \"*Command=*http*\", \"*Command=*mshta*\",  \"*Command=*msiexec*\",\n                          \"*Command=*cmd /c*\", \"*Command=*cmd.exe*\", \"*Command=\\\"cmd /c*\", \"*LocalCommand=scp*&&*\", \"*LocalCommand=?scp*&&*\", \"*Command=*script*\")\n",
+  "actions": []
+}

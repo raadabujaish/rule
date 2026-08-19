@@ -1,0 +1,326 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<Playbook xmlns="https://soc.example/playbooks" id="PB-fim-monitored-system-executable-driver-deleted" name="FIM — Monitored System Executable/Driver Deleted - SOC Playbook" version="3.0" status="Validated" classification="TLP:AMBER">
+  <Metadata>
+    <Owner>NBI SOC / Detection Engineering</Owner>
+    <LastUpdated>2026-08-19</LastUpdated>
+    <Severity default="Medium">Medium</Severity>
+    <Confidence default="Medium">Medium</Confidence>
+    <Category>Defense Evasion</Category>
+    <MitreAttack>
+      <Technique id="T1070.004"/>
+      <Technique id="T1070"/>
+      <Technique id="T1562.001"/>
+      <Technique id="T1562"/>
+      <Tactic id="TA0005"/>
+    </MitreAttack>
+    <References>
+      <Reference title="MITRE ATT&amp;CK - Indicator Removal: File Deletion (T1070.004)" url="https://attack.mitre.org/techniques/T1070/004/"/>
+      <Reference title="MITRE ATT&amp;CK - Impair Defenses: Disable or Modify Tools (T1562.001)" url="https://attack.mitre.org/techniques/T1562/001/"/>
+      <Reference title="MITRE ATT&amp;CK - Defense Evasion tactic (TA0005)" url="https://attack.mitre.org/tactics/TA0005/"/>
+      <Reference title="Elastic - File Integrity Monitoring / auditbeat FIM (event.action, file fields)" url="https://www.elastic.co/guide/en/beats/auditbeat/current/auditbeat-module-file_integrity.html"/>
+      <Reference title="Elastic - ECS file fields reference (file.path, file.hash.*)" url="https://www.elastic.co/guide/en/ecs/current/ecs-file.html"/>
+      <Reference title="MITRE ATT&amp;CK - Indicator Removal (T1070, parent technique)" url="https://attack.mitre.org/techniques/T1070/"/>
+      <Reference title="Microsoft Learn - Windows Security auditing (4688 process creation, 7045 service install)" url="https://learn.microsoft.com/en-us/windows/security/threat-protection/auditing/event-4688"/>
+    </References>
+  </Metadata>
+  <AlertContext>
+    <RuleName>FIM — Monitored System Executable/Driver Deleted</RuleName>
+    <RuleId>nbi-fim-system-file-deleted</RuleId>
+    <RuleType>query</RuleType>
+    <Index>logs-fim.event-*</Index>
+    <TriggerLogic>The deployed rule is an Elastic query rule over FIM events. Its intended one-line Kibana-KQL detection filter:
+
+
+
+Plain English: a monitored executable or driver was deleted. But because file.extension is null on deletions at NBI (section 1), the working filter - and the anchor for this investigation - is the path-suffix form:
+
+
+
+The decision then turns on two questions the path reveals: is the removed binary a security/monitoring component or a system driver (versus an ordinary application/runtime file), and was the same path re-created around the deletion (software servicing) or not (a genuine removal). Delete-then-recreate of the same path is the normal updater pattern; a standalone deletion of a defensive/system binary is the impair-defenses case the rule exists to catch.</TriggerLogic>
+    <KeyAlertFields>event.action, file.path, file.owner, file.hash.sha1, host.name, file.extension, file.name, file.hash.sha256, user.name, process.name</KeyAlertFields>
+  </AlertContext>
+  <Inputs>
+    <Input name="$host"/>
+    <Input name="$file_path"/>
+  </Inputs>
+  <ExecutiveSummary>
+    <Overview>This playbook drives triage and investigation of the FIM - Monitored System Executable/Driver Deleted detection on NBI's Elastic Security deployment. The rule is intended to fire on a File Integrity Monitoring event (event.dataset: "fim.event") with event.action: "deleted" where file.extension is exe, dll or sys - a monitored executable or driver was removed, which can indicate removal of a security/monitoring component (impairing defenses) or clean-up of dropped tooling to erase evidence.
+
+The analyst's job is to decide whether the deletion is a genuine removal of a defensive/system component (true_positive), routine software servicing / authorised uninstall (false_positive - authorised, never "benign"), a rule/baseline defect the deletion merely exposes (misconfiguration), or unproven (needs_escalation).
+
+&gt; VALIDATION_BLOCKED - the deployed rule is blind (proven live). On NBI's FIM feed file.extension is NULL on 100% of deleted events (564/564 in a 30-day sample), so the deployed extension-based condition currently matches nothing - the rule as written cannot fire on executable deletions. Deleted executables/drivers are nonetheless present and recoverable via the file.path suffix (*.exe / *.dll / *.sys), which this playbook uses throughout. This is a deployed-rule defect to raise for separate human-authorised tuning (match file.path suffix instead of file.extension), not a reason to treat the behaviour as unmonitored.</Overview>
+    <BusinessImpact>An alert (surfaced by the path-based method, or after the rule is fixed) means: a monitored .exe/.dll/.sys was reported deleted on $host. Deletion of a system binary matters most in two ways:
+
+- Removal of a security/monitoring component (AV/EDR/agent binary) - an attacker impairing defenses so subsequent activity on the host is unlogged (T1562.001). This blinds the SOC to everything that follows on that host.
+- Clean-up of dropped tooling - removing attacker binaries to erase forensic evidence (T1070.004).
+
+The overwhelmingly common benign cause is software servicing: an updater deletes an old binary and immediately writes the new version to the same path (validated on $host for mfc100.dll - a deleted and a created for the identical path). The investigation therefore correlates each deletion against re-creation and against the set of known defensive binaries.
+
+A crucial caveat governs this rule: the FIM feed carries no acting user or process (both null - section 8), so *who* deleted the file is not in this telemetry - it must be recovered by correlating the host's Windows Security process/auth activity (logs-system.security*), which is rich on the FIM hosts.</BusinessImpact>
+  </ExecutiveSummary>
+  <Investigation>
+    <Goal>Decide true_positive / false_positive / misconfiguration / needs_escalation for FIM — Monitored System Executable/Driver Deleted.</Goal>
+    <Workflow>
+      <Step order="1" name="Recover which executables/drivers were deleted on the host (verbatim FIMDEL-INV-01)">
+        <Purpose>Recover which executables/drivers were deleted on the host (verbatim FIMDEL-INV-01)</Purpose>
+        <Query platform="Elastic" language="ES|QL" id="Q-01">
+          <![CDATA[
+FROM logs-fim.event-*
+| WHERE event.action == "deleted" AND host.name == "$host"
+    AND (file.path LIKE "*.exe" OR file.path LIKE "*.dll" OR file.path LIKE "*.sys")
+    AND @timestamp >= NOW() - 4 hours
+| KEEP @timestamp, file.path, file.owner, file.extension, host.name
+| SORT @timestamp DESC
+| LIMIT 20
+]]>
+        </Query>
+      </Step>
+      <Step order="2" name="Servicing or genuine removal - was the exact path re-created (verbatim FIMDEL-INV-02)">
+        <Purpose>Servicing or genuine removal - was the exact path re-created (verbatim FIMDEL-INV-02)</Purpose>
+        <Query platform="Elastic" language="ES|QL" id="Q-02">
+          <![CDATA[
+FROM logs-fim.event-*
+| WHERE host.name == "$host" AND file.path == "$file_path"
+    AND @timestamp >= NOW() - 4 hours
+| STATS events = COUNT(*), first_seen = MIN(@timestamp), last_seen = MAX(@timestamp)
+    BY event.action
+| SORT events DESC
+| LIMIT 10
+]]>
+        </Query>
+      </Step>
+      <Step order="3" name="Entity pivoting">
+        <Purpose>Entity pivoting</Purpose>
+        <Query platform="Elastic" language="ES|QL" id="Q-03">
+          <![CDATA[
+FROM logs-fim.event-*
+| WHERE event.action == "deleted" AND host.name == "$host"
+    AND (file.path LIKE "*.exe" OR file.path LIKE "*.dll" OR file.path LIKE "*.sys")
+    AND @timestamp >= NOW() - 4 hours
+| KEEP @timestamp, file.path, file.owner, file.hash.sha1, event.action
+| SORT @timestamp DESC
+| LIMIT 30
+]]>
+        </Query>
+      </Step>
+      <Step order="4" name="Process investigation">
+        <Purpose>Process investigation</Purpose>
+        <Query platform="Elastic" language="ES|QL" id="Q-04">
+          <![CDATA[
+FROM logs-system.security*
+| WHERE @timestamp >= NOW() - 4 hours AND event.code == "4688"
+    AND host.name == "$host"
+    AND TO_LOWER(process.name) IN ("sc.exe", "net.exe", "net1.exe", "taskkill.exe", "msiexec.exe", "reg.exe", "cmd.exe", "powershell.exe", "rundll32.exe")
+| KEEP @timestamp, user.name, process.name, process.executable, process.parent.name, process.pid
+| SORT @timestamp DESC
+| LIMIT 40
+]]>
+        </Query>
+      </Step>
+      <Step order="5" name="Host investigation">
+        <Purpose>Host investigation</Purpose>
+        <Query platform="Elastic" language="ES|QL" id="Q-05">
+          <![CDATA[
+FROM logs-fim.event-*
+| WHERE host.name == "$host"
+    AND @timestamp >= NOW() - 4 hours
+| STATS events = COUNT(*), first_seen = MIN(@timestamp), last_seen = MAX(@timestamp)
+    BY event.action
+| SORT events DESC
+| LIMIT 15
+]]>
+        </Query>
+      </Step>
+      <Step order="6" name="Hash investigation">
+        <Purpose>Hash investigation</Purpose>
+        <Query platform="Elastic" language="ES|QL" id="Q-06">
+          <![CDATA[
+FROM logs-fim.event-*
+| WHERE event.action == "deleted" AND host.name == "$host"
+    AND (file.path LIKE "*.exe" OR file.path LIKE "*.dll" OR file.path LIKE "*.sys")
+    AND @timestamp >= NOW() - 4 hours
+| EVAL has_sha1 = file.hash.sha1 IS NOT NULL
+| STATS deletions = COUNT(*) BY has_sha1
+| SORT deletions DESC
+| LIMIT 5
+]]>
+        </Query>
+      </Step>
+      <Step order="7" name="File investigation">
+        <Purpose>File investigation</Purpose>
+        <Query platform="Elastic" language="ES|QL" id="Q-07">
+          <![CDATA[
+FROM logs-fim.event-*
+| WHERE event.action == "deleted" AND host.name == "$host"
+    AND (file.path LIKE "*Kaspersky*" OR file.path LIKE "*Defender*" OR file.path LIKE "*Sense*"
+         OR file.path LIKE "*CrowdStrike*" OR file.path LIKE "*Sentinel*" OR file.path LIKE "*elastic*"
+         OR file.path LIKE "*auditbeat*" OR file.path LIKE "*winlogbeat*" OR file.path LIKE "*Sysmon*")
+    AND @timestamp >= NOW() - 4 hours
+| KEEP @timestamp, file.path, file.owner, host.name
+| SORT @timestamp DESC
+| LIMIT 20
+]]>
+        </Query>
+      </Step>
+      <Step order="8" name="Authentication investigation">
+        <Purpose>Authentication investigation</Purpose>
+        <Query platform="Elastic" language="ES|QL" id="Q-08">
+          <![CDATA[
+FROM logs-system.security*
+| WHERE @timestamp >= NOW() - 4 hours AND host.name == "$host"
+    AND event.code IN ("4624", "4672")
+| STATS events = COUNT(*), first_seen = MIN(@timestamp), last_seen = MAX(@timestamp)
+    BY event.code, user.name
+| SORT events DESC
+| LIMIT 30
+]]>
+        </Query>
+      </Step>
+      <Step order="9" name="Timeline Reconstruction">
+        <Purpose>Timeline Reconstruction</Purpose>
+        <Query platform="Elastic" language="ES|QL" id="Q-09">
+          <![CDATA[
+FROM logs-fim.event-*
+| WHERE host.name == "$host"
+    AND (file.path LIKE "*.exe" OR file.path LIKE "*.dll" OR file.path LIKE "*.sys")
+    AND @timestamp >= NOW() - 4 hours
+| KEEP @timestamp, event.action, file.path, file.owner
+| SORT @timestamp ASC
+| LIMIT 200
+]]>
+        </Query>
+      </Step>
+      <Step order="10" name="Lateral movement validation">
+        <Purpose>Lateral movement validation</Purpose>
+        <Query platform="Elastic" language="ES|QL" id="Q-10">
+          <![CDATA[
+FROM logs-system.security*
+| WHERE @timestamp >= NOW() - 4 hours AND host.name == "$host"
+    AND event.code IN ("4624", "4648", "4768", "4769", "5140")
+| STATS events = COUNT(*) BY event.code, user.name
+| SORT events DESC
+| LIMIT 30
+]]>
+        </Query>
+      </Step>
+      <Step order="11" name="Persistence validation">
+        <Purpose>Persistence validation</Purpose>
+        <Query platform="Elastic" language="ES|QL" id="Q-11">
+          <![CDATA[
+FROM logs-system.security*
+| WHERE @timestamp >= NOW() - 4 hours AND host.name == "$host"
+    AND event.code IN ("7045", "4697", "4698", "4720")
+| STATS events = COUNT(*) BY event.code, user.name
+| SORT events DESC
+| LIMIT 20
+]]>
+        </Query>
+      </Step>
+      <Step order="12" name="Defense evasion validation">
+        <Purpose>Defense evasion validation</Purpose>
+        <Query platform="Elastic" language="ES|QL" id="Q-12">
+          <![CDATA[
+FROM logs-system.security*
+| WHERE @timestamp >= NOW() - 4 hours AND host.name == "$host"
+    AND (
+        (event.code == "4688" AND TO_LOWER(process.name) IN ("sc.exe", "net.exe", "net1.exe", "taskkill.exe", "wevtutil.exe", "fltmc.exe", "sethc.exe"))
+        OR event.code == "1102"
+        OR event.code == "4719"
+    )
+| STATS events = COUNT(*) BY event.code, process.name, user.name
+| SORT events DESC
+| LIMIT 30
+]]>
+        </Query>
+      </Step>
+      <Step order="13" name="Impact assessment">
+        <Purpose>Impact assessment</Purpose>
+        <Query platform="Elastic" language="ES|QL" id="Q-13">
+          <![CDATA[
+FROM logs-fim.event-*
+| WHERE event.action == "deleted" AND host.name == "$host"
+    AND (file.path LIKE "*.exe" OR file.path LIKE "*.dll" OR file.path LIKE "*.sys")
+    AND @timestamp >= NOW() - 4 hours
+| STATS deletions = COUNT(*), distinct_paths = COUNT_DISTINCT(file.path)
+| LIMIT 1
+]]>
+        </Query>
+      </Step>
+      <Step order="14" name="Finalize verdict">
+        <DecisionTree>
+        </DecisionTree>
+      </Step>
+    </Workflow>
+  </Investigation>
+  <ClassificationGuidance>
+    <TruePositive>
+      <Definition></Definition>
+    </TruePositive>
+    <FalsePositive>
+      <Definition></Definition>
+      <Indicators>
+        <Item>Software servicing (the dominant benign cause). An updater/patch removes an old binary and writes the new one to the same path - a deleted immediately followed by a created/updated for that exact file.path. Validated on $host for mfc100.dll. This is a false_positive (authorised), documented as a normal update cycle.</Item>
+        <Item>Sanctioned uninstall / decommission. An administrator or software-management tool intentionally removes an application's binaries. Authorised, but confirm against a change record - do not assume.</Item>
+        <Item>Application/runtime churn. Ordinary .dll files under an application directory removed during its own update.</Item>
+        <Item>A removal attempt that failed/was reverted (the defensive component remains installed and running despite a deleted event) is not benign - it is a blocked-malicious attempt (section 13), documented as such.</Item>
+        <Item>file.extension is null on 100% of deletions (section 1) - so the deployed rule is blind and the path-suffix method is authoritative. Any "the rule didn't fire, so nothing was deleted" reasoning is wrong here.</Item>
+        <Item>Deletions of executables are sporadic and cluster with servicing. Live, there were no .exe/.dll/.sys deletions in a 7-day window, with real examples in the preceding weeks on nim-est-apv07 (mfc100.dll, atl100.dll) and nim-fti-apv01 (mfc140u.dll, vcomp140.dll, …) - overwhelmingly Visual C++ runtime servicing. A 0-row 4h window is normal; re-anchor to the alert time.</Item>
+        <Item>file.owner and file.hash.sha1 are frequently NULL on the system-binary deletions (both null on the validated mfc100.dll/atl100.dll deletes), so owner-context and hash-reputation pivots are often unavailable at triage - a telemetry gap, not a clean verdict.</Item>
+        <Item>The FIM feed has no acting user/process. Attribution must come from the host's Windows Security telemetry (logs-system.security*), which is rich on the FIM hosts (nim-est-apv07 ≈24k Event 4688 in 4h; nim-fti-apv01 ≈6.6k) - this is where section 15/section 17 recover *who/what* around the deletion.</Item>
+      </Indicators>
+    </FalsePositive>
+    <Misconfiguration>
+      <Definition></Definition>
+    </Misconfiguration>
+    <NeedsEscalation>
+      <Definition></Definition>
+    </NeedsEscalation>
+  </ClassificationGuidance>
+  <ResponseActions>
+    <Phase name="Containment">
+      <Action>True_positive (security/system component removed): treat $host's logging as untrusted from the deletion time onward, isolate $host, and verify/reinstall the security agent (confirm it is running and shipping, not merely present on disk).</Action>
+      <Action>Terminate and preserve: if section 15.2 identified the process that performed the removal, terminate it and preserve volatile evidence (running process list, the deleted binary if recoverable, agent state) - the FIM feed cannot attribute the deletion, so host-side capture is the only way to recover the actor.</Action>
+      <Action>Preserve evidence: attach INV-01 (what deleted), INV-02 (servicing check), INV-03 (security-component check), the section 15.2 process context and section 15.12 auth context to the case before changing host state.</Action>
+      <Action>Investigation here is read-only; isolation, agent reinstall and account actions run only via the authorised, human-approved change path.</Action>
+    </Phase>
+    <Phase name="Eradication">
+      <Action>Reinstate the security agent on $host and enable tamper protection so its binaries cannot be deleted again.</Action>
+      <Action>Remove any persistence discovered in section 17.2 (services, scheduled tasks, rogue accounts) and identify and disable the account/process responsible (section 15.2/section 15.12).</Action>
+      <Action>Hunt what the removal was meant to hide during the window $host's logging was untrusted - credential access, lateral movement (section 17.1), and staging - using peers' telemetry where $host's own is suspect.</Action>
+      <Action>Remediate the access path that gave the attacker the privilege to delete defensive binaries.</Action>
+    </Phase>
+    <Phase name="Recovery">
+      <Action>Confirm agent health off-host: validate the reinstalled agent's heartbeat/telemetry is arriving centrally, not just that the service is up locally.</Action>
+      <Action>Restore $host from a known-good image if tampering was extensive; otherwise validate all eradication actions hold after reboot.</Action>
+      <Action>Fix the detection (misconfiguration action): change the deployed rule to match the file.path suffix (*.exe/*.dll/*.sys) instead of the null file.extension, scoped to security/system paths, so real executable deletions actually fire.</Action>
+      <Action>Harden monitoring: protect security-agent binaries with tamper protection and forward FIM/agent-health off-host so agent removal is itself alerted even when the agent is stopped first.</Action>
+    </Phase>
+  </ResponseActions>
+  <Escalation>
+    <Trigger>Escalate to SOC L2 / Incident Response and the endpoint/EDR team when any of the following hold:
+
+- A security/monitoring binary was deleted (section 15.10) - impair-defenses; this alone warrants IR.
+- A system driver/binary was deleted with no re-creation (section 14.2) and no servicing explanation.
+- Agent health cannot be confirmed for $host - treat visibility as compromised until proven otherwise.
+- Host process/persistence context (section 15.2/section 17.2/section 17.4) shows service-stop, log-clearing, or persistence around the deletion.
+- The binary's role or re-creation status cannot be established - escalate as needs_escalation with the gaps (owner/hash null, no in-feed actor) named.
+
+Hand off with INV-01/02/03 and the section 15.2/section 15.12/section 17 host-correlation, plus the affected agent's health status.</Trigger>
+    <To>SOC L2 / IR</To>
+  </Escalation>
+  <ClosureCriteria>
+    <Item>false_positive (authorised servicing/uninstall): the exact $file_path was re-created/updated (section 14.2 delete-then-recreate) or removed by a recognised updater/uninstaller; documented as a normal update cycle.</Item>
+    <Item>false_positive (proven-reverted removal attempt): a defensive binary's deletion event exists but the component is confirmed still installed and running - a blocked-malicious attempt, documented as such (investigate the actor); never benign.</Item>
+    <Item>misconfiguration: benign servicing churn the blind rule mishandles; the rule is fixed to match file.path suffix and the servicing pattern is baselined.</Item>
+    <Item>true_positive: $host isolated, security agent reinstated, the responsible account/process identified, concealed activity hunted; incident documented.</Item>
+    <Item>needs_escalation: handed to endpoint/EDR + SOC L2 with the specific gaps documented.</Item>
+  </ClosureCriteria>
+  <Limitations>
+    <Item>The deployed rule is blind - file.extension is null on 100% of FIM deletions. Use the file.path suffix (*.exe/*.dll/*.sys); the extension-based rule matches nothing. Raise the rule fix (match file.path suffix) as a deployed-rule defect for separate human-authorised tuning.</Item>
+    <Item>file.owner and file.hash.sha1 are frequently null on system-binary deletions, and sha256/file.name are unmapped - so owner-context and hash reputation are often unavailable at triage. Null hash is a telemetry gap, not a clean verdict.</Item>
+    <Item>The FIM feed has no acting user/process - attribution is cross-index. user.name/process.name are null on logs-fim.event-*; recover *who/what* from $host's logs-system.security* 4688/4624/4672 (rich on the FIM hosts - nim-est-apv07 ≈24k 4688/4h). This is the single most important move for a FIM deletion at NBI.</Item>
+    <Item>Delete-then-recreate of the same path is servicing. Validated on $host for mfc100.dll (a deleted + a created/updated for the identical path) - the dominant benign cause; focus on the deleted-versus-created relationship for the exact path amid heavy attributes_modified/updated noise.</Item>
+    <Item>Evasion - agent stopped first. An attacker who stops/uninstalls the FIM/EDR agent before deleting its binaries prevents the deleted event from ever shipping, so absence of the alert is expected in a real impair-defenses sequence. Complement with agent-health/heartbeat monitoring, the Kaspersky protection-removed / service-stop detections, and Windows 4688/7045 around the time.</Item>
+    <Item>KB-worthy (persist to NBI customer scope): (1) logs-fim.event-* file.extension null on 100% of deleted (564/564 in 30d) → deployed rule blind, use file.path suffix; (2) file.owner/file.hash.sha1 null on system-binary deletes; (3) no user.name/process.name in the FIM feed → attribute via logs-system.security* on the host; (4) mfc100.dll on nim-est-apv07 delete→recreate servicing pattern; (5) FIM hosts nim-est-apv07/nim-fti-apv01 have rich 4688. All observed live on 2026-08-19.</Item>
+  </Limitations>
+</Playbook>

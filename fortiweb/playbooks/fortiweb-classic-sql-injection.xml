@@ -1,0 +1,363 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<Playbook xmlns="https://soc.example/playbooks" id="PB-fortiweb-classic-sql-injection" name="FortiWeb — SQL Injection: Classic Patterns - SOC Playbook" version="3.0" status="Validated" classification="TLP:AMBER">
+  <Metadata>
+    <Owner>NBI SOC / Detection Engineering</Owner>
+    <LastUpdated>2026-08-19</LastUpdated>
+    <Severity default="high">high</Severity>
+    <Confidence default="Medium">Medium</Confidence>
+    <Category>Initial Access</Category>
+    <MitreAttack>
+      <Technique id="T1190"/>
+      <Tactic id="TA0001"/>
+      <Tactic id="TA0002"/>
+    </MitreAttack>
+    <References>
+      <Reference title="MITRE ATT&amp;CK - Exploit Public-Facing Application (T1190)" url="https://attack.mitre.org/techniques/T1190/"/>
+      <Reference title="MITRE ATT&amp;CK - Initial Access tactic (TA0001)" url="https://attack.mitre.org/tactics/TA0001/"/>
+      <Reference title="OWASP - SQL Injection" url="https://owasp.org/www-community/attacks/SQL_Injection"/>
+      <Reference title="OWASP - Testing for SQL Injection (WSTG)" url="https://owasp.org/www-project-web-security-testing-guide/latest/4-Web_Application_Security_Testing/07-Input_Validation_Testing/05-Testing_for_SQL_Injection"/>
+      <Reference title="OWASP - SQL Injection Prevention Cheat Sheet" url="https://cheatsheetseries.owasp.org/cheatsheets/SQL_Injection_Prevention_Cheat_Sheet.html"/>
+      <Reference title="PortSwigger Web Security Academy - SQL injection (UNION / tautology / stacked)" url="https://portswigger.net/web-security/sql-injection"/>
+      <Reference title="Fortinet FortiWeb - Attack log and signature reference" url="https://docs.fortinet.com/product/fortiweb"/>
+      <Reference title="Elastic Security - Create a custom query rule" url="https://www.elastic.co/guide/en/security/current/rules-ui-create.html"/>
+    </References>
+  </Metadata>
+  <AlertContext>
+    <RuleName>FortiWeb — SQL Injection: Classic Patterns</RuleName>
+    <RuleId>raad-06-classic-sqli</RuleId>
+    <RuleType>query</RuleType>
+    <Index>logs-tcp.generic-default</Index>
+    <TriggerLogic>The deployed rule is a Lucene query rule (verbatim from the rule definition):
+
+
+
+Plain English: any FortiWeb record whose captured packet body contains one of the classic in-band SQLi literals above. It runs every 5 minutes over a now-10m look-back against the logs-* data view (the live matches all land in logs-tcp.generic-default, the only stream carrying data.packet.packet). This is *in-band* injection - the attacker tries to act directly (read data via UNION, bypass a login via a tautology, map the schema, or run OS commands via xp_cmdshell) - distinct from the time-based/blind (SLEEP/BENCHMARK) analytic, which infers data from response timing and is covered by the companion Encoded SQL Injection playbook.
+
+One-line Kibana KQL filter for fast pivoting in Discover / Timeline:
+
+
+
+Note the capture caveat that shapes everything downstream: data.packet.packet is populated on only ~34% of FortiWeb records at NBI (measured live: 113,803 of 338,167 over 4h). An injection can be delivered on a request whose packet was not captured, so an empty result is never proof of safety.</TriggerLogic>
+    <KeyAlertFields>data.type, data.http_host, mobile.nbi.iq, businessonline.nbi.iq, data.http_url, data.http_agent, data.http_retcode, data.src, data.original_src, data.packet.packet, data.attack_type, data.action</KeyAlertFields>
+  </AlertContext>
+  <Inputs>
+    <Input name="$src"/>
+    <Input name="$host"/>
+  </Inputs>
+  <ExecutiveSummary>
+    <Overview>This playbook drives triage and investigation of the FortiWeb - SQL Injection: Classic Patterns detection on NBI's Elastic Security deployment. The rule is a Lucene query rule that fires when a captured request packet (data.packet.packet) on the FortiWeb-fronted surface contains a classic in-band SQL-injection pattern: a tautology auth-bypass (' OR '1'='1, ' or 1=1--), a UNION-based extraction (UNION SELECT, UNION ALL SELECT) with column-counting (ORDER BY 1--, ORDER BY 100--), schema enumeration (INFORMATION_SCHEMA.TABLES, sys.databases), or a stacked/destructive or OS-command primitive (; DROP TABLE, xp_cmdshell).
+
+The analyst's job is to decide, quickly and defensibly, which SQL-injection sub-technique was attempted, whether it reached and acted on the database or was blocked at the WAF, and who really sent it - then classify the alert as true_positive, false_positive (authorised OR proven-blocked-malicious, never "benign"), misconfiguration, or needs_escalation, with the ES|QL evidence attached. Because the alert source is a shared FortiWeb SNAT address fronting many real clients, resolving the true client from x_forwarded_for is a mandatory step, not an optional one.</Overview>
+    <BusinessImpact>An alert means: on the FortiWeb surface $host, a captured request from front-end $src contained a classic in-band SQL-injection string. The signature match is a fact; the *verdict* depends on two things the signature alone does not tell you:
+
+1. Did it work? The response code carried on the same traffic record is the discriminator. A UNION/tautology request that returns 2xx has plausibly extracted rows or bypassed a login; a 5xx tied to the payload means it reached and errored the database (error-based injection); an all-403 pattern means the WAF rejected it (a blocked malicious attempt - documented, never "benign").
+2. Who really sent it? $src is a FortiWeb SNAT/front-end address (the 185.56.154.0/24 and 159.60.162-170.0/24 pools) shared by many real clients. The actual attacker is the first hop in x_forwarded_for. Attribution and any "authorised tester" question must be answered against the de-proxied client, never the SNAT address.
+
+A schema keyword such as INFORMATION_SCHEMA.TABLES or sys.databases can also appear incidentally inside a legitimate value, so a match must be read as *a candidate injection to confirm*, not an automatic conviction - confirm the string sits in an att</BusinessImpact>
+  </ExecutiveSummary>
+  <Investigation>
+    <Goal>Decide true_positive / false_positive / misconfiguration / needs_escalation for FortiWeb — SQL Injection: Classic Patterns.</Goal>
+    <Workflow>
+      <Step order="1" name="Confirm the classic-SQLi match on the host">
+        <Purpose>Confirm the classic-SQLi match on the host</Purpose>
+        <Query platform="Elastic" language="ES|QL" id="Q-01">
+          <![CDATA[
+FROM logs-tcp.generic-default
+| WHERE @timestamp >= NOW() - 4 hours AND data.type == "traffic"
+    AND data.http_host == "$host" AND data.packet.packet IS NOT NULL
+| EVAL p = TO_LOWER(data.packet.packet)
+| WHERE p LIKE "*union select*" OR p LIKE "*union all select*" OR p LIKE "*order by 1--*"
+    OR p LIKE "*order by 100--*" OR p LIKE "*information_schema.tables*" OR p LIKE "*sys.databases*"
+    OR p LIKE "*xp_cmdshell*" OR p LIKE "*; drop table*" OR p LIKE "*' or '1'='1*" OR p LIKE "*' or 1=1*"
+| KEEP @timestamp, data.original_src, data.src, data.http_url, data.http_retcode, data.http_agent, data.packet.packet
+| SORT @timestamp DESC
+| LIMIT 100
+]]>
+        </Query>
+      </Step>
+      <Step order="2" name="Classify the SQLi sub-technique and outcome (anchor on $src + $host)">
+        <Purpose>Classify the SQLi sub-technique and outcome (anchor on $src + $host)</Purpose>
+        <Query platform="Elastic" language="ES|QL" id="Q-02">
+          <![CDATA[
+FROM logs-tcp.generic-default
+| WHERE @timestamp >= NOW() - 2 hours AND data.type == "traffic"
+    AND data.original_src == "$src" AND data.http_host == "$host" AND data.packet.packet IS NOT NULL
+| EVAL p = TO_LOWER(data.packet.packet), rc = TO_INTEGER(data.http_retcode)
+| EVAL subtech = CASE(
+      p LIKE "*union*select*" OR p LIKE "*order by 1--*" OR p LIKE "*order by 100--*", "union_extraction",
+      p LIKE "*information_schema*" OR p LIKE "*sys.databases*", "schema_enum",
+      p LIKE "*xp_cmdshell*" OR p LIKE "*drop table*", "stacked_destructive",
+      p LIKE "*' or '1'='1*" OR p LIKE "*' or 1=1*" OR p LIKE "*or 1=1--*", "tautology_authbypass",
+      "other")
+| WHERE subtech != "other"
+| STATS hits = COUNT(*), served2xx = SUM(CASE(rc >= 200 AND rc < 300, 1, 0)),
+        err5xx = SUM(CASE(rc >= 500, 1, 0)), blocked4xx = SUM(CASE(rc >= 400 AND rc < 500, 1, 0)),
+        urls = VALUES(data.http_url)
+    BY subtech
+| SORT hits DESC
+| LIMIT 20
+]]>
+        </Query>
+      </Step>
+      <Step order="3" name="Entity pivoting">
+        <Purpose>Entity pivoting</Purpose>
+        <Query platform="Elastic" language="ES|QL" id="Q-03">
+          <![CDATA[
+FROM logs-tcp.generic-default
+| WHERE @timestamp >= NOW() - 4 hours AND data.type == "traffic"
+    AND data.original_src == "$src" AND data.http_host == "$host"
+| EVAL real_client = COALESCE(TRIM(MV_FIRST(SPLIT(x_forwarded_for, ","))), data.src)
+| KEEP @timestamp, real_client, data.http_method, data.http_url, data.http_retcode, data.http_agent, data.packet.packet
+| SORT @timestamp DESC
+| LIMIT 50
+]]>
+        </Query>
+      </Step>
+      <Step order="4" name="Host investigation">
+        <Purpose>Host investigation</Purpose>
+        <Query platform="Elastic" language="ES|QL" id="Q-04">
+          <![CDATA[
+FROM logs-tcp.generic-default
+| WHERE @timestamp >= NOW() - 4 hours AND data.http_host == "$host"
+| EVAL rc = TO_INTEGER(data.http_retcode)
+| STATS records = COUNT(*), clients = COUNT_DISTINCT(x_forwarded_for),
+        attacks = COUNT(data.attack_type),
+        served2xx = SUM(CASE(rc >= 200 AND rc < 300, 1, 0)),
+        rejected4xx = SUM(CASE(rc >= 400 AND rc < 500, 1, 0)),
+        err5xx = SUM(CASE(rc >= 500, 1, 0))
+    BY data.type
+| SORT records DESC
+| LIMIT 10
+]]>
+        </Query>
+      </Step>
+      <Step order="5" name="IP investigation">
+        <Purpose>IP investigation</Purpose>
+        <Query platform="Elastic" language="ES|QL" id="Q-05">
+          <![CDATA[
+FROM logs-tcp.generic-default
+| WHERE @timestamp >= NOW() - 2 hours AND data.type == "traffic"
+    AND data.original_src == "$src" AND data.http_host == "$host"
+| EVAL real_client = COALESCE(TRIM(MV_FIRST(SPLIT(x_forwarded_for, ","))), data.src)
+| STATS reqs = COUNT(*), urls = COUNT_DISTINCT(data.http_url), agents = VALUES(data.http_agent)
+    BY real_client
+| EVAL reqs_per_url = reqs / (1 + urls)
+| SORT reqs DESC
+| LIMIT 15
+]]>
+        </Query>
+      </Step>
+      <Step order="6" name="Domain investigation">
+        <Purpose>Domain investigation</Purpose>
+        <Query platform="Elastic" language="ES|QL" id="Q-06">
+          <![CDATA[
+FROM logs-tcp.generic-default
+| WHERE @timestamp >= NOW() - 4 hours AND data.type == "traffic"
+    AND x_forwarded_for LIKE "*$src*"
+| STATS reqs = COUNT(*), urls = COUNT_DISTINCT(data.http_url) BY data.http_host, data.srccountry
+| SORT reqs DESC
+| LIMIT 20
+]]>
+        </Query>
+      </Step>
+      <Step order="7" name="URL investigation">
+        <Purpose>URL investigation</Purpose>
+        <Query platform="Elastic" language="ES|QL" id="Q-07">
+          <![CDATA[
+FROM logs-tcp.generic-default
+| WHERE @timestamp >= NOW() - 2 hours AND data.type == "traffic"
+    AND data.original_src == "$src" AND data.http_host == "$host" AND data.packet.packet IS NOT NULL
+| EVAL p = TO_LOWER(data.packet.packet), rc = TO_INTEGER(data.http_retcode),
+       endpoint = MV_FIRST(SPLIT(data.http_url, "?"))
+| WHERE p LIKE "*union*select*" OR p LIKE "*information_schema*" OR p LIKE "*sys.databases*"
+    OR p LIKE "*' or '1'='1*" OR p LIKE "*or 1=1--*" OR p LIKE "*order by 1--*" OR p LIKE "*xp_cmdshell*"
+| STATS hits = COUNT(*), served2xx = SUM(CASE(rc >= 200 AND rc < 300, 1, 0)),
+        err5xx = SUM(CASE(rc >= 500, 1, 0)), blocked4xx = SUM(CASE(rc >= 400 AND rc < 500, 1, 0))
+    BY endpoint
+| SORT served2xx DESC
+| LIMIT 20
+]]>
+        </Query>
+      </Step>
+      <Step order="8" name="Authentication investigation">
+        <Purpose>Authentication investigation</Purpose>
+        <Query platform="Elastic" language="ES|QL" id="Q-08">
+          <![CDATA[
+FROM logs-tcp.generic-default
+| WHERE @timestamp >= NOW() - 4 hours AND data.type == "traffic" AND data.http_host == "$host"
+    AND (TO_LOWER(data.http_url) LIKE "*login*" OR TO_LOWER(data.http_url) LIKE "*auth*" OR TO_LOWER(data.http_url) LIKE "*token*")
+| EVAL rc = TO_INTEGER(data.http_retcode),
+       real_client = COALESCE(TRIM(MV_FIRST(SPLIT(x_forwarded_for, ","))), data.src)
+| STATS reqs = COUNT(*), ok2xx = SUM(CASE(rc >= 200 AND rc < 300, 1, 0)),
+        rejected4xx = SUM(CASE(rc >= 400 AND rc < 500, 1, 0)) BY data.http_url, real_client
+| SORT reqs DESC
+| LIMIT 25
+]]>
+        </Query>
+      </Step>
+      <Step order="9" name="Timeline Reconstruction">
+        <Purpose>Timeline Reconstruction</Purpose>
+        <Query platform="Elastic" language="ES|QL" id="Q-09">
+          <![CDATA[
+FROM logs-tcp.generic-default
+| WHERE @timestamp >= NOW() - 4 hours AND data.type == "traffic"
+    AND data.original_src == "$src" AND data.http_host == "$host"
+| EVAL real_client = COALESCE(TRIM(MV_FIRST(SPLIT(x_forwarded_for, ","))), data.src)
+| KEEP @timestamp, real_client, data.http_method, data.http_url, data.http_retcode, data.http_agent
+| SORT @timestamp ASC
+| LIMIT 200
+]]>
+        </Query>
+      </Step>
+      <Step order="10" name="Lateral movement validation">
+        <Purpose>Lateral movement validation</Purpose>
+        <Query platform="Elastic" language="ES|QL" id="Q-10">
+          <![CDATA[
+FROM logs-tcp.generic-default
+| WHERE @timestamp >= NOW() - 4 hours AND x_forwarded_for LIKE "*$src*" AND data.http_host != "$host"
+| STATS reqs = COUNT(*), urls = COUNT_DISTINCT(data.http_url), attacks = COUNT(data.attack_type)
+    BY data.http_host
+| SORT reqs DESC
+| LIMIT 20
+]]>
+        </Query>
+      </Step>
+      <Step order="11" name="Persistence validation">
+        <Purpose>Persistence validation</Purpose>
+        <Query platform="Elastic" language="ES|QL" id="Q-11">
+          <![CDATA[
+FROM logs-tcp.generic-default
+| WHERE @timestamp >= NOW() - 4 hours AND data.type == "traffic"
+    AND data.original_src == "$src" AND data.http_host == "$host"
+    AND TO_LOWER(data.http_method) IN ("post", "put")
+| EVAL rc = TO_INTEGER(data.http_retcode)
+| STATS reqs = COUNT(*), served2xx = SUM(CASE(rc >= 200 AND rc < 300, 1, 0)) BY data.http_url, data.http_method
+| SORT reqs DESC
+| LIMIT 25
+]]>
+        </Query>
+      </Step>
+      <Step order="12" name="Privilege escalation validation">
+        <Purpose>Privilege escalation validation</Purpose>
+        <Query platform="Elastic" language="ES|QL" id="Q-12">
+          <![CDATA[
+FROM logs-tcp.generic-default
+| WHERE @timestamp >= NOW() - 4 hours AND data.type == "traffic"
+    AND data.http_host == "$host" AND data.packet.packet IS NOT NULL
+| EVAL p = TO_LOWER(data.packet.packet), rc = TO_INTEGER(data.http_retcode),
+       real_client = COALESCE(TRIM(MV_FIRST(SPLIT(x_forwarded_for, ","))), data.src)
+| WHERE p LIKE "*xp_cmdshell*" OR p LIKE "*; drop table*" OR p LIKE "*;drop table*" OR p LIKE "*; exec*" OR p LIKE "*into outfile*"
+| KEEP @timestamp, real_client, data.http_url, data.http_retcode, data.packet.packet
+| SORT @timestamp DESC
+| LIMIT 50
+]]>
+        </Query>
+      </Step>
+      <Step order="13" name="Defense evasion validation">
+        <Purpose>Defense evasion validation</Purpose>
+        <Query platform="Elastic" language="ES|QL" id="Q-13">
+          <![CDATA[
+FROM logs-tcp.generic-default
+| WHERE @timestamp >= NOW() - 4 hours AND data.type == "attack" AND data.http_host == "$host"
+| STATS events = COUNT(*), denied = SUM(CASE(data.action == "Alert_Deny", 1, 0)),
+        alerted = SUM(CASE(data.action == "Alert", 1, 0)), erased = SUM(CASE(data.action == "Erase", 1, 0))
+    BY data.attack_type, data.main_type
+| SORT events DESC
+| LIMIT 25
+]]>
+        </Query>
+      </Step>
+      <Step order="14" name="Impact assessment">
+        <Purpose>Impact assessment</Purpose>
+        <Query platform="Elastic" language="ES|QL" id="Q-14">
+          <![CDATA[
+FROM logs-tcp.generic-default
+| WHERE @timestamp >= NOW() - 4 hours AND data.type == "traffic"
+    AND data.http_host == "$host" AND data.packet.packet IS NOT NULL
+| EVAL p = TO_LOWER(data.packet.packet), rc = TO_INTEGER(data.http_retcode)
+| WHERE p LIKE "*union*select*" OR p LIKE "*information_schema*" OR p LIKE "*sys.databases*"
+    OR p LIKE "*' or '1'='1*" OR p LIKE "*or 1=1--*" OR p LIKE "*xp_cmdshell*" OR p LIKE "*; drop table*"
+| STATS injected = COUNT(*), served2xx = SUM(CASE(rc >= 200 AND rc < 300, 1, 0)),
+        err5xx = SUM(CASE(rc >= 500, 1, 0)), blocked4xx = SUM(CASE(rc >= 400 AND rc < 500, 1, 0)),
+        clients = COUNT_DISTINCT(x_forwarded_for)
+| LIMIT 5
+]]>
+        </Query>
+      </Step>
+      <Step order="15" name="Finalize verdict">
+        <DecisionTree>
+        </DecisionTree>
+      </Step>
+    </Workflow>
+  </Investigation>
+  <ClassificationGuidance>
+    <TruePositive>
+      <Definition></Definition>
+    </TruePositive>
+    <FalsePositive>
+      <Definition></Definition>
+      <Indicators>
+        <Item>Authorised penetration tests / red-team exercises. These are *not* benign - they are authorised malicious-technique execution and must be confirmed against a change ticket or engagement ROE (the specific de-proxied client, window, and scope) before classifying as false_positive, never dismissed on sight.</Item>
+        <Item>Security scanners and vulnerability tools run by NBI or a contracted assessor that emit textbook SQLi payloads. Same rule: confirm the engagement, do not trust the apparent source.</Item>
+        <Item>Incidental keyword matches. A legitimate request value that happens to contain sys.databases, information_schema, or the substring union select (for example a free-text search box, a reporting parameter, or a serialized value) can trip the signature without being an injection. Confirm by reading the full request.</Item>
+        <Item>Application/ETL parameters that legitimately carry SQL-like fragments (a reporting/BI query builder, an admin console) can repeatedly match. That is a tuning/baseline condition (misconfiguration), not an attack.</Item>
+        <Item>The dominant client identity on the banking surfaces is a mobile app, not a browser. The de-proxied real clients hitting mobile.nbi.iq carry user-agents like Dart/3.8 (dart:io) and national_bank_of_iraq/202604131 CFNetwork/… Darwin/… (the NBI iOS/Android app). Legitimate app traffic is high-volume, low-URL-diversity, and 2xx-dominated. A classic-SQLi signature match embedded in that app traffic is unusual and worth reading carefully - the app does not send UNION SELECT in normal operation.</Item>
+        <Item>$src is always a FortiWeb SNAT address, never the attacker. The 185.56.154.0/24 and 159.60.162.0/24 - 159.60.170.0/24 ranges are the reverse-proxy/SNAT pool. Per-source counts on data.src/data.original_src are proxy aggregates. Never attribute or exonerate on the SNAT address - always de-proxy via x_forwarded_for (section 15.6).</Item>
+        <Item>Packet capture is partial (~34%). Because data.packet.packet is null on ~two-thirds of records, the rule can only fire on the captured slice. Absence of a classic pattern in the current window does not mean none was sent; corroborate impact from response codes and (for real incidents) from the database audit trail.</Item>
+        <Item>No historical NBI benign-true-positive is on record for this rule at authoring time. Do not create a blanket exception for a host or a SNAT source off a single alert; scope any exception to an exact de-proxied client + endpoint + confirmed-authorised cause.</Item>
+      </Indicators>
+    </FalsePositive>
+    <Misconfiguration>
+      <Definition></Definition>
+    </Misconfiguration>
+    <NeedsEscalation>
+      <Definition></Definition>
+    </NeedsEscalation>
+  </ClassificationGuidance>
+  <ResponseActions>
+    <Phase name="Containment">
+      <Action>Block the de-proxied real client (from section 15.6) at the FortiWeb/edge, not the SNAT address $src (which fronts legitimate clients). If the attacker rotates source IPs, apply a rate-limit/geo or signature-based block on the injection pattern.</Action>
+      <Action>Protect the vulnerable endpoint identified in section 15.8: engage the application owner to take the endpoint offline or put it behind a tightened WAF signature if a UNION/tautology was served.</Action>
+      <Action>Engage the DBA immediately if any injection was served/errored or any stacked_destructive/xp_cmdshell appears - have them review the database for unauthorised reads/modifications on the endpoint and time, and treat affected data as exposed pending confirmation.</Action>
+      <Action>Preserve evidence: the FortiWeb traffic/attack records (packet, URL, response code, de-proxied client), and the database/application audit for the window.</Action>
+      <Action>Deploy/confirm blocks only via the authorised human-approved DEPLOY path; investigation here is read-only.</Action>
+    </Phase>
+    <Phase name="Eradication">
+      <Action>Parameterise the injectable query at the vulnerable endpoint (prepared statements / bound parameters) - the root fix; input filtering alone is insufficient.</Action>
+      <Action>Least-privilege the application's database account: remove xp_cmdshell, DDL, and INTO OUTFILE/file-write rights so a future injection cannot reach the OS or drop files.</Action>
+      <Action>Remove any planted artifact found in section 17.2 (web shell, rogue stored procedure) from the web root and database, and audit for others.</Action>
+      <Action>Tighten WAF SQLi signatures for the served attack classes and add the observed payload/encoding to the block set; review the app for sibling injection points.</Action>
+    </Phase>
+    <Phase name="Recovery">
+      <Action>Rotate any credentials the injection could have exposed (application DB account, and any customer/session secrets reachable from the vulnerable query) once the DBA confirms what was queryable.</Action>
+      <Action>Restore data integrity from backup if a stacked_destructive (DROP/UPDATE) query was served, after the DBA scopes the change.</Action>
+      <Action>Return the endpoint to service only after section 22 closing criteria are met, the parameterised fix is deployed, and monitoring confirms the injection no longer succeeds (payloads now 403/blocked).</Action>
+      <Action>Recommend enabling fuller FortiWeb packet capture on the banking policies - the ~34% capture rate is the single biggest evidence gap for this rule class.</Action>
+    </Phase>
+  </ResponseActions>
+  <Escalation>
+    <Trigger>Escalate to Tier 3 / IR (and the DBA + application owner) when any of the following hold:
+
+- A UNION/tautology payload was served 2xx, or an injected endpoint returned a payload-tied 5xx, on a customer-facing banking host - possible extraction / auth-bypass / error-based reaching the DB.
+- Any stacked_destructive / xp_cmdshell attempt appears (section 17.3), served or not - the intent is data destruction or OS command execution.
+- The de-proxied client shows a broad estate campaign (section 17.1) or write-method follow-on suggesting a web-shell (section 17.2).
+- Evidence is incomplete because packet capture missed the payload or the served-vs-blocked outcome cannot be established from web logs - escalate as needs_escalation for DBA/app audit, with the gaps named.</Trigger>
+    <To>SOC L2 / IR</To>
+  </Escalation>
+  <ClosureCriteria>
+    <Item>false_positive (authorised): an authorised pentest/exercise is positively matched to the exact de-proxied client + endpoint + window. Record the ROE/ticket; scope any exception narrowly.</Item>
+    <Item>false_positive (blocked-malicious): the injection was positively proven blocked (all-403 for the payload, nothing served/errored); documented as a blocked malicious attempt, never "benign".</Item>
+    <Item>false_positive (benign token): the flagged string is an incidental substring in a legitimate value, confirmed by reading the full request; refine the signature.</Item>
+    <Item>misconfiguration: a benign automated client/parameter repeatedly matches SQL keywords with no served/errored injection; tune the signature / baseline the client.</Item>
+    <Item>true_positive: injection served/errored or a stacked/xp_cmdshell attempt from an unauthorised client; containment/eradication/recovery completed, DBA impact assessment done, no residual access.</Item>
+    <Item>needs_escalation: handed to Tier 3/IR + DBA with the specific evidence gaps documented.</Item>
+  </ClosureCriteria>
+  <Limitations>
+    <Item>De-proxy first, always. $src (data.original_src) and data.src are FortiWeb SNAT addresses (185.56.154.0/24, 159.60.162-170.0/24) shared by many clients. The attacker is the first hop of x_forwarded_for. Every attribution, block, and "authorised?" decision keys on the de-proxied client, never the SNAT source.</Item>
+    <Item>The response code is the verdict, not the signature. A classic-SQLi literal in the packet only says an attempt was made. served2xx (extraction/bypass) vs err5xx (error-based) vs all-blocked4xx (mitigated) is what separates true_positive from blocked-malicious. Web logs stop at the response code - data exposure is confirmed by the DBA, not the WAF.</Item>
+    <Item>Two record types, one story. Real client + response code live on data.type == "traffic"; the WAF's own attack verdict (data.action, data.attack_type, data.policy, data.srccountry) lives on data.type == "attack" with no client IP or response code. Join the two views by host + endpoint + time.</Item>
+    <Item>~34% packet capture = fail-open evidence gap. The signature only fires on captured packets; an injection can be delivered on an uncaptured request. Empty != safe. Raising capture on the banking policies is the top hardening ask from this rule.</Item>
+    <Item>Scanner/tooling is never an auto-verdict, in either direction. A sqlmap-style user-agent is one signal (trivially spoofed); an app-like Dart/CFNetwork agent does not clear a request that carries UNION SELECT. Investigate on behaviour and outcome.</Item>
+    <Item>KB-worthy (persist to NBI customer scope): (1) FortiWeb WAF telemetry lives in logs-tcp.generic-default with data.* fields; (2) x_forwarded_for top-level ~99% on traffic records, data.original_src/data.src = SNAT pool; (3) attack records lack x_forwarded_for/data.original_src/data.http_retcode; (4) data.packet.packet ~34% populated; (5) banking surfaces mobile.nbi.iq, businessonline.nbi.iq; SNAT pools 185.56.154.0/24 &amp; 159.60.162-170.0/24. Observed live 2026-08-17.</Item>
+  </Limitations>
+</Playbook>

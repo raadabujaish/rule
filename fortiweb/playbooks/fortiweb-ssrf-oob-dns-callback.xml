@@ -1,0 +1,392 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<Playbook xmlns="https://soc.example/playbooks" id="PB-fortiweb-ssrf-oob-dns-callback" name="FortiWeb — SSRF Out-of-Band DNS Callback - SOC Playbook" version="3.0" status="Validated" classification="TLP:AMBER">
+  <Metadata>
+    <Owner>NBI SOC / Detection Engineering</Owner>
+    <LastUpdated>2026-08-19</LastUpdated>
+    <Severity default="high">high</Severity>
+    <Confidence default="Medium">Medium</Confidence>
+    <Category>Initial Access</Category>
+    <MitreAttack>
+      <Technique id="T1190"/>
+      <Technique id="T1071.004"/>
+      <Technique id="T1071"/>
+      <Tactic id="TA0001"/>
+      <Tactic id="TA0011"/>
+    </MitreAttack>
+    <References>
+      <Reference title="MITRE ATT&amp;CK - Exploit Public-Facing Application (T1190)" url="https://attack.mitre.org/techniques/T1190/"/>
+      <Reference title="MITRE ATT&amp;CK - Application Layer Protocol: DNS (T1071.004)" url="https://attack.mitre.org/techniques/T1071/004/"/>
+      <Reference title="MITRE ATT&amp;CK - Initial Access tactic (TA0001)" url="https://attack.mitre.org/tactics/TA0001/"/>
+      <Reference title="MITRE ATT&amp;CK - Command and Control tactic (TA0011)" url="https://attack.mitre.org/tactics/TA0011/"/>
+      <Reference title="OWASP - Server-Side Request Forgery (SSRF)" url="https://owasp.org/www-community/attacks/Server_Side_Request_Forgery"/>
+      <Reference title="OWASP Top 10 2021 - A10 Server-Side Request Forgery (SSRF)" url="https://owasp.org/Top10/A10_2021-Server-Side_Request_Forgery_%28SSRF%29/"/>
+      <Reference title="OWASP Cheat Sheet - Server-Side Request Forgery Prevention" url="https://cheatsheetseries.owasp.org/cheatsheets/Server_Side_Request_Forgery_Prevention_Cheat_Sheet.html"/>
+      <Reference title="PortSwigger Web Security Academy - SSRF" url="https://portswigger.net/web-security/ssrf"/>
+      <Reference title="PayloadsAllTheThings - Server Side Request Forgery" url="https://github.com/swisskyrepo/PayloadsAllTheThings/blob/master/Server%20Side%20Request%20Forgery/README.md"/>
+      <Reference title="AWS - Use IMDSv2 to defend against SSRF" url="https://docs.aws.amazon.com/AWSEC2/latest/UserGuide/configuring-instance-metadata-service.html"/>
+      <Reference title="Fortinet - FortiWeb Administration Guide (attack/traffic logging)" url="https://docs.fortinet.com/product/fortiweb"/>
+    </References>
+  </Metadata>
+  <AlertContext>
+    <RuleName>FortiWeb — SSRF Out-of-Band DNS Callback</RuleName>
+    <RuleId>raad-09-ssrf-oob-dns</RuleId>
+    <RuleType>esql</RuleType>
+    <Index>logs-tcp.generic-*</Index>
+    <TriggerLogic>The deployed rule is an ES|QL analytic over the FortiWeb/WAF traffic stream. It normalises the raw packet and tests it against four SSRF target families, then requires an actual match (a "loose substring" review bucket is separated out so incidental tokens are read, not auto-fired). Faithful reproduction of the deployed logic (this is section 14.1, kept ES|QL because NBI is Elastic, not Sentinel):
+
+
+
+Plain English: on the targeted application host, any request whose raw packet contains a metadata address, a known OOB-callback domain, a dangerous scheme, or a loopback target is bucketed by severity; a fifth loose_substring_review bucket captures weak tokens (oast, nip.io-style) that must be read in full before they are believed.
+
+One-line Kibana KQL detection filter (for fast pivoting in Discover / Timeline - Elastic's KQL is filter syntax only; the runnable analytic above is ES|QL):</TriggerLogic>
+    <KeyAlertFields>data.type, data.http_host, data.original_src, data.src, data.x_forwarded_for, data.http_url, data.http_method, data.http_agent, data.http_retcode, data.http_response_bytes, data.srccountry, data.original_srccountry</KeyAlertFields>
+  </AlertContext>
+  <Inputs>
+    <Input name="$src"/>
+    <Input name="$host"/>
+  </Inputs>
+  <ExecutiveSummary>
+    <Overview>This playbook drives triage and investigation of the FortiWeb - SSRF Out-of-Band DNS Callback detection on NBI's Elastic Security deployment. The rule lower-cases the raw request packet (data.packet.packet) and matches Server-Side Request Forgery targets: cloud instance-metadata endpoints (169.254.169.254, metadata.google.internal, 100.100.100.200), out-of-band interaction/callback domains (oast.fun/online/live, interactsh, burpcollaborator.net, requestbin, pipedream, ngrok, canarytokens, dnslog.cn, ceye.io, nip.io/xip.io/sslip.io), dangerous URL schemes (gopher://, file:///, dict://), and loopback targets (127.0.0.1, localhost, 0.0.0.0). It flags an attempt to make an NBI application server issue a request to an attacker-chosen destination.
+
+The analyst's job is to decide, quickly and defensibly, whether a matched request is a genuine SSRF attempt against a banking-facing application, an incidental benign substring inside ordinary traffic, an authorised security test, or a benign server-side-request application feature - and to classify the alert as true_positive, false_positive, misconfiguration, or needs_escalation with evidence attached. The single hardest fact of this rule (see section 8 and section 24) is that the WAF request log proves what target was *injected* but not whether the server actually *made* the outbound request; that proof lives in egress DNS/proxy/IMDS telemetry outside this index.</Overview>
+    <BusinessImpact>An alert means: on $host, a request arrived whose body/URL carried an SSRF target token. SSRF abuses application functionality that fetches a URL (webhook testers, PDF/URL previews, image proxies, import-from-URL, cloud SDK calls) by substituting an attacker-controlled destination. The severity is set by the target class:
+
+- cloud_metadata_imds - the attacker is aiming the server at the cloud instance-metadata service (169.254.169.254 on AWS/Azure, metadata.google.internal / 100.100.100.200 on GCP/Alibaba) to steal the instance's cloud credentials/role tokens. Highest impact.
+- oob_callback - an interaction/callback domain (interactsh, burpcollaborator, dnslog.cn, ceye.io). These exist to confirm blind SSRF: if the server resolves/fetches the unique subdomain, the attacker's out-of-band server logs the DNS/HTTP hit. A callback domain in a request is a direct blind-SSRF probe.
+- dangerous_scheme - gopher://, file:///, dict:// pivot SSRF into internal service interaction (Redis/SMTP via gopher), local file read (file:///etc/passwd), or protocol smuggling.
+- loopback_ssrf - 127.0.0.1 / localhost / 0.0.0.0 reach admin interfaces and internal-only services bound to the loopback of the a</BusinessImpact>
+  </ExecutiveSummary>
+  <Investigation>
+    <Goal>Decide true_positive / false_positive / misconfiguration / needs_escalation for FortiWeb — SSRF Out-of-Band DNS Callback.</Goal>
+    <Workflow>
+      <Step order="1" name="Detection Summary">
+        <Purpose>Detection Summary</Purpose>
+        <Query platform="Elastic" language="ES|QL" id="Q-01">
+          <![CDATA[
+FROM logs-tcp.generic-*
+| WHERE @timestamp >= NOW() - 4 hours AND data.type == "traffic"
+    AND data.http_host == "$host" AND data.packet.packet IS NOT NULL
+| EVAL u = TO_LOWER(data.packet.packet), rc = TO_INTEGER(data.http_retcode)
+| EVAL target_class = CASE(
+      u LIKE "*169.254.169.254*" OR u LIKE "*metadata.google.internal*" OR u LIKE "*100.100.100.200*", "cloud_metadata_imds",
+      u LIKE "*oast.fun*" OR u LIKE "*oast.online*" OR u LIKE "*oast.live*" OR u LIKE "*interactsh*" OR u LIKE "*burpcollaborator.net*" OR u LIKE "*dnslog.cn*" OR u LIKE "*ceye.io*", "oob_callback",
+      u LIKE "*gopher://*" OR u LIKE "*file:///*" OR u LIKE "*dict://*", "dangerous_scheme",
+      u LIKE "*http://127.0.0.1*" OR u LIKE "*http://localhost*" OR u LIKE "*http://0.0.0.0*", "loopback_ssrf",
+      u LIKE "*oast*" OR u LIKE "*nip.io*" OR u LIKE "*xip.io*" OR u LIKE "*ngrok*", "loose_substring_review",
+      "other")
+| WHERE target_class != "other"
+| STATS hits = COUNT(*), accepted2xx = SUM(CASE(rc >= 200 AND rc < 300, 1, 0)),
+        blocked4xx = SUM(CASE(rc >= 400 AND rc < 500, 1, 0)), methods = VALUES(data.http_method)
+    BY target_class
+| SORT hits DESC
+| LIMIT 20
+]]>
+        </Query>
+      </Step>
+      <Step order="2" name="Reproduce the rule on the alert host (classify the target)">
+        <Purpose>Reproduce the rule on the alert host (classify the target)</Purpose>
+        <Query platform="Elastic" language="ES|QL" id="Q-02">
+          <![CDATA[
+FROM logs-tcp.generic-*
+| WHERE @timestamp >= NOW() - 4 hours AND data.type == "traffic"
+    AND data.http_host == "$host" AND data.packet.packet IS NOT NULL
+| EVAL u = TO_LOWER(data.packet.packet), rc = TO_INTEGER(data.http_retcode)
+| EVAL target_class = CASE(
+      u LIKE "*169.254.169.254*" OR u LIKE "*metadata.google.internal*" OR u LIKE "*100.100.100.200*", "cloud_metadata_imds",
+      u LIKE "*oast.fun*" OR u LIKE "*oast.online*" OR u LIKE "*oast.live*" OR u LIKE "*interactsh*" OR u LIKE "*burpcollaborator.net*" OR u LIKE "*dnslog.cn*" OR u LIKE "*ceye.io*", "oob_callback",
+      u LIKE "*gopher://*" OR u LIKE "*file:///*" OR u LIKE "*dict://*", "dangerous_scheme",
+      u LIKE "*http://127.0.0.1*" OR u LIKE "*http://localhost*" OR u LIKE "*http://0.0.0.0*", "loopback_ssrf",
+      u LIKE "*oast*" OR u LIKE "*nip.io*" OR u LIKE "*xip.io*" OR u LIKE "*ngrok*", "loose_substring_review",
+      "other")
+| WHERE target_class != "other"
+| STATS hits = COUNT(*), accepted2xx = SUM(CASE(rc >= 200 AND rc < 300, 1, 0)),
+        blocked4xx = SUM(CASE(rc >= 400 AND rc < 500, 1, 0)), methods = VALUES(data.http_method)
+    BY target_class
+| SORT hits DESC
+| LIMIT 20
+]]>
+        </Query>
+      </Step>
+      <Step order="3" name="Did the application accept the SSRF request (on the flagged source)">
+        <Purpose>Did the application accept the SSRF request (on the flagged source)</Purpose>
+        <Query platform="Elastic" language="ES|QL" id="Q-03">
+          <![CDATA[
+FROM logs-tcp.generic-*
+| WHERE @timestamp >= NOW() - 4 hours AND data.type == "traffic"
+    AND data.original_src == "$src" AND data.http_host == "$host" AND data.packet.packet IS NOT NULL
+| EVAL u = TO_LOWER(data.packet.packet), rc = TO_INTEGER(data.http_retcode)
+| WHERE u LIKE "*169.254.169.254*" OR u LIKE "*metadata.google.internal*" OR u LIKE "*oast.fun*"
+    OR u LIKE "*oast.online*" OR u LIKE "*interactsh*" OR u LIKE "*burpcollaborator.net*"
+    OR u LIKE "*gopher://*" OR u LIKE "*file:///*" OR u LIKE "*dict://*" OR u LIKE "*http://127.0.0.1*"
+| STATS hits = COUNT(*), accepted2xx = SUM(CASE(rc >= 200 AND rc < 300, 1, 0)),
+        blocked4xx = SUM(CASE(rc >= 400 AND rc < 500, 1, 0)), err5xx = SUM(CASE(rc >= 500, 1, 0))
+    BY data.http_method, data.http_url
+| SORT hits DESC
+| LIMIT 20
+]]>
+        </Query>
+      </Step>
+      <Step order="4" name="Entity pivoting">
+        <Purpose>Entity pivoting</Purpose>
+        <Query platform="Elastic" language="ES|QL" id="Q-04">
+          <![CDATA[
+FROM logs-tcp.generic-*
+| WHERE @timestamp >= NOW() - 4 hours AND data.type == "traffic"
+    AND data.original_src == "$src" AND data.http_host == "$host"
+| EVAL real_client = COALESCE(TRIM(MV_FIRST(SPLIT(x_forwarded_for, ","))), data.src)
+| STATS reqs = COUNT(*), urls = COUNT_DISTINCT(data.http_url),
+        url_submitting = SUM(CASE(data.http_method == "post" OR data.http_method == "put", 1, 0)),
+        agents = VALUES(data.http_agent)
+    BY real_client
+| SORT reqs DESC
+| LIMIT 10
+]]>
+        </Query>
+      </Step>
+      <Step order="5" name="Host investigation">
+        <Purpose>Host investigation</Purpose>
+        <Query platform="Elastic" language="ES|QL" id="Q-05">
+          <![CDATA[
+FROM logs-tcp.generic-*
+| WHERE @timestamp >= NOW() - 4 hours AND data.type == "traffic"
+    AND data.http_host == "$host" AND data.original_src == "$src"
+| EVAL rc = TO_INTEGER(data.http_retcode)
+| STATS reqs = COUNT(*), accepted2xx = SUM(CASE(rc >= 200 AND rc < 300, 1, 0)),
+        blocked4xx = SUM(CASE(rc >= 400 AND rc < 500, 1, 0))
+    BY data.http_url
+| SORT reqs DESC
+| LIMIT 30
+]]>
+        </Query>
+      </Step>
+      <Step order="6" name="IP investigation">
+        <Purpose>IP investigation</Purpose>
+        <Query platform="Elastic" language="ES|QL" id="Q-06">
+          <![CDATA[
+FROM logs-tcp.generic-*
+| WHERE @timestamp >= NOW() - 4 hours AND data.type == "traffic"
+    AND data.original_src == "$src"
+| EVAL real_client = COALESCE(TRIM(MV_FIRST(SPLIT(x_forwarded_for, ","))), data.src)
+| STATS reqs = COUNT(*), hosts = COUNT_DISTINCT(data.http_host), countries = VALUES(data.srccountry)
+    BY real_client
+| SORT reqs DESC
+| LIMIT 20
+]]>
+        </Query>
+      </Step>
+      <Step order="7" name="Domain investigation">
+        <Purpose>Domain investigation</Purpose>
+        <Query platform="Elastic" language="ES|QL" id="Q-07">
+          <![CDATA[
+FROM logs-tcp.generic-*
+| WHERE @timestamp >= NOW() - 4 hours AND data.type == "traffic"
+    AND data.http_host == "$host" AND data.packet.packet IS NOT NULL
+| EVAL u = TO_LOWER(data.packet.packet)
+| WHERE u LIKE "*oast*" OR u LIKE "*interactsh*" OR u LIKE "*burpcollaborator*" OR u LIKE "*dnslog*"
+    OR u LIKE "*nip.io*" OR u LIKE "*metadata.google.internal*"
+| STATS hits = COUNT(*), urls = VALUES(data.http_url)
+    BY data.http_method
+| SORT hits DESC
+| LIMIT 20
+]]>
+        </Query>
+      </Step>
+      <Step order="8" name="URL investigation">
+        <Purpose>URL investigation</Purpose>
+        <Query platform="Elastic" language="ES|QL" id="Q-08">
+          <![CDATA[
+FROM logs-tcp.generic-*
+| WHERE @timestamp >= NOW() - 4 hours AND data.type == "traffic"
+    AND data.http_host == "$host" AND data.original_src == "$src" AND data.packet.packet IS NOT NULL
+| EVAL rc = TO_INTEGER(data.http_retcode)
+| STATS hits = COUNT(*), accepted2xx = SUM(CASE(rc >= 200 AND rc < 300, 1, 0)),
+        blocked4xx = SUM(CASE(rc >= 400 AND rc < 500, 1, 0))
+    BY data.http_method, data.http_url
+| SORT hits DESC
+| LIMIT 30
+]]>
+        </Query>
+      </Step>
+      <Step order="9" name="Authentication investigation">
+        <Purpose>Authentication investigation</Purpose>
+        <Query platform="Elastic" language="ES|QL" id="Q-09">
+          <![CDATA[
+FROM logs-tcp.generic-*
+| WHERE @timestamp >= NOW() - 4 hours AND data.type == "traffic"
+    AND data.http_host == "$host" AND data.original_src == "$src"
+| EVAL rc = TO_INTEGER(data.http_retcode)
+| STATS reqs = COUNT(*)
+    BY rc, data.http_method
+| SORT reqs DESC
+| LIMIT 20
+]]>
+        </Query>
+      </Step>
+      <Step order="10" name="Timeline Reconstruction">
+        <Purpose>Timeline Reconstruction</Purpose>
+        <Query platform="Elastic" language="ES|QL" id="Q-10">
+          <![CDATA[
+FROM logs-tcp.generic-*
+| WHERE @timestamp >= NOW() - 4 hours AND data.type == "traffic"
+    AND data.http_host == "$host" AND data.original_src == "$src" AND data.packet.packet IS NOT NULL
+| EVAL real_client = COALESCE(TRIM(MV_FIRST(SPLIT(x_forwarded_for, ","))), data.src)
+| KEEP @timestamp, real_client, data.http_method, data.http_url, data.http_retcode
+| SORT @timestamp DESC
+| LIMIT 100
+]]>
+        </Query>
+      </Step>
+      <Step order="11" name="Lateral movement validation">
+        <Purpose>Lateral movement validation</Purpose>
+        <Query platform="Elastic" language="ES|QL" id="Q-11">
+          <![CDATA[
+FROM logs-tcp.generic-*
+| WHERE @timestamp >= NOW() - 4 hours AND data.type == "traffic"
+    AND data.original_src == "$src"
+| EVAL real_client = COALESCE(TRIM(MV_FIRST(SPLIT(x_forwarded_for, ","))), data.src)
+| STATS reqs = COUNT(*), hosts = COUNT_DISTINCT(data.http_host), host_list = VALUES(data.http_host)
+    BY real_client
+| SORT hosts DESC
+| LIMIT 20
+]]>
+        </Query>
+      </Step>
+      <Step order="12" name="Privilege escalation validation">
+        <Purpose>Privilege escalation validation</Purpose>
+        <Query platform="Elastic" language="ES|QL" id="Q-12">
+          <![CDATA[
+FROM logs-tcp.generic-*
+| WHERE @timestamp >= NOW() - 4 hours AND data.type == "traffic"
+    AND data.http_host == "$host" AND data.packet.packet IS NOT NULL
+| EVAL u = TO_LOWER(data.packet.packet), rc = TO_INTEGER(data.http_retcode)
+| WHERE u LIKE "*169.254.169.254*" OR u LIKE "*metadata.google.internal*" OR u LIKE "*100.100.100.200*" OR u LIKE "*169.254.170.2*"
+| STATS hits = COUNT(*), accepted2xx = SUM(CASE(rc >= 200 AND rc < 300, 1, 0))
+    BY data.original_src, data.http_url
+| SORT hits DESC
+| LIMIT 20
+]]>
+        </Query>
+      </Step>
+      <Step order="13" name="Defense evasion validation">
+        <Purpose>Defense evasion validation</Purpose>
+        <Query platform="Elastic" language="ES|QL" id="Q-13">
+          <![CDATA[
+FROM logs-tcp.generic-*
+| WHERE @timestamp >= NOW() - 4 hours AND data.type == "traffic"
+    AND data.http_host == "$host" AND data.packet.packet IS NOT NULL
+| EVAL u = TO_LOWER(data.packet.packet), rc = TO_INTEGER(data.http_retcode)
+| EVAL evasion = CASE(
+      u LIKE "*gopher://*", "gopher_scheme",
+      u LIKE "*file:///*", "file_scheme",
+      u LIKE "*dict://*", "dict_scheme",
+      u LIKE "*0x*" OR u LIKE "*%2f%2f*", "encoded_target",
+      u LIKE "*nip.io*" OR u LIKE "*xip.io*" OR u LIKE "*sslip.io*", "dns_wildcard",
+      "none")
+| WHERE evasion != "none"
+| STATS hits = COUNT(*), accepted2xx = SUM(CASE(rc >= 200 AND rc < 300, 1, 0)),
+        blocked4xx = SUM(CASE(rc >= 400 AND rc < 500, 1, 0))
+    BY evasion
+| SORT hits DESC
+| LIMIT 20
+]]>
+        </Query>
+      </Step>
+      <Step order="14" name="Impact assessment">
+        <Purpose>Impact assessment</Purpose>
+        <Query platform="Elastic" language="ES|QL" id="Q-14">
+          <![CDATA[
+FROM logs-tcp.generic-*
+| WHERE @timestamp >= NOW() - 4 hours AND data.type == "traffic"
+    AND data.http_host == "$host" AND data.original_src == "$src" AND data.packet.packet IS NOT NULL
+| EVAL u = TO_LOWER(data.packet.packet), rc = TO_INTEGER(data.http_retcode)
+| WHERE u LIKE "*169.254.169.254*" OR u LIKE "*oast*" OR u LIKE "*interactsh*" OR u LIKE "*gopher://*"
+    OR u LIKE "*file:///*" OR u LIKE "*127.0.0.1*"
+| STATS hits = COUNT(*), accepted2xx = SUM(CASE(rc >= 200 AND rc < 300, 1, 0)),
+        total_resp_bytes = SUM(TO_LONG(data.http_response_bytes))
+    BY data.http_url
+| SORT accepted2xx DESC
+| LIMIT 20
+]]>
+        </Query>
+      </Step>
+      <Step order="15" name="Finalize verdict">
+        <DecisionTree>
+        </DecisionTree>
+      </Step>
+    </Workflow>
+  </Investigation>
+  <ClassificationGuidance>
+    <TruePositive>
+      <Definition></Definition>
+    </TruePositive>
+    <FalsePositive>
+      <Definition></Definition>
+      <Indicators>
+        <Item>Incidental substring matches. The weak tokens - oast, nip.io, ngrok - occur inside legitimate strings (product names, base64/JWT fragments, analytics parameters, app version strings). These are the loose_substring_review bucket and are benign until the full packet shows the token inside a URL the app would actually fetch.</Item>
+        <Item>Legitimate server-side-request features. URL-preview, link-unfurl, webhook-validation, avatar/image proxy, RSS/feed import, and cloud SDK calls all make the *server* fetch a URL by design. If the destinations are fixed and legitimate (not attacker-controlled), that is a feature tripping the markers - a misconfiguration/baseline case (section 6, section 13), not an attack.</Item>
+        <Item>Authorised security testing. A contracted pen-tester or an internal red/purple-team using interactsh/burpcollaborator against NBI apps will fire this rule. This is authorised malicious-technique execution - confirm against scope/ROE and close as false_positive (authorised), never dismiss on sight as "benign".</Item>
+        <Item>Copied threat-intel / documentation traffic. Requests that carry an OOB domain as literal data (a bug-bounty report body, a security blog URL, a paste) rather than as a fetch target.</Item>
+        <Item>The dominant match on NBI is a benign loose_substring_review on mobile.nbi.iq. On the busiest host the target-class query returns exactly the loose_substring_review bucket (3 hits in the window, 0 accepted / 3 blocked-4xx, all GET) - an incidental oast-family substring inside ordinary mobile /api traffic, not a callback URL. The genuine SSRF buckets (cloud_metadata_imds, oob_callback, dangerous_scheme, loopback_ssrf) returned nothing in the window. So on NBI today this rule is overwhelmingly a benign-token detector; a *genuine* target-class hit is the notable event.</Item>
+        <Item>mobile.nbi.iq is a native mobile-app backend. Its real clients (recovered via x_forwarded_for) present Dart/3.8 (dart:io) and national_bank_of_iraq/… CFNetwork/… Darwin/… user-agents - the NBI mobile banking app. Automated-looking, high-volume /api traffic here is normal app behaviour, not scanning. Read the agent and the packet before escalating.</Item>
+        <Item>The alert source is always a shared SNAT proxy. data.original_src values 185.56.154.104-119, 159.60.162.x are FortiWeb egress addresses; a single one (185.56.154.107) fronted ~2,070 distinct x_forwarded_for clients in 4h. Never attribute the SSRF to $src; always de-proxy to the real client first.</Item>
+        <Item>data.packet.packet is only ~38% populated (167,970 of 435,452 records in the window). A quiet result is not proof of safety - the request that mattered may simply be one of the ~62% without a captured packet. State this whenever a packet-dependent query is empty.</Item>
+      </Indicators>
+    </FalsePositive>
+    <Misconfiguration>
+      <Definition></Definition>
+    </Misconfiguration>
+    <NeedsEscalation>
+      <Definition></Definition>
+    </NeedsEscalation>
+  </ClassificationGuidance>
+  <ResponseActions>
+    <Phase name="Containment">
+      <Action>Block the confirmed real client (the x_forwarded_for address from section 15.1/section 15.6, not the shared $src proxy) at the WAF/edge once a genuine SSRF target and a non-authorised actor are established.</Action>
+      <Action>For a metadata-class target accepted by the app, treat the server's cloud credentials as exposed: engage the cloud team immediately to rotate the instance role/credentials and review IMDS access - do not wait for full confirmation if a 2xx on 169.254.169.254 is seen.</Action>
+      <Action>Constrain the app tier's egress (with the app/cloud owner): enforce IMDSv2 / block 169.254.169.254 from the application subnet, and apply an outbound allow-list so the server cannot reach attacker destinations even if the SSRF logic remains.</Action>
+      <Action>Preserve evidence: export the matching data.packet.packet records, the section 14/section 15 results, and request the app server's own logs and the egress DNS for the window before anything is rotated or reconfigured.</Action>
+      <Action>All blocks/config changes go through the authorised human-approved DEPLOY path; investigation here is read-only.</Action>
+    </Phase>
+    <Phase name="Eradication">
+      <Action>Fix the SSRF in the application: validate and allow-list the URL scheme and destination host for any server-side fetch, reject internal/loopback/metadata targets and non-http(s) schemes, disable unused URL-consuming features, and follow redirects safely (re-validate the final host).</Action>
+      <Action>Rotate exposed cloud credentials if any metadata target was accepted (section 17.3), and review cloud audit logs for use of the leaked role/token from unexpected sources.</Action>
+      <Action>Remove any attacker-controlled destinations from stored application settings (webhooks, callback URLs, feed/import sources) found while scoping section 17.2.</Action>
+      <Action>Hunt the same actor across NBI apps using the real client from section 17.1, and sweep other FortiWeb-fronted hosts for the same target tokens.</Action>
+    </Phase>
+    <Phase name="Recovery">
+      <Action>Confirm the SSRF path is closed by re-testing the URL-consuming parameter against metadata/loopback/OOB targets (in a controlled manner) and verifying the app now rejects them and cannot egress to them.</Action>
+      <Action>Validate credential rotation (metadata case): the old role/token is invalidated and no longer accepted cloud-side.</Action>
+      <Action>Return the app to normal monitoring only after section 22 closing criteria are met and the target-class buckets (section 14.1) stay clean on the host.</Action>
+      <Action>Recommend telemetry hardening (section 23): forwarding the app server's egress DNS and cloud IMDS-access logs into Elastic would let a future instance of this rule confirm or exclude the callback *inside* the SIEM rather than out of band.</Action>
+    </Phase>
+  </ResponseActions>
+  <Escalation>
+    <Trigger>Escalate to SOC L2 / IR (and notify the application, cloud, and network teams) when any of the following hold:
+
+- A cloud_metadata_imds target was accepted (2xx) on any NBI application host - treat as a potential cloud-credential theft and drive rotation immediately.
+- Any genuine target class was accepted and you need egress DNS / forward-proxy / cloud IMDS-access logs to confirm the callback - this is the needs_escalation path, since the decisive evidence is out-of-band by design.
+- A genuine oob_callback / dangerous_scheme / loopback_ssrf target on a banking-facing host (e.g. businessonline.nbi.iq) with no authorised explanation.
+- The same real client is walking multiple NBI application hosts with SSRF tokens (section 17.1), indicating a broad campaign.
+- The packet was not captured (the ~62% gap) and the alert cannot be safely cleared - escalate with the visibility gap named.
+
+Hand</Trigger>
+    <To>SOC L2 / IR</To>
+  </Escalation>
+  <ClosureCriteria>
+    <Item>false_positive (verified benign token): the packet was read and the match is confirmed to be a loose_substring_review substring inside legitimate traffic (the common NBI mobile-app case). Attach the packet read. Tighten the token list toward full callback domains if noise recurs; do not blanket-exempt a host.</Item>
+    <Item>false_positive (blocked-malicious): genuine SSRF target positively proven blocked (4xx only, no acceptance). Document as a blocked attempt, block/monitor the real client - never label "benign".</Item>
+    <Item>false_positive (authorised testing): the real client is a known/scoped tester matched to the schedule; record the ROE reference.</Item>
+    <Item>misconfiguration: a legitimate app feature made benign server-side requests to fixed, legitimate destinations; baseline it and constrain its egress allow-list.</Item>
+    <Item>true_positive: a genuine target was accepted and an out-of-band callback / metadata access is confirmed; client blocked, SSRF fixed, cloud credentials rotated (metadata case), internal exposure reviewed, campaign scoped across hosts.</Item>
+    <Item>needs_escalation: a genuine target was accepted but the callback could not be confirmed or excluded from available telemetry; handed to IR/cloud with the exact egress logs required.</Item>
+  </ClosureCriteria>
+  <Limitations>
+    <Item>De-proxy first, always. data.original_src ($src) is a shared FortiWeb SNAT address - one value (185.56.154.107) fronted ~2,070 distinct x_forwarded_for clients in 4h. The actor is the de-proxied x_forwarded_for client (COALESCE(TRIM(MV_FIRST(SPLIT(x_forwarded_for, ","))), data.src)), never $src.</Item>
+    <Item>On NBI this rule is mostly a benign-token detector today. The live loose_substring_review bucket on mobile.nbi.iq (incidental oast substrings in Dart/CFNetwork national_bank_of_iraq mobile-app /api traffic, all blocked) is the norm; genuine target classes returned nothing in the window. Read the packet before believing a match, and treat any *genuine* bucket as real.</Item>
+    <Item>The callback proof is out-of-band by definition. This index shows the injected target and the response code, not whether the server made the request. A 2xx is not confirmation and a 4xx is not exoneration. Only egress DNS / forward-proxy / cloud IMDS-access logs confirm blind SSRF - that is the reason a genuine accepted target is needs_escalation, not an automatic true_positive.</Item>
+    <Item>data.packet.packet is ~38% populated; empty != safe. The request that mattered may be one of the ~62% without a captured packet. Corroborate quiet packet queries against request-volume queries (section 15.5) and the app-server logs.</Item>
+    <Item>No app-user identity here. data.user_name is Unknown; the only identity is the client IP. Get the authenticated principal from the application's own logs.</Item>
+    <Item>Metadata acceptance is a credential incident, not a maybe. A 2xx on 169.254.169.254/metadata.google.internal from a banking app tier means rotate now and investigate cloud-side; do not gate rotation on full confirmation.</Item>
+    <Item>KB-worthy (persist to NBI customer scope): (1) FortiWeb/WAF live index is logs-tcp.generic-*, data.* schema, real client in root x_forwarded_for (not data.x_forwarded_for); (2) data.original_src is a shared SNAT pool (185.56.154.107 fronted ~2,070 clients/4h); (3) data.packet.packet ~38.6% populated; (4) data.user_name = Unknown (~99.8%), data.packet.files.* 0-populated; (5) genuine SSRF target-class baseline on mobile.nbi.iq = zero, only loose_substring_review. All observed live on 2026-08-17.</Item>
+  </Limitations>
+</Playbook>

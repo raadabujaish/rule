@@ -1,0 +1,429 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<Playbook xmlns="https://soc.example/playbooks" id="PB-windows-wmi-incoming-lateral-movement" name="WMI Incoming Lateral Movement [NBI-4688] - SOC Playbook" version="3.0" status="Validated" classification="TLP:AMBER">
+  <Metadata>
+    <Owner>NBI SOC / Detection Engineering</Owner>
+    <LastUpdated>2026-08-19</LastUpdated>
+    <Severity default="medium">medium</Severity>
+    <Confidence default="Medium">Medium</Confidence>
+    <Category>Lateral Movement</Category>
+    <MitreAttack>
+      <Technique id="T1047"/>
+      <Technique id="T1021.003"/>
+      <Technique id="T1021"/>
+      <Tactic id="TA0008"/>
+    </MitreAttack>
+    <References>
+      <Reference title="MITRE ATT&amp;CK - Windows Management Instrumentation (T1047)" url="https://attack.mitre.org/techniques/T1047/"/>
+      <Reference title="MITRE ATT&amp;CK - Remote Services: Distributed Component Object Model (T1021.003)" url="https://attack.mitre.org/techniques/T1021/003/"/>
+      <Reference title="MITRE ATT&amp;CK - Lateral Movement tactic (TA0008)" url="https://attack.mitre.org/tactics/TA0008/"/>
+      <Reference title="Elastic - Incoming DCOM Lateral Movement via WMI (prebuilt rule reference)" url="https://www.elastic.co/guide/en/security/current/incoming-dcom-lateral-movement-via-wmi.html"/>
+      <Reference title="Microsoft Learn - 4688(S): A new process has been created" url="https://learn.microsoft.com/en-us/windows/security/threat-protection/auditing/event-4688"/>
+      <Reference title="Microsoft Learn - 4624(S): An account was successfully logged on (Logon Types)" url="https://learn.microsoft.com/en-us/windows/security/threat-protection/auditing/event-4624"/>
+      <Reference title="The DFIR Report - WMImplant / WMI lateral movement tradecraft" url="https://thedfirreport.com/"/>
+      <Reference title="Elastic Security - Detection rules repository" url="https://github.com/elastic/detection-rules"/>
+    </References>
+  </Metadata>
+  <AlertContext>
+    <RuleName>WMI Incoming Lateral Movement [NBI-4688]</RuleName>
+    <RuleId>nbi-b2-wmi-incoming-lateral-movement</RuleId>
+    <RuleType>eql</RuleType>
+    <Index>logs-system.security*</Index>
+    <TriggerLogic>The deployed rule is an EQL sequence on Windows Security telemetry. Plain-English logic: *within 20 seconds on the same host*, an inbound connection to svchost.exe on port 135 is followed by a process whose parent is WmiPrvSE.exe (excluding System integrity and the known management-tool allowlist).
+
+NBI reality: leg 1 requires network telemetry that NBI does not collect (section 8), so only leg 2 - the WmiPrvSE.exe child - is evaluable, and the incoming source is reconstructed from 4624 Type-3 (network) logons as a proxy. One-line Kibana-KQL filter for the collectible leg:
+
+
+
+Because this reduces a two-leg sequence to its process half plus a logon proxy, a match is a strong hypothesis, not a closed case: correlate the WmiPrvSE child's timing and account with the incoming Type-3 source (section 15.6) before deciding.</TriggerLogic>
+    <KeyAlertFields>process.name, process.parent.name, user.name, user.id, process.command_line, process.args, source.ip</KeyAlertFields>
+  </AlertContext>
+  <Inputs>
+    <Input name="$host"/>
+    <Input name="$user"/>
+  </Inputs>
+  <ExecutiveSummary>
+    <Overview>This playbook drives triage and investigation of the WMI Incoming Lateral Movement [NBI-4688] detection on NBI's Elastic Security deployment. The deployed rule is an EQL sequence (maxspan 20s, keyed by host.id): leg 1 is an incoming network connection to svchost.exe on destination port 135 (the WMI/RPC endpoint mapper) from a non-loopback source; leg 2 is a process start whose parent is WmiPrvSE.exe, excluding System-integrity and a set of known management tools (SCCM Ccm32BitLauncher, mofcomp, csc, powercfg, HP tools, a reboot-suppress msiexec, an appcmd uninstall).
+
+A WmiPrvSE.exe-spawned process is how remote WMI command execution lands on a target (wmic … process call create, Invoke-WmiMethod, Win32_Process.Create from another machine) - a standard lateral-movement technique that is also exactly how SCCM, monitoring, and inventory tools run across the estate. The analyst's goal is to decide whether this is sanctioned management/monitoring (false_positive - authorised), an operator moving laterally over WMI (true_positive), an un-baselined management tool (misconfiguration), or an unresolved case (needs_escalation) - knowing that on NBI the incoming source must be reconstructed from 4624 network logons, not the RPC-on-135 event.</Overview>
+    <BusinessImpact>An alert means: on $host, WmiPrvSE.exe spawned a child process - the visible half of remote WMI execution. Something on the network invoked WMI against $host, and the WMI provider host ran a command on its behalf. The three discriminators are:
+
+1. The child command - cmd/powershell running whoami/net/encoded/IEX commands or a dropped tool is hands-on remote execution; mofcomp/Ccm*/csc/powercfg are the management tools the rule already excludes.
+2. The account - a machine account (HOST$) or SYSTEM points to a service/agent (SCCM/monitoring); a domain user or admin points to a hands-on operator.
+3. The incoming source (section 15.6) - a documented management/monitoring server supports the sanctioned case; an unexpected workstation/foothold IP, or an admin credential from an unusual source, supports lateral movement.</BusinessImpact>
+  </ExecutiveSummary>
+  <Investigation>
+    <Goal>Decide true_positive / false_positive / misconfiguration / needs_escalation for WMI Incoming Lateral Movement [NBI-4688].</Goal>
+    <Workflow>
+      <Step order="1" name="Reproduce leg 2 estate-wide (the collectible half of the sequence)">
+        <Purpose>Reproduce leg 2 estate-wide (the collectible half of the sequence)</Purpose>
+        <Query platform="Elastic" language="ES|QL" id="Q-01">
+          <![CDATA[
+FROM logs-system.security-*
+| WHERE event.code == "4688" AND @timestamp >= NOW() - 4 hours
+    AND TO_LOWER(process.parent.name) == "wmiprvse.exe"
+    AND NOT TO_LOWER(process.name) IN ("mofcomp.exe", "ccm32bitlauncher.exe", "hpsum_swdiscovery.exe", "csc.exe", "powercfg.exe", "appcmd.exe")
+| KEEP @timestamp, host.name, user.name, user.id, process.name, process.command_line, process.args
+| SORT @timestamp DESC
+| LIMIT 50
+]]>
+        </Query>
+      </Step>
+      <Step order="2" name="Confirm the WmiPrvSE child on the alert host">
+        <Purpose>Confirm the WmiPrvSE child on the alert host</Purpose>
+        <Query platform="Elastic" language="ES|QL" id="Q-02">
+          <![CDATA[
+FROM logs-system.security-*
+| WHERE event.code == "4688" AND host.name == "$host" AND @timestamp >= NOW() - 4 hours
+    AND TO_LOWER(process.parent.name) == "wmiprvse.exe"
+| KEEP @timestamp, user.name, user.id, process.name, process.command_line, process.args, process.pid, process.parent.pid
+| SORT @timestamp DESC
+| LIMIT 25
+]]>
+        </Query>
+      </Step>
+      <Step order="3" name="Reconstruct the incoming source (proxy for the blocked network leg)">
+        <Purpose>Reconstruct the incoming source (proxy for the blocked network leg)</Purpose>
+        <Query platform="Elastic" language="ES|QL" id="Q-03">
+          <![CDATA[
+FROM logs-system.security-*
+| WHERE event.code == "4624" AND host.name == "$host"
+    AND winlog.event_data.LogonType == "3"
+    AND @timestamp >= NOW() - 4 hours
+    AND source.ip IS NOT NULL AND source.ip != "127.0.0.1" AND source.ip != "::1"
+| STATS logons = COUNT(*), accounts = COUNT_DISTINCT(winlog.event_data.TargetUserName) BY source.ip
+| SORT logons DESC
+| LIMIT 25
+]]>
+        </Query>
+      </Step>
+      <Step order="4" name="Entity pivoting">
+        <Purpose>Entity pivoting</Purpose>
+        <Query platform="Elastic" language="ES|QL" id="Q-04">
+          <![CDATA[
+FROM logs-system.security*
+| WHERE @timestamp >= NOW() - 4 hours
+    AND event.code == "4688"
+    AND host.name == "$host"
+    AND (TO_LOWER(process.name) == "wmiprvse.exe" OR TO_LOWER(process.parent.name) == "wmiprvse.exe")
+| KEEP @timestamp, host.name, user.name, user.id, process.parent.name, process.name, process.executable, process.pid, process.parent.pid, process.command_line
+| SORT @timestamp DESC
+| LIMIT 50
+]]>
+        </Query>
+      </Step>
+      <Step order="5" name="Process investigation">
+        <Purpose>Process investigation</Purpose>
+        <Query platform="Elastic" language="ES|QL" id="Q-05">
+          <![CDATA[
+FROM logs-system.security*
+| WHERE @timestamp >= NOW() - 4 hours
+    AND event.code == "4688"
+    AND host.name == "$host"
+    AND (TO_LOWER(process.name) == "wmiprvse.exe" OR TO_LOWER(process.parent.name) == "wmiprvse.exe")
+| EVAL role = CASE(TO_LOWER(process.name) == "wmiprvse.exe", "provider-start", "wmi-child")
+| STATS events = COUNT(*), users = COUNT_DISTINCT(user.name) BY role, process.parent.name, process.name
+| SORT events DESC
+| LIMIT 25
+]]>
+        </Query>
+      </Step>
+      <Step order="6" name="Process investigation">
+        <Purpose>Process investigation</Purpose>
+        <Query platform="Elastic" language="ES|QL" id="Q-06">
+          <![CDATA[
+FROM logs-system.security*
+| WHERE @timestamp >= NOW() - 4 hours
+    AND event.code == "4688" AND host.name == "$host" AND user.name == "$user"
+    AND TO_LOWER(process.parent.name) == "wmiprvse.exe"
+| EVAL cl = TO_LOWER(CONCAT(COALESCE(process.command_line, ""), " ", COALESCE(MV_CONCAT(process.args, " "), "")))
+| EVAL child_class = CASE(
+    TO_LOWER(process.name) IN ("powershell.exe", "cmd.exe") AND (cl LIKE "*-enc*" OR cl LIKE "*downloadstring*" OR cl LIKE "*iex*" OR cl LIKE "*whoami*" OR cl LIKE "*net *" OR cl LIKE "*net1 *"), "hands-on-remote-exec",
+    TO_LOWER(process.name) IN ("mofcomp.exe", "ccm32bitlauncher.exe", "hpsum_swdiscovery.exe", "csc.exe", "powercfg.exe", "appcmd.exe"), "known-management",
+    TO_LOWER(process.name) IN ("powershell.exe", "cmd.exe", "wscript.exe", "cscript.exe", "rundll32.exe", "mshta.exe", "certutil.exe", "bitsadmin.exe", "schtasks.exe", "reg.exe", "sc.exe"), "lolbin-child",
+    "other")
+| STATS execs = COUNT(*) BY child_class, process.name
+| SORT execs DESC
+| LIMIT 20
+]]>
+        </Query>
+      </Step>
+      <Step order="7" name="Parent-Child process analysis">
+        <Purpose>Parent-Child process analysis</Purpose>
+        <Query platform="Elastic" language="ES|QL" id="Q-07">
+          <![CDATA[
+FROM logs-system.security*
+| WHERE @timestamp >= NOW() - 4 hours
+    AND event.code == "4688"
+    AND host.name == "$host"
+    AND TO_LOWER(process.parent.name) == "wmiprvse.exe"
+| KEEP @timestamp, user.name, user.id, process.name, process.executable, process.pid, process.parent.pid, process.command_line
+| SORT @timestamp DESC
+| LIMIT 25
+]]>
+        </Query>
+      </Step>
+      <Step order="8" name="Parent-Child process analysis">
+        <Purpose>Parent-Child process analysis</Purpose>
+        <Query platform="Elastic" language="ES|QL" id="Q-08">
+          <![CDATA[
+FROM logs-system.security*
+| WHERE @timestamp >= NOW() - 4 hours
+    AND event.code == "4688"
+    AND host.name == "$host"
+    AND TO_LOWER(process.name) == "wmiprvse.exe"
+| STATS starts = COUNT(*) BY process.parent.name, process.parent.executable, user.name
+| SORT starts DESC
+| LIMIT 20
+]]>
+        </Query>
+      </Step>
+      <Step order="9" name="User investigation">
+        <Purpose>User investigation</Purpose>
+        <Query platform="Elastic" language="ES|QL" id="Q-09">
+          <![CDATA[
+FROM logs-system.security*
+| WHERE @timestamp >= NOW() - 4 hours
+    AND event.code == "4688"
+    AND user.name == "$user"
+| STATS executions = COUNT(*), distinct_procs = COUNT_DISTINCT(process.name), hosts = COUNT_DISTINCT(host.name) BY host.name
+| SORT executions DESC
+| LIMIT 20
+]]>
+        </Query>
+      </Step>
+      <Step order="10" name="Host investigation">
+        <Purpose>Host investigation</Purpose>
+        <Query platform="Elastic" language="ES|QL" id="Q-10">
+          <![CDATA[
+FROM logs-system.security*
+| WHERE @timestamp >= NOW() - 4 hours
+    AND event.code == "4688"
+    AND host.name == "$host"
+| STATS executions = COUNT(*), users = COUNT_DISTINCT(user.name) BY process.name, process.parent.name
+| SORT executions ASC
+| LIMIT 40
+]]>
+        </Query>
+      </Step>
+      <Step order="11" name="IP investigation">
+        <Purpose>IP investigation</Purpose>
+        <Query platform="Elastic" language="ES|QL" id="Q-11">
+          <![CDATA[
+FROM logs-system.security*
+| WHERE @timestamp >= NOW() - 4 hours
+    AND event.code == "4624"
+    AND host.name == "$host"
+    AND winlog.event_data.LogonType == "3"
+    AND source.ip IS NOT NULL AND source.ip != "127.0.0.1" AND source.ip != "::1"
+| STATS logons = COUNT(*) BY source.ip, winlog.event_data.TargetUserName
+| SORT logons DESC
+| LIMIT 30
+]]>
+        </Query>
+      </Step>
+      <Step order="12" name="File investigation">
+        <Purpose>File investigation</Purpose>
+        <Query platform="Elastic" language="ES|QL" id="Q-12">
+          <![CDATA[
+FROM logs-system.security*
+| WHERE @timestamp >= NOW() - 4 hours
+    AND event.code == "4688"
+    AND host.name == "$host"
+    AND TO_LOWER(process.name) IN ("cmd.exe", "powershell.exe", "wscript.exe", "cscript.exe", "rundll32.exe", "mshta.exe", "certutil.exe", "bitsadmin.exe")
+| STATS executions = COUNT(*), first_seen = MIN(@timestamp), last_seen = MAX(@timestamp) BY process.name, process.executable
+| SORT executions DESC
+| LIMIT 30
+]]>
+        </Query>
+      </Step>
+      <Step order="13" name="Authentication investigation">
+        <Purpose>Authentication investigation</Purpose>
+        <Query platform="Elastic" language="ES|QL" id="Q-13">
+          <![CDATA[
+FROM logs-system.security*
+| WHERE @timestamp >= NOW() - 4 hours
+    AND event.code IN ("4624", "4625", "4634", "4647")
+    AND host.name == "$host" AND user.name == "$user"
+| STATS events = COUNT(*), first_seen = MIN(@timestamp), last_seen = MAX(@timestamp) BY event.code, winlog.event_data.LogonType, source.ip
+| SORT events DESC
+| LIMIT 30
+]]>
+        </Query>
+      </Step>
+      <Step order="14" name="Timeline Reconstruction">
+        <Purpose>Timeline Reconstruction</Purpose>
+        <Query platform="Elastic" language="ES|QL" id="Q-14">
+          <![CDATA[
+FROM logs-system.security*
+| WHERE @timestamp >= NOW() - 4 hours
+    AND host.name == "$host"
+    AND (
+        (event.code == "4688" AND (TO_LOWER(process.parent.name) == "wmiprvse.exe" OR TO_LOWER(process.name) == "wmiprvse.exe"))
+        OR (event.code == "4624" AND winlog.event_data.LogonType == "3" AND source.ip IS NOT NULL AND source.ip != "::1")
+    )
+| KEEP @timestamp, event.code, source.ip, winlog.event_data.TargetUserName, user.name, process.parent.name, process.name, process.command_line
+| SORT @timestamp ASC
+| LIMIT 200
+]]>
+        </Query>
+      </Step>
+      <Step order="15" name="Lateral movement validation">
+        <Purpose>Lateral movement validation</Purpose>
+        <Query platform="Elastic" language="ES|QL" id="Q-15">
+          <![CDATA[
+FROM logs-system.security*
+| WHERE @timestamp >= NOW() - 4 hours
+    AND event.code IN ("4624", "4648", "4768", "4769", "5140")
+    AND user.name == "$user"
+    AND host.name != "$host"
+| STATS events = COUNT(*) BY host.name, event.code, winlog.event_data.LogonType
+| SORT events DESC
+| LIMIT 30
+]]>
+        </Query>
+      </Step>
+      <Step order="16" name="Persistence validation">
+        <Purpose>Persistence validation</Purpose>
+        <Query platform="Elastic" language="ES|QL" id="Q-16">
+          <![CDATA[
+FROM logs-system.security*
+| WHERE @timestamp >= NOW() - 4 hours
+    AND host.name == "$host"
+    AND (
+        (event.code == "4688" AND TO_LOWER(process.name) IN ("sc.exe", "schtasks.exe", "reg.exe", "at.exe", "powershell.exe", "wscript.exe", "cscript.exe", "rundll32.exe", "mshta.exe", "wmic.exe"))
+        OR event.code == "7045"
+        OR event.code == "4720"
+        OR event.code == "4698"
+    )
+| STATS events = COUNT(*) BY event.code, process.name, user.name
+| SORT events DESC
+| LIMIT 40
+]]>
+        </Query>
+      </Step>
+      <Step order="17" name="Privilege escalation validation">
+        <Purpose>Privilege escalation validation</Purpose>
+        <Query platform="Elastic" language="ES|QL" id="Q-17">
+          <![CDATA[
+FROM logs-system.security*
+| WHERE @timestamp >= NOW() - 4 hours
+    AND event.code == "4672"
+    AND host.name == "$host"
+| STATS special_priv_logons = COUNT(*) BY user.name
+| SORT special_priv_logons DESC
+| LIMIT 25
+]]>
+        </Query>
+      </Step>
+      <Step order="18" name="Defense evasion validation">
+        <Purpose>Defense evasion validation</Purpose>
+        <Query platform="Elastic" language="ES|QL" id="Q-18">
+          <![CDATA[
+FROM logs-system.security*
+| WHERE @timestamp >= NOW() - 4 hours
+    AND host.name == "$host"
+    AND (
+        (event.code == "4688" AND TO_LOWER(process.name) IN ("wevtutil.exe", "fsutil.exe", "vssadmin.exe", "wmic.exe", "cipher.exe", "sdelete.exe", "sdelete64.exe"))
+        OR event.code == "1102"
+        OR event.code == "4719"
+    )
+| STATS events = COUNT(*) BY event.code, process.name, user.name
+| SORT events DESC
+| LIMIT 30
+]]>
+        </Query>
+      </Step>
+      <Step order="19" name="Impact assessment">
+        <Purpose>Impact assessment</Purpose>
+        <Query platform="Elastic" language="ES|QL" id="Q-19">
+          <![CDATA[
+FROM logs-system.security*
+| WHERE @timestamp >= NOW() - 4 hours
+    AND host.name == "$host"
+    AND event.code == "4688"
+    AND TO_LOWER(process.parent.name) IN ("cmd.exe", "powershell.exe", "wscript.exe", "cscript.exe")
+| STATS children = COUNT(*), distinct_children = COUNT_DISTINCT(process.name) BY process.parent.name, process.name
+| SORT children DESC
+| LIMIT 30
+]]>
+        </Query>
+      </Step>
+      <Step order="20" name="Finalize verdict">
+        <DecisionTree>
+        </DecisionTree>
+      </Step>
+    </Workflow>
+  </Investigation>
+  <ClassificationGuidance>
+    <TruePositive>
+      <Definition></Definition>
+    </TruePositive>
+    <FalsePositive>
+      <Definition></Definition>
+      <Indicators>
+        <Item>SCCM / monitoring / inventory over WMI. The dominant benign cause: management children (mofcomp, Ccm32BitLauncher, HP inventory, csc, powercfg) under a machine/service account from a documented management server. Several are already excluded by the rule; new ones need baselining.</Item>
+        <Item>Administrative WMI for legitimate ops - a genuine admin running a WMI query/command from a sanctioned admin host. Confirm the admin, the action, and the source - verified, not assumed.</Item>
+        <Item>Un-baselined management tooling - a new agent that runs over WMI and simply is not on the exclusion list yet (misconfiguration until added).</Item>
+        <Item>Proven-blocked attempts - a WMI call that was access-denied and spawned no child. Recorded as a blocked malicious attempt, never "benign".</Item>
+        <Item>The network leg is uncollectable - this is a structurally partial detection. event.category:network is empty and there is no Sysmon on NBI, so the incoming RPC-on-135 connection (leg 1) cannot be evaluated. Every investigation here rests on the WmiPrvSE process leg plus the 4624 Type-3 proxy; treat the source attribution as correlative, not a precise RPC join.</Item>
+        <Item>WmiPrvSE children are bursty management activity. In the validated 4h window there were 0 WmiPrvSE.exe-parented children estate-wide; a day earlier nim-jump-apv22 ran cmd.exe/powershell.exe and nim-dc-dbap01 ran DismHost.exe under machine accounts via WMI - the sanctioned SCCM/servicing shape. So a machine-account management child is the common benign case; a user/admin-account hands-on child is the finding.</Item>
+        <Item>The target host here is a domain controller. nim-dc-dbap01 receives ~236k Type-3 logons from ~2,116 sources per 4h (including real admin accounts Wahab.Admin, karrar.admin, jamal.admin holding 4672). On a DC the incoming-source haystack is enormous, so tight time-correlation to the WmiPrvSE child is essential - do not treat any single Type-3 source as the origin without matching timing and account.</Item>
+        <Item>No NBI benign-true-positive is on record for this rule. Do not blanket-exclude; scope any exclusion to a verified management tool + account + source.</Item>
+      </Indicators>
+    </FalsePositive>
+    <Misconfiguration>
+      <Definition></Definition>
+    </Misconfiguration>
+    <NeedsEscalation>
+      <Definition></Definition>
+    </NeedsEscalation>
+  </ClassificationGuidance>
+  <ResponseActions>
+    <Phase name="Containment">
+      <Action>Isolate $host (network-contain / quarantine) if a true_positive is confirmed, to stop the WMI operator's activity. For a domain controller, coordinate closely with AD/IT - do not drop a DC blindly; prioritise cutting the operator's session and credential while preserving directory service continuity.</Action>
+      <Action>Isolate the attributed source host (section 15.6) once identified, to sever the lateral-movement origin.</Action>
+      <Action>Reset the credential used - the account under which the WmiPrvSE child ran ($user) and any admin credential attributed to the incoming source - via the authorised path; on a DC, treat exposed admin/Kerberos secrets as high-priority (section 20).</Action>
+      <Action>Terminate the WMI child and its descendants (section 17.5) if the host cannot yet be isolated.</Action>
+      <Action>Preserve volatile evidence first - running processes, the WmiPrvSE child tree, WMI repository / event-subscription state (__EventFilter/CommandLineEventConsumer), and the 4624/4688 records. NBI does not collect the network leg, so host-side and EDR capture are the only ways to recover the RPC origin.</Action>
+      <Action>Investigation is read-only; make changes only via the authorised human-approved DEPLOY path.</Action>
+    </Phase>
+    <Phase name="Eradication">
+      <Action>Remove persistence discovered in section 17.2 and, critically, audit WMI event subscriptions on $host out of band (Get-WmiObject -Namespace root\subscription -Class __EventFilter / CommandLineEventConsumer / __FilterToConsumerBinding) - the in-memory persistence class that leaves no 4688 child.</Action>
+      <Action>Remove any dropped tooling the WMI child fetched/executed (section 15.9/section 15.10) after capturing it.</Action>
+      <Action>Hunt the fan-out - pivot $user and the attributed source across the estate (section 15.4, section 17.1) for further WmiPrvSE children and Type-3 logons; contain every reached host.</Action>
+      <Action>Rotate exposed credentials broadly if a DC or Tier-0 host was involved - the blast radius of WMI on a DC is domain-wide.</Action>
+      <Action>Remediate the initial-access vector and the foothold host that originated the WMI session.</Action>
+    </Phase>
+    <Phase name="Recovery">
+      <Action>Reset the operator credential and any privileged accounts exposed on $host during the window (section 17.3); for a DC, review krbtgt/machine-account and Kerberos exposure with the AD team.</Action>
+      <Action>Restore $host from a known-good state if persistence/tampering was extensive; for a DC, follow AD-specific recovery guidance rather than a plain reimage.</Action>
+      <Action>Return hosts/accounts to service only after section 22 closing criteria are met and monitoring confirms no new WmiPrvSE-child or anomalous Type-3 activity.</Action>
+      <Action>Fleet hardening (highest value): deploy network telemetry (Sysmon/Elastic Defend) so the incoming RPC-on-135 leg is actually collected - this rule is structurally partial without it; restrict WMI/DCOM to management subnets; and baseline sanctioned WMI management sources so operator WMI stands out. Enabling command-line auditing everywhere (already ~100% on this DC) keeps the child command readable.</Action>
+    </Phase>
+  </ResponseActions>
+  <Escalation>
+    <Trigger>Escalate to Tier 3 / Incident Response (and notify the customer) when any of the following hold:
+
+- The WmiPrvSE child is hands-on remote execution (encoded PowerShell / recon / dropped tool) under a user/admin account (section 15.2b) - lateral movement warrants IR.
+- The attributed incoming source (section 15.6) is an unexpected/foothold IP or an admin credential from an unusual source.
+- The target is a domain controller / server / Tier-0 system (as here), or WMI fan-out to further hosts is observed (section 17.1).
+- The child spawned recon/credential/persistence tooling (section 17.5), persistence was installed (section 17.2), or log/audit tampering appears (section 17.4).
+- The child command cannot be recovered or the incoming source cannot be attributed (network leg absent) and the alert cannot be safely cleared - escalate as needs_escalation with the gaps named.</Trigger>
+    <To>SOC L2 / IR</To>
+  </Escalation>
+  <ClosureCriteria>
+    <Item>false_positive (authorised): the child is a known management tool under a machine/service account from a documented management source - tool, account, and source all confirmed. Record the reference; scope any exclusion to that exact tool + account + source, never a whole host.</Item>
+    <Item>false_positive (proven-blocked attempt): the WMI call was access-denied and spawned no child - documented as a blocked malicious attempt, never "benign".</Item>
+    <Item>misconfiguration: a legitimate new management tool/agent runs over WMI and was not yet baselined/excluded; it is documented and added to the exclusion baseline.</Item>
+    <Item>true_positive: remote WMI executed hands-on commands from an unsanctioned source; $host and the source host contained, credentials reset, WMI event-subscription persistence and fan-out hunted and removed, scope established, no recurrence on monitoring; the network-leg telemetry gap raised for remediation.</Item>
+    <Item>needs_escalation: handed to L2/IR with the child-command / source-attribution gaps and the uncollected network leg documented.</Item>
+  </ClosureCriteria>
+  <Limitations>
+    <Item>This is half a detection by design. Leg 1 (incoming RPC on 135) is uncollectable on NBI (event.category:network empty, no Sysmon); every case rests on the WmiPrvSE process leg plus the 4624 Type-3 proxy. Deploying network telemetry is the single highest-value fix.</Item>
+    <Item>A child-free window is not a clear. WmiPrvSE children are bursty (present a day earlier on nim-jump-apv22/nim-dc-dbap01, zero in the validated 4h), and in-memory event-subscription WMI leaves no child at all. Empty != safe.</Item>
+    <Item>Account is the fastest discriminator. A machine/service account (HOST$) with a management child is the common benign shape; a user/admin account with a recon/encoded child is the lateral-movement finding. On this DC, real admin accounts (Wahab.Admin, karrar.admin, jamal.admin) hold 4672 - an admin-context WMI child here is domain-privileged.</Item>
+    <Item>Attribute by time and account, not volume. The DC sees ~2,116 Type-3 sources per 4h; never name a source as the origin without matching the exact time and account of the WmiPrvSE child (section 15.6/section 16).</Item>
+    <Item>The provider host runs even without a flagged child. svchost.exe → WmiPrvSE.exe starts (18×/4h on the DC) show WMI is being serviced; that is normal - the child, not the provider start, is the signal.</Item>
+    <Item>KB-worthy (persist to NBI customer scope): (1) leg-1 network telemetry absent (event.category:network = 0, no Sysmon) - rule structurally partial; (2) WmiPrvSE children bursty/management (machine-account cmd/powershell/DismHost a day prior; 0 in the validated 4h); (3) nim-dc-dbap01 = DC, ~236k Type-3/4h from ~2,116 sources, process.command_line ~100%; (4) real admins Wahab.Admin/karrar.admin/jamal.admin hold 4672 on the DC; (5) no process.hash.*/5156 on NBI. All observed live on 2026-08-19.</Item>
+  </Limitations>
+</Playbook>

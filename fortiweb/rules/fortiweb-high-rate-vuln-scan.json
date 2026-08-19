@@ -1,0 +1,77 @@
+{
+  "name": "FortiWeb — High-Rate Web Vulnerability Scan / Fuzzing",
+  "tags": [
+    "raad",
+    "redteam-2026-05",
+    "phase-2",
+    "web",
+    "variant-a"
+  ],
+  "interval": "5m",
+  "enabled": true,
+  "description": "Fires when a single client IP issues 300+ requests across 20+ distinct paths with 100+ 4xx/5xx responses in 10 minutes, combined with suspicious-path pattern matches — the signature of automated web vulnerability scanning or fuzzing against FortiWeb-fronted applications. High error ratios plus path spread distinguish a scanner from a normal client. The client IP is derived from X-Forwarded-For or data.src. Maps to ATT&CK Reconnaissance T1595.002 (Active Scanning: Vulnerability Scanning).",
+  "risk_score": 55,
+  "severity": "medium",
+  "note": "### Investigation\n1. Review req_per_min, suspicious_hits, and client_error_ratio — a true scan shows high rate, many paths, and a high error ratio.\n2. Check user_agents — a known scanner (sqlmap, nikto, nuclei) versus a search crawler or the bank's own app UA.\n3. Determine whether any suspicious path returned 2xx (successful hit) — that escalates from recon toward exploitation (T1190).\n4. Identify the target app (data.http_host) and whether the source is an authorized internal scanner or an external/unknown IP.\n5. Escalate if external, unauthorized, and any suspicious path succeeded.\n\n### False positives / benign\nSearch-engine crawlers, internal performance tests, and link-checkers produce high request volumes and path spread. Distinguish by user_agents (declared crawler/known tool versus spoofed/absent), client_error_ratio (crawlers mostly get 2xx/3xx; scanners generate many 4xx/5xx), and whether the source is an authorized scanner. Genuine bank-app clients are separated by the app-UA heuristic. Verify UA and authorization rather than allowlisting the IP, which a scanner can spoof.",
+  "license": "",
+  "output_index": "",
+  "meta": {
+    "kibana_siem_app_url": ""
+  },
+  "investigation_fields": {
+    "field_names": [
+      "client_ip",
+      "xff_first",
+      "client_ip_str",
+      "retcode",
+      "is_error",
+      "is_2xx"
+    ]
+  },
+  "author": [],
+  "false_positives": [
+    "Search engine crawlers (Googlebot, Bingbot) — typically low error",
+    "Internal performance testing — exclude internal source-IP ranges.",
+    "Automated link-checkers."
+  ],
+  "from": "now-10m",
+  "rule_id": "raad-04-loud-web-vuln-scan",
+  "max_signals": 100,
+  "risk_score_mapping": [],
+  "severity_mapping": [],
+  "threat": [
+    {
+      "framework": "MITRE ATT&CK",
+      "tactic": {
+        "id": "TA0043",
+        "name": "Reconnaissance",
+        "reference": "https://attack.mitre.org/tactics/TA0043/"
+      },
+      "technique": [
+        {
+          "id": "T1595",
+          "name": "Active Scanning",
+          "reference": "https://attack.mitre.org/techniques/T1595/",
+          "subtechnique": [
+            {
+              "id": "T1595.002",
+              "name": "Vulnerability Scanning",
+              "reference": "https://attack.mitre.org/techniques/T1595/002/"
+            }
+          ]
+        }
+      ]
+    }
+  ],
+  "to": "now",
+  "references": [],
+  "version": 1,
+  "exceptions_list": [],
+  "related_integrations": [],
+  "required_fields": [],
+  "setup": "",
+  "type": "esql",
+  "language": "esql",
+  "query": "FROM logs-*\n| WHERE @timestamp >= NOW() - 10 minutes\n  AND data.http_method IS NOT NULL\n    AND data.src IS NOT NULL\n    AND data.http_url IS NOT NULL\n| EVAL xff_first     = TRIM(MV_FIRST(SPLIT(x_forwarded_for, \",\"))),\n       client_ip_str = CASE(xff_first IS NOT NULL AND xff_first != \"\", xff_first, data.src),\n       client_ip     = TO_IP(client_ip_str)\n| WHERE client_ip IS NOT NULL\n    AND NOT CIDR_MATCH(client_ip,\n        \"10.0.0.0/8\", \"172.16.0.0/12\", \"192.168.0.0/16\",\n        \"127.0.0.0/8\", \"169.254.0.0/16\",\n        \"::1/128\", \"fe80::/10\", \"fc00::/7\")\n| EVAL retcode      = TO_INTEGER(data.http_retcode),\n       is_error     = CASE(retcode >= 400, 1, 0),\n       is_2xx       = CASE(retcode >= 200 AND retcode < 300, 1, 0),\n       is_3xx       = CASE(retcode >= 300 AND retcode < 400, 1, 0),\n       is_401       = CASE(retcode == 401, 1, 0),\n       is_403       = CASE(retcode == 403, 1, 0),\n       is_404       = CASE(retcode == 404, 1, 0),\n       is_5xx       = CASE(retcode >= 500 AND retcode < 600, 1, 0),\n       is_bank_app  = CASE(\n           data.http_agent LIKE \"national_bank_of_iraq/%\"\n        OR data.http_agent LIKE \"Dart/%\", 1, 0),\n       suspicious_path = CASE(\n           data.http_url RLIKE \"(?i).*(\\\\.env|\\\\.git|\\\\.aws|\\\\.bak|\\\\.sql|\\\\.swp|\\\\.htaccess|\\\\.\\\\./|%2e%2e%2f|wp-admin|wp-login|wp-content/plugins|wp-content/themes|phpmyadmin|phppgadmin|/admin\\\\.|/Admin/|/administrator/|administrator\\\\.|login\\\\.aspx|login\\\\.php|login-|/cgi-bin/|/actuator|/console|/jmx|/v1/sys/|/api/v[0-9]+/(swagger|cmdb)|/qlikview/|/dotAdmin|/sphider|/ampps|/irj/portal|cfcc/login|users/auth/saml|/etc/passwd|L2V0Yy9w).*\", 1, 0)\n| STATS requests         = COUNT(*),\n        unique_paths     = COUNT_DISTINCT(data.http_url),\n        unique_methods   = COUNT_DISTINCT(data.http_method),\n        ua_count         = COUNT_DISTINCT(data.http_agent),\n        error_hits       = SUM(is_error),\n        hits_2xx         = SUM(is_2xx),\n        hits_3xx         = SUM(is_3xx),\n        hits_401         = SUM(is_401),\n        hits_403         = SUM(is_403),\n        hits_404         = SUM(is_404),\n        hits_5xx         = SUM(is_5xx),\n        suspicious_hits  = SUM(suspicious_path),\n        bank_app_hits    = SUM(is_bank_app),\n        methods          = VALUES(data.http_method),\n        all_paths        = VALUES(data.http_url),\n        user_agents      = VALUES(data.http_agent),\n        target_hosts     = VALUES(data.http_host),\n        policies         = VALUES(data.policy),\n        server_pools     = VALUES(data.server_pool_name),\n        usernames        = VALUES(data.user_name),\n        proxy_srcs       = VALUES(data.src),\n        proxy_countries  = VALUES(data.srccountry),\n        xff_chains       = VALUES(x_forwarded_for),\n        first_seen       = MIN(@timestamp),\n        last_seen        = MAX(@timestamp)\n        BY client_ip\n| WHERE requests >= 300 AND unique_paths >= 20 AND error_hits >= 100\n| EVAL client_errors       = error_hits - hits_5xx,\n       client_error_ratio  = TO_DOUBLE(client_errors) / requests,\n       server_error_ratio  = TO_DOUBLE(hits_5xx)      / requests,\n       error_ratio         = TO_DOUBLE(error_hits)    / requests,\n       success_ratio       = TO_DOUBLE(hits_2xx)      / requests,\n       bank_app_ratio      = TO_DOUBLE(bank_app_hits) / requests,\n       duration_sec        = TO_DOUBLE(DATE_DIFF(\"seconds\", first_seen, last_seen)),\n       req_per_min         = CASE(duration_sec > 0, requests / (duration_sec / 60.0), TO_DOUBLE(requests)),\n       sample_paths        = MV_SLICE(all_paths, 0, 19),\n       found_something     = CASE(suspicious_hits > 0 AND hits_2xx > 0, 1, 0),\n       backend_unhealthy   = CASE(server_error_ratio >= 0.3, 1, 0),\n       likely_bank_user    = CASE(bank_app_ratio >= 0.9, 1, 0)\n| WHERE likely_bank_user == 0\n    AND (\n            client_error_ratio >= 0.4\n         OR suspicious_hits    >= 5\n         OR found_something    == 1\n         OR ua_count           >= 10\n         OR unique_methods     >= 3\n         OR req_per_min        >= 60\n        )\n| SORT found_something DESC, suspicious_hits DESC, req_per_min DESC, requests DESC\n| KEEP client_ip, proxy_srcs, proxy_countries, xff_chains,\n       user_agents, ua_count,\n       requests, req_per_min,\n       unique_paths, unique_methods, methods,\n       hits_2xx, hits_3xx, hits_401, hits_403, hits_404, hits_5xx,\n       client_error_ratio, server_error_ratio, error_ratio, success_ratio,\n       bank_app_ratio, likely_bank_user,\n       suspicious_hits, found_something, backend_unhealthy,\n       sample_paths, target_hosts, policies, server_pools, usernames,\n       first_seen, last_seen",
+  "actions": []
+}

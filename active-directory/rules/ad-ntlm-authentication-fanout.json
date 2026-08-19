@@ -1,0 +1,89 @@
+{
+  "name": "AD — NTLM Authentication Fan-Out",
+  "tags": [
+    "NBI",
+    "detection-recovery-2026-08",
+    "PT-validated",
+    "credential-access",
+    "lateral-movement",
+    "pass-the-hash",
+    "ntlm"
+  ],
+  "interval": "1h",
+  "enabled": true,
+  "description": "A single source IP used NTLM to authenticate (network logon type 3) to 8 or more distinct hosts within 6 hours — the fan-out signature of Pass-the-Hash or credential replay spreading across the estate. The rule aggregates 4624 NTLM logons per source.ip and counts distinct destination hosts and identities. Attackers replay a stolen NTLM hash from one foothold to reach many machines quickly. Maps to ATT&CK Lateral Movement T1550.002 (Pass the Hash) with T1021.002 (SMB/Windows Admin Shares).",
+  "risk_score": 47,
+  "severity": "medium",
+  "note": "### Investigation\n1. Review dest_hosts and accounts — one identity spraying many hosts, or many identities from one source (both suspicious)?\n2. Determine whether source.ip is a sanctioned mgmt/patch/EDR/PAM node (known_infrastructure) that legitimately reaches many endpoints.\n3. Pivot on the accounts used and check whether NTLM (not Kerberos) is expected for those hosts — NTLM where Kerberos is normal strengthens PtH.\n4. Correlate follow-on 5140/5145 admin-share access and any 4672 on the destinations.\n5. Escalate if the source is not an inventoried management host and the accounts are privileged.\n\n### False positives / benign\nManagement, patch (SCCM), EDR, and PAM push hosts legitimately fan out NTLM to many endpoints — the baseline names mgmt 10.11.18.21/.49 and PAM 10.11.102.15 reaching 13-18 hosts. Distinguish by resolving source.ip against a known_infrastructure management group and by identity profile: sanctioned tooling uses a stable service account to a predictable host set, whereas PtH shows a user/admin credential reaching an unusual or growing set. Baseline the known pushers rather than raising the threshold, which would let a slow attacker under it.",
+  "output_index": "",
+  "investigation_fields": {
+    "field_names": [
+      "source.ip",
+      "ntlm_logons",
+      "dest_hosts",
+      "identities",
+      "accounts",
+      "first_seen"
+    ]
+  },
+  "author": [
+    "raadabujaish"
+  ],
+  "false_positives": [
+    "Management/patch/EDR servers and PAM that legitimately push to many endpoints via NTLM (validate then suppress by source.ip)."
+  ],
+  "from": "now-6h",
+  "rule_id": "nbi-ntlm-lateral-fanout",
+  "max_signals": 200,
+  "risk_score_mapping": [],
+  "severity_mapping": [],
+  "threat": [
+    {
+      "framework": "MITRE ATT&CK",
+      "tactic": {
+        "id": "TA0008",
+        "name": "Lateral Movement",
+        "reference": "https://attack.mitre.org/tactics/TA0008/"
+      },
+      "technique": [
+        {
+          "id": "T1550",
+          "name": "Use Alternate Authentication Material",
+          "reference": "https://attack.mitre.org/techniques/T1550/",
+          "subtechnique": [
+            {
+              "id": "T1550.002",
+              "name": "Pass the Hash",
+              "reference": "https://attack.mitre.org/techniques/T1550/002/"
+            }
+          ]
+        },
+        {
+          "id": "T1021",
+          "name": "Remote Services",
+          "reference": "https://attack.mitre.org/techniques/T1021/",
+          "subtechnique": [
+            {
+              "id": "T1021.002",
+              "name": "SMB/Windows Admin Shares",
+              "reference": "https://attack.mitre.org/techniques/T1021/002/"
+            }
+          ]
+        }
+      ]
+    }
+  ],
+  "to": "now",
+  "references": [
+    "NBIRQ_DFIR_Report.md"
+  ],
+  "version": 1,
+  "exceptions_list": [],
+  "related_integrations": [],
+  "required_fields": [],
+  "setup": "",
+  "type": "esql",
+  "language": "esql",
+  "query": "FROM logs-system.security-*\n| WHERE event.code == \"4624\" AND winlog.event_data.LogonType == \"3\" AND winlog.event_data.AuthenticationPackageName == \"NTLM\" AND source.ip IS NOT NULL AND source.ip != \"::1\"\n| STATS ntlm_logons=COUNT(*), dest_hosts=COUNT_DISTINCT(host.name), identities=COUNT_DISTINCT(winlog.event_data.TargetUserName), accounts=VALUES(winlog.event_data.TargetUserName), first_seen=MIN(@timestamp), last_seen=MAX(@timestamp) BY source.ip\n| WHERE dest_hosts >= 8\n| SORT dest_hosts DESC",
+  "actions": []
+}

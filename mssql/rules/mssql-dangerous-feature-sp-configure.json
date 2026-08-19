@@ -1,0 +1,72 @@
+{
+  "name": "MS SQL — Dangerous Feature Enabled via sp_configure",
+  "tags": [
+    "NBI-Database",
+    "Phase3",
+    "MS-SQL-Server"
+  ],
+  "interval": "5m",
+  "enabled": true,
+  "description": "Detects sp_configure enabling a high-risk SQL Server feature — xp_cmdshell, OLE Automation, CLR, external scripts, or Ad Hoc Distributed Queries. Attackers enable these to gain code execution or data access before abusing them.",
+  "risk_score": 80,
+  "severity": "high",
+  "note": "## Investigation\n1. Identify which feature was enabled and by whom (`server_principal_name`/`client_ip`).\n2. Enabling xp_cmdshell/OLE/CLR is rarely part of normal operations.\n## Response\nRevert the configuration change and investigate the principal for compromise.",
+  "output_index": "",
+  "investigation_fields": {
+    "field_names": [
+      "sqlserver.audit.statement",
+      "sqlserver.audit.server_principal_name",
+      "sqlserver.audit.session_server_principal_name",
+      "sqlserver.audit.database_name",
+      "sqlserver.audit.client_ip",
+      "sqlserver.audit.application_name",
+      "sqlserver.audit.host_name",
+      "event.action",
+      "host.name",
+      "user.name"
+    ]
+  },
+  "author": [
+    "raadabujaish"
+  ],
+  "false_positives": [],
+  "from": "now-9m",
+  "rule_id": "nbi-sql-configure-dangerous",
+  "max_signals": 100,
+  "risk_score_mapping": [],
+  "severity_mapping": [],
+  "threat": [
+    {
+      "framework": "MITRE ATT&CK",
+      "tactic": {
+        "id": "TA0005",
+        "name": "Defense Evasion",
+        "reference": "https://attack.mitre.org/tactics/TA0005/"
+      },
+      "technique": [
+        {
+          "id": "T1562",
+          "name": "Impair Defenses",
+          "reference": "https://attack.mitre.org/techniques/T1562/"
+        }
+      ]
+    }
+  ],
+  "to": "now",
+  "references": [
+    "https://attack.mitre.org/",
+    "https://learn.microsoft.com/en-us/sql/relational-databases/security/auditing/"
+  ],
+  "version": 1,
+  "exceptions_list": [],
+  "related_integrations": [],
+  "required_fields": [],
+  "setup": "",
+  "type": "query",
+  "language": "kuery",
+  "index": [
+    "logs-microsoft_sqlserver.audit-*"
+  ],
+  "query": "sqlserver.audit.statement:\"sp_configure\" and sqlserver.audit.statement:(\"xp_cmdshell\" or \"Ole Automation\" or \"clr enabled\" or \"external scripts\" or \"Ad Hoc Distributed Queries\")",
+  "actions": []
+}

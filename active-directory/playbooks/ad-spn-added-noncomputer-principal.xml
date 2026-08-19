@@ -1,0 +1,368 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<Playbook xmlns="https://soc.example/playbooks" id="PB-ad-spn-added-noncomputer-principal" name="AD — SPN Added by Non-Computer Principal (Kerberoast setup) - SOC Playbook" version="3.0" status="Validated" classification="TLP:AMBER">
+  <Metadata>
+    <Owner>NBI SOC / Detection Engineering</Owner>
+    <LastUpdated>2026-08-19</LastUpdated>
+    <Severity default="high">high</Severity>
+    <Confidence default="Medium">Medium</Confidence>
+    <Category>Credential Access</Category>
+    <MitreAttack>
+      <Technique id="T1558"/>
+      <Technique id="T1558.003"/>
+      <Technique id="T1098"/>
+      <Tactic id="TA0006"/>
+    </MitreAttack>
+    <References>
+      <Reference title="MITRE ATT&amp;CK - Steal or Forge Kerberos Tickets: Kerberoasting (T1558.003)" url="https://attack.mitre.org/techniques/T1558/003/"/>
+      <Reference title="MITRE ATT&amp;CK - Account Manipulation (T1098)" url="https://attack.mitre.org/techniques/T1098/"/>
+      <Reference title="MITRE ATT&amp;CK - Credential Access tactic (TA0006)" url="https://attack.mitre.org/tactics/TA0006/"/>
+      <Reference title='ADSecurity (Sean Metcalf) - "Cracking Kerberos TGS Tickets Using Kerberoast"' url="https://adsecurity.org/?p=3458"/>
+      <Reference title="The Hacker Recipes - Kerberoasting (incl. targeted / SPN-jacking)" url="https://www.thehacker.recipes/a-d/movement/kerberos/kerberoast"/>
+      <Reference title="Rubeus (Kerberos abuse toolkit)" url="https://github.com/GhostPack/Rubeus"/>
+      <Reference title="Microsoft Learn - Event 5136 (a directory service object was modified)" url="https://learn.microsoft.com/en-us/windows/security/threat-protection/auditing/event-5136"/>
+      <Reference title="Microsoft Learn - Event 4769 (a Kerberos service ticket was requested)" url="https://learn.microsoft.com/en-us/windows/security/threat-protection/auditing/event-4769"/>
+      <Reference title="Microsoft Learn - Group Managed Service Accounts (gMSA) overview" url="https://learn.microsoft.com/en-us/windows-server/security/group-managed-service-accounts/group-managed-service-accounts-overview"/>
+    </References>
+  </Metadata>
+  <AlertContext>
+    <RuleName>AD — SPN Added by Non-Computer Principal (Kerberoast setup)</RuleName>
+    <RuleId>nbi-ad-spn-added-to-account</RuleId>
+    <RuleType>query</RuleType>
+    <Index>logs-system.security*</Index>
+    <TriggerLogic>The deployed rule is a query rule on the Directory Service Changes audit. Its one-line Kibana KQL detection filter (for fast pivoting in Discover / Timeline) is:
+
+
+
+Plain English: a servicePrincipalName write (5136) performed by a non-computer, non-SYSTEM principal onto an object that is not a computer/DC. The event names the actor (winlog.event_data.SubjectUserName → $actor), the receiving account (winlog.event_data.ObjectDN → $object_dn), the SPN string that was set (winlog.event_data.AttributeValue), and the DC that logged it (host.name → $dc_host).
+
+Why the exclusions matter, proven on NBI: computer accounts self-register their own SPNs constantly (~1,530 servicePrincipalName writes in a 4-hour window, dominated by objects like NIM-KTA-APV01$ writing CN=NIM-KTA-APV01,…), and human admins legitimately write SPNs onto computer objects during branch device provisioning (e.g. Abdulrahman.Diaa/Mohammed.Adnan/Yasser.Amar writing SPNs on CN=…,CN=Computers,DC=nbirq,DC=com branch machines). Both are normal and are stripped out by the $, SYSTEM, and CN=Computers/Domain Controllers filters. What remains - a person setting an SPN on a user account - is rare and is the roast-setup signature</TriggerLogic>
+    <KeyAlertFields>host.name, source.ip</KeyAlertFields>
+  </AlertContext>
+  <Inputs>
+    <Input name="$actor"/>
+    <Input name="$object_dn"/>
+    <Input name="$target_sam"/>
+    <Input name="$dc_host"/>
+  </Inputs>
+  <ExecutiveSummary>
+    <Overview>This playbook drives triage and investigation of the AD - SPN Added by Non-Computer Principal detection on NBI's Elastic Security deployment. The rule fires on a Windows Security Directory Service Changes event (5136) where the changed attribute is servicePrincipalName, the acting principal is not a computer account (SubjectUserName does not end in $) and is not SYSTEM, and the target object is not a computer (its ObjectDN is not under CN=Computers and not in the Domain Controllers OU).
+
+In plain terms: a human/interactive principal set a service principal name on a (typically user) account. That matters because any account carrying an SPN is requestable via Kerberos - an authenticated user can ask a DC for a service ticket (TGS) for that SPN, and the ticket is encrypted with a key derived from the account's password. The attacker takes the ticket offline and cracks the password (Kerberoasting). Adding an SPN to an account the attacker can already write to is the classic "make it roastable" setup step.
+
+The analyst's job is to decide, with evidence, whether the write is authorised service-account onboarding (false_positive), an attacker making a writable account roastable for offline cracking (true_positive), a legitimate-but-unbaselined admin practice of putting SPNs on user-type service accounts (misconfiguration), or unprovable with the telemetry at hand (needs_escalation).</Overview>
+    <BusinessImpact>An alert means: on Domain Controller $dc_host, non-computer principal $actor set a servicePrincipalName (value in AttributeValue) on account $object_dn.
+
+What is already established:
+
+- The account is now Kerberos-requestable. From this moment, any authenticated domain user can request a TGS for the SPN and receive material encrypted with the account's password-derived key - i.e. the account is roastable.
+- The write succeeded (5136 is recorded on successful directory changes with the appropriate SACL and "Audit Directory Service Changes: Success" enabled).
+
+What is not yet established - the investigation:
+
+- Is $object_dn a genuine service account for which an SPN is expected (onboarding), or an ordinary user account that has no business carrying an SPN (the roast-setup case)?
+- Is the SPN value meaningful (a real service like MSSQLSvc/host:1433) or arbitrary/nonsensical (attackers only need *an* SPN to make the account requestable - often a throwaway string)?
+- Is $actor a recognised directory administrator onboarding a service, or an unexpected/compromised principal - and from where did they act (section 15.6)?
+- Was the SPN then used - did a TGS request for the account appear (</BusinessImpact>
+  </ExecutiveSummary>
+  <Investigation>
+    <Goal>Decide true_positive / false_positive / misconfiguration / needs_escalation for AD — SPN Added by Non-Computer Principal (Kerberoast setup).</Goal>
+    <Workflow>
+      <Step order="1" name="Confirm the SPN addition and receiving account (reused verbatim from the validated v2 playbook, INV-01)">
+        <Purpose>Confirm the SPN addition and receiving account (reused verbatim from the validated v2 playbook, INV-01)</Purpose>
+        <Query platform="Elastic" language="ES|QL" id="Q-01">
+          <![CDATA[
+FROM logs-system.security-*
+| WHERE event.code == "5136" AND winlog.event_data.AttributeLDAPDisplayName == "servicePrincipalName"
+    AND NOT winlog.event_data.SubjectUserName LIKE "*$"
+    AND winlog.event_data.SubjectUserName != "SYSTEM"
+    AND NOT winlog.event_data.ObjectDN LIKE "*CN=Computers*"
+    AND NOT winlog.event_data.ObjectDN LIKE "*Domain Controllers*"
+    AND host.name == "$dc_host" AND winlog.event_data.ObjectDN == "$object_dn"
+    AND @timestamp >= NOW() - 4 hours
+| STATS adds = COUNT(*) BY winlog.event_data.SubjectUserName, winlog.event_data.ObjectDN, winlog.event_data.AttributeValue, host.name
+| SORT adds DESC
+| LIMIT 20
+]]>
+        </Query>
+      </Step>
+      <Step order="2" name="Estate-wide non-computer SPN sweep (is this happening anywhere?)">
+        <Purpose>Estate-wide non-computer SPN sweep (is this happening anywhere?)</Purpose>
+        <Query platform="Elastic" language="ES|QL" id="Q-02">
+          <![CDATA[
+FROM logs-system.security*
+| WHERE @timestamp >= NOW() - 4 hours
+    AND event.code == "5136" AND winlog.event_data.AttributeLDAPDisplayName == "servicePrincipalName"
+    AND NOT winlog.event_data.SubjectUserName LIKE "*$"
+    AND winlog.event_data.SubjectUserName != "SYSTEM"
+    AND NOT winlog.event_data.ObjectDN LIKE "*CN=Computers*"
+    AND NOT winlog.event_data.ObjectDN LIKE "*Domain Controllers*"
+| STATS adds = COUNT(*), objects = COUNT_DISTINCT(winlog.event_data.ObjectDN) BY winlog.event_data.SubjectUserName, host.name
+| SORT adds DESC
+| LIMIT 25
+]]>
+        </Query>
+      </Step>
+      <Step order="3" name="Entity pivoting">
+        <Purpose>Entity pivoting</Purpose>
+        <Query platform="Elastic" language="ES|QL" id="Q-03">
+          <![CDATA[
+FROM logs-system.security*
+| WHERE @timestamp >= NOW() - 4 hours
+    AND event.code IN ("5136", "5137")
+    AND host.name == "$dc_host"
+    AND winlog.event_data.ObjectDN == "$object_dn"
+| KEEP @timestamp, event.code, winlog.event_data.AttributeLDAPDisplayName, winlog.event_data.AttributeValue, winlog.event_data.SubjectUserName, winlog.event_data.ObjectClass
+| SORT @timestamp DESC
+| LIMIT 100
+]]>
+        </Query>
+      </Step>
+      <Step order="4" name="Process investigation">
+        <Purpose>Process investigation</Purpose>
+        <Query platform="Elastic" language="ES|QL" id="Q-04">
+          <![CDATA[
+FROM logs-system.security*
+| WHERE @timestamp >= NOW() - 4 hours
+    AND event.code == "4688"
+    AND host.name == "$dc_host"
+    AND user.name == "$actor"
+| STATS executions = COUNT(*) BY process.name, process.parent.name
+| SORT executions DESC
+| LIMIT 40
+]]>
+        </Query>
+      </Step>
+      <Step order="5" name="Parent-Child process analysis">
+        <Purpose>Parent-Child process analysis</Purpose>
+        <Query platform="Elastic" language="ES|QL" id="Q-05">
+          <![CDATA[
+FROM logs-system.security*
+| WHERE @timestamp >= NOW() - 4 hours
+    AND event.code == "4688"
+    AND host.name == "$dc_host"
+    AND user.name == "$actor"
+| KEEP @timestamp, process.parent.name, process.parent.pid, process.name, process.pid, process.executable
+| SORT @timestamp ASC
+| LIMIT 100
+]]>
+        </Query>
+      </Step>
+      <Step order="6" name="User investigation">
+        <Purpose>User investigation</Purpose>
+        <Query platform="Elastic" language="ES|QL" id="Q-06">
+          <![CDATA[
+FROM logs-system.security*
+| WHERE @timestamp >= NOW() - 4 hours
+    AND event.code == "4624"
+    AND winlog.event_data.TargetUserName == "$actor"
+| STATS logons = COUNT(*), distinct_sources = COUNT_DISTINCT(source.ip) BY host.name, winlog.event_data.LogonType
+| SORT logons DESC
+| LIMIT 25
+]]>
+        </Query>
+      </Step>
+      <Step order="7" name="Host investigation">
+        <Purpose>Host investigation</Purpose>
+        <Query platform="Elastic" language="ES|QL" id="Q-07">
+          <![CDATA[
+FROM logs-system.security*
+| WHERE @timestamp >= NOW() - 4 hours
+    AND event.code IN ("5136", "5137")
+    AND host.name == "$dc_host"
+| STATS writes = COUNT(*), attrs = COUNT_DISTINCT(winlog.event_data.AttributeLDAPDisplayName), objects = COUNT_DISTINCT(winlog.event_data.ObjectDN) BY winlog.event_data.SubjectUserName
+| SORT writes DESC
+| LIMIT 30
+]]>
+        </Query>
+      </Step>
+      <Step order="8" name="IP investigation">
+        <Purpose>IP investigation</Purpose>
+        <Query platform="Elastic" language="ES|QL" id="Q-08">
+          <![CDATA[
+FROM logs-system.security*
+| WHERE @timestamp >= NOW() - 4 hours
+    AND event.code == "4624"
+    AND winlog.event_data.TargetUserName == "$actor"
+| STATS logons = COUNT(*), hosts = COUNT_DISTINCT(host.name) BY source.ip, winlog.event_data.LogonType
+| SORT logons DESC
+| LIMIT 15
+]]>
+        </Query>
+      </Step>
+      <Step order="9" name="Authentication investigation">
+        <Purpose>Authentication investigation</Purpose>
+        <Query platform="Elastic" language="ES|QL" id="Q-09">
+          <![CDATA[
+FROM logs-system.security*
+| WHERE @timestamp >= NOW() - 4 hours
+    AND event.code IN ("4624", "4625", "4768", "4769", "4776")
+    AND winlog.event_data.TargetUserName == "$actor"
+| STATS events = COUNT(*), distinct_hosts = COUNT_DISTINCT(host.name), distinct_sources = COUNT_DISTINCT(source.ip) BY event.code, winlog.event_data.LogonType
+| SORT events DESC
+| LIMIT 30
+]]>
+        </Query>
+      </Step>
+      <Step order="10" name="Timeline Reconstruction">
+        <Purpose>Timeline Reconstruction</Purpose>
+        <Query platform="Elastic" language="ES|QL" id="Q-10">
+          <![CDATA[
+FROM logs-system.security*
+| WHERE @timestamp >= NOW() - 4 hours
+    AND event.code IN ("5136", "5137")
+    AND host.name == "$dc_host"
+    AND winlog.event_data.SubjectUserName == "$actor"
+| KEEP @timestamp, event.code, winlog.event_data.AttributeLDAPDisplayName, winlog.event_data.AttributeValue, winlog.event_data.ObjectDN, winlog.event_data.ObjectClass
+| SORT @timestamp ASC
+| LIMIT 200
+]]>
+        </Query>
+      </Step>
+      <Step order="11" name="Lateral movement validation">
+        <Purpose>Lateral movement validation</Purpose>
+        <Query platform="Elastic" language="ES|QL" id="Q-11">
+          <![CDATA[
+FROM logs-system.security*
+| WHERE @timestamp >= NOW() - 4 hours
+    AND event.code IN ("4624", "4648", "4768", "4769")
+    AND winlog.event_data.TargetUserName == "$actor"
+    AND host.name != "$dc_host"
+| STATS events = COUNT(*) BY host.name, event.code, winlog.event_data.LogonType
+| SORT events DESC
+| LIMIT 30
+]]>
+        </Query>
+      </Step>
+      <Step order="12" name="Persistence validation">
+        <Purpose>Persistence validation</Purpose>
+        <Query platform="Elastic" language="ES|QL" id="Q-12">
+          <![CDATA[
+FROM logs-system.security-*
+| WHERE winlog.event_data.SubjectUserName == "$actor" AND event.code == "5136"
+    AND winlog.event_data.AttributeLDAPDisplayName IN ("servicePrincipalName","msDS-KeyCredentialLink","nTSecurityDescriptor")
+    AND @timestamp >= NOW() - 4 hours
+| STATS changes = COUNT(*), objects = COUNT_DISTINCT(winlog.event_data.ObjectDN) BY winlog.event_data.AttributeLDAPDisplayName
+| SORT changes DESC
+| LIMIT 15
+]]>
+        </Query>
+      </Step>
+      <Step order="13" name="Privilege escalation validation">
+        <Purpose>Privilege escalation validation</Purpose>
+        <Query platform="Elastic" language="ES|QL" id="Q-13">
+          <![CDATA[
+FROM logs-system.security*
+| WHERE @timestamp >= NOW() - 4 hours
+    AND event.code == "4672"
+    AND host.name == "$dc_host"
+| STATS special_priv_logons = COUNT(*) BY winlog.event_data.SubjectUserName
+| SORT special_priv_logons DESC
+| LIMIT 25
+]]>
+        </Query>
+      </Step>
+      <Step order="14" name="Defense evasion validation">
+        <Purpose>Defense evasion validation</Purpose>
+        <Query platform="Elastic" language="ES|QL" id="Q-14">
+          <![CDATA[
+FROM logs-system.security*
+| WHERE @timestamp >= NOW() - 4 hours
+    AND host.name == "$dc_host"
+    AND event.code IN ("1102", "4719")
+| STATS events = COUNT(*) BY event.code, winlog.event_data.SubjectUserName
+| SORT events DESC
+| LIMIT 20
+]]>
+        </Query>
+      </Step>
+      <Step order="15" name="Impact assessment">
+        <Purpose>Impact assessment</Purpose>
+        <Query platform="Elastic" language="ES|QL" id="Q-15">
+          <![CDATA[
+FROM logs-system.security*
+| WHERE @timestamp >= NOW() - 4 hours
+    AND event.code == "4769"
+    AND winlog.event_data.ServiceName == "$target_sam"
+| STATS requests = COUNT(*), distinct_sources = COUNT_DISTINCT(source.ip) BY source.ip, winlog.event_data.TicketEncryptionType, winlog.event_data.TargetUserName
+| SORT requests DESC
+| LIMIT 30
+]]>
+        </Query>
+      </Step>
+      <Step order="16" name="Finalize verdict">
+        <DecisionTree>
+        </DecisionTree>
+      </Step>
+    </Workflow>
+  </Investigation>
+  <ClassificationGuidance>
+    <TruePositive>
+      <Definition></Definition>
+    </TruePositive>
+    <FalsePositive>
+      <Definition></Definition>
+      <Indicators>
+        <Item>Genuine service-account onboarding. A directory administrator provisions a new user-type service account and sets its SPN so the service can register - routine, and identifiable by a real service, a recognised admin, and a matching change/onboarding record.</Item>
+        <Item>Application/vendor deployment procedures that require an SPN on a user account (older middleware, SQL service accounts, custom Kerberos-authenticated apps). Legitimate when it maps to a documented deployment.</Item>
+        <Item>Admin habit of user-type service accounts. Some environments assign SPNs to user objects used as service identities as a matter of practice; if unbaselined this looks novel but is benign (a misconfiguration/baseline gap, not an attack).</Item>
+        <Item>SPN correction/migration - an admin fixing or moving an SPN between accounts during maintenance.</Item>
+        <Item>Computer self-registration dominates SPN writes and is correctly excluded. ~1,530 servicePrincipalName writes in 4h are computer accounts (NAME$) writing their own SPNs (e.g. NIM-KTA-APV01$ → 402 writes on CN=NIM-KTA-APV01,…). The rule's *$ filter removes these.</Item>
+        <Item>**Human admins writing SPNs on *computer* objects during branch provisioning are also excluded - and explain the pattern. Abdulrahman.Diaa, Mohammed.Adnan, Yasser.Amar, Faisal.Falah write servicePrincipalName onto branch computer** objects under CN=Computers,DC=nbirq,DC=com (device imaging/join). These are non-computer *principals* but write onto *computer* objects, so the CN=Computers exclusion strips them. This is why the ObjectDN exclusion is load-bearing - without it, routine branch provisioning would flood the rule. A write that survives the filter is specifically a person setting an SPN on a non-computer object, which did not occur in the window (zero baseline for the true condition).</Item>
+        <Item>The DCs are nim-dc-dbap01 and nim-dc2-dbap, with directory-change auditing active (SPN/member/UAC writes all present) - an empty anchor reflects absence of the behaviour, not absence of auditing.</Item>
+        <Item>User-type service accounts exist and are plausible targets. solarwind (CN=solarwind,DC=nbirq,DC=com, 93 live logons) is a real user-object service identity administered by jamal.admin; it carries no SPN today, but is exactly the kind of account an attacker would make roastable. No standing allow-list ships with this rule; scope any exception to the exact (admin, service account, SPN) after confirming onboarding.</Item>
+      </Indicators>
+    </FalsePositive>
+    <Misconfiguration>
+      <Definition></Definition>
+    </Misconfiguration>
+    <NeedsEscalation>
+      <Definition></Definition>
+    </NeedsEscalation>
+  </ClassificationGuidance>
+  <ResponseActions>
+    <Phase name="Containment">
+      <Action>Remove the SPN from $object_dn (Set-ADUser $target_sam -ServicePrincipalNames @{Remove=…} / clear the servicePrincipalName value) - this makes the account non-roastable again. Preserve the SPN value first (evidence).</Action>
+      <Action>Rotate the account's password to a long, complex value (25+ characters / managed) - this is the essential containment even if the SPN is removed, because the attacker may already hold the ticket and be cracking it offline. For a genuine service account, coordinate the rotation with the application owner to avoid an outage, but prioritise it.</Action>
+      <Action>Investigate and contain $actor as potentially compromised: hold/disable the writing principal if it is not a proven onboarding admin, and isolate its origin host (section 15.6).</Action>
+      <Action>Preserve volatile evidence first where feasible (the account's current SPNs, the actor's session/tickets, the DC's directory-change log). NBI does not see the offline crack, so the in-directory SPN state and the 4769 record are the authoritative artefacts.</Action>
+      <Action>Deploy/confirm changes only via the authorised human-approved DEPLOY path; investigation itself is read-only.</Action>
+    </Phase>
+    <Phase name="Eradication">
+      <Action>Remove every attacker-set SPN found in the campaign (section 17.2 / section 14.2) and rotate all affected accounts' passwords - audit servicePrincipalName on user objects the actor touched.</Action>
+      <Action>Fix the right that enabled the write: find and remove the ACL/delegation that gave $actor write access to the target's servicePrincipalName (BloodHound targeted-Kerberoast path); this is the root cause and must be closed or the attack recurs.</Action>
+      <Action>Assume the password may be cracked for any account whose ticket was requested (section 17.5): rotate it and review what it can reach; if the account is privileged, treat downstream access as suspect.</Action>
+      <Action>Hunt the actor's broader activity (section 15.4/section 17.1) and remediate the initial-access vector that compromised the writing principal.</Action>
+    </Phase>
+    <Phase name="Recovery">
+      <Action>Confirm the account's SPN set is clean (only legitimate SPNs remain, or none for a user that should carry none) and that no anomalous TGS request for it recurs on monitoring.</Action>
+      <Action>Migrate to a stronger identity model where feasible: replace user-type service accounts with group Managed Service Accounts (gMSA) (automatic 120-char rotation, immune to offline cracking) and enforce long/rotated passwords for the rest.</Action>
+      <Action>Return the account to service only after section 22 closing criteria are met.</Action>
+      <Action>Harden: restrict who may write servicePrincipalName on user objects, enforce AES-only where possible (remove RC4), and deploy 4769 roasting analytics (RC4 downgrade / distinct-service fan-out) so the roast is caught even when the SPN is transient.</Action>
+    </Phase>
+  </ResponseActions>
+  <Escalation>
+    <Trigger>Escalate to Tier 3 / Incident Response (and notify the customer) when any of the following hold:
+
+- The SPN was set on a privileged / highly-connected / weak-password account - a likely-crackable path to significant access.
+- $actor is not a recognised onboarding admin, or acts from a workstation/foothold rather than sanctioned admin infrastructure (section 15.6).
+- A campaign is present: SPNs across multiple user accounts, or combined servicePrincipalName + msDS-KeyCredentialLink + nTSecurityDescriptor writes by one principal (section 17.2).
+- A TGS request for the account appears after the write (section 17.5), especially with RC4 (0x17), or the SPN was added then removed within minutes (section 17.4 / section 15.1).
+- Evidence is incomplete because of NBI's telemetry gaps (ACL step not audited, onboarding owner unknown, password strength unknown) and the alert cannot be safely cleared</Trigger>
+    <To>SOC L2 / IR</To>
+  </Escalation>
+  <ClosureCriteria>
+    <Item>false_positive (authorised): an onboarding/change record positively matches the exact actor + account + SPN + time, the account is a genuine, well-secured service identity (long/rotated password or gMSA), the actor is a recognised admin from a sanctioned origin, and there is no campaign or TGS follow-on. Record the reference. Scope any exception to the exact (admin, service account, SPN) - never a blanket actor/account allow.</Item>
+    <Item>false_positive (blocked/authorised): the hostile SPN was positively proven removed before any TGS request, documented as a blocked-malicious attempt (evidence preserved, actor hunted) - never "benign"; or a sanctioned red/purple-team exercise under ROE.</Item>
+    <Item>misconfiguration: a legitimate but unbaselined admin practice of assigning SPNs to user-type service accounts; maps to a real service with no attacker origin/campaign/roast. Baseline the practice and ensure long/rotated passwords or gMSA.</Item>
+    <Item>true_positive: roast-setup confirmed; the SPN(s) removed, affected account(s) password-rotated, the enabling ACL/delegation fixed, actor investigated, TGS-request hunt completed, and no recurrence on monitoring.</Item>
+    <Item>needs_escalation: handed to the AD team + IR with INV-01..03 and the direct read of the account's SPNs and password metadata documented.</Item>
+  </ClosureCriteria>
+  <Limitations>
+    <Item>Read the SPN value first. winlog.event_data.AttributeValue carries the actual SPN (validated live, e.g. CmRcService/HQ-ECH-LP-MHH.nbirq.com) - a meaningful service SPN suggests onboarding; an arbitrary/throwaway string on an ordinary user is the roast-setup tell.</Item>
+    <Item>The CN=Computers exclusion is load-bearing. On NBI, human admins (Abdulrahman.Diaa, Mohammed.Adnan, Yasser.Amar) routinely write SPNs onto *computer* objects during branch provisioning; the rule excludes these by ObjectDN. A survivor of the filter is specifically a person setting an SPN on a non-computer object - which had a zero baseline in-window.</Item>
+    <Item>Account type and password strength decide the risk. The event does not label the object type - confirm in AD whether $object_dn is a user or service account, and check its password age/complexity. An SPN on a weak, old-password account is a near-certain crack; on a gMSA it is nearly worthless to the attacker.</Item>
+    <Item>The roast is the impact, the SPN write is the setup. Correlate the write with 4769 for $target_sam (section 17.5); RC4 (0x17) is the downgrade tell against NBI's AES (0x12) norm. Absence of a TGS is not safety - the crack is offline and invisible.</Item>
+    <Item>Watch for add-then-remove. A servicePrincipalName write followed by a delete on the same object (section 15.1/section 17.4) is a strong true-positive signature of pull-the-ticket-and-clean-up.</Item>
+    <Item>KB-worthy (persist to NBI customer scope): (1) non-computer SPN-on-non-computer-object has a zero baseline (4h/24h); (2) branch device provisioning by human admins writes SPNs on CN=Computers objects (benign, excluded); (3) solarwind = a live user-type service account (CN=solarwind,DC=nbirq,DC=com, 93 logons) administered by jamal.admin - a plausible roast target; (4) 4769 uses ServiceName/TicketEncryptionType (0x17=RC4, 0x12=AES) and source.ip (not IpAddress). All observed live on 2026-08-17.</Item>
+  </Limitations>
+</Playbook>

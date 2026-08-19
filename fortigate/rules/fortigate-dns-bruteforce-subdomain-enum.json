@@ -1,0 +1,62 @@
+{
+  "name": "FortiGate — DNS Brute-Force / Subdomain Enumeration",
+  "tags": [
+    "raad",
+    "redteam-2026-05",
+    "phase-1",
+    "recon"
+  ],
+  "interval": "5m",
+  "enabled": true,
+  "description": "Detects a burst of DNS queries to many distinct subdomains of owned zones from a single external source — DNS-based subdomain enumeration and reconnaissance of the external footprint.",
+  "risk_score": 50,
+  "severity": "medium",
+  "output_index": "",
+  "investigation_fields": {
+    "field_names": [
+      "source.ip",
+      "unique_subdomains",
+      "queries",
+      "unique_zones"
+    ]
+  },
+  "author": [],
+  "false_positives": [
+    "Recursive resolvers (Quad9, Cloudflare, Google) sending NBI's",
+    "Continuous-attack-surface-management vendors NBI has retained.",
+    "Cache warmers / certificate-transparency monitors."
+  ],
+  "from": "now-30m",
+  "rule_id": "raad-02-dns-bruteforce",
+  "max_signals": 100,
+  "risk_score_mapping": [],
+  "severity_mapping": [],
+  "threat": [
+    {
+      "framework": "MITRE ATT&CK",
+      "tactic": {
+        "id": "TA0043",
+        "name": "Reconnaissance",
+        "reference": "https://attack.mitre.org/tactics/TA0043/"
+      },
+      "technique": [
+        {
+          "id": "T1595.002",
+          "name": "Active Scanning: Vulnerability Scanning",
+          "reference": "https://attack.mitre.org/techniques/T1595/002/"
+        }
+      ]
+    }
+  ],
+  "to": "now",
+  "references": [],
+  "version": 1,
+  "exceptions_list": [],
+  "related_integrations": [],
+  "required_fields": [],
+  "setup": "",
+  "type": "esql",
+  "language": "esql",
+  "query": "FROM logs-fortinet_fortigate.log-default,logs-cef.log-default\n| WHERE @timestamp >= NOW() - 30 minutes\n  AND (network.protocol == \"dns\" OR event.dataset LIKE \"*dns*\")\n  AND dns.question.name IS NOT NULL\n  AND source.ip IS NOT NULL\n  AND NOT CIDR_MATCH(source.ip, \"10.0.0.0/8\", \"172.16.0.0/12\",\n                     \"192.168.0.0/16\", \"127.0.0.0/8\", \"169.254.0.0/16\",\n                     \"100.64.0.0/10\")\n| STATS unique_subdomains = COUNT_DISTINCT(dns.question.name),\n        queries           = COUNT(*),\n        unique_zones      = COUNT_DISTINCT(SUBSTRING(dns.question.name,\n                                LENGTH(dns.question.name) - 20, 20))\n        BY source.ip\n| WHERE unique_subdomains >= 30\n| SORT unique_subdomains DESC\n| KEEP source.ip, unique_subdomains, queries, unique_zones",
+  "actions": []
+}

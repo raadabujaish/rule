@@ -1,0 +1,72 @@
+{
+  "name": "MS SQL — Ad-Hoc File/Data Access via OPENROWSET or BULK INSERT",
+  "tags": [
+    "NBI-Database",
+    "Phase3",
+    "MS-SQL-Server"
+  ],
+  "interval": "5m",
+  "enabled": true,
+  "description": "Detects ad-hoc distributed queries (OPENROWSET/OPENDATASOURCE) or BULK INSERT, used to read/write files on the SQL host or pull data from remote sources — relevant to data exfiltration and file access.",
+  "risk_score": 60,
+  "severity": "medium",
+  "note": "## Investigation\n1. Inspect the statement for the file path / remote source.\n2. Distinguish sanctioned ETL from ad-hoc access.\n## Response\nIf unauthorised, investigate the data accessed and the principal.",
+  "output_index": "",
+  "investigation_fields": {
+    "field_names": [
+      "sqlserver.audit.statement",
+      "sqlserver.audit.server_principal_name",
+      "sqlserver.audit.session_server_principal_name",
+      "sqlserver.audit.database_name",
+      "sqlserver.audit.client_ip",
+      "sqlserver.audit.application_name",
+      "sqlserver.audit.host_name",
+      "event.action",
+      "host.name",
+      "user.name"
+    ]
+  },
+  "author": [
+    "raadabujaish"
+  ],
+  "false_positives": [],
+  "from": "now-9m",
+  "rule_id": "nbi-sql-bulk-data-access",
+  "max_signals": 100,
+  "risk_score_mapping": [],
+  "severity_mapping": [],
+  "threat": [
+    {
+      "framework": "MITRE ATT&CK",
+      "tactic": {
+        "id": "TA0009",
+        "name": "Collection",
+        "reference": "https://attack.mitre.org/tactics/TA0009/"
+      },
+      "technique": [
+        {
+          "id": "T1005",
+          "name": "Data from Local System",
+          "reference": "https://attack.mitre.org/techniques/T1005/"
+        }
+      ]
+    }
+  ],
+  "to": "now",
+  "references": [
+    "https://attack.mitre.org/",
+    "https://learn.microsoft.com/en-us/sql/relational-databases/security/auditing/"
+  ],
+  "version": 1,
+  "exceptions_list": [],
+  "related_integrations": [],
+  "required_fields": [],
+  "setup": "",
+  "type": "query",
+  "language": "kuery",
+  "index": [
+    "logs-microsoft_sqlserver.audit-*"
+  ],
+  "query": "sqlserver.audit.statement:(\"OPENROWSET\" or \"OPENDATASOURCE\" or \"BULK INSERT\")",
+  "actions": []
+}

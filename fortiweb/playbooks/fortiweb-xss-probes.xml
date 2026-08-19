@@ -1,0 +1,358 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<Playbook xmlns="https://soc.example/playbooks" id="PB-fortiweb-xss-probes" name="FortiWeb — Cross-Site Scripting (XSS) Probes - SOC Playbook" version="3.0" status="Validated" classification="TLP:AMBER">
+  <Metadata>
+    <Owner>NBI SOC / Detection Engineering</Owner>
+    <LastUpdated>2026-08-19</LastUpdated>
+    <Severity default="Medium">Medium</Severity>
+    <Confidence default="Medium">Medium</Confidence>
+    <Category>Initial Access</Category>
+    <MitreAttack>
+      <Technique id="T1190"/>
+      <Technique id="T1059.007"/>
+      <Technique id="T1059"/>
+      <Tactic id="TA0001"/>
+    </MitreAttack>
+    <References>
+      <Reference title="MITRE ATT&amp;CK - Exploit Public-Facing Application (T1190)" url="https://attack.mitre.org/techniques/T1190/"/>
+      <Reference title="MITRE ATT&amp;CK - Command and Scripting Interpreter: JavaScript (T1059.007)" url="https://attack.mitre.org/techniques/T1059/007/"/>
+      <Reference title="MITRE ATT&amp;CK - Initial Access tactic (TA0001)" url="https://attack.mitre.org/tactics/TA0001/"/>
+      <Reference title="OWASP - Cross Site Scripting (XSS)" url="https://owasp.org/www-community/attacks/xss/"/>
+      <Reference title="OWASP - Cross Site Scripting Prevention Cheat Sheet" url="https://cheatsheetseries.owasp.org/cheatsheets/Cross_Site_Scripting_Prevention_Cheat_Sheet.html"/>
+      <Reference title="PortSwigger Web Security Academy - Cross-site scripting (reflected / stored / DOM)" url="https://portswigger.net/web-security/cross-site-scripting"/>
+      <Reference title="MDN Web Docs - Content Security Policy (CSP)" url="https://developer.mozilla.org/en-US/docs/Web/HTTP/CSP"/>
+      <Reference title="Fortinet - FortiWeb administration guide (XSS signatures / attack logs)" url="https://docs.fortinet.com/product/fortiweb"/>
+      <Reference title="Elastic Security - ES|QL reference (SPLIT, MV_FIRST, CASE, COALESCE)" url="https://www.elastic.co/guide/en/elasticsearch/reference/current/esql.html"/>
+    </References>
+  </Metadata>
+  <AlertContext>
+    <RuleName>FortiWeb — Cross-Site Scripting (XSS) Probes</RuleName>
+    <RuleId>raad-08-xss-probe</RuleId>
+    <RuleType>query</RuleType>
+    <Index>logs-tcp.generic-*</Index>
+    <TriggerLogic>The deployed rule is a query (KQL) rule over logs-tcp.generic-*. It matches known XSS tokens inside the captured request packet.
+
+One-line Kibana KQL detection filter (representative of the deployed token set):
+
+
+
+Plain English: any captured request whose packet body contains a script tag or a JavaScript event-handler/URI payload. The rule matches on delivery of the token, not on the application's response - so investigation must add the outcome (blocked vs processed) and the surface (reflected GET vs stored POST). Because data.original_src is a shared proxy and data.packet.packet is only partially captured (section 8), a match is a strong lead to *qualify*, not a finished verdict.
+
+Faithful ES|QL reproduction of the trigger, scoped to the alert entities (live-tested, &lt;= 4h):</TriggerLogic>
+    <KeyAlertFields>data.type, data.original_src, data.src, data.http_host, mobile.nbi.iq, businessonline.nbi.iq, data.http_url, data.http_method, data.http_retcode, data.packet.packet, data.http_agent, data.original_srccountry</KeyAlertFields>
+  </AlertContext>
+  <Inputs>
+    <Input name="$src"/>
+    <Input name="$host"/>
+  </Inputs>
+  <ExecutiveSummary>
+    <Overview>This playbook drives triage and investigation of the FortiWeb XSS Probes detection on NBI's Elastic Security deployment. The rule fires when a captured request packet (data.packet.packet) contains a browser-script injection token - HTML/script tags or event-handler payloads such as &lt;script&gt;, svg onload=, img onerror=, javascript:alert(, onerror=alert(, onload=fetch(, ontoggle=, onfocus=, or data:text/html;base64,. It flags XSS payload delivery against an NBI web application behind FortiWeb; it does not by itself prove the script was reflected, stored, or executed in a victim browser.
+
+The analyst decides, for this rule: was an XSS payload accepted by the application (reflected on a processed response or stored on a content endpoint, so it can execute for victims - true_positive / needs_escalation), was it blocked/stripped by the WAF (false_positive - blocked-malicious, never "benign"), or is the source an authorised tester or the token an incidental benign substring (false_positive - other) or a benign over-matching client (misconfiguration). Because the alert source is a shared proxy, the investigation must first resolve the real client behind it.</Overview>
+    <BusinessImpact>An alert means: a request carrying a cross-site-scripting payload was delivered to an NBI web application behind FortiWeb. XSS weaponises another user's browser - a reflected payload runs for the tricked user who follows a crafted link; a stored payload runs for *every* user who later loads the poisoned content. On a banking portal this is session-riding: hijacking authenticated customer or corporate-banking sessions, capturing credentials, and driving fraudulent transfers from the victim's own browser, bypassing network controls.
+
+Critically, the alert proves the payload was sent, not that it ran. The three facts that decide the verdict are: the delivery outcome (did the WAF/app block it, or process it - section 15.8), the surface (a transient reflected GET vs a persistent stored POST - section 17.2), and the real client behind the proxy (section 15.6). The alert's data.original_src ($src) is an NBI reverse-proxy/SNAT address that fronts hundreds of real clients - it is never the attacker; the true client is in x_forwarded_for.</BusinessImpact>
+  </ExecutiveSummary>
+  <Investigation>
+    <Goal>Decide true_positive / false_positive / misconfiguration / needs_escalation for FortiWeb — Cross-Site Scripting (XSS) Probes.</Goal>
+    <Workflow>
+      <Step order="1" name="Detection Summary">
+        <Purpose>Detection Summary</Purpose>
+        <Query platform="Elastic" language="ES|QL" id="Q-01">
+          <![CDATA[
+FROM logs-tcp.generic-*
+| WHERE @timestamp >= NOW() - 4 hours AND data.type == "traffic"
+    AND data.original_src == "$src" AND data.http_host == "$host"
+    AND data.packet.packet IS NOT NULL
+| EVAL p = TO_LOWER(data.packet.packet)
+| WHERE p LIKE "*<script>*" OR p LIKE "*</script>*" OR p LIKE "*onerror=alert(*" OR p LIKE "*javascript:alert(*"
+    OR p LIKE "*svg*onload=*" OR p LIKE "*img*onerror=*" OR p LIKE "*onload=fetch(*"
+    OR p LIKE "*data:text/html;base64,*" OR p LIKE "*ontoggle=*" OR p LIKE "*onfocus=*"
+| KEEP @timestamp, data.original_src, data.http_host, data.http_url, data.http_method, data.http_retcode
+| SORT @timestamp DESC
+| LIMIT 50
+]]>
+        </Query>
+      </Step>
+      <Step order="2" name="Confirm the entities and de-proxy the source">
+        <Purpose>Confirm the entities and de-proxy the source</Purpose>
+        <Query platform="Elastic" language="ES|QL" id="Q-02">
+          <![CDATA[
+FROM logs-tcp.generic-*
+| WHERE @timestamp >= NOW() - 2 hours AND data.type == "traffic"
+    AND data.original_src == "$src" AND data.http_host == "$host"
+| EVAL real_client = COALESCE(TRIM(MV_FIRST(SPLIT(x_forwarded_for, ","))), data.src)
+| STATS requests = COUNT(*), real_clients = COUNT_DISTINCT(real_client),
+        urls = COUNT_DISTINCT(data.http_url), methods = VALUES(data.http_method)
+| LIMIT 5
+]]>
+        </Query>
+      </Step>
+      <Step order="3" name="Delivery-outcome overview (WAF posture on this pair)">
+        <Purpose>Delivery-outcome overview (WAF posture on this pair)</Purpose>
+        <Query platform="Elastic" language="ES|QL" id="Q-03">
+          <![CDATA[
+FROM logs-tcp.generic-*
+| WHERE @timestamp >= NOW() - 2 hours AND data.type == "traffic"
+    AND data.original_src == "$src" AND data.http_host == "$host"
+| EVAL rc = TO_INTEGER(data.http_retcode)
+| STATS requests = COUNT(*), blocked = SUM(CASE(rc >= 400, 1, 0)),
+        processed = SUM(CASE(rc >= 200 AND rc < 400, 1, 0))
+    BY data.http_method
+| SORT requests DESC
+| LIMIT 10
+]]>
+        </Query>
+      </Step>
+      <Step order="4" name="Entity pivoting">
+        <Purpose>Entity pivoting</Purpose>
+        <Query platform="Elastic" language="ES|QL" id="Q-04">
+          <![CDATA[
+FROM logs-tcp.generic-*
+| WHERE @timestamp >= NOW() - 2 hours AND data.type == "traffic"
+    AND data.original_src == "$src" AND data.http_host == "$host"
+| EVAL rc = TO_INTEGER(data.http_retcode), endpoint = MV_FIRST(SPLIT(data.http_url, "?"))
+| STATS requests = COUNT(*), methods = VALUES(data.http_method),
+        processed = SUM(CASE(rc >= 200 AND rc < 400, 1, 0)), blocked = SUM(CASE(rc >= 400, 1, 0))
+    BY endpoint
+| SORT requests DESC
+| LIMIT 30
+]]>
+        </Query>
+      </Step>
+      <Step order="5" name="Host investigation">
+        <Purpose>Host investigation</Purpose>
+        <Query platform="Elastic" language="ES|QL" id="Q-05">
+          <![CDATA[
+FROM logs-tcp.generic-*
+| WHERE @timestamp >= NOW() - 2 hours AND data.type == "traffic"
+    AND data.http_host == "$host"
+| EVAL rc = TO_INTEGER(data.http_retcode), endpoint = MV_FIRST(SPLIT(data.http_url, "?"))
+| STATS requests = COUNT(*), sources = COUNT_DISTINCT(data.original_src),
+        processed = SUM(CASE(rc >= 200 AND rc < 400, 1, 0)), blocked = SUM(CASE(rc >= 400, 1, 0))
+    BY endpoint, data.http_method
+| SORT requests DESC
+| LIMIT 30
+]]>
+        </Query>
+      </Step>
+      <Step order="6" name="IP investigation">
+        <Purpose>IP investigation</Purpose>
+        <Query platform="Elastic" language="ES|QL" id="Q-06">
+          <![CDATA[
+FROM logs-tcp.generic-*
+| WHERE @timestamp >= NOW() - 2 hours AND data.type == "traffic"
+    AND data.original_src == "$src" AND data.http_host == "$host"
+| EVAL real_client = COALESCE(TRIM(MV_FIRST(SPLIT(x_forwarded_for, ","))), data.src)
+| STATS reqs = COUNT(*), urls = COUNT_DISTINCT(data.http_url),
+        post_deliveries = SUM(CASE(data.http_method == "post", 1, 0)), agents = VALUES(data.http_agent)
+    BY real_client
+| SORT reqs DESC
+| LIMIT 10
+]]>
+        </Query>
+      </Step>
+      <Step order="7" name="Domain investigation">
+        <Purpose>Domain investigation</Purpose>
+        <Query platform="Elastic" language="ES|QL" id="Q-07">
+          <![CDATA[
+FROM logs-tcp.generic-*
+| WHERE @timestamp >= NOW() - 2 hours AND data.type == "traffic"
+    AND data.original_src == "$src"
+| STATS requests = COUNT(*), urls = COUNT_DISTINCT(data.http_url),
+        countries = VALUES(data.original_srccountry)
+    BY data.http_host
+| SORT requests DESC
+| LIMIT 20
+]]>
+        </Query>
+      </Step>
+      <Step order="8" name="URL investigation">
+        <Purpose>URL investigation</Purpose>
+        <Query platform="Elastic" language="ES|QL" id="Q-08">
+          <![CDATA[
+FROM logs-tcp.generic-*
+| WHERE @timestamp >= NOW() - 2 hours AND data.type == "traffic"
+    AND data.original_src == "$src" AND data.http_host == "$host"
+    AND data.packet.packet IS NOT NULL
+| EVAL p = TO_LOWER(data.packet.packet), rc = TO_INTEGER(data.http_retcode)
+| WHERE p LIKE "*<script>*" OR p LIKE "*</script>*" OR p LIKE "*onerror=alert(*" OR p LIKE "*javascript:alert(*"
+    OR p LIKE "*svg*onload=*" OR p LIKE "*img*onerror=*" OR p LIKE "*onload=fetch(*"
+    OR p LIKE "*data:text/html;base64,*" OR p LIKE "*ontoggle=*" OR p LIKE "*onfocus=*"
+| STATS hits = COUNT(*), methods = VALUES(data.http_method),
+        blocked = SUM(CASE(rc >= 400, 1, 0)), processed = SUM(CASE(rc >= 200 AND rc < 400, 1, 0))
+    BY data.http_url
+| SORT hits DESC
+| LIMIT 20
+]]>
+        </Query>
+      </Step>
+      <Step order="9" name="Authentication investigation">
+        <Purpose>Authentication investigation</Purpose>
+        <Query platform="Elastic" language="ES|QL" id="Q-09">
+          <![CDATA[
+FROM logs-tcp.generic-*
+| WHERE @timestamp >= NOW() - 2 hours AND data.type == "traffic"
+    AND data.original_src == "$src" AND data.http_host == "$host"
+| STATS requests = COUNT(*), sessions = COUNT_DISTINCT(data.http_session_id)
+    BY data.http_retcode
+| SORT requests DESC
+| LIMIT 20
+]]>
+        </Query>
+      </Step>
+      <Step order="10" name="Timeline Reconstruction">
+        <Purpose>Timeline Reconstruction</Purpose>
+        <Query platform="Elastic" language="ES|QL" id="Q-10">
+          <![CDATA[
+FROM logs-tcp.generic-*
+| WHERE @timestamp >= NOW() - 2 hours AND data.type == "traffic"
+    AND data.original_src == "$src" AND data.http_host == "$host"
+| EVAL real_client = COALESCE(TRIM(MV_FIRST(SPLIT(x_forwarded_for, ","))), data.src)
+| KEEP @timestamp, real_client, data.http_method, data.http_url, data.http_retcode, data.http_agent
+| SORT @timestamp ASC
+| LIMIT 200
+]]>
+        </Query>
+      </Step>
+      <Step order="11" name="Lateral movement validation">
+        <Purpose>Lateral movement validation</Purpose>
+        <Query platform="Elastic" language="ES|QL" id="Q-11">
+          <![CDATA[
+FROM logs-tcp.generic-*
+| WHERE @timestamp >= NOW() - 2 hours AND data.type == "traffic"
+    AND data.original_src == "$src"
+| EVAL real_client = COALESCE(TRIM(MV_FIRST(SPLIT(x_forwarded_for, ","))), data.src)
+| STATS requests = COUNT(*), hosts = COUNT_DISTINCT(data.http_host),
+        host_list = VALUES(data.http_host)
+    BY real_client
+| SORT hosts DESC, requests DESC
+| LIMIT 20
+]]>
+        </Query>
+      </Step>
+      <Step order="12" name="Persistence validation">
+        <Purpose>Persistence validation</Purpose>
+        <Query platform="Elastic" language="ES|QL" id="Q-12">
+          <![CDATA[
+FROM logs-tcp.generic-*
+| WHERE @timestamp >= NOW() - 2 hours AND data.type == "traffic"
+    AND data.original_src == "$src" AND data.http_host == "$host"
+    AND data.http_method == "post"
+| EVAL rc = TO_INTEGER(data.http_retcode), endpoint = MV_FIRST(SPLIT(data.http_url, "?"))
+| STATS posts = COUNT(*), accepted = SUM(CASE(rc >= 200 AND rc < 300, 1, 0)),
+        rejected = SUM(CASE(rc >= 400, 1, 0))
+    BY endpoint
+| SORT posts DESC
+| LIMIT 20
+]]>
+        </Query>
+      </Step>
+      <Step order="13" name="Defense evasion validation">
+        <Purpose>Defense evasion validation</Purpose>
+        <Query platform="Elastic" language="ES|QL" id="Q-13">
+          <![CDATA[
+FROM logs-tcp.generic-*
+| WHERE @timestamp >= NOW() - 2 hours AND data.type == "attack"
+    AND data.http_host == "$host"
+| STATS detections = COUNT(*), sources = COUNT_DISTINCT(data.src)
+    BY data.packet.pattern
+| SORT detections DESC
+| LIMIT 20
+]]>
+        </Query>
+      </Step>
+      <Step order="14" name="Impact assessment">
+        <Purpose>Impact assessment</Purpose>
+        <Query platform="Elastic" language="ES|QL" id="Q-14">
+          <![CDATA[
+FROM logs-tcp.generic-*
+| WHERE @timestamp >= NOW() - 2 hours AND data.type == "traffic"
+    AND data.original_src == "$src" AND data.http_host == "$host"
+    AND data.packet.packet IS NOT NULL
+| EVAL p = TO_LOWER(data.packet.packet), rc = TO_INTEGER(data.http_retcode)
+| WHERE p LIKE "*<script>*" OR p LIKE "*onerror=alert(*" OR p LIKE "*javascript:alert(*"
+    OR p LIKE "*svg*onload=*" OR p LIKE "*img*onerror=*" OR p LIKE "*onload=fetch(*"
+| STATS script_requests = COUNT(*), processed = SUM(CASE(rc >= 200 AND rc < 400, 1, 0)),
+        blocked = SUM(CASE(rc >= 400, 1, 0)), urls = COUNT_DISTINCT(data.http_url)
+| LIMIT 5
+]]>
+        </Query>
+      </Step>
+      <Step order="15" name="Finalize verdict">
+        <DecisionTree>
+        </DecisionTree>
+      </Step>
+    </Workflow>
+  </Investigation>
+  <ClassificationGuidance>
+    <TruePositive>
+      <Definition></Definition>
+    </TruePositive>
+    <FalsePositive>
+      <Definition></Definition>
+      <Indicators>
+        <Item>Blocked/stripped payloads - the WAF or application rejected the script (4xx / no processed script). This is a *blocked malicious attempt*, documented as blocked-malicious, never "benign".</Item>
+        <Item>Authorised penetration testing / vulnerability scanning - a contracted tester or a sanctioned scanner emitting XSS tokens on schedule. Verified from source and schedule, never auto-passed.</Item>
+        <Item>Incidental benign substrings - a legitimate value that merely contains a script-like substring (svg, onload, a rich-text field, a URL with data:), matched by a loose token but not a real injection. Confirmed by reading the full request.</Item>
+        <Item>Benign automated clients - a broken widget, marketing/analytics tag, or misbehaving integration repeatedly emitting script-like content without a real injection (a misconfiguration/over-match, see section 6).</Item>
+        <Item>data.original_src is a shared proxy - the alert IP is never the attacker. 185.56.154.104 fronted ~1,290 distinct x_forwarded_for clients to mobile.nbi.iq in 2 hours. Always de-proxy via x_forwarded_for (section 15.6) before attributing; if many real clients map to the proxy and only one carried the payload, attribute to *that* client.</Item>
+        <Item>On API hosts, POST is the norm and does not imply a stored-content sink. mobile.nbi.iq is the mobile-banking REST API - its POSTs are ordinary RPC calls (/api/User/LoginUser, /api/Transaction/GetAccountTransactionHistoryForDashboard, /api/BillPayment/...), all returning 2xx. An accepted POST here is not by itself a stored-XSS surface; confirm the posted value actually contained a script (read the record) before treating INV-02 (section 17.2) as stored XSS. Traditional stored-content surfaces are more likely on the web portals (businessonline.nbi.iq).</Item>
+        <Item>The proxy fronts several NBI apps. From 185.56.154.104: mobile.nbi.iq, businessonline.nbi.iq, www.businessonline.nbi.iq, loyalty.nbi.iq, mename.nbi.iq, est.nbi.iq (proxy egress geo-tagged Germany). Scope by $host and confirm which app is actually targeted.</Item>
+        <Item>Genuine XSS tokens were absent in the validation window, but packet capture is partial. data.packet.packet is populated on only ~38% of records estate-wide (~58% measured on mobile.nbi.iq), so a delivered payload can exist with no captured packet. An empty section 15.8 is a capture gap, not proof of safety - corroborate with the real client's behaviour (section 15.6) and the WAF attack stream (section 17.4).</Item>
+      </Indicators>
+    </FalsePositive>
+    <Misconfiguration>
+      <Definition></Definition>
+    </Misconfiguration>
+    <NeedsEscalation>
+      <Definition></Definition>
+    </NeedsEscalation>
+  </ClassificationGuidance>
+  <ResponseActions>
+    <Phase name="Containment">
+      <Action>Block the real client at the WAF/edge - the de-proxied x_forwarded_for client(s) from section 15.6, not the shared proxy $src (blocking the proxy would drop legitimate traffic for hundreds of clients).</Action>
+      <Action>Engage the application owner to purge any stored payload and confirm reflection points on the affected endpoint if a script was processed/accepted (section 15.8/section 17.2).</Action>
+      <Action>Invalidate at-risk sessions on the affected page/endpoint - treat authenticated customer/corporate-banking sessions that could have loaded a stored payload as potentially hijacked (section 17.3).</Action>
+      <Action>Preserve evidence: the payload request(s), the injected parameter/endpoint, the real client, and the WAF attack records (section 17.4) - capture them before any tuning, since packet capture is partial.</Action>
+      <Action>Make edge/WAF changes only via the authorised human-approved path; investigation is read-only.</Action>
+    </Phase>
+    <Phase name="Eradication">
+      <Action>Fix the vulnerable parameter: apply context-aware output encoding / escaping on the endpoint that accepted the payload, so the input can no longer break out into script context.</Action>
+      <Action>Purge stored payloads from the content store and re-render affected pages clean (for confirmed stored XSS).</Action>
+      <Action>Tighten the WAF XSS signatures to catch the encoding/handler variants that were used, and re-test the parameter after the fix.</Action>
+      <Action>Block/monitor the real client across all NBI app hosts it touched (section 17.1), and review whether it reached authenticated surfaces (section 15.12).</Action>
+    </Phase>
+    <Phase name="Recovery">
+      <Action>Deploy a Content-Security-Policy on the affected endpoints (restricting inline script and script sources) as defence-in-depth against residual/again-introduced XSS, and enable CSP violation reporting as a complementary detection.</Action>
+      <Action>Re-test the endpoint (authorised) to confirm the payload is now encoded/blocked, and confirm no stored payload remains.</Action>
+      <Action>Rotate/invalidate any session tokens that could have been exposed to a confirmed executing payload.</Action>
+      <Action>Return the endpoint to normal only after section 22 closing criteria are met and monitoring (traffic + WAF attack stream + CSP reports) shows no recurrence.</Action>
+    </Phase>
+  </ResponseActions>
+  <Escalation>
+    <Trigger>Escalate to SOC L2 / IR and the application owner when any hold:
+
+- A script payload accepted (2xx) on a stored-content endpoint, or any confirmed reflection, on a customer-facing banking host (businessonline.nbi.iq, mobile.nbi.iq) from an unauthorised real client (section 15.8/section 17.2/section 15.6).
+- A payload was processed but whether it is reflected/stored and executes for victims cannot be determined from web logs - hand the response body / app logs to the app owner (the needs_escalation boundary).
+- A real client is probing many app hosts (section 17.1) with script payloads, or the WAF attack stream (section 17.4) shows related blocks that the traffic view missed (evasion).
+- Evidence is incomplete due to the packet-capture gap and the alert cannot be safely cleared - escalate as needs_escalation with the gap named. Empty != safe.</Trigger>
+    <To>SOC L2 / IR</To>
+  </Escalation>
+  <ClosureCriteria>
+    <Item>false_positive (blocked): the XSS payloads are positively proven blocked/stripped (section 15.8 blocked&gt;0, processed=0) with no accepted stored POST - documented as a blocked-malicious attempt, never "benign"; block/monitor the real client.</Item>
+    <Item>false_positive (authorised/benign token): the real client is a documented, scheduled tester/scanner, or the flagged token is a verified benign substring in a legitimate value (read in full) - record which.</Item>
+    <Item>misconfiguration: a benign client / rule over-match emits script-like content without a real injection - tune the token pattern to the exact tags/handlers and baseline the client.</Item>
+    <Item>true_positive: an XSS payload was accepted/processed (reflected or stored) so it can execute for victims - real client blocked at the edge, stored payload purged and reflection points fixed (encoding/CSP), at-risk sessions invalidated, incident documented.</Item>
+    <Item>needs_escalation: a payload was processed but reflection/storage is unconfirmed from web logs, or the capture gap prevents a safe decision - handed to the app owner / IR with the specifics.</Item>
+  </ClosureCriteria>
+  <Limitations>
+    <Item>The alert IP is a proxy - always de-proxy first (section 15.6). data.original_src (185.56.154.104) fronted ~1,290 distinct x_forwarded_for clients to mobile.nbi.iq in 2h. Attribute to the real client, never the proxy; block the real client at the edge, not the proxy.</Item>
+    <Item>Empty != safe - packet capture is partial (~38%). A delivered payload can exist with no captured data.packet.packet. Corroborate with the real client's behaviour (section 15.6) and the WAF attack stream (section 17.4); do not clear on an empty section 15.8.</Item>
+    <Item>Web logs show delivery, not execution. Whether a processed payload reflects in the response or is stored and rendered to victims requires the application response body / app logs - this is the needs_escalation boundary, handed to the app owner.</Item>
+    <Item>On API hosts, POST != stored surface. mobile.nbi.iq POSTs are normal REST RPC (all 2xx); confirm the posted value actually held a script before treating section 17.2 as stored XSS. Genuine content surfaces are likelier on businessonline.nbi.iq.</Item>
+    <Item>The WAF attack stream is keyed differently. data.type == "attack" records carry data.src/data.http_host but not data.original_src - scope section 17.4 by $host.</Item>
+    <Item>Scanners are investigated, not trusted. NESSUS/X-Scanner fingerprints appear in packet headers; a recognised scanner/tester is verified from source + schedule, never auto-passed.</Item>
+    <Item>Mind the evasions: encoding, alternate event handlers, tag-splitting across fields, and hiding among proxy traffic. Complement with an Obfuscated Web Probing analytic and CSP violation reports so encoded payloads that slip the token list are still caught.</Item>
+    <Item>KB-worthy (persist to NBI customer scope): (1) data.original_src = shared proxy, real client in top-level x_forwarded_for; (2) data.packet.packet ~38% populated (empty != safe); (3) data.type ∈ {traffic, attack, event}; attack stream keyed on data.src/data.http_host, not original_src; (4) 185.56.154.104 proxy (geo Germany) fronts mobile.nbi.iq/businessonline.nbi.iq/loyalty.nbi.iq/mename.nbi.iq/est.nbi.iq; (5) mobile.nbi.iq is a REST API where POST is normal RPC. All observed live 2026-08-19.</Item>
+  </Limitations>
+</Playbook>

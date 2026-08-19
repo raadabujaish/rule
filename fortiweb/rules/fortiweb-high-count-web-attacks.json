@@ -1,0 +1,89 @@
+{
+  "name": "High Count Of attacks WAF",
+  "tags": [],
+  "interval": "5m",
+  "enabled": true,
+  "description": "Detect when there is High Count Of attacks WAF during small period of Time",
+  "risk_score": 73,
+  "severity": "high",
+  "license": "",
+  "output_index": "",
+  "meta": {
+    "kibana_siem_app_url": "https://nbi.scanwave.local:8008/app/security"
+  },
+  "investigation_fields": {
+    "field_names": [
+      "data.original_src",
+      "data.http_host",
+      "data.http_url",
+      "data.http_retcode"
+    ]
+  },
+  "author": [],
+  "false_positives": [],
+  "from": "now-125m",
+  "rule_id": "15eb099c-b22f-467f-a011-ee44c9dc95af",
+  "max_signals": 100,
+  "risk_score_mapping": [],
+  "severity_mapping": [],
+  "threat": [],
+  "to": "now",
+  "references": [],
+  "version": 1,
+  "exceptions_list": [],
+  "related_integrations": [],
+  "required_fields": [],
+  "setup": "",
+  "type": "threshold",
+  "language": "kuery",
+  "data_view_id": "logs-*",
+  "query": "",
+  "filters": [
+    {
+      "meta": {
+        "index": "logs-*",
+        "type": "phrase",
+        "disabled": false,
+        "negate": false,
+        "alias": null,
+        "key": "tags",
+        "params": {
+          "query": "Fortiweb"
+        }
+      },
+      "query": {
+        "match_phrase": {
+          "tags": "Fortiweb"
+        }
+      },
+      "$state": {
+        "store": "appState"
+      }
+    },
+    {
+      "meta": {
+        "index": "logs-*",
+        "type": "exists",
+        "disabled": false,
+        "negate": false,
+        "alias": null,
+        "key": "data.attack_type",
+        "value": "exists"
+      },
+      "$state": {
+        "store": "appState"
+      },
+      "query": {
+        "exists": {
+          "field": "data.attack_type"
+        }
+      }
+    }
+  ],
+  "threshold": {
+    "field": [],
+    "value": 15000,
+    "cardinality": []
+  },
+  "actions": []
+}

@@ -1,0 +1,402 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<Playbook xmlns="https://soc.example/playbooks" id="PB-windows-internet-capability-discovery" name="Discovery of Internet Capabilities via Built-in Tools [NBI-4688] - SOC Playbook" version="3.0" status="Validated" classification="TLP:AMBER">
+  <Metadata>
+    <Owner>NBI SOC / Detection Engineering</Owner>
+    <LastUpdated>2026-08-19</LastUpdated>
+    <Severity default="low">low</Severity>
+    <Confidence default="Medium">Medium</Confidence>
+    <Category>Discovery</Category>
+    <MitreAttack>
+      <Technique id="T1016.001"/>
+      <Technique id="T1016"/>
+      <Technique id="T1018"/>
+      <Tactic id="TA0007"/>
+    </MitreAttack>
+    <References>
+      <Reference title="MITRE ATT&amp;CK - System Network Configuration Discovery: Internet Connection Discovery (T1016.001)" url="https://attack.mitre.org/techniques/T1016/001/"/>
+      <Reference title="MITRE ATT&amp;CK - Remote System Discovery (T1018)" url="https://attack.mitre.org/techniques/T1018/"/>
+      <Reference title="MITRE ATT&amp;CK - Discovery tactic (TA0007)" url="https://attack.mitre.org/tactics/TA0007/"/>
+      <Reference title="Elastic Security - New Terms rule type reference" url="https://www.elastic.co/guide/en/security/current/rules-ui-create.html"/>
+      <Reference title="LOLBAS - Ping / living-off-the-land binaries context" url="https://lolbas-project.github.io/"/>
+      <Reference title="Microsoft Learn - Command line process auditing (Event 4688 command-line GPO)" url="https://learn.microsoft.com/en-us/windows-server/identity/ad-ds/manage/component-updates/command-line-process-auditing"/>
+      <Reference title="MITRE ATT&amp;CK - Ingress Tool Transfer (post-reachability download, T1105)" url="https://attack.mitre.org/techniques/T1105/"/>
+    </References>
+  </Metadata>
+  <AlertContext>
+    <RuleName>Discovery of Internet Capabilities via Built-in Tools [NBI-4688]</RuleName>
+    <RuleId>nbi-b2-discovery-of-internet-capabilities-via-built-in-</RuleId>
+    <RuleType>new_terms</RuleType>
+    <Index>logs-system.security*</Index>
+    <TriggerLogic>The deployed rule is a New Terms analytic over a KQL scope. The one-line Kibana KQL detection filter (the deployed scope):
+
+
+
+New Terms fields: host.id, user.id, process.command_line - the alert is raised only when that (host, user, command line) triple has not been seen before in the rule's history window. Plain English: *the first time this host/user runs this exact non-loopback connectivity command.* The loopback exclusions drop self-tests that carry no discovery value.
+
+On NBI the target is read from process.args (multivalued, via MV_CONCAT) because process.command_line is only ~50% populated estate-wide and 0% on the jump/VDI tier. The New Terms first-seen context (host.id + user.id + command_line) is established by the rule engine, not re-derived in these queries.</TriggerLogic>
+    <KeyAlertFields>process.name, process.executable, ping.exe, process.parent.name, cmd.exe, powershell.exe, user.name, host.name, host.id, user.id, process.command_line, process.args</KeyAlertFields>
+  </AlertContext>
+  <Inputs>
+    <Input name="$host"/>
+    <Input name="$user"/>
+    <Input name="$process"/>
+    <Input name="$source_ip"/>
+  </Inputs>
+  <ExecutiveSummary>
+    <Overview>This playbook drives triage and investigation of the Discovery of Internet Capabilities via Built-in Tools detection on NBI's Elastic Security deployment. The rule fires on a Windows process start (Event 4688) for ping.exe, tracert.exe, or pathping.exe whose arguments are not a loopback/self target (not 127.0.0.1, 0.0.0.0, localhost, ::1). Because it is a New Terms rule keyed on host.id + user.id + process.command_line, it fires only the first time a given host/user runs that exact command line - a *novel* connectivity check, not routine repetition.
+
+These signed, always-present tools are used constantly by administrators and help-desk staff for legitimate troubleshooting, and also by attackers to confirm outbound internet reachability and to map internal hosts before staging download, C2, or lateral movement - classic living-off-the-land discovery. This is a low-severity, high-context signal: the analyst decides whether the probe is malicious reconnaissance (true_positive), authorised IT troubleshooting (false_positive), or a benign automated health check not yet baselined (misconfiguration) - or unresolved (needs_escalation). The target and the surrounding activity, not the tool itself, decide it.</Overview>
+    <BusinessImpact>An alert means: on $host, $user ran a built-in connectivity tool ($process) against a non-loopback target for the first time (for that host/user/command line). The tool merely *issued* a probe; Windows Security 4688 records the execution and its arguments, not whether the target was reached (there is no process-to-network 5156 telemetry on NBI, section 8). So the alert establishes intent-to-probe, and the investigation must judge the target and context.
+
+Two readings are possible and the evidence separates them: an external/internet target (or a sweep of many targets) is the attacker use case - confirming egress or mapping hosts before the next stage; an internal single host probed once, by an IT/help-desk identity, with no surrounding recon, is ordinary troubleshooting. Because the rule is first-seen, even a benign monitoring check can trip it the first time - hence the misconfiguration branch.</BusinessImpact>
+  </ExecutiveSummary>
+  <Investigation>
+    <Goal>Decide true_positive / false_positive / misconfiguration / needs_escalation for Discovery of Internet Capabilities via Built-in Tools [NBI-4688].</Goal>
+    <Workflow>
+      <Step order="1" name="Confirm the probe and its target (reuse of deployed INV-01)">
+        <Purpose>Confirm the probe and its target (reuse of deployed INV-01)</Purpose>
+        <Query platform="Elastic" language="ES|QL" id="Q-01">
+          <![CDATA[
+FROM logs-system.security*
+| WHERE @timestamp >= NOW() - 4 hours
+    AND event.code == "4688" AND host.name == "$host" AND TO_LOWER(process.name) == "$process"
+| EVAL argline = MV_CONCAT(process.args, " ")
+| KEEP @timestamp, user.name, process.name, process.parent.name, argline, process.command_line
+| SORT @timestamp DESC
+| LIMIT 25
+]]>
+        </Query>
+      </Step>
+      <Step order="2" name="Connectivity-tool activity on the host (scope the rule's tool set)">
+        <Purpose>Connectivity-tool activity on the host (scope the rule's tool set)</Purpose>
+        <Query platform="Elastic" language="ES|QL" id="Q-02">
+          <![CDATA[
+FROM logs-system.security*
+| WHERE @timestamp >= NOW() - 4 hours
+    AND event.code == "4688" AND host.name == "$host"
+    AND TO_LOWER(process.name) IN ("ping.exe", "tracert.exe", "pathping.exe")
+| EVAL argline = MV_CONCAT(process.args, " ")
+| STATS probes = COUNT(*), users = COUNT_DISTINCT(user.name) BY process.name, argline
+| SORT probes DESC
+| LIMIT 25
+]]>
+        </Query>
+      </Step>
+      <Step order="3" name="Entity pivoting">
+        <Purpose>Entity pivoting</Purpose>
+        <Query platform="Elastic" language="ES|QL" id="Q-03">
+          <![CDATA[
+FROM logs-system.security*
+| WHERE @timestamp >= NOW() - 4 hours
+    AND event.code == "4688"
+    AND host.name == "$host"
+    AND TO_LOWER(process.name) == "$process"
+| KEEP @timestamp, host.name, user.name, process.name, process.executable, process.parent.name, process.pid, process.parent.pid, process.command_line
+| SORT @timestamp DESC
+| LIMIT 50
+]]>
+        </Query>
+      </Step>
+      <Step order="4" name="Process investigation">
+        <Purpose>Process investigation</Purpose>
+        <Query platform="Elastic" language="ES|QL" id="Q-04">
+          <![CDATA[
+FROM logs-system.security*
+| WHERE @timestamp >= NOW() - 4 hours
+    AND event.code == "4688"
+    AND TO_LOWER(process.name) == "$process"
+| STATS executions = COUNT(*), hosts = COUNT_DISTINCT(host.name), users = COUNT_DISTINCT(user.name) BY process.executable, process.parent.name
+| SORT executions DESC
+| LIMIT 50
+]]>
+        </Query>
+      </Step>
+      <Step order="5" name="Process investigation">
+        <Purpose>Process investigation</Purpose>
+        <Query platform="Elastic" language="ES|QL" id="Q-05">
+          <![CDATA[
+FROM logs-system.security*
+| WHERE @timestamp >= NOW() - 4 hours
+    AND event.code == "4688"
+    AND user.name == "$user"
+    AND TO_LOWER(process.name) IN ("ping.exe", "tracert.exe", "pathping.exe")
+| EVAL argline = MV_CONCAT(process.args, " ")
+| STATS probes = COUNT(*), hosts_used = COUNT_DISTINCT(host.name) BY argline
+| SORT probes DESC
+| LIMIT 25
+]]>
+        </Query>
+      </Step>
+      <Step order="6" name="Parent-Child process analysis">
+        <Purpose>Parent-Child process analysis</Purpose>
+        <Query platform="Elastic" language="ES|QL" id="Q-06">
+          <![CDATA[
+FROM logs-system.security*
+| WHERE @timestamp >= NOW() - 4 hours
+    AND event.code == "4688"
+    AND host.name == "$host"
+    AND TO_LOWER(process.name) == "$process"
+| KEEP @timestamp, user.name, process.parent.name, process.parent.pid, process.name, process.pid, process.executable
+| SORT @timestamp DESC
+| LIMIT 50
+]]>
+        </Query>
+      </Step>
+      <Step order="7" name="User investigation">
+        <Purpose>User investigation</Purpose>
+        <Query platform="Elastic" language="ES|QL" id="Q-07">
+          <![CDATA[
+FROM logs-system.security*
+| WHERE @timestamp >= NOW() - 4 hours
+    AND event.code == "4688"
+    AND user.name == "$user"
+| STATS executions = COUNT(*), distinct_procs = COUNT_DISTINCT(process.name) BY host.name
+| SORT executions DESC
+| LIMIT 20
+]]>
+        </Query>
+      </Step>
+      <Step order="8" name="Host investigation">
+        <Purpose>Host investigation</Purpose>
+        <Query platform="Elastic" language="ES|QL" id="Q-08">
+          <![CDATA[
+FROM logs-system.security*
+| WHERE @timestamp >= NOW() - 4 hours
+    AND event.code == "4688"
+    AND host.name == "$host"
+| STATS executions = COUNT(*), users = COUNT_DISTINCT(user.name) BY process.name, process.parent.name
+| SORT executions ASC
+| LIMIT 40
+]]>
+        </Query>
+      </Step>
+      <Step order="9" name="IP investigation">
+        <Purpose>IP investigation</Purpose>
+        <Query platform="Elastic" language="ES|QL" id="Q-09">
+          <![CDATA[
+FROM logs-system.security*
+| WHERE @timestamp >= NOW() - 4 hours
+    AND event.code == "4624"
+    AND host.name == "$host" AND user.name == "$user"
+    AND source.ip IS NOT NULL
+| STATS logons = COUNT(*) BY source.ip, winlog.event_data.LogonType
+| SORT logons DESC
+| LIMIT 20
+]]>
+        </Query>
+      </Step>
+      <Step order="10" name="IP investigation">
+        <Purpose>IP investigation</Purpose>
+        <Query platform="Elastic" language="ES|QL" id="Q-10">
+          <![CDATA[
+FROM logs-system.security*
+| WHERE @timestamp >= NOW() - 4 hours
+    AND event.code == "4624"
+    AND source.ip == "$source_ip"
+| STATS logons = COUNT(*) BY user.name, host.name, winlog.event_data.LogonType
+| SORT logons DESC
+| LIMIT 25
+]]>
+        </Query>
+      </Step>
+      <Step order="11" name="File investigation">
+        <Purpose>File investigation</Purpose>
+        <Query platform="Elastic" language="ES|QL" id="Q-11">
+          <![CDATA[
+FROM logs-system.security*
+| WHERE @timestamp >= NOW() - 4 hours
+    AND event.code == "4688"
+    AND host.name == "$host"
+    AND TO_LOWER(process.name) == "$process"
+| STATS executions = COUNT(*), first_seen = MIN(@timestamp), last_seen = MAX(@timestamp) BY process.executable
+| SORT executions DESC
+| LIMIT 30
+]]>
+        </Query>
+      </Step>
+      <Step order="12" name="Authentication investigation">
+        <Purpose>Authentication investigation</Purpose>
+        <Query platform="Elastic" language="ES|QL" id="Q-12">
+          <![CDATA[
+FROM logs-system.security*
+| WHERE @timestamp >= NOW() - 4 hours
+    AND event.code IN ("4624", "4625", "4634", "4647")
+    AND host.name == "$host" AND user.name == "$user"
+| STATS events = COUNT(*), first_seen = MIN(@timestamp), last_seen = MAX(@timestamp) BY event.code, winlog.event_data.LogonType, source.ip
+| SORT events DESC
+| LIMIT 30
+]]>
+        </Query>
+      </Step>
+      <Step order="13" name="Timeline Reconstruction">
+        <Purpose>Timeline Reconstruction</Purpose>
+        <Query platform="Elastic" language="ES|QL" id="Q-13">
+          <![CDATA[
+FROM logs-system.security*
+| WHERE @timestamp >= NOW() - 4 hours
+    AND event.code == "4688"
+    AND host.name == "$host"
+    AND user.name == "$user"
+| KEEP @timestamp, process.parent.name, process.parent.pid, process.name, process.pid, process.executable
+| SORT @timestamp ASC
+| LIMIT 200
+]]>
+        </Query>
+      </Step>
+      <Step order="14" name="Lateral movement validation">
+        <Purpose>Lateral movement validation</Purpose>
+        <Query platform="Elastic" language="ES|QL" id="Q-14">
+          <![CDATA[
+FROM logs-system.security*
+| WHERE @timestamp >= NOW() - 4 hours
+    AND event.code IN ("4624", "4648", "4768", "4769", "5140")
+    AND user.name == "$user"
+    AND host.name != "$host"
+| STATS events = COUNT(*) BY host.name, event.code, winlog.event_data.LogonType
+| SORT events DESC
+| LIMIT 30
+]]>
+        </Query>
+      </Step>
+      <Step order="15" name="Persistence validation">
+        <Purpose>Persistence validation</Purpose>
+        <Query platform="Elastic" language="ES|QL" id="Q-15">
+          <![CDATA[
+FROM logs-system.security*
+| WHERE @timestamp >= NOW() - 4 hours
+    AND host.name == "$host"
+    AND (
+        (event.code == "4688" AND TO_LOWER(process.name) IN ("schtasks.exe", "reg.exe", "sc.exe", "at.exe", "powershell.exe", "wscript.exe", "cscript.exe", "rundll32.exe", "mshta.exe"))
+        OR event.code == "7045"
+        OR event.code == "4720"
+        OR event.code == "4698"
+    )
+| STATS events = COUNT(*) BY event.code, process.name, user.name
+| SORT events DESC
+| LIMIT 40
+]]>
+        </Query>
+      </Step>
+      <Step order="16" name="Privilege escalation validation">
+        <Purpose>Privilege escalation validation</Purpose>
+        <Query platform="Elastic" language="ES|QL" id="Q-16">
+          <![CDATA[
+FROM logs-system.security*
+| WHERE @timestamp >= NOW() - 4 hours
+    AND event.code == "4672"
+    AND host.name == "$host"
+| STATS special_priv_logons = COUNT(*) BY user.name
+| SORT special_priv_logons DESC
+| LIMIT 25
+]]>
+        </Query>
+      </Step>
+      <Step order="17" name="Defense evasion validation">
+        <Purpose>Defense evasion validation</Purpose>
+        <Query platform="Elastic" language="ES|QL" id="Q-17">
+          <![CDATA[
+FROM logs-system.security*
+| WHERE @timestamp >= NOW() - 4 hours
+    AND host.name == "$host"
+    AND (
+        (event.code == "4688" AND TO_LOWER(process.name) IN ("wevtutil.exe", "fsutil.exe", "vssadmin.exe", "wmic.exe", "cipher.exe", "sdelete.exe", "sdelete64.exe"))
+        OR event.code == "1102"
+        OR event.code == "4719"
+    )
+| STATS events = COUNT(*) BY event.code, process.name, user.name
+| SORT events DESC
+| LIMIT 30
+]]>
+        </Query>
+      </Step>
+      <Step order="18" name="Impact assessment">
+        <Purpose>Impact assessment</Purpose>
+        <Query platform="Elastic" language="ES|QL" id="Q-18">
+          <![CDATA[
+FROM logs-system.security*
+| WHERE @timestamp >= NOW() - 4 hours
+    AND event.code == "4688"
+    AND host.name == "$host" AND user.name == "$user"
+| EVAL n = TO_LOWER(process.name)
+| WHERE n IN ("whoami.exe", "net.exe", "net1.exe", "nltest.exe", "systeminfo.exe", "ipconfig.exe", "nslookup.exe", "arp.exe", "route.exe", "netstat.exe", "hostname.exe", "curl.exe", "certutil.exe", "bitsadmin.exe")
+| STATS execs = COUNT(*) BY process.name
+| SORT execs DESC
+| LIMIT 25
+]]>
+        </Query>
+      </Step>
+      <Step order="19" name="Finalize verdict">
+        <DecisionTree>
+        </DecisionTree>
+      </Step>
+    </Workflow>
+  </Investigation>
+  <ClassificationGuidance>
+    <TruePositive>
+      <Definition></Definition>
+    </TruePositive>
+    <FalsePositive>
+      <Definition></Definition>
+      <Indicators>
+        <Item>Authorised IT/help-desk troubleshooting. An admin or help-desk identity diagnosing a legitimate host, single target, no surrounding recon/staging - the most common benign cause. Confirm role and reason; do not assume from the account name.</Item>
+        <Item>Automated health/monitoring checks (a recognised script or service account periodically probing an endpoint) that simply had not run that exact command before (New Terms first-seen) - usually a misconfiguration/baseline gap (section 6).</Item>
+        <Item>Proven-failed reachability checks - a probe that positively failed to reach its target with no follow-on. Recorded as a negative/blocked result, never a bare "benign"; still confirm nothing else followed.</Item>
+        <Item>Administrator/red-team testing - authorised, but not benign; confirm against ROE/change before classifying.</Item>
+        <Item>The built-in connectivity tools are rare on NBI. In the validation window, ping.exe/tracert.exe/pathping.exe had 0 executions on the 4688 stream across the estate. There is no high-volume legitimate source to tune out, so a firing is genuinely first-seen and worth reading - but low-severity, because a single benign check also trips it.</Item>
+        <Item>nim-jump-apv02 is a plausible interactive locus. Admins and help-desk often troubleshoot from jump hosts; a first-seen ping there by an IT identity to an internal host is the archetypal benign case. A probe from a server (e.g. nim-est-apv07) or a standard user/service account, to an external target, is the opposite.</Item>
+        <Item>Command-line auditing is 0% on the jump tier. On nim-jump-apv02 process.command_line/process.args are null, so the target may be unreadable from telemetry exactly where the probe is most plausible - the New Terms key still fired on the rule engine's view, but your argline will be empty. Corroborate the target with firewall/proxy/DNS logs, or read the command line on a command-line-audited host (nim-est-apv07 ~100%).</Item>
+        <Item>No recorded benign-true-positive / allow-list. Baseline a specific monitoring check (host/user/command) after confirming it; do not blanket-except the tools.</Item>
+      </Indicators>
+    </FalsePositive>
+    <Misconfiguration>
+      <Definition></Definition>
+    </Misconfiguration>
+    <NeedsEscalation>
+      <Definition></Definition>
+    </NeedsEscalation>
+  </ClassificationGuidance>
+  <ResponseActions>
+    <Phase name="Containment">
+      <Action>This is a low-severity discovery signal; containment is proportionate to the verdict. For a confirmed true_positive (external target / sweep + surrounding recon/staging), treat $host as a foothold: review and constrain its egress, and prepare to isolate if download/lateral activity is confirmed.</Action>
+      <Action>Constrain egress from $host where feasible (especially a server/segmented host) to deny the reachability the probe was testing, pending investigation.</Action>
+      <Action>Preserve the process tree and any downloaded payload (section 17.5) host-side - NBI does not record whether the probe reached its target, so firewall/proxy/DNS correlation and host capture are how reachability is established.</Action>
+      <Action>Do not contain on a single benign-looking internal probe by a plausible IT identity; verify first (section 5/section 13). Deploy/confirm changes only via the authorised human-approved DEPLOY path; investigation is read-only.</Action>
+    </Phase>
+    <Phase name="Eradication">
+      <Action>If a foothold is confirmed, remove any persistence (section 17.2) and any dropped payload from a follow-on download (section 17.5, section 15.10 paths), and block the external target/C2 at the perimeter.</Action>
+      <Action>Hunt the recon chain and the account across the estate (section 15.4, section 17.1): where else $user probed or executed, and whether the same first-seen pattern appears on peers.</Action>
+      <Action>Remediate the initial-access vector that placed the operator on $host.</Action>
+      <Action>For a misconfiguration verdict, baseline the monitoring check (host/user/command) so the first-seen rule does not re-fire on the same benign activity.</Action>
+    </Phase>
+    <Phase name="Recovery">
+      <Action>Confirm egress controls and monitoring are correct on $host, and that any constrained egress can be safely restored.</Action>
+      <Action>Reset $user's credentials only if the account is implicated in a confirmed foothold; otherwise close with the troubleshooting/monitoring context documented.</Action>
+      <Action>Return the host/account to service after section 22 closing criteria are met and monitoring confirms no recon clustering recurs.</Action>
+      <Action>Harden: tighten egress from server/segmented hosts, baseline legitimate monitoring checks, enable command-line auditing on the jump/workstation class (so the probe target is readable, section 8), and prefer alerting on recon clustering (multiple discovery LOLBins by one user) over single probes.</Action>
+    </Phase>
+  </ResponseActions>
+  <Escalation>
+    <Trigger>Escalate to SOC L2 / Tier 3 (and involve the network team) when any of the following hold:
+
+- The target is external/internet and surrounding recon/download tooling is present (section 14.1, section 17.5), or the account swept many targets (section 15.2b).
+- The probe came from a server/Tier-0 host with no troubleshooting remit, or from a script-host/Office parent (section 15.3).
+- Lateral movement (section 17.1), persistence (section 17.2), privilege escalation (section 17.3), or defence evasion (section 17.4) accompanies the probe.
+- The target's nature or the account's legitimacy cannot be resolved from telemetry (cmdline null) - escalate as needs_escalation with the reachability question handed to the network team.</Trigger>
+    <To>SOC L2 / IR</To>
+  </Escalation>
+  <ClosureCriteria>
+    <Item>false_positive (authorised troubleshooting): IT/help-desk/admin role and reason verified, legitimate diagnosed host, no surrounding recon/staging. Documented.</Item>
+    <Item>false_positive (proven-failed reachability): the probe positively failed to reach its target with no follow-on - recorded as a negative result, never a bare "benign"; confirm nothing else followed.</Item>
+    <Item>misconfiguration: a recognised automated health/monitoring check tripped the first-seen rule; the host/user/command is baselined.</Item>
+    <Item>true_positive: malicious reconnaissance confirmed (external target/sweep + surrounding staging); foothold investigation completed, egress reviewed, recon chain and any payload hunted, account pivoted, incident documented.</Item>
+    <Item>needs_escalation: handed to SOC L2 / the network team with the target/role unresolved and the reachability question open.</Item>
+  </ClosureCriteria>
+  <Limitations>
+    <Item>Low severity, high context - read the target and the company it keeps. The tool is never the story; the target (internal vs external), the breadth (single vs sweep), the parent (interactive vs script host), and the surrounding recon/download chain decide it.</Item>
+    <Item>First-seen means benign checks trip it too. New Terms fires on the first (host, user, command line) triple, so a legitimate monitoring check will alert once - hence the misconfiguration branch and the low severity.</Item>
+    <Item>Reachability is unknowable from this index. There is no 5156/Sysmon-3/EDR network telemetry, so logs-system.security* shows the probe was *issued*, never whether it *succeeded*. Corroborate with firewall/proxy/DNS for the true reachability verdict.</Item>
+    <Item>Command-line auditing is 0% on the jump tier, so the target is often unreadable exactly where an interactive probe is most plausible. Read the target on a command-line-audited host (nim-est-apv07 ~100%) or corroborate out of band; empty is not innocence.</Item>
+    <Item>source.ip is the session origin, not the probe target, and it is shared infrastructure (validated 10.11.102.2). Never conflate the two, and never treat the origin IP as an individual identifier.</Item>
+    <Item>KB-worthy (persist to NBI customer scope): (1) ping/tracert/pathping zero-baseline over 4h on 4688; (2) no process-to-network (5156/Sysmon-3) telemetry - reachability not provable in-index; (3) command-line 0% on nim-jump-apv02 vs ~100% on nim-est-apv07; (4) 10.11.102.2 = shared PAM/DC/VDI network-logon source. All observed live on 2026-08-19.</Item>
+  </Limitations>
+</Playbook>

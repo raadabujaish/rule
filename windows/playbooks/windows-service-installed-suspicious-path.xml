@@ -1,0 +1,406 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<Playbook xmlns="https://soc.example/playbooks" id="PB-windows-service-installed-suspicious-path" name="Windows — Service Installed from a Suspicious Path - SOC Playbook" version="3.0" status="Validated" classification="TLP:AMBER">
+  <Metadata>
+    <Owner>NBI SOC / Detection Engineering</Owner>
+    <LastUpdated>2026-08-19</LastUpdated>
+    <Severity default="High">High</Severity>
+    <Confidence default="Medium">Medium</Confidence>
+    <Category>Persistence</Category>
+    <MitreAttack>
+      <Technique id="T1543"/>
+      <Technique id="T1543.003"/>
+      <Technique id="T1569"/>
+      <Technique id="T1569.002"/>
+      <Tactic id="TA0003"/>
+      <Tactic id="TA0004"/>
+    </MitreAttack>
+    <References>
+      <Reference title="MITRE ATT&amp;CK - Create or Modify System Process: Windows Service (T1543.003)" url="https://attack.mitre.org/techniques/T1543/003/"/>
+      <Reference title="MITRE ATT&amp;CK - System Services: Service Execution (T1569.002)" url="https://attack.mitre.org/techniques/T1569/002/"/>
+      <Reference title="MITRE ATT&amp;CK - Persistence tactic (TA0003)" url="https://attack.mitre.org/tactics/TA0003/"/>
+      <Reference title="MITRE ATT&amp;CK - Privilege Escalation tactic (TA0004)" url="https://attack.mitre.org/tactics/TA0004/"/>
+      <Reference title="Microsoft Learn - Event 4697: A service was installed in the system" url="https://learn.microsoft.com/en-us/windows/security/threat-protection/auditing/event-4697"/>
+      <Reference title="LOLBAS - Sc.exe" url="https://lolbas-project.github.io/lolbas/Binaries/Sc/"/>
+      <Reference title="Microsoft Learn / Sysinternals - PsExec (service-based remote execution)" url="https://learn.microsoft.com/en-us/sysinternals/downloads/psexec"/>
+      <Reference title="Red Canary - Threat Detection: Windows service creation and abuse" url="https://redcanary.com/threat-detection-report/techniques/windows-service/"/>
+      <Reference title="MITRE ATT&amp;CK - Create or Modify System Process (T1543)" url="https://attack.mitre.org/techniques/T1543/"/>
+    </References>
+  </Metadata>
+  <AlertContext>
+    <RuleName>Windows — Service Installed from a Suspicious Path</RuleName>
+    <RuleId>nbi-win-service-suspicious-path</RuleId>
+    <RuleType>query</RuleType>
+    <Index>logs-system.security-*</Index>
+    <TriggerLogic>The deployed rule is a query (KQL) rule over Windows Security 4697. Its logic is:
+
+
+
+Plain English: a new Windows service whose executable path is user-writable / non-standard. A service runs with high privilege (often LocalSystem) and can start automatically, so the location it launches from is a security-critical fact. System32/Program Files paths - including the per-user svchost.exe -k &lt;GroupName&gt; service groups that Windows registers on RDP/jump hosts at logon - are normal. Anything under a user-writable directory is abnormal for a service and is the rule's signal.
+
+One-line Kibana KQL detection filter (for fast pivoting in Discover / Timeline):
+
+
+
+Note the coverage reality (see section 8): NBI records service installs as 4697 in the Security log; some hosts instead record installs as 7045 in the System log. Where only 7045 exists, this rule is blind - treat 4697 coverage as partial and complement with 7045 monitoring.</TriggerLogic>
+    <KeyAlertFields>file.path, file.owner, event.action, host.name, process.command_line, process.args</KeyAlertFields>
+  </AlertContext>
+  <Inputs>
+    <Input name="$host"/>
+    <Input name="$subject_user"/>
+    <Input name="$service_name"/>
+  </Inputs>
+  <ExecutiveSummary>
+    <Overview>This playbook drives triage and investigation of the Service Installed from a Suspicious Path detection on NBI's Elastic Security deployment. The rule fires on Event 4697 (a service was installed in the system) where winlog.event_data.ServiceFileName points into a user-writable / non-standard location - \Temp\, \AppData\, \ProgramData\, \Users\Public\, \Windows\Temp\, or \PerfLogs\. Legitimate services almost always run from \Windows\System32\ or \Program Files\; a service binary in a location any user can write to is a classic persistence and lateral-execution technique - a dropped payload registered as a service to gain SYSTEM and survive reboot, or a PsExec-style remote service used to execute code on a target.
+
+The analyst's job is to decide whether this is malicious persistence / lateral execution (true_positive), an authorised install by legitimate software or an administrator (false_positive - authorised), a poorly-packaged product that genuinely installs to such a path (misconfiguration), or unproven (needs_escalation) - classified with evidence attached. The discriminators are the binary path and its reputation, the installing account and how the service was created (remote tooling vs OS/agent servicing), and whether the binary was freshly dropped into that path just before the install.</Overview>
+    <BusinessImpact>A Windows service is a privileged, auto-starting execution primitive managed by the Service Control Manager (services.exe). Registering a service binds a name to a binary path plus a start type and an account (frequently LocalSystem). Because the Service Control Manager will launch that binary as SYSTEM at boot and on demand, a service registered from a directory any user can write to is one of the most reliable ways for an attacker to convert a foothold into durable, high-privilege persistence - or, when done remotely (the PsExec pattern: copy a binary to ADMIN$, create and start a service pointing at it), into lateral code execution on a new host.
+
+An alert therefore means: on $host, a service ($service_name) was installed whose binary lives in a user-writable path. That is the exact shape of service-based persistence/lateral-execution. The service may already be running as SYSTEM. The investigative questions are: is the binary known-good or freshly-dropped/unknown; who installed it and how (remote tooling, a hands-on admin session, or OS/agent servicing); and is there an authorised change that explains it.</BusinessImpact>
+  </ExecutiveSummary>
+  <Investigation>
+    <Goal>Decide true_positive / false_positive / misconfiguration / needs_escalation for Windows — Service Installed from a Suspicious Path.</Goal>
+    <Workflow>
+      <Step order="1" name="Recover the install detail and the binary path">
+        <Purpose>Recover the install detail and the binary path</Purpose>
+        <Query platform="Elastic" language="ES|QL" id="Q-01">
+          <![CDATA[
+FROM logs-system.security-*
+| WHERE event.code == "4697" AND host.name == "$host"
+    AND winlog.event_data.ServiceName == "$service_name"
+    AND @timestamp >= NOW() - 4 hours
+| STATS installs = COUNT(*), first_seen = MIN(@timestamp), last_seen = MAX(@timestamp)
+    BY winlog.event_data.ServiceFileName, winlog.event_data.SubjectUserName
+| SORT installs DESC
+| LIMIT 10
+]]>
+        </Query>
+      </Step>
+      <Step order="2" name="Characterise the installer and how the service was created">
+        <Purpose>Characterise the installer and how the service was created</Purpose>
+        <Query platform="Elastic" language="ES|QL" id="Q-02">
+          <![CDATA[
+FROM logs-system.security-*
+| WHERE host.name == "$host"
+    AND (winlog.event_data.SubjectUserName == "$subject_user" OR winlog.event_data.TargetUserName == "$subject_user")
+    AND event.code IN ("4688","4624","4648","4672")
+    AND @timestamp >= NOW() - 4 hours
+| STATS events = COUNT(*), last_seen = MAX(@timestamp) BY event.code, process.name
+| SORT events DESC
+| LIMIT 20
+]]>
+        </Query>
+      </Step>
+      <Step order="3" name="Was the service binary freshly dropped (FIM)">
+        <Purpose>Was the service binary freshly dropped (FIM)</Purpose>
+        <Query platform="Elastic" language="ES|QL" id="Q-03">
+          <![CDATA[
+FROM logs-fim.event-*
+| WHERE host.name == "$host" AND event.action IN ("created","updated","moved")
+    AND (file.path LIKE "*Temp*" OR file.path LIKE "*AppData*" OR file.path LIKE "*ProgramData*"
+         OR file.path LIKE "*Public*" OR file.path LIKE "*PerfLogs*")
+    AND @timestamp >= NOW() - 4 hours
+| KEEP @timestamp, file.path, file.owner, event.action, host.name
+| SORT @timestamp DESC
+| LIMIT 15
+]]>
+        </Query>
+      </Step>
+      <Step order="4" name="Entity pivoting">
+        <Purpose>Entity pivoting</Purpose>
+        <Query platform="Elastic" language="ES|QL" id="Q-04">
+          <![CDATA[
+FROM logs-system.security-*
+| WHERE @timestamp >= NOW() - 4 hours
+    AND event.code == "4697"
+    AND host.name == "$host"
+    AND winlog.event_data.ServiceName == "$service_name"
+| KEEP @timestamp, host.name, winlog.event_data.ServiceName, winlog.event_data.ServiceFileName, winlog.event_data.SubjectUserName
+| SORT @timestamp DESC
+| LIMIT 20
+]]>
+        </Query>
+      </Step>
+      <Step order="5" name="Process investigation">
+        <Purpose>Process investigation</Purpose>
+        <Query platform="Elastic" language="ES|QL" id="Q-05">
+          <![CDATA[
+FROM logs-system.security-*
+| WHERE @timestamp >= NOW() - 4 hours
+    AND event.code == "4688"
+    AND host.name == "$host"
+    AND winlog.event_data.SubjectUserName == "$subject_user"
+| STATS executions = COUNT(*), last_seen = MAX(@timestamp) BY process.name
+| SORT executions DESC
+| LIMIT 40
+]]>
+        </Query>
+      </Step>
+      <Step order="6" name="Process investigation">
+        <Purpose>Process investigation</Purpose>
+        <Query platform="Elastic" language="ES|QL" id="Q-06">
+          <![CDATA[
+FROM logs-system.security-*
+| WHERE @timestamp >= NOW() - 4 hours
+    AND event.code == "4688"
+    AND host.name == "$host"
+    AND TO_LOWER(process.name) IN ("sc.exe", "psexesvc.exe", "services.exe", "cmd.exe", "powershell.exe", "net.exe", "net1.exe", "psexec.exe", "paexec.exe")
+| STATS executions = COUNT(*), users = COUNT_DISTINCT(user.name) BY process.name, process.parent.name
+| SORT executions DESC
+| LIMIT 30
+]]>
+        </Query>
+      </Step>
+      <Step order="7" name="Parent-Child process analysis">
+        <Purpose>Parent-Child process analysis</Purpose>
+        <Query platform="Elastic" language="ES|QL" id="Q-07">
+          <![CDATA[
+FROM logs-system.security-*
+| WHERE @timestamp >= NOW() - 4 hours
+    AND event.code == "4688"
+    AND host.name == "$host"
+    AND TO_LOWER(process.parent.name) == "services.exe"
+| STATS executions = COUNT(*) BY process.name, process.executable
+| SORT executions DESC
+| LIMIT 30
+]]>
+        </Query>
+      </Step>
+      <Step order="8" name="User investigation">
+        <Purpose>User investigation</Purpose>
+        <Query platform="Elastic" language="ES|QL" id="Q-08">
+          <![CDATA[
+FROM logs-system.security-*
+| WHERE @timestamp >= NOW() - 4 hours
+    AND event.code == "4688"
+    AND winlog.event_data.SubjectUserName == "$subject_user"
+| STATS executions = COUNT(*), distinct_procs = COUNT_DISTINCT(process.name) BY host.name
+| SORT executions DESC
+| LIMIT 20
+]]>
+        </Query>
+      </Step>
+      <Step order="9" name="Host investigation">
+        <Purpose>Host investigation</Purpose>
+        <Query platform="Elastic" language="ES|QL" id="Q-09">
+          <![CDATA[
+FROM logs-system.security-*
+| WHERE @timestamp >= NOW() - 4 hours
+    AND event.code == "4688"
+    AND host.name == "$host"
+| STATS executions = COUNT(*), users = COUNT_DISTINCT(user.name) BY process.name, process.parent.name
+| SORT executions ASC
+| LIMIT 40
+]]>
+        </Query>
+      </Step>
+      <Step order="10" name="IP investigation">
+        <Purpose>IP investigation</Purpose>
+        <Query platform="Elastic" language="ES|QL" id="Q-10">
+          <![CDATA[
+FROM logs-system.security-*
+| WHERE @timestamp >= NOW() - 4 hours
+    AND event.code == "4624"
+    AND host.name == "$host"
+    AND source.ip IS NOT NULL
+    AND winlog.event_data.LogonType IN ("3", "10")
+| STATS logons = COUNT(*), accounts = COUNT_DISTINCT(winlog.event_data.TargetUserName) BY source.ip, winlog.event_data.LogonType
+| SORT logons DESC
+| LIMIT 25
+]]>
+        </Query>
+      </Step>
+      <Step order="11" name="File investigation">
+        <Purpose>File investigation</Purpose>
+        <Query platform="Elastic" language="ES|QL" id="Q-11">
+          <![CDATA[
+FROM logs-fim.event-*
+| WHERE @timestamp >= NOW() - 4 hours
+    AND host.name == "$host"
+| KEEP @timestamp, file.path, file.owner, event.action
+| SORT @timestamp DESC
+| LIMIT 25
+]]>
+        </Query>
+      </Step>
+      <Step order="12" name="Authentication investigation">
+        <Purpose>Authentication investigation</Purpose>
+        <Query platform="Elastic" language="ES|QL" id="Q-12">
+          <![CDATA[
+FROM logs-system.security-*
+| WHERE @timestamp >= NOW() - 4 hours
+    AND event.code IN ("4624", "4625", "4648")
+    AND host.name == "$host"
+| STATS events = COUNT(*), first_seen = MIN(@timestamp), last_seen = MAX(@timestamp) BY event.code, winlog.event_data.LogonType, winlog.event_data.TargetUserName
+| SORT events DESC
+| LIMIT 30
+]]>
+        </Query>
+      </Step>
+      <Step order="13" name="Timeline Reconstruction">
+        <Purpose>Timeline Reconstruction</Purpose>
+        <Query platform="Elastic" language="ES|QL" id="Q-13">
+          <![CDATA[
+FROM logs-system.security-*
+| WHERE @timestamp >= NOW() - 4 hours
+    AND host.name == "$host"
+    AND (event.code == "4697" OR (event.code == "4688" AND TO_LOWER(process.parent.name) == "services.exe"))
+| KEEP @timestamp, event.code, winlog.event_data.ServiceName, winlog.event_data.ServiceFileName, process.name, process.executable, process.parent.name
+| SORT @timestamp ASC
+| LIMIT 200
+]]>
+        </Query>
+      </Step>
+      <Step order="14" name="Lateral movement validation">
+        <Purpose>Lateral movement validation</Purpose>
+        <Query platform="Elastic" language="ES|QL" id="Q-14">
+          <![CDATA[
+FROM logs-system.security-*
+| WHERE @timestamp >= NOW() - 4 hours
+    AND host.name == "$host"
+    AND event.code IN ("4624", "4648", "5140", "5145")
+    AND source.ip IS NOT NULL
+| STATS events = COUNT(*), accounts = COUNT_DISTINCT(winlog.event_data.TargetUserName) BY source.ip, event.code
+| SORT events DESC
+| LIMIT 25
+]]>
+        </Query>
+      </Step>
+      <Step order="15" name="Persistence validation">
+        <Purpose>Persistence validation</Purpose>
+        <Query platform="Elastic" language="ES|QL" id="Q-15">
+          <![CDATA[
+FROM logs-system.security-*
+| WHERE @timestamp >= NOW() - 4 hours
+    AND host.name == "$host"
+    AND event.code IN ("4697", "7045", "4698", "4720")
+| STATS events = COUNT(*), last_seen = MAX(@timestamp) BY event.code
+| SORT events DESC
+| LIMIT 20
+]]>
+        </Query>
+      </Step>
+      <Step order="16" name="Privilege escalation validation">
+        <Purpose>Privilege escalation validation</Purpose>
+        <Query platform="Elastic" language="ES|QL" id="Q-16">
+          <![CDATA[
+FROM logs-system.security-*
+| WHERE @timestamp >= NOW() - 4 hours
+    AND event.code == "4672"
+    AND host.name == "$host"
+| STATS special_priv_logons = COUNT(*) BY user.name
+| SORT special_priv_logons DESC
+| LIMIT 25
+]]>
+        </Query>
+      </Step>
+      <Step order="17" name="Defense evasion validation">
+        <Purpose>Defense evasion validation</Purpose>
+        <Query platform="Elastic" language="ES|QL" id="Q-17">
+          <![CDATA[
+FROM logs-system.security-*
+| WHERE @timestamp >= NOW() - 4 hours
+    AND host.name == "$host"
+    AND (
+        (event.code == "4688" AND TO_LOWER(process.name) IN ("wevtutil.exe", "fsutil.exe", "vssadmin.exe", "wmic.exe", "cipher.exe", "sdelete.exe", "sdelete64.exe"))
+        OR event.code == "1102"
+        OR event.code == "4719"
+    )
+| STATS events = COUNT(*) BY event.code, process.name, user.name
+| SORT events DESC
+| LIMIT 30
+]]>
+        </Query>
+      </Step>
+      <Step order="18" name="Impact assessment">
+        <Purpose>Impact assessment</Purpose>
+        <Query platform="Elastic" language="ES|QL" id="Q-18">
+          <![CDATA[
+FROM logs-system.security-*
+| WHERE @timestamp >= NOW() - 4 hours
+    AND host.name == "$host"
+    AND event.code == "4688"
+    AND TO_LOWER(process.parent.name) == "services.exe"
+| STATS launches = COUNT(*), distinct_images = COUNT_DISTINCT(process.executable) BY process.name
+| SORT launches DESC
+| LIMIT 30
+]]>
+        </Query>
+      </Step>
+      <Step order="19" name="Finalize verdict">
+        <DecisionTree>
+        </DecisionTree>
+      </Step>
+    </Workflow>
+  </Investigation>
+  <ClassificationGuidance>
+    <TruePositive>
+      <Definition></Definition>
+    </TruePositive>
+    <FalsePositive>
+      <Definition></Definition>
+      <Indicators>
+        <Item>Legitimate software with poor packaging - some products genuinely install a service to ProgramData or a vendor sub-folder that trips the user-writable match. These are *authorised* but should still be verified (signed, known binary) and baselined; recommend relocating the binary (misconfiguration).</Item>
+        <Item>Administrator-deployed agents / management tooling - an admin installing a known agent, even from an unusual path, via a change ticket. Authorised - verify the binary signature/hash, then close.</Item>
+        <Item>EDR/backup/monitoring installers that stage a service binary in ProgramData or Temp during setup.</Item>
+        <Item>Blocked malicious attempts - a service-creation attempt positively proven denied (creation failed, binary never executed). Record as a blocked attempt, never "benign".</Item>
+        <Item>Every 4697 install in the validation window was benign System32 svchost servicing. Across the estate, 4697 installs were per-user svchost.exe -k &lt;GroupName&gt; service groups (ClipboardSvcGroup, UnistackSvcGroup, DevicesFlow, PrintWorkflow) registered by the machine account (NIM-JUMP-APV02$, NIM-JUMP-APV03$) at user logon on the jump/VDI hosts - 209 such installs on nim-jump-apv02 alone in 4 hours. These are normal and must not be confused with the rule's target: none had a user-writable ServiceFileName. So a suspicious-path install stands out cleanly.</Item>
+        <Item>The jump/VDI tier generates the most service-install noise, but all of it is System32. The volume is real; the *path* is what the rule keys on, and it is always System32 for these. Do not let the high 4697 count on jump hosts mask a single anomalous-path install - filter on the path, not the count.</Item>
+        <Item>FIM is live but partial. logs-fim.event-* is populated (validated: created/updated/attributes_modified events for hosts like nim-py-apv1, nim-dc-dbap01, nim-jump-apv05), so drop-then-register correlation (section 14.3 / section 15.10) works on monitored hosts - but coverage is sparse. An empty FIM result never proves the binary was not dropped; the host may be outside FIM scope.</Item>
+        <Item>No historical NBI benign-true-positive is on record for this rule. There is no environment-specific allow-list. Never encode a path or account exclusion an attacker could reuse; scope any exception to the exact verified binary (name + hash + path) + service + installer.</Item>
+      </Indicators>
+    </FalsePositive>
+    <Misconfiguration>
+      <Definition></Definition>
+    </Misconfiguration>
+    <NeedsEscalation>
+      <Definition></Definition>
+    </NeedsEscalation>
+  </ClassificationGuidance>
+  <ResponseActions>
+    <Phase name="Containment">
+      <Action>Stop and disable the service ($service_name) and quarantine the binary at the ServiceFileName path if a true_positive is confirmed, to halt SYSTEM-level execution and prevent restart-persistence.</Action>
+      <Action>Isolate $host (network-contain / quarantine) if the service is running or follow-on SYSTEM activity is visible. On a shared jump/VDI host, coordinate with IT but prioritise containment.</Action>
+      <Action>Reset the installing account ($subject_user) and, if the install came from a remote origin (section 15.6 / section 17.1), contain that origin host too.</Action>
+      <Action>Preserve volatile evidence first: capture the binary (for hashing/reverse-engineering), the service configuration (registry HKLM\SYSTEM\CurrentControlSet\Services\&lt;name&gt;), the FIM record of the drop (section 15.10), and the running process tree before removal.</Action>
+      <Action>Deploy/confirm changes only via the authorised human-approved DEPLOY path; investigation itself is read-only.</Action>
+    </Phase>
+    <Phase name="Eradication">
+      <Action>Remove the service (delete the registry service key and the binary) and any additional persistence found in section 17.2 (other services, scheduled tasks, accounts).</Action>
+      <Action>Identify and close the drop vector: how the binary reached the writable path (remote copy to ADMIN$ via section 15.6/section 17.1, a dropped payload from an earlier foothold, or a hands-on session) - remediate that access.</Action>
+      <Action>Hunt the binary hash and service name across the estate - especially peers reachable for remote service creation - and any host the installer or origin touched (section 15.4, section 17.1). PsExec-style operators reuse the same binary widely.</Action>
+      <Action>Run a full anti-malware / EDR scan on $host and confirm no residual SYSTEM implant.</Action>
+    </Phase>
+    <Phase name="Recovery">
+      <Action>Reset credentials exposed on $host during the SYSTEM-level compromise window (local accounts, cached domain creds, any service credentials the host held); rotate privileged accounts that logged on there.</Action>
+      <Action>Restore $host from a known-good image if the service ran as SYSTEM and the extent of tampering is uncertain; otherwise validate eradication holds after reboot and that the service does not reappear.</Action>
+      <Action>Return the host to service only after section 22 closing criteria are met and monitoring confirms no re-installation of the service.</Action>
+      <Action>Recommend hardening (section 23): restrict service creation to administrators from managed tooling, harden ACLs on user-writable paths, application-allowlist service binaries, and monitor 4697 and 7045 together across the estate to close the coverage gap.</Action>
+    </Phase>
+  </ResponseActions>
+  <Escalation>
+    <Trigger>Escalate to Tier 3 / Incident Response and the endpoint team (and notify the customer) when any of the following hold:
+
+- The service binary is unsigned/unknown or verified malicious, or was freshly dropped into the writable path before the install (section 14.3 / section 15.10).
+- The install shows remote-install tooling (psexesvc.exe, remote sc.exe) or followed a network/interactive session from an unexpected origin (section 14.2 / section 15.6 / section 17.1) - lateral execution.
+- The service is running as SYSTEM with follow-on activity (section 17.5), or additional persistence is present (section 17.2).
+- Log clearing or audit-policy tampering appears (section 17.4).
+- The binary cannot be verified or the host is outside FIM/EDR visibility and authorisation cannot be established - escalate as needs_escalation with the gaps named.</Trigger>
+    <To>SOC L2 / IR</To>
+  </Escalation>
+  <ClosureCriteria>
+    <Item>false_positive (authorised): a change record + a verified-benign (signed / known-hash) binary are positively matched to the install; even an unusual path is the product's documented behaviour. Record the ticket and binary verdict. Scope any exception to the exact binary (name + hash + path) + service + installer - never a bare path/account exclusion.</Item>
+    <Item>false_positive (blocked attempt): the service-creation attempt is positively proven denied (no service running, binary never executed) - documented as blocked, never "benign"; the installer is still investigated.</Item>
+    <Item>misconfiguration: a recognised legitimate product installs its service to a user-writable path by design; baseline it and recommend relocating the binary + hardening path ACLs.</Item>
+    <Item>true_positive: malicious service persistence / lateral execution confirmed; service removed, binary quarantined, host contained, installing account reset, drop vector and lateral movement hunted, and no recurrence on monitoring.</Item>
+    <Item>needs_escalation: handed to the endpoint team / Tier 3 with the specific evidence gaps documented (binary unverified, host outside FIM/EDR).</Item>
+  </ClosureCriteria>
+  <Limitations>
+    <Item>Read the path, not the count. The estate's entire 4697 baseline is System32 servicing - 209 benign per-user svchost -k &lt;Group&gt; installs on nim-jump-apv02 in 4 hours. The rule keys on the ServiceFileName location; a single user-writable-path install is the anomaly regardless of how much benign 4697 noise a jump host produces.</Item>
+    <Item>Coverage is partial - 4697 vs 7045. Some hosts record service installs only as 7045 in the System log, where this Security-log rule is blind. Pair it with 7045 monitoring; the highest-value complementary analytic is 7045 + service binary-path modification (attackers also repoint an *existing* service instead of creating one).</Item>
+    <Item>Verify the binary - it is not in telemetry. No process/file hash is collected; the signature + SHA-256 must come from $host. This single out-of-band step usually decides the verdict. An unsigned binary in Temp/ProgramData/Public is textbook malicious persistence.</Item>
+    <Item>FIM is live but sparse. Drop-then-register correlation works on monitored hosts (nim-py-apv1, nim-dc-dbap01, nim-jump-apv05 seen) and is powerful when present, but an empty FIM result is inconclusive - the host may be outside scope.</Item>
+    <Item>Machine accounts need SubjectUserName. The installer of the benign svchost groups is the machine account (NIM-JUMP-APV02$), which collapses to SYSTEM under user.name on 4688; key installer pivots on vendor-native winlog.event_data.SubjectUserName (as section 14.2/section 15.2a do) to resolve it correctly.</Item>
+    <Item>Evasion to expect: install from System32/Program Files after dropping the binary there; modify an existing service's binary path instead of creating one; or use a host that only logs 7045. Complement with 7045, service binary-path-modification, the unquoted-service-path rule, and FIM creation of executables in both writable and system paths (section 24).</Item>
+    <Item>KB-worthy (persist to NBI customer scope): (1) 4697 baseline is 100% System32 svchost -k per-user groups installed by machine accounts on jump/VDI hosts (nim-jump-apv02 ~209/4h); (2) logs-fim.event-* is live but sparse (monitored hosts incl. nim-py-apv1, nim-dc-dbap01, nim-jump-apv05); (3) process.hash.* absent on 4688 - service binaries must be hashed host-side; (4) 4697-vs-7045 coverage gap. Observed live 2026-08-19.</Item>
+  </Limitations>
+</Playbook>

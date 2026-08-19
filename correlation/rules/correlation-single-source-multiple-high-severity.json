@@ -1,0 +1,74 @@
+{
+  "name": "Correlation — Single Source Firing Multiple High-Severity Detections",
+  "tags": [
+    "NBI",
+    "detection-recovery-2026-08",
+    "PT-validated",
+    "correlation",
+    "incident",
+    "multi-stage"
+  ],
+  "interval": "1h",
+  "enabled": true,
+  "description": "A single source IP triggered 2 or more distinct high- or critical-severity detections still open within 24 hours — a meta-correlation that promotes a multi-stage attack chain from one entity into a single incident. Rather than detecting a technique, it fuses existing alerts by source.ip so an analyst sees the campaign, not scattered signals. Because it spans techniques, it should carry the union of contributing techniques rather than a single ATT&CK tag.",
+  "risk_score": 73,
+  "severity": "high",
+  "note": "### Investigation\n1. Read the rules list — are the contributing detections independent stages (recon + credential access + lateral movement) or the same behaviour double-counted?\n2. Confirm source.ip is a real adversary foothold and not a busy mgmt/security scanner that legitimately trips behavioural rules.\n3. Rebuild the timeline from first_seen across the contributing alerts to establish sequence and dwell.\n4. Pivot into each contributing alert for the actor accounts, target hosts, and techniques involved.\n5. Escalate to incident when 2+ genuinely independent tactics converge on one non-infrastructure source.\n\n### False positives / benign\nA busy management or security source (vuln scanner, EDR, monitoring) can legitimately trip two behavioural rules and inflate distinct_rules. More importantly, two of NBI's own rules firing on the SAME behaviour (e.g., idx5 NTLM fan-out and idx10 on one host) count as two distinct_rules without being two independent stages. Distinguish by whether the contributing rules represent different tactics, and resolve the source against known_infrastructure — do not simply exclude scanner IPs, which would suppress a real chain staged from a compromised admin host.",
+  "output_index": "",
+  "investigation_fields": {
+    "field_names": [
+      "source.ip",
+      "distinct_rules",
+      "total_alerts",
+      "rules",
+      "tactics",
+      "first_seen"
+    ]
+  },
+  "author": [
+    "raadabujaish"
+  ],
+  "false_positives": [
+    "A busy management/security source that legitimately trips two high-severity behavioral rules — validate the source and its rules; genuine multi-stage chains are rare."
+  ],
+  "from": "now-24h",
+  "rule_id": "nbi-corr-multistage-attack-chain",
+  "max_signals": 100,
+  "risk_score_mapping": [],
+  "severity_mapping": [],
+  "threat": [
+    {
+      "framework": "MITRE ATT&CK",
+      "tactic": {
+        "id": "TA0008",
+        "name": "Lateral Movement",
+        "reference": "https://attack.mitre.org/tactics/TA0008/"
+      },
+      "technique": [
+        {
+          "id": "T1078",
+          "name": "Valid Accounts",
+          "reference": "https://attack.mitre.org/techniques/T1078/",
+          "subtechnique": [
+            {
+              "id": "T1078.002",
+              "name": "Domain Accounts",
+              "reference": "https://attack.mitre.org/techniques/T1078/002/"
+            }
+          ]
+        }
+      ]
+    }
+  ],
+  "to": "now",
+  "references": [],
+  "version": 1,
+  "exceptions_list": [],
+  "related_integrations": [],
+  "required_fields": [],
+  "setup": "",
+  "type": "esql",
+  "language": "esql",
+  "query": "FROM .internal.alerts-security.alerts-*\n| WHERE source.ip IS NOT NULL AND kibana.alert.rule.name IS NOT NULL AND kibana.alert.severity IN (\"high\",\"critical\") AND kibana.alert.workflow_status != \"closed\"\n| STATS distinct_rules = COUNT_DISTINCT(kibana.alert.rule.name), total_alerts = COUNT(*), rules = VALUES(kibana.alert.rule.name), tactics = VALUES(kibana.alert.rule.name), first_seen = MIN(@timestamp), last_seen = MAX(@timestamp) BY source.ip\n| WHERE distinct_rules >= 2\n| SORT distinct_rules DESC",
+  "actions": []
+}

@@ -1,0 +1,421 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<Playbook xmlns="https://soc.example/playbooks" id="PB-windows-curl-file-transfer" name="Potential File Transfer via Curl for Windows [NBI-4688] - SOC Playbook" version="3.0" status="Validated" classification="TLP:AMBER">
+  <Metadata>
+    <Owner>NBI SOC / Detection Engineering</Owner>
+    <LastUpdated>2026-08-19</LastUpdated>
+    <Severity default="low">low</Severity>
+    <Confidence default="Medium">Medium</Confidence>
+    <Category>Command and Control</Category>
+    <MitreAttack>
+      <Technique id="T1105"/>
+      <Technique id="T1071.001"/>
+      <Technique id="T1071"/>
+      <Tactic id="TA0011"/>
+    </MitreAttack>
+    <References>
+      <Reference title="MITRE ATT&amp;CK - Ingress Tool Transfer (T1105)" url="https://attack.mitre.org/techniques/T1105/"/>
+      <Reference title="MITRE ATT&amp;CK - Application Layer Protocol: Web Protocols (T1071.001)" url="https://attack.mitre.org/techniques/T1071/001/"/>
+      <Reference title="MITRE ATT&amp;CK - Command and Control tactic (TA0011)" url="https://attack.mitre.org/tactics/TA0011/"/>
+      <Reference title='Elastic - "Potential File Transfer via Curl" prebuilt rule reference' url="https://www.elastic.co/docs/reference/security/prebuilt-rules/rules/windows/command_and_control_file_transfer_via_curl"/>
+      <Reference title="LOLBAS - Curl.exe" url="https://lolbas-project.github.io/lolbas/Binaries/Curl/"/>
+      <Reference title="curl manual (flags: -o/-O/-k/--data)" url="https://curl.se/docs/manpage.html"/>
+      <Reference title="Microsoft Learn - Command line process auditing (Event 4688 command-line GPO)" url="https://learn.microsoft.com/en-us/windows-server/identity/ad-ds/manage/component-updates/command-line-process-auditing"/>
+      <Reference title="Microsoft Learn - curl is now shipped in Windows" url="https://techcommunity.microsoft.com/t5/containers/tar-and-curl-come-to-windows/ba-p/382409"/>
+    </References>
+  </Metadata>
+  <AlertContext>
+    <RuleName>Potential File Transfer via Curl for Windows [NBI-4688]</RuleName>
+    <RuleId>nbi-b2-potential-file-transfer-via-curl-for-windows</RuleId>
+    <RuleType>eql</RuleType>
+    <Index>logs-system.security*</Index>
+    <TriggerLogic>The deployed rule is an EQL process rule. Faithful plain-English of the deployed trigger logic: a Windows process start (Event 4688) for curl.exe (image in System32 or SysWOW64) whose command line contains http, where the parent process is one of the shell/scripting/LOLBin set (cmd.exe, powershell.exe, rundll32.exe, explorer.exe, conhost.exe, forfiles.exe, wscript.exe, cscript.exe, mshta.exe, hh.exe, mmc.exe), and the process is not running as SYSTEM / at System integrity.
+
+One-line Kibana KQL detection filter (for fast pivoting in Discover / Timeline):
+
+
+
+Why each clause exists: the http substring narrows to network fetches (not local curl file:// or --help); the shell/LOLBin parent set is where a hands-on operator or a malicious script would spawn curl; the SYSTEM/System-integrity exclusion removes the noisy machine-context servicing/telemetry curl calls and focuses on interactive or scripted user activity, which is where ingress transfer lives. On NBI the command-line clause has a major caveat: process.command_line is only ~50% populated (see section 8), so the deployed EQL and this playbook corroborate the URL from process.args (multivalued → MV_CONCAT(process.args, " ")); an e</TriggerLogic>
+    <KeyAlertFields>process.name, process.executable, curl.exe, process.parent.name, process.parent.executable, process.pid, process.parent.pid, process.entity_id, user.name, user.domain, host.name, host.os.type</KeyAlertFields>
+  </AlertContext>
+  <Inputs>
+    <Input name="$host"/>
+    <Input name="$user"/>
+    <Input name="$parent"/>
+    <Input name="$source_ip"/>
+  </Inputs>
+  <ExecutiveSummary>
+    <Overview>This playbook drives triage and investigation of the Potential File Transfer via Curl for Windows detection on NBI's Elastic Security deployment. The rule fires when the built-in Windows curl.exe (shipped in C:\Windows\System32\curl.exe / SysWOW64) is started with a command line that contains http, launched by a shell / scripting / LOLBin parent (cmd, powershell, rundll32, explorer, conhost, forfiles, wscript, cscript, mshta, hh, mmc), while running under a non-SYSTEM / non-System-integrity account. In short: an interactive or scripted context used the native curl to fetch something over HTTP(S).
+
+curl.exe is a legitimate, Microsoft-signed, built-in transfer utility - and for exactly that reason it is a favourite ingress tool transfer living-off-the-land binary: after gaining a foothold, an attacker uses it to pull a second-stage payload, tool, or configuration from a remote server over ordinary web traffic that blends with normal browsing. The same command is also run legitimately by developers, installers, and admin scripts.
+
+The analyst's job is to determine, quickly and defensibly, whether this curl invocation fetched an attacker payload, performed an authorised/benign transfer, or is an unbaselined-but-legitimate automation - and to classify the alert as true_positive, false_positive, misconfiguration, or needs_escalation with evidence attached. The URL curl contacted, the parent that launched it, and what executed on the host afterwards decide it.</Overview>
+    <BusinessImpact>An alert means: on $host, a non-SYSTEM account ($user) launched the native curl.exe from a shell/scripting parent ($parent) with an HTTP(S) URL on the command line. Because 4688 records a process *start*, the fetch has already been invoked - the investigative question is not *did a curl HTTP request happen* (it did) but *what was fetched, from where, and what happened to it*.
+
+curl.exe has been shipped in-box on Windows 10/11 and Windows Server since 2018, so it is present and signed on every modern host - no dropper needed. That makes it a clean ingress primitive: one signed, allow-listed binary can retrieve an arbitrary remote file over HTTP(S)/FTP, optionally writing it straight to disk (-o/-O) in a location of the attacker's choosing. The alert is therefore the observable signature of the download step of an intrusion. Whether that download is a malware payload or a developer pulling a package is what the URL, the parent, and the post-transfer execution reveal.</BusinessImpact>
+  </ExecutiveSummary>
+  <Investigation>
+    <Goal>Decide true_positive / false_positive / misconfiguration / needs_escalation for Potential File Transfer via Curl for Windows [NBI-4688].</Goal>
+    <Workflow>
+      <Step order="1" name="Confirm the curl request and its URL on the alert host">
+        <Purpose>Confirm the curl request and its URL on the alert host</Purpose>
+        <Query platform="Elastic" language="ES|QL" id="Q-01">
+          <![CDATA[
+FROM logs-system.security-*
+| WHERE event.code == "4688" AND host.name == "$host" AND TO_LOWER(process.name) == "curl.exe" AND @timestamp >= NOW() - 4 hours
+| EVAL cl = TO_LOWER(COALESCE(process.command_line, MV_CONCAT(process.args, " ")))
+| WHERE cl LIKE "*http*"
+| KEEP @timestamp, user.name, process.parent.name, process.executable, process.command_line, process.args
+| SORT @timestamp DESC
+| LIMIT 20
+]]>
+        </Query>
+      </Step>
+      <Step order="2" name="Reproduce the rule estate-wide (confirm the detection logic)">
+        <Purpose>Reproduce the rule estate-wide (confirm the detection logic)</Purpose>
+        <Query platform="Elastic" language="ES|QL" id="Q-02">
+          <![CDATA[
+FROM logs-system.security-*
+| WHERE @timestamp >= NOW() - 4 hours
+    AND event.code == "4688" AND event.type == "start"
+    AND TO_LOWER(process.name) == "curl.exe"
+    AND TO_LOWER(process.parent.name) IN ("cmd.exe","powershell.exe","rundll32.exe","explorer.exe","conhost.exe","forfiles.exe","wscript.exe","cscript.exe","mshta.exe","hh.exe","mmc.exe")
+    AND NOT TO_LOWER(user.name) == "system"
+| EVAL cl = TO_LOWER(COALESCE(process.command_line, MV_CONCAT(process.args, " ")))
+| WHERE cl LIKE "*http*"
+| KEEP @timestamp, host.name, user.name, process.parent.name, process.executable, process.command_line
+| SORT @timestamp DESC
+| LIMIT 100
+]]>
+        </Query>
+      </Step>
+      <Step order="3" name="Entity pivoting">
+        <Purpose>Entity pivoting</Purpose>
+        <Query platform="Elastic" language="ES|QL" id="Q-03">
+          <![CDATA[
+FROM logs-system.security-*
+| WHERE @timestamp >= NOW() - 4 hours
+    AND event.code == "4688"
+    AND host.name == "$host"
+    AND TO_LOWER(process.name) == "curl.exe"
+| KEEP @timestamp, host.name, user.name, user.domain, process.parent.name, process.parent.pid, process.pid, process.executable, process.command_line, process.args
+| SORT @timestamp DESC
+| LIMIT 50
+]]>
+        </Query>
+      </Step>
+      <Step order="4" name="Process investigation">
+        <Purpose>Process investigation</Purpose>
+        <Query platform="Elastic" language="ES|QL" id="Q-04">
+          <![CDATA[
+FROM logs-system.security-*
+| WHERE @timestamp >= NOW() - 4 hours
+    AND event.code == "4688"
+    AND TO_LOWER(process.name) == "curl.exe"
+| STATS executions = COUNT(*), hosts = COUNT_DISTINCT(host.name), users = COUNT_DISTINCT(user.name) BY process.parent.name
+| SORT executions DESC
+| LIMIT 50
+]]>
+        </Query>
+      </Step>
+      <Step order="5" name="Process investigation">
+        <Purpose>Process investigation</Purpose>
+        <Query platform="Elastic" language="ES|QL" id="Q-05">
+          <![CDATA[
+FROM logs-system.security-*
+| WHERE @timestamp >= NOW() - 4 hours
+    AND event.code == "4688"
+    AND host.name == "$host"
+    AND TO_LOWER(process.name) == "curl.exe"
+| EVAL arguments = MV_CONCAT(process.args, " ")
+| KEEP @timestamp, user.name, process.parent.name, process.executable, process.command_line, arguments
+| SORT @timestamp DESC
+| LIMIT 50
+]]>
+        </Query>
+      </Step>
+      <Step order="6" name="Parent-Child process analysis">
+        <Purpose>Parent-Child process analysis</Purpose>
+        <Query platform="Elastic" language="ES|QL" id="Q-06">
+          <![CDATA[
+FROM logs-system.security-*
+| WHERE event.code == "4688" AND host.name == "$host" AND process.parent.name == "$parent" AND @timestamp >= NOW() - 4 hours
+| STATS spawned = COUNT(*), users = COUNT_DISTINCT(user.name), distinct_children = COUNT_DISTINCT(process.name) BY process.name
+| SORT spawned DESC
+| LIMIT 20
+]]>
+        </Query>
+      </Step>
+      <Step order="7" name="Parent-Child process analysis">
+        <Purpose>Parent-Child process analysis</Purpose>
+        <Query platform="Elastic" language="ES|QL" id="Q-07">
+          <![CDATA[
+FROM logs-system.security-*
+| WHERE @timestamp >= NOW() - 4 hours
+    AND event.code == "4688"
+    AND host.name == "$host" AND user.name == "$user" AND process.parent.name == "$parent"
+| KEEP @timestamp, process.parent.name, process.parent.pid, process.name, process.pid, process.executable
+| SORT @timestamp DESC
+| LIMIT 100
+]]>
+        </Query>
+      </Step>
+      <Step order="8" name="User investigation">
+        <Purpose>User investigation</Purpose>
+        <Query platform="Elastic" language="ES|QL" id="Q-08">
+          <![CDATA[
+FROM logs-system.security-*
+| WHERE @timestamp >= NOW() - 4 hours
+    AND event.code == "4688"
+    AND user.name == "$user"
+| STATS executions = COUNT(*), distinct_procs = COUNT_DISTINCT(process.name) BY host.name
+| SORT executions DESC
+| LIMIT 20
+]]>
+        </Query>
+      </Step>
+      <Step order="9" name="Host investigation">
+        <Purpose>Host investigation</Purpose>
+        <Query platform="Elastic" language="ES|QL" id="Q-09">
+          <![CDATA[
+FROM logs-system.security-*
+| WHERE @timestamp >= NOW() - 4 hours
+    AND event.code == "4688"
+    AND host.name == "$host"
+| STATS executions = COUNT(*), users = COUNT_DISTINCT(user.name) BY process.name, process.parent.name
+| SORT executions ASC
+| LIMIT 40
+]]>
+        </Query>
+      </Step>
+      <Step order="10" name="IP investigation">
+        <Purpose>IP investigation</Purpose>
+        <Query platform="Elastic" language="ES|QL" id="Q-10">
+          <![CDATA[
+FROM logs-system.security-*
+| WHERE @timestamp >= NOW() - 4 hours
+    AND event.code == "4624"
+    AND host.name == "$host" AND user.name == "$user"
+    AND source.ip IS NOT NULL
+| STATS logons = COUNT(*) BY source.ip, winlog.event_data.LogonType
+| SORT logons DESC
+| LIMIT 20
+]]>
+        </Query>
+      </Step>
+      <Step order="11" name="IP investigation">
+        <Purpose>IP investigation</Purpose>
+        <Query platform="Elastic" language="ES|QL" id="Q-11">
+          <![CDATA[
+FROM logs-system.security-*
+| WHERE @timestamp >= NOW() - 4 hours
+    AND event.code == "4624"
+    AND source.ip == "$source_ip"
+| STATS logons = COUNT(*) BY user.name, host.name, winlog.event_data.LogonType
+| SORT logons DESC
+| LIMIT 25
+]]>
+        </Query>
+      </Step>
+      <Step order="12" name="File investigation">
+        <Purpose>File investigation</Purpose>
+        <Query platform="Elastic" language="ES|QL" id="Q-12">
+          <![CDATA[
+FROM logs-system.security-*
+| WHERE event.code == "4688" AND host.name == "$host" AND user.name == "$user" AND @timestamp >= NOW() - 4 hours
+| EVAL exe = TO_LOWER(process.executable)
+| WHERE NOT exe LIKE "*system32*" AND NOT exe LIKE "*syswow64*" AND NOT exe LIKE "*program files*" AND NOT exe LIKE "*windows*"
+| STATS execs = COUNT(*), first_seen = MIN(@timestamp), last_seen = MAX(@timestamp) BY process.name, process.executable
+| SORT execs DESC
+| LIMIT 20
+]]>
+        </Query>
+      </Step>
+      <Step order="13" name="Authentication investigation">
+        <Purpose>Authentication investigation</Purpose>
+        <Query platform="Elastic" language="ES|QL" id="Q-13">
+          <![CDATA[
+FROM logs-system.security-*
+| WHERE @timestamp >= NOW() - 4 hours
+    AND event.code IN ("4624", "4625", "4634", "4647")
+    AND host.name == "$host" AND user.name == "$user"
+| STATS events = COUNT(*), first_seen = MIN(@timestamp), last_seen = MAX(@timestamp) BY event.code, winlog.event_data.LogonType, source.ip
+| SORT events DESC
+| LIMIT 30
+]]>
+        </Query>
+      </Step>
+      <Step order="14" name="Timeline Reconstruction">
+        <Purpose>Timeline Reconstruction</Purpose>
+        <Query platform="Elastic" language="ES|QL" id="Q-14">
+          <![CDATA[
+FROM logs-system.security-*
+| WHERE @timestamp >= NOW() - 4 hours
+    AND event.code == "4688"
+    AND host.name == "$host"
+    AND user.name == "$user"
+| KEEP @timestamp, process.parent.name, process.parent.pid, process.name, process.pid, process.executable, process.command_line
+| SORT @timestamp ASC
+| LIMIT 200
+]]>
+        </Query>
+      </Step>
+      <Step order="15" name="Lateral movement validation">
+        <Purpose>Lateral movement validation</Purpose>
+        <Query platform="Elastic" language="ES|QL" id="Q-15">
+          <![CDATA[
+FROM logs-system.security-*
+| WHERE @timestamp >= NOW() - 4 hours
+    AND event.code IN ("4624", "4648", "4768", "4769", "5140")
+    AND user.name == "$user"
+    AND host.name != "$host"
+| STATS events = COUNT(*) BY host.name, event.code, winlog.event_data.LogonType
+| SORT events DESC
+| LIMIT 30
+]]>
+        </Query>
+      </Step>
+      <Step order="16" name="Persistence validation">
+        <Purpose>Persistence validation</Purpose>
+        <Query platform="Elastic" language="ES|QL" id="Q-16">
+          <![CDATA[
+FROM logs-system.security-*
+| WHERE @timestamp >= NOW() - 4 hours
+    AND host.name == "$host"
+    AND (
+        (event.code == "4688" AND TO_LOWER(process.name) IN ("schtasks.exe", "reg.exe", "sc.exe", "at.exe", "powershell.exe", "wscript.exe", "cscript.exe", "rundll32.exe", "mshta.exe"))
+        OR event.code == "7045"
+        OR event.code == "4720"
+        OR event.code == "4698"
+    )
+| STATS events = COUNT(*) BY event.code, process.name, user.name
+| SORT events DESC
+| LIMIT 40
+]]>
+        </Query>
+      </Step>
+      <Step order="17" name="Privilege escalation validation">
+        <Purpose>Privilege escalation validation</Purpose>
+        <Query platform="Elastic" language="ES|QL" id="Q-17">
+          <![CDATA[
+FROM logs-system.security-*
+| WHERE @timestamp >= NOW() - 4 hours
+    AND event.code == "4672"
+    AND host.name == "$host"
+| STATS special_priv_logons = COUNT(*) BY user.name
+| SORT special_priv_logons DESC
+| LIMIT 25
+]]>
+        </Query>
+      </Step>
+      <Step order="18" name="Defense evasion validation">
+        <Purpose>Defense evasion validation</Purpose>
+        <Query platform="Elastic" language="ES|QL" id="Q-18">
+          <![CDATA[
+FROM logs-system.security-*
+| WHERE @timestamp >= NOW() - 4 hours
+    AND host.name == "$host"
+    AND (
+        (event.code == "4688" AND TO_LOWER(process.name) IN ("wevtutil.exe", "fsutil.exe", "vssadmin.exe", "wmic.exe", "cipher.exe", "sdelete.exe", "sdelete64.exe"))
+        OR event.code == "1102"
+        OR event.code == "4719"
+    )
+| STATS events = COUNT(*) BY event.code, process.name, user.name
+| SORT events DESC
+| LIMIT 30
+]]>
+        </Query>
+      </Step>
+      <Step order="19" name="Impact assessment">
+        <Purpose>Impact assessment</Purpose>
+        <Query platform="Elastic" language="ES|QL" id="Q-19">
+          <![CDATA[
+FROM logs-system.security-*
+| WHERE @timestamp >= NOW() - 4 hours
+    AND host.name == "$host"
+    AND event.code == "4688"
+    AND process.parent.name == "$parent"
+| STATS children = COUNT(*), distinct_children = COUNT_DISTINCT(process.name) BY process.name, user.name
+| SORT children DESC
+| LIMIT 30
+]]>
+        </Query>
+      </Step>
+      <Step order="20" name="Finalize verdict">
+        <DecisionTree>
+        </DecisionTree>
+      </Step>
+    </Workflow>
+  </Investigation>
+  <ClassificationGuidance>
+    <TruePositive>
+      <Definition></Definition>
+    </TruePositive>
+    <FalsePositive>
+      <Definition></Definition>
+      <Indicators>
+        <Item>Developers and admins pulling packages, scripts, or API responses from internal mirrors or known vendor endpoints - curl https://&lt;internal-mirror&gt;/..., curl https://api.&lt;vendor&gt;.com/... - run interactively from cmd/powershell under explorer.exe.</Item>
+        <Item>Installers and setup routines that shell out to curl to fetch components or check for updates during software installation.</Item>
+        <Item>Automation / CI / configuration-management scripts that use curl for health checks, artifact retrieval, or webhook calls against recognised destinations.</Item>
+        <Item>Monitoring, update, or telemetry agents that invoke curl programmatically as part of their normal operation.</Item>
+        <Item>curl.exe has a zero baseline in NBI. Across the estate in a 4-hour window, curl.exe appeared 0 times on the 4688 stream. Native curl use by non-system accounts is rare here, so any firing is a genuine anomaly with no noisy legitimate source to tune out - but also no in-environment allow-list to lean on. Treat each hit on its own merits.</Item>
+        <Item>Jump/VDI hosts carry heavy interactive dev tooling that mimics "bad" patterns. On nim-jump-apv02 (a Citrix/MobaXterm jump host with ~32 interactive users), the validated $user (Mahmoud.Akram) runs an SSH/terminal client - MoTTYnew.exe, XWin_MobaX.exe, xkbcomp_w32.exe - from C:\Users\MAHMOU~1.AKR\AppData\Roaming\MobaXterm\slash\bin\. That is a binary executing from a user-writable AppData path, which is exactly the shape a naive post-transfer hunt (section 15.10) would flag - yet it is benign, sanctioned tooling. On these hosts, a non-standard-path binary is a *lead*, not a verdict: correlate it to an actual curl fetch and a suspicious URL before escalating.</Item>
+        <Item>Command-line capture is bimodal. process.command_line is enabled on some servers (~100% on hosts like nim-est-apv07) and absent on the jump/VDI tier where interactive curl is most plausible. Expect the URL/flags to sometimes be recoverable only from process.args, and sometimes not present at all - which pushes ambiguous cases to needs_escalation with a proxy pull, not to a benign close.</Item>
+        <Item>No NBI benign-true-positive is on record for this rule. There is no environment-specific allow-list. Do not create a blanket host/user exception off a single alert; scope any exception to an exact URL/destination + parent + user only after a documented authorised cause.</Item>
+      </Indicators>
+    </FalsePositive>
+    <Misconfiguration>
+      <Definition></Definition>
+    </Misconfiguration>
+    <NeedsEscalation>
+      <Definition></Definition>
+    </NeedsEscalation>
+  </ClassificationGuidance>
+  <ResponseActions>
+    <Phase name="Containment">
+      <Action>Isolate $host (network-contain / quarantine) if a true_positive is confirmed, to stop the downloaded payload's execution and any C2. On a shared jump/VDI host, coordinate with IT to avoid dropping unrelated user sessions unnecessarily, but prioritise containment.</Action>
+      <Action>Block the source at the perimeter. Give the proxy/network team the URL/host/IP recovered from the curl command line (section 14.1/section 15.2b) to block egress to the destination and to confirm out-of-band what was actually fetched.</Action>
+      <Action>Suspend or force-logoff $user's session on $host and disable the account pending investigation if the user context is implicated; reset its credentials (section 20).</Action>
+      <Action>Capture and quarantine the fetched file (the non-standard-path binary from section 15.10) for analysis before it is deleted; terminate the payload process and its descendants ($parent tree from section 15.3b/section 17.5) if the host cannot yet be isolated.</Action>
+      <Action>Preserve volatile evidence first where feasible (running process list, the file on disk, memory) - NBI does not collect the network fetch, so host-side and proxy-side capture are the only way to recover the destination and payload.</Action>
+      <Action>Deploy/confirm changes only via the authorised human-approved DEPLOY path; investigation itself is read-only.</Action>
+    </Phase>
+    <Phase name="Eradication">
+      <Action>Remove the downloaded payload identified via section 15.10 (its process.executable path) and any copies it wrote.</Action>
+      <Action>Remove persistence discovered in section 17.2 (services, scheduled tasks, Run keys, rogue accounts) that the payload installed.</Action>
+      <Action>Run a full anti-malware / EDR scan on $host and hunt for the same URL, destination IP, and payload hash across peers - especially other jump/VDI hosts and any host $user touched (section 15.4, section 17.1).</Action>
+      <Action>Remediate the initial-access vector that gave the attacker the foothold from which they ran curl (phishing, exposed service, credential reuse).</Action>
+    </Phase>
+    <Phase name="Recovery">
+      <Action>Reset $user's password and any credentials that were accessible from $host during the compromised window; if privileged accounts logged on there (section 17.3), rotate those too.</Action>
+      <Action>Restore $host from a known-good image if the payload established persistence or tampering was extensive; otherwise validate that all eradication actions hold after reboot.</Action>
+      <Action>Return the host/account to service only after section 22 closing criteria are met and monitoring confirms no recurrence of the fetch or payload.</Action>
+      <Action>Consider host hardening (section 23) - application control to restrict curl on server-class hosts, tightened egress to known destinations, and enabling the command-line-auditing GPO on the jump/VDI tier so the URL is always captured.</Action>
+    </Phase>
+  </ResponseActions>
+  <Escalation>
+    <Trigger>Escalate to Tier 3 / Incident Response (and notify the customer) when any of the following hold:
+
+- A suspicious/payload URL (raw IP, non-corporate domain, high port, .exe/.dll/.ps1/.bin target, -o to temp/AppData) is recovered.
+- A downloaded binary is executing from a non-standard path (section 15.10) time-correlated to the curl fetch.
+- The parent is a scripted LOLBin (wscript/cscript/mshta/forfiles) or an Office/browser ancestor (phishing-driven ingress).
+- The curl call is on a server / Tier-0 host, or persistence / lateral movement / defence evasion is observed (section 17).
+- The URL or whether a fetched file executed cannot be resolved from the 4688 stream (command line/args empty) - escalate as needs_escalation with the gaps named and a proxy/EDR pull requested.</Trigger>
+    <To>SOC L2 / IR</To>
+  </Escalation>
+  <ClosureCriteria>
+    <Item>false_positive (authorised): a change ticket, known installer, or documented automation is positively matched to the exact URL/destination + $parent + $user + time. Record the reference. Do not create a broad exception; if warranted, scope it to the exact destination + parent + user.</Item>
+    <Item>false_positive (blocked attempt): the fetch is positively proven to have failed (host unreachable / HTTP error, nothing written or run); documented as a blocked attempt, never "benign", with a check for any follow-on still performed.</Item>
+    <Item>misconfiguration: a legitimate but unbaselined automation/script used curl for a benign transfer to a recognised destination with no payload execution; register the source/destination.</Item>
+    <Item>true_positive: malicious ingress transfer confirmed (suspicious URL and/or downloaded binary executing); containment/eradication/recovery completed, scope of $user/$host/peers established, source blocked, and no residual payload or persistence on monitoring.</Item>
+    <Item>needs_escalation: handed to Tier 3/IR with the specific evidence gaps (URL unresolved / execution unknown) documented.</Item>
+  </ClosureCriteria>
+  <Limitations>
+    <Item>Zero baseline = high fidelity. Native curl.exe does not appear in NBI's 4-hour Windows telemetry. There is nothing legitimate to tune out, so this rule should be near-silent; when it fires, investigate it fully rather than pattern-matching to "probably a dev".</Item>
+    <Item>The network side is invisible here. logs-system.security* has no 5156/network events - the destination, port, bytes, and response are not in this index. The URL comes only from the curl command line/args; the *connection* must be corroborated via proxy/DNS/EDR. Empty is never proof of a failed or benign fetch.</Item>
+    <Item>Command-line capture is bimodal, and the "wrong" tier for this attack. It is enabled on some servers but absent on the jump/VDI hosts where interactive curl is most plausible. Expect process.command_line/process.args to be null exactly where you most want the URL; enabling the "Include command line in process creation events" GPO on the jump/workstation class is the single highest-value hardening ask from this rule.</Item>
+    <Item>Non-standard-path != malicious on jump hosts. Validated example: Mahmoud.Akram on nim-jump-apv02 runs MoTTYnew.exe/XWin_MobaX.exe from AppData\Roaming\MobaXterm\... - a benign SSH client. The section 15.10 hunt will surface this; correlate to an actual curl fetch + suspicious URL before escalating.</Item>
+    <Item>source.ip is shared infrastructure. A single VDI/jump egress IP (validated example: 10.11.102.15) fronts many users. Never treat source.ip as an individual identifier; correlate IP + user + host.</Item>
+    <Item>Evasion to expect. An attacker can run curl as SYSTEM (excluded by the rule), rename curl.exe, use certutil/bitsadmin/certreq/Invoke-WebRequest instead, or fetch over a non-http scheme. Complement this rule with proxy-side download detection and post-transfer new-binary-execution monitoring.</Item>
+    <Item>KB-worthy (persist to NBI customer scope): (1) curl.exe zero-baseline over 4h on logs-system.security*; (2) no 5156/process-network telemetry in this index (URL only from command line); (3) command-line/process.args host-bimodality (servers populated vs jump hosts null); (4) process.hash.* absent on 4688; (5) 10.11.102.15 = shared VDI/jump egress; (6) benign AppData tooling pattern on nim-jump-apv02 (MobaXterm/MoTTY). All observed live on 2026-08-17.</Item>
+  </Limitations>
+</Playbook>

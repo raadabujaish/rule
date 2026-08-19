@@ -1,0 +1,55 @@
+{
+  "name": "FortiWeb — Cross-Site Scripting (XSS) Probes",
+  "tags": [
+    "raad",
+    "redteam-2026-05",
+    "phase-3",
+    "web",
+    "variant-a",
+    "variant-b",
+    "xss"
+  ],
+  "interval": "10m",
+  "enabled": true,
+  "description": "Detects classic and polyglot Cross-Site Scripting payloads in HTTP requests — `<script>` tags, `javascript:` pseudo-URIs, `<svg onload=>`, `<img onerror=>` and event-handler injections — indicating attempts to inject client-side script into web applications.",
+  "risk_score": 55,
+  "severity": "medium",
+  "license": "",
+  "output_index": "",
+  "meta": {
+    "kibana_siem_app_url": ""
+  },
+  "investigation_fields": {
+    "field_names": [
+      "data.original_src",
+      "data.http_host",
+      "data.http_url",
+      "data.http_retcode"
+    ]
+  },
+  "author": [],
+  "false_positives": [
+    "Documentation pages (e.g. WAF-vendor docs) that contain literal",
+    "Search engines storing the literal text in a cached query — usually",
+    "ScanWave Variant A — TP-Verified."
+  ],
+  "from": "now-15m",
+  "rule_id": "raad-08-xss-probe",
+  "max_signals": 100,
+  "risk_score_mapping": [],
+  "severity_mapping": [],
+  "threat": [],
+  "to": "now",
+  "references": [],
+  "version": 1,
+  "exceptions_list": [],
+  "related_integrations": [],
+  "required_fields": [],
+  "setup": "",
+  "type": "query",
+  "language": "lucene",
+  "data_view_id": "logs-*",
+  "query": "data.packet.packet:(*<script>* OR *<\\/script>* OR *svg*onload=* OR *img*onerror=* OR *iframe*javascript\\:* OR *body*onload=* OR *javascript\\:alert\\(* OR *onerror=alert\\(* OR *onload=fetch\\(* OR *';alert\\(* OR *details*ontoggle=* OR *input*onfocus=* OR *data\\:text\\/html;base64,*)",
+  "filters": [],
+  "actions": []
+}

@@ -1,0 +1,66 @@
+{
+  "name": "Cisco IOS — Manual Network Device Configuration Change",
+  "tags": [
+    "NBI-Network",
+    "Phase3",
+    "Cisco-IOS"
+  ],
+  "interval": "5m",
+  "enabled": true,
+  "description": "Detects a manual running-configuration change on a Cisco network device (%SYS-5-CONFIG_I = configured from console/vty by an operator), excluding automated NETCONF/controller pushes. Config changes on the ATM/branch network are high-impact and are a common step in network-level attacks (ACL/route tampering, adding access).",
+  "risk_score": 56,
+  "severity": "medium",
+  "note": "## Investigation\n1. `log.syslog.hostname` is the device (ATM/branch site); `message` shows the source line (console/vty/user).\n2. Confirm the change against network change control.\n## Response\nIf unauthorised, review the device running-config diff and investigate the source.",
+  "output_index": "",
+  "investigation_fields": {
+    "field_names": [
+      "message",
+      "log.syslog.hostname",
+      "cisco.ios.facility",
+      "log.source.address",
+      "event.severity"
+    ]
+  },
+  "author": [
+    "raadabujaish"
+  ],
+  "false_positives": [],
+  "from": "now-9m",
+  "rule_id": "nbi-cisco-config-change",
+  "max_signals": 100,
+  "risk_score_mapping": [],
+  "severity_mapping": [],
+  "threat": [
+    {
+      "framework": "MITRE ATT&CK",
+      "tactic": {
+        "id": "TA0005",
+        "name": "Defense Evasion",
+        "reference": "https://attack.mitre.org/tactics/TA0005/"
+      },
+      "technique": [
+        {
+          "id": "T1562",
+          "name": "Impair Defenses",
+          "reference": "https://attack.mitre.org/techniques/T1562/"
+        }
+      ]
+    }
+  ],
+  "to": "now",
+  "references": [
+    "https://attack.mitre.org/"
+  ],
+  "version": 1,
+  "exceptions_list": [],
+  "related_integrations": [],
+  "required_fields": [],
+  "setup": "",
+  "type": "query",
+  "language": "kuery",
+  "index": [
+    "logs-cisco_ios.log-*"
+  ],
+  "query": "event.dataset:\"cisco_ios.log\" and message:\"SYS-5-CONFIG_I\"",
+  "actions": []
+}

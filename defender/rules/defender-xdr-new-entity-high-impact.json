@@ -1,0 +1,53 @@
+{
+  "name": "Microsoft Defender XDR — New Entity Entering High-Severity High-Impact Status",
+  "tags": [
+    "NBI-Advanced",
+    "Phase2-Batch3",
+    "M365-Defender-XDR",
+    "New-Terms",
+    "Alert-Promotion"
+  ],
+  "interval": "1h",
+  "enabled": true,
+  "description": "Raises an alert when a user appears for the first time (not observed in the previous 7 days) within a high-severity (severity >= 73) Microsoft Defender XDR alert in a high-impact tactic — Exfiltration, Credential Access, or Lateral Movement. Identifies a new account entering severe-threat status.",
+  "risk_score": 78,
+  "severity": "high",
+  "note": "## Investigation\n1. This is a NEW entity crossing into severe status — treat as a potential fresh compromise.\n2. Read the Defender `message`/`threat.technique`; identify `source.ip` and whether the account is privileged.\n3. Pivot to endpoint (4688/4104) and FortiGate for the entity and window.\n4. Confirm whether the account is authorised security testing before closing.",
+  "output_index": "",
+  "investigation_fields": {
+    "field_names": [
+      "host.name",
+      "user.name"
+    ]
+  },
+  "author": [
+    "raadabujaish"
+  ],
+  "false_positives": [],
+  "from": "now-70m",
+  "rule_id": "nbi-b3-defender-new-victim",
+  "max_signals": 100,
+  "risk_score_mapping": [],
+  "severity_mapping": [],
+  "threat": [],
+  "to": "now",
+  "references": [
+    "https://learn.microsoft.com/en-us/defender-xdr/"
+  ],
+  "version": 1,
+  "exceptions_list": [],
+  "related_integrations": [],
+  "required_fields": [],
+  "setup": "",
+  "type": "new_terms",
+  "query": "event.severity >= 73 and threat.tactic.name : (\"Exfiltration\" or \"CredentialAccess\" or \"LateralMovement\")",
+  "new_terms_fields": [
+    "user.name"
+  ],
+  "history_window_start": "now-7d",
+  "index": [
+    "logs-m365_defender.*"
+  ],
+  "language": "kuery",
+  "actions": []
+}

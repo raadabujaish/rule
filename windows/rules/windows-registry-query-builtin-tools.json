@@ -1,0 +1,78 @@
+{
+  "name": "Query Registry using Built-in Tools [NBI-4688]",
+  "tags": [
+    "Domain: Endpoint",
+    "OS: Windows",
+    "Use Case: Threat Detection",
+    "Tactic: Discovery",
+    "Rule Type: BBR",
+    "Data Source: Elastic Defend",
+    "NBI-Recovered",
+    "Phase2-Batch2",
+    "Windows-4688",
+    "coverage:partial-29pct"
+  ],
+  "interval": "12h",
+  "enabled": true,
+  "description": "This rule identifies the execution of commands that can be used to query the Windows Registry. Adversaries may query the registry to gain situational awareness about the host, like installed security software, programs and settings.",
+  "risk_score": 21,
+  "severity": "low",
+  "note": "## Coverage\nThis rule runs on Windows Security 4688 process-creation events. Command-line-dependent conditions currently apply to hosts where command-line auditing is enabled.\n\n",
+  "output_index": "",
+  "investigation_fields": {
+    "field_names": [
+      "user.name",
+      "process.name",
+      "process.parent.name",
+      "process.command_line",
+      "host.name"
+    ]
+  },
+  "author": [
+    "raadabujaish"
+  ],
+  "false_positives": [],
+  "from": "now-24h",
+  "rule_id": "nbi-b2-query-registry-using-built-in-tools",
+  "max_signals": 100,
+  "risk_score_mapping": [],
+  "severity_mapping": [],
+  "threat": [
+    {
+      "framework": "MITRE ATT&CK",
+      "tactic": {
+        "id": "TA0007",
+        "name": "Discovery",
+        "reference": "https://attack.mitre.org/tactics/TA0007/"
+      },
+      "technique": [
+        {
+          "id": "T1012",
+          "name": "Query Registry",
+          "reference": "https://attack.mitre.org/techniques/T1012/"
+        }
+      ]
+    }
+  ],
+  "to": "now",
+  "references": [
+    "https://www.elastic.co/guide/en/security/current/prebuilt-rules.html"
+  ],
+  "version": 1,
+  "exceptions_list": [],
+  "related_integrations": [],
+  "required_fields": [],
+  "setup": "",
+  "type": "new_terms",
+  "query": "host.os.type:windows and event.category:process and event.type:start and\n  (\n    (process.name.caseless:\"reg.exe\" and process.args:\"query\") or\n    (process.name.caseless:(\"powershell.exe\" or \"powershell_ise.exe\" or \"pwsh.exe\") and\n     process.args:(\n       (\"get-childitem\" or \"Get-ChildItem\" or \"gci\" or \"dir\" or \"ls\" or\n        \"get-item\" or \"Get-Item\" or \"gi\" or\n        \"get-itemproperty\" or \"Get-ItemProperty\" or \"gp\") and\n       (\"hkcu\" or \"HKCU\" or \"hkey_current_user\" or \"HKEY_CURRENT_USER\" or\n        \"hkey_local_machine\" or \"HKEY_LOCAL_MACHINE\" or\n        \"hklm\" or \"HKLM\" or registry\\:\\:*)\n      )\n    )\n  ) and\n  not process.command_line : (\n    \"C:\\\\Windows\\\\system32\\\\reg.exe  query hklm\\\\software\\\\microsoft\\\\windows\\\\softwareinventorylogging /v collectionstate /reg:64\" or\n    \"reg  query \\\"HKLM\\\\Software\\\\WOW6432Node\\\\Npcap\\\" /ve  \"\n  )\n",
+  "new_terms_fields": [
+    "host.id",
+    "user.id"
+  ],
+  "history_window_start": "now-7d",
+  "index": [
+    "logs-system.security-*"
+  ],
+  "language": "kuery",
+  "actions": []
+}

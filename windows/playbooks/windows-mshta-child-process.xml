@@ -1,0 +1,442 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<Playbook xmlns="https://soc.example/playbooks" id="PB-windows-mshta-child-process" name="Suspicious Microsoft HTML Application Child Process [NBI-4688] - SOC Playbook" version="3.0" status="Validated" classification="TLP:AMBER">
+  <Metadata>
+    <Owner>NBI SOC / Detection Engineering</Owner>
+    <LastUpdated>2026-08-19</LastUpdated>
+    <Severity default="High">High</Severity>
+    <Confidence default="Medium">Medium</Confidence>
+    <Category>Defense Evasion</Category>
+    <MitreAttack>
+      <Technique id="T1218"/>
+      <Technique id="T1218.005"/>
+      <Tactic id="TA0005"/>
+      <Tactic id="TA0002"/>
+    </MitreAttack>
+    <References>
+      <Reference title="MITRE ATT&amp;CK - System Binary Proxy Execution (T1218)" url="https://attack.mitre.org/techniques/T1218/"/>
+      <Reference title="MITRE ATT&amp;CK - System Binary Proxy Execution: Mshta (T1218.005)" url="https://attack.mitre.org/techniques/T1218/005/"/>
+      <Reference title="MITRE ATT&amp;CK - Defense Evasion tactic (TA0005)" url="https://attack.mitre.org/tactics/TA0005/"/>
+      <Reference title="MITRE ATT&amp;CK - Execution tactic (TA0002)" url="https://attack.mitre.org/tactics/TA0002/"/>
+      <Reference title='Elastic - prebuilt rule "Suspicious HTML Application (mshta) child process" reference' url="https://www.elastic.co/docs/reference/security/prebuilt-rules/rules/windows/defense_evasion_mshta_child_process"/>
+      <Reference title="LOLBAS - Mshta.exe" url="https://lolbas-project.github.io/lolbas/Binaries/Mshta/"/>
+      <Reference title="Red Canary - Mshta threat detection" url="https://redcanary.com/threat-detection-report/techniques/mshta/"/>
+      <Reference title="Microsoft Learn - Command line process auditing (Event 4688 command-line GPO)" url="https://learn.microsoft.com/en-us/windows-server/identity/ad-ds/manage/component-updates/command-line-process-auditing"/>
+    </References>
+  </Metadata>
+  <AlertContext>
+    <RuleName>Suspicious Microsoft HTML Application Child Process [NBI-4688]</RuleName>
+    <RuleId>nbi-b2-suspicious-microsoft-html-application-child-proc</RuleId>
+    <RuleType>eql</RuleType>
+    <Index>logs-system.security-*</Index>
+    <TriggerLogic>The deployed rule is an EQL analytic. As characterised by its trigger logic, it fires on a process-creation event whose parent is mshta.exe and whose child is a LOLBin or a user-profile executable:
+
+
+
+Plain English: mshta.exe spawned either a shell/download/persistence/installer/proxy tool or a binary running from a user profile - the tell that an HTA did more than render markup.
+
+Unlike some Windows analytics, this one is fully live-capable on NBI: it keys on Windows Security 4688 (event.code : "4688"), which NBI collects. The one-line Kibana KQL detection/pivot filter is:
+
+
+
+In NBI's live window mshta.exe is absent, so the rule should be near-silent; any mshta-parented child is a high-value lead. Empty results are the expected zero baseline and are not evidence of safety - command-line capture is only ~50% populated (section 8), and a child spawn is confirmed even when its command line is null.</TriggerLogic>
+    <KeyAlertFields>process.name, process.executable, process.parent.name, process.parent.executable, mshta.exe, process.pid, process.parent.pid, process.entity_id, user.name, host.name, host.os.type, process.command_line</KeyAlertFields>
+  </AlertContext>
+  <Inputs>
+    <Input name="$host"/>
+    <Input name="$user"/>
+    <Input name="$process"/>
+    <Input name="$suspicious_pid"/>
+    <Input name="$source_ip"/>
+  </Inputs>
+  <ExecutiveSummary>
+    <Overview>This playbook drives triage and investigation of the Suspicious Microsoft HTML Application Child Process detection on NBI's Elastic Security deployment. The rule fires when mshta.exe (the HTML Application host) spawns a child that is either a living-off-the-land binary (cmd, powershell, certutil, bitsadmin, curl, msiexec, schtasks, reg, wscript, rundll32) or an executable running from a user-profile path (C:\Users\...\*.exe). mshta.exe on its own is a legitimate Windows binary that renders HTA markup; a shell, download tool, persistence utility, or dropped user-profile EXE as its child is the observable sign that an HTA actually executed code rather than merely displaying a page.
+
+An alert therefore captures the execution stage after an HTA loader runs - typically the moment a phishing click becomes code execution. The analyst's job is to decide, quickly and defensibly, whether an HTA legitimately drove a benign helper (rare - false_positive, authorised), an HTA loader executed malicious follow-on code (true_positive), a line-of-business HTA application was simply never baselined (misconfiguration), or the evidence is insufficient (needs_escalation). This analytic is the downstream companion to the mshta script-execution detection - there the concern is the script mshta *ran*; here it is what mshta *launched*.</Overview>
+    <BusinessImpact>An alert means: on $host, mshta.exe spawned a child process that indicates code execution - a shell, a downloader, a persistence utility, an installer, a proxy-execution binary, or a dropped user-profile EXE. mshta.exe is a Microsoft-signed, allow-listed binary that executes the JScript/VBScript inside an .hta; attackers deliver an HTA by phishing (attachment or a mshta http://… link), and when it runs it typically shells out to fetch and launch the next stage. The child the rule caught is that next stage.
+
+The logon/render step is not in itself malicious - the child is the signal. The investigative questions are: what is the child and what did its command line do (download? persist? run a payload?), did the account go on to establish persistence or fetch more payloads, and what launched mshta in the first place (an office/browser/mail parent points to phishing). A download/persistence child, or a dropped user-profile EXE, is a working malware loader on the endpoint.</BusinessImpact>
+  </ExecutiveSummary>
+  <Investigation>
+    <Goal>Decide true_positive / false_positive / misconfiguration / needs_escalation for Suspicious Microsoft HTML Application Child Process [NBI-4688].</Goal>
+    <Workflow>
+      <Step order="1" name="Reproduce the rule estate-wide (LOLBin child arm)">
+        <Purpose>Reproduce the rule estate-wide (LOLBin child arm)</Purpose>
+        <Query platform="Elastic" language="ES|QL" id="Q-01">
+          <![CDATA[
+FROM logs-system.security-*
+| WHERE @timestamp >= NOW() - 4 hours
+    AND event.code == "4688"
+    AND TO_LOWER(process.parent.name) == "mshta.exe"
+    AND TO_LOWER(process.name) IN ("cmd.exe", "powershell.exe", "certutil.exe", "bitsadmin.exe", "curl.exe", "msiexec.exe", "schtasks.exe", "reg.exe", "wscript.exe", "rundll32.exe")
+| KEEP @timestamp, host.name, user.name, process.name, process.executable, process.parent.name, process.pid, process.parent.pid
+| SORT @timestamp DESC
+| LIMIT 100
+]]>
+        </Query>
+      </Step>
+      <Step order="2" name="Confirm on the alert host (all mshta children + command line)">
+        <Purpose>Confirm on the alert host (all mshta children + command line)</Purpose>
+        <Query platform="Elastic" language="ES|QL" id="Q-02">
+          <![CDATA[
+FROM logs-system.security-*
+| WHERE event.code == "4688" AND host.name == "$host"
+    AND TO_LOWER(process.parent.name) == "mshta.exe"
+    AND @timestamp >= NOW() - 4 hours
+| KEEP @timestamp, host.name, user.name, process.name, process.parent.name, process.command_line, process.args
+| SORT @timestamp DESC
+| LIMIT 20
+]]>
+        </Query>
+      </Step>
+      <Step order="3" name="Entity pivoting">
+        <Purpose>Entity pivoting</Purpose>
+        <Query platform="Elastic" language="ES|QL" id="Q-03">
+          <![CDATA[
+FROM logs-system.security-*
+| WHERE @timestamp >= NOW() - 4 hours
+    AND event.code == "4688"
+    AND host.name == "$host"
+    AND TO_LOWER(process.parent.name) == "$process"
+| KEEP @timestamp, host.name, user.name, process.name, process.executable, process.parent.name, process.pid, process.parent.pid, process.command_line
+| SORT @timestamp DESC
+| LIMIT 50
+]]>
+        </Query>
+      </Step>
+      <Step order="4" name="Process investigation">
+        <Purpose>Process investigation</Purpose>
+        <Query platform="Elastic" language="ES|QL" id="Q-04">
+          <![CDATA[
+FROM logs-system.security-*
+| WHERE event.code == "4688" AND host.name == "$host"
+    AND TO_LOWER(process.parent.name) == "mshta.exe"
+    AND @timestamp >= NOW() - 4 hours
+| EVAL child_type = CASE(
+    TO_LOWER(process.name) IN ("certutil.exe", "bitsadmin.exe", "curl.exe"), "download-tool",
+    TO_LOWER(process.name) IN ("powershell.exe", "cmd.exe", "wscript.exe"), "shell-or-script",
+    TO_LOWER(process.name) IN ("schtasks.exe", "reg.exe"), "persistence-tool",
+    TO_LOWER(process.name) == "msiexec.exe", "installer",
+    TO_LOWER(process.name) == "rundll32.exe", "proxy-exec",
+    "other-or-dropped-exe")
+| STATS execs = COUNT(*) BY child_type, process.name, user.name
+| SORT execs DESC
+| LIMIT 20
+]]>
+        </Query>
+      </Step>
+      <Step order="5" name="Process investigation">
+        <Purpose>Process investigation</Purpose>
+        <Query platform="Elastic" language="ES|QL" id="Q-05">
+          <![CDATA[
+FROM logs-system.security-*
+| WHERE @timestamp >= NOW() - 4 hours
+    AND event.code == "4688"
+    AND host.name == "$host"
+    AND TO_LOWER(process.parent.name) == "$process"
+    AND process.args IS NOT NULL
+| EVAL arguments = MV_CONCAT(process.args, " ")
+| KEEP @timestamp, user.name, process.name, process.executable, arguments
+| SORT @timestamp DESC
+| LIMIT 50
+]]>
+        </Query>
+      </Step>
+      <Step order="6" name="Parent-Child process analysis">
+        <Purpose>Parent-Child process analysis</Purpose>
+        <Query platform="Elastic" language="ES|QL" id="Q-06">
+          <![CDATA[
+FROM logs-system.security-*
+| WHERE @timestamp >= NOW() - 4 hours
+    AND event.code == "4688"
+    AND host.name == "$host"
+    AND (TO_LOWER(process.parent.name) == "$process" OR TO_LOWER(process.name) == "$process")
+| KEEP @timestamp, user.name, process.parent.name, process.parent.pid, process.name, process.pid, process.executable
+| SORT @timestamp DESC
+| LIMIT 50
+]]>
+        </Query>
+      </Step>
+      <Step order="7" name="Parent-Child process analysis">
+        <Purpose>Parent-Child process analysis</Purpose>
+        <Query platform="Elastic" language="ES|QL" id="Q-07">
+          <![CDATA[
+FROM logs-system.security-*
+| WHERE @timestamp >= NOW() - 4 hours
+    AND event.code == "4688"
+    AND host.name == "$host"
+    AND process.parent.pid == $suspicious_pid
+| KEEP @timestamp, user.name, process.parent.name, process.parent.pid, process.name, process.pid, process.executable
+| SORT @timestamp ASC
+| LIMIT 100
+]]>
+        </Query>
+      </Step>
+      <Step order="8" name="User investigation">
+        <Purpose>User investigation</Purpose>
+        <Query platform="Elastic" language="ES|QL" id="Q-08">
+          <![CDATA[
+FROM logs-system.security-*
+| WHERE @timestamp >= NOW() - 4 hours
+    AND event.code == "4688"
+    AND user.name == "$user"
+| STATS executions = COUNT(*), distinct_procs = COUNT_DISTINCT(process.name) BY host.name
+| SORT executions DESC
+| LIMIT 20
+]]>
+        </Query>
+      </Step>
+      <Step order="9" name="Host investigation">
+        <Purpose>Host investigation</Purpose>
+        <Query platform="Elastic" language="ES|QL" id="Q-09">
+          <![CDATA[
+FROM logs-system.security-*
+| WHERE @timestamp >= NOW() - 4 hours
+    AND event.code == "4688"
+    AND host.name == "$host"
+| STATS executions = COUNT(*), users = COUNT_DISTINCT(user.name) BY process.name, process.parent.name
+| SORT executions ASC
+| LIMIT 40
+]]>
+        </Query>
+      </Step>
+      <Step order="10" name="IP investigation">
+        <Purpose>IP investigation</Purpose>
+        <Query platform="Elastic" language="ES|QL" id="Q-10">
+          <![CDATA[
+FROM logs-system.security-*
+| WHERE @timestamp >= NOW() - 4 hours
+    AND event.code == "4624"
+    AND host.name == "$host" AND user.name == "$user"
+    AND source.ip IS NOT NULL
+| STATS logons = COUNT(*) BY source.ip, winlog.event_data.LogonType
+| SORT logons DESC
+| LIMIT 20
+]]>
+        </Query>
+      </Step>
+      <Step order="11" name="IP investigation">
+        <Purpose>IP investigation</Purpose>
+        <Query platform="Elastic" language="ES|QL" id="Q-11">
+          <![CDATA[
+FROM logs-system.security-*
+| WHERE @timestamp >= NOW() - 4 hours
+    AND event.code == "4624"
+    AND source.ip == "$source_ip"
+| STATS logons = COUNT(*) BY user.name, host.name, winlog.event_data.LogonType
+| SORT logons DESC
+| LIMIT 25
+]]>
+        </Query>
+      </Step>
+      <Step order="12" name="File investigation">
+        <Purpose>File investigation</Purpose>
+        <Query platform="Elastic" language="ES|QL" id="Q-12">
+          <![CDATA[
+FROM logs-system.security-*
+| WHERE @timestamp >= NOW() - 4 hours
+    AND event.code == "4688"
+    AND host.name == "$host"
+    AND TO_LOWER(process.parent.name) == "$process"
+| STATS executions = COUNT(*), first_seen = MIN(@timestamp), last_seen = MAX(@timestamp) BY process.executable, process.name
+| SORT executions DESC
+| LIMIT 30
+]]>
+        </Query>
+      </Step>
+      <Step order="13" name="Authentication investigation">
+        <Purpose>Authentication investigation</Purpose>
+        <Query platform="Elastic" language="ES|QL" id="Q-13">
+          <![CDATA[
+FROM logs-system.security-*
+| WHERE @timestamp >= NOW() - 4 hours
+    AND event.code IN ("4624", "4625", "4634", "4647")
+    AND host.name == "$host" AND user.name == "$user"
+| STATS events = COUNT(*), first_seen = MIN(@timestamp), last_seen = MAX(@timestamp) BY event.code, winlog.event_data.LogonType, source.ip
+| SORT events DESC
+| LIMIT 30
+]]>
+        </Query>
+      </Step>
+      <Step order="14" name="Timeline Reconstruction">
+        <Purpose>Timeline Reconstruction</Purpose>
+        <Query platform="Elastic" language="ES|QL" id="Q-14">
+          <![CDATA[
+FROM logs-system.security-*
+| WHERE @timestamp >= NOW() - 4 hours
+    AND event.code == "4688"
+    AND host.name == "$host"
+    AND user.name == "$user"
+| KEEP @timestamp, process.parent.name, process.parent.pid, process.name, process.pid, process.executable
+| SORT @timestamp ASC
+| LIMIT 200
+]]>
+        </Query>
+      </Step>
+      <Step order="15" name="Lateral movement validation">
+        <Purpose>Lateral movement validation</Purpose>
+        <Query platform="Elastic" language="ES|QL" id="Q-15">
+          <![CDATA[
+FROM logs-system.security-*
+| WHERE @timestamp >= NOW() - 4 hours
+    AND event.code IN ("4624", "4648", "4768", "4769", "5140")
+    AND user.name == "$user"
+    AND host.name != "$host"
+| STATS events = COUNT(*) BY host.name, event.code, winlog.event_data.LogonType
+| SORT events DESC
+| LIMIT 30
+]]>
+        </Query>
+      </Step>
+      <Step order="16" name="Persistence validation">
+        <Purpose>Persistence validation</Purpose>
+        <Query platform="Elastic" language="ES|QL" id="Q-16">
+          <![CDATA[
+FROM logs-system.security-*
+| WHERE event.code == "4688" AND host.name == "$host" AND user.name == "$user"
+    AND @timestamp >= NOW() - 4 hours
+    AND TO_LOWER(process.name) IN ("schtasks.exe", "reg.exe", "certutil.exe", "bitsadmin.exe", "curl.exe", "powershell.exe", "rundll32.exe", "wscript.exe", "sc.exe")
+| STATS execs = COUNT(*), last_seen = MAX(@timestamp) BY process.name
+| SORT execs DESC
+| LIMIT 20
+]]>
+        </Query>
+      </Step>
+      <Step order="17" name="Persistence validation">
+        <Purpose>Persistence validation</Purpose>
+        <Query platform="Elastic" language="ES|QL" id="Q-17">
+          <![CDATA[
+FROM logs-system.security-*
+| WHERE @timestamp >= NOW() - 4 hours
+    AND host.name == "$host"
+    AND event.code IN ("7045", "4698", "4720")
+| STATS events = COUNT(*) BY event.code
+| SORT events DESC
+| LIMIT 10
+]]>
+        </Query>
+      </Step>
+      <Step order="18" name="Privilege escalation validation">
+        <Purpose>Privilege escalation validation</Purpose>
+        <Query platform="Elastic" language="ES|QL" id="Q-18">
+          <![CDATA[
+FROM logs-system.security-*
+| WHERE @timestamp >= NOW() - 4 hours
+    AND event.code == "4672"
+    AND host.name == "$host"
+| STATS special_priv_logons = COUNT(*) BY user.name
+| SORT special_priv_logons DESC
+| LIMIT 25
+]]>
+        </Query>
+      </Step>
+      <Step order="19" name="Defense evasion validation">
+        <Purpose>Defense evasion validation</Purpose>
+        <Query platform="Elastic" language="ES|QL" id="Q-19">
+          <![CDATA[
+FROM logs-system.security-*
+| WHERE @timestamp >= NOW() - 4 hours
+    AND host.name == "$host"
+    AND (
+        (event.code == "4688" AND TO_LOWER(process.name) IN ("wevtutil.exe", "fsutil.exe", "vssadmin.exe", "wmic.exe", "cipher.exe", "sdelete.exe", "sdelete64.exe"))
+        OR event.code == "1102"
+        OR event.code == "4719"
+    )
+| STATS events = COUNT(*) BY event.code, process.name, user.name
+| SORT events DESC
+| LIMIT 30
+]]>
+        </Query>
+      </Step>
+      <Step order="20" name="Impact assessment">
+        <Purpose>Impact assessment</Purpose>
+        <Query platform="Elastic" language="ES|QL" id="Q-20">
+          <![CDATA[
+FROM logs-system.security-*
+| WHERE @timestamp >= NOW() - 4 hours
+    AND host.name == "$host"
+    AND event.code == "4688"
+    AND process.parent.pid == $suspicious_pid
+| STATS children = COUNT(*), distinct_children = COUNT_DISTINCT(process.name) BY process.name
+| SORT children DESC
+| LIMIT 30
+]]>
+        </Query>
+      </Step>
+      <Step order="21" name="Finalize verdict">
+        <DecisionTree>
+        </DecisionTree>
+      </Step>
+    </Workflow>
+  </Investigation>
+  <ClassificationGuidance>
+    <TruePositive>
+      <Definition></Definition>
+    </TruePositive>
+    <FalsePositive>
+      <Definition></Definition>
+      <Indicators>
+        <Item>Legacy line-of-business HTA applications. Some enterprise apps ship an .hta front-end that legitimately spawns a helper (a cmd/wscript wrapper, an installer). These are the main benign case and are confirmed by a recognised application HTA, a consistent benign child, and no download/persistence follow-on - not assumed.</Item>
+        <Item>Software installers / management tooling that invoke mshta as part of setup and shell to a helper. Rare on a bank estate.</Item>
+        <Item>Administrator or vendor scripts that wrap configuration in an HTA. Confirm against a change record.</Item>
+        <Item>A child positively proven to have failed or been blocked (allow-listing/AV denied it, no download or child activity) is recorded as blocked-malicious, never "benign".</Item>
+        <Item>mshta.exe is absent from NBI's live 4-hour window. mshta-parented children are therefore expected to be rare, and any hit is a high-value lead with no noisy legitimate source to tune out.</Item>
+        <Item>The plausible-legitimate locus is an interactive user or a jump/VDI host, where a genuine LOB HTA might run; NBI's busy servers are dominated by service/machine-account process creation and would not normally launch mshta at all. A mshta child on a server is more anomalous still.</Item>
+        <Item>Command-line auditing is bimodal (~50% estate-wide). The child's command line - the clearest download/persistence evidence - is populated on some hosts and null on others (section 8). A null child command line still confirms the spawn and is not exoneration; corroborate with the child identity, follow-on activity, and (for a dropped EXE) the process.executable path via EDR.</Item>
+        <Item>No historical NBI benign-true-positive is on record for this rule. There is no environment-specific allow-list to apply; scope any future exception to an exact application HTA + child + path + host + user after a documented owner is confirmed.</Item>
+      </Indicators>
+    </FalsePositive>
+    <Misconfiguration>
+      <Definition></Definition>
+    </Misconfiguration>
+    <NeedsEscalation>
+      <Definition></Definition>
+    </NeedsEscalation>
+  </ClassificationGuidance>
+  <ResponseActions>
+    <Phase name="Containment">
+      <Action>Isolate $host (network-contain / quarantine) if a true_positive is confirmed, to stop the loader fetching further stages and moving on. Coordinate with IT on shared hosts but prioritise containment.</Action>
+      <Action>Suspend or force-logoff $user's session on $host and disable the account pending investigation; reset its credentials (section 20).</Action>
+      <Action>Terminate the mshta child and its descendants ($suspicious_pid tree from section 15.3b / section 17.5), and mshta itself if still running.</Action>
+      <Action>Preserve volatile evidence first where feasible: running process list, the dropped user-profile EXE (path from section 15.10), the HTA file, and memory of the child. NBI does not collect the download or the HTA write, so host-side capture is the only way to recover them.</Action>
+      <Action>Deploy/confirm changes only via the authorised human-approved DEPLOY path; investigation itself is read-only.</Action>
+    </Phase>
+    <Phase name="Eradication">
+      <Action>Remove the persistence discovered in section 17.2 (scheduled tasks, Run keys, services) and any dropped payload identified via section 15.10.</Action>
+      <Action>Delete the HTA and any second-stage binaries it fetched or wrote, recovered host-side.</Action>
+      <Action>Run a full anti-malware / EDR scan on $host and hunt for the same HTA/payload and the mshta-parent pattern across peers - especially any host $user touched (section 15.4, section 17.1).</Action>
+      <Action>Remediate the initial-access vector - the phishing message/attachment that delivered the HTA (section 15.11), and the office/browser/mail parent that launched mshta (section 15.3).</Action>
+    </Phase>
+    <Phase name="Recovery">
+      <Action>Reset $user's password and any credentials accessible from $host during the intrusion window; if privileged accounts logged on there (section 17.3), rotate those too.</Action>
+      <Action>Restore $host from a known-good image if the loader established persistence or dropped multiple stages; otherwise validate that all eradication actions hold after reboot.</Action>
+      <Action>Return the host/account to service only after section 22 closing criteria are met and monitoring confirms mshta does not recur.</Action>
+      <Action>Harden. Block or restrict mshta.exe by policy (WDAC/AppLocker), alert on mshta spawning shells/download tools, strip HTA attachments at the mail gateway, and enable command-line auditing on the host class - the single highest-value gap for this rule.</Action>
+    </Phase>
+  </ResponseActions>
+  <Escalation>
+    <Trigger>Escalate to Tier 3 / Incident Response (and notify the customer) when any of the following hold:
+
+- The mshta child is a download or persistence tool, or a dropped user-profile EXE (section 15.2/section 15.10).
+- Persistence/download follow-on by $user is present (section 17.2), or the child spawned further tooling (section 17.5).
+- mshta's parent is office/browser/mail (section 15.3) - an active phishing chain.
+- Lateral movement from $host/$user is observed (section 17.1), especially toward domain controllers or other privileged systems.
+- The acting account is privileged/service, or log clearing / audit-policy tampering appears (section 17.4).
+- Evidence is incomplete because of NBI's telemetry gaps (null command line, no dropped-EXE hash) and the alert cannot be safely cleared - escalate as needs_escalation with the gaps named.</Trigger>
+    <To>SOC L2 / IR</To>
+  </Escalation>
+  <ClosureCriteria>
+    <Item>false_positive (authorised): a recognised line-of-business application HTA, a benign child, and no download/persistence are positively matched to the exact $process(mshta) + child + $user + $host + time. Record the owner; scope any exception to the exact application HTA + child + path + host + user.</Item>
+    <Item>false_positive (blocked-malicious): the child was positively proven blocked/failed (no download, no child activity); documented as blocked (never "benign").</Item>
+    <Item>misconfiguration: a legitimate application HTA spawns helpers and was simply not yet baselined; baseline it and recommend migrating off mshta.</Item>
+    <Item>true_positive: a working HTA loader confirmed (LOLBin/dropped-EXE child with follow-on); containment/eradication/recovery completed, scope of $user/$host/peers and the phishing source established, no residual persistence or recurrence.</Item>
+    <Item>needs_escalation: handed to Tier 3/IR with the specific evidence gaps documented.</Item>
+  </ClosureCriteria>
+  <Limitations>
+    <Item>The child is the signal, not mshta. mshta.exe rendering an HTA is not by itself malicious; a LOLBin/dropped-EXE child is the observable that the HTA executed code. Read the child and its command line first (section 15.1/section 15.2b).</Item>
+    <Item>mshta's near-zero baseline = high fidelity. mshta is absent from NBI's live 4h window; there is nothing legitimate to tune out, so any mshta-parented child is a strong lead despite the possibility of a rare LOB HTA.</Item>
+    <Item>Command-line capture is bimodal (~50%). The powershell -enc/download/persistence command is your best evidence where present and simply null where the GPO is off - corroborate with child identity, follow-on (section 17.2), the dropped-EXE path (section 15.10), and PID lineage.</Item>
+    <Item>The dropped EXE lives in a user path. The rule's user-profile-EXE arm surfaces in section 15.10 as a child process.executable under Users\/Temp/ProgramData - hash it host-side (no process.hash.* on NBI).</Item>
+    <Item>Pair with the companion analytic. The mshta *script-execution* rule catches what mshta ran; this one catches what it launched - investigate them together when both fire on the same host/user.</Item>
+    <Item>KB-worthy (persist to NBI customer scope): (1) mshta zero-baseline over 4h on logs-system.security-*; (2) command-line/process.args host-bimodality (~50%); (3) process.hash.* absent on 4688; (4) user-profile-EXE arm is observable via child process.executable host-scoped. All observed live on 2026-08-19.</Item>
+  </Limitations>
+</Playbook>

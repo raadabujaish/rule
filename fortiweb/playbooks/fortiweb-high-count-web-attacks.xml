@@ -1,0 +1,341 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<Playbook xmlns="https://soc.example/playbooks" id="PB-fortiweb-high-count-web-attacks" name="High Count Of attacks WAF - SOC Playbook" version="3.0" status="Validated" classification="TLP:AMBER">
+  <Metadata>
+    <Owner>NBI SOC / Detection Engineering</Owner>
+    <LastUpdated>2026-08-19</LastUpdated>
+    <Severity default="high">high</Severity>
+    <Confidence default="Medium">Medium</Confidence>
+    <Category>Impact</Category>
+    <MitreAttack>
+      <Technique id="T1499"/>
+      <Technique id="T1190"/>
+      <Technique id="T1595.002"/>
+      <Technique id="T1595"/>
+      <Tactic id="TA0040"/>
+      <Tactic id="TA0043"/>
+    </MitreAttack>
+    <References>
+      <Reference title="MITRE ATT&amp;CK - Endpoint Denial of Service (T1499)" url="https://attack.mitre.org/techniques/T1499/"/>
+      <Reference title="MITRE ATT&amp;CK - Exploit Public-Facing Application (T1190)" url="https://attack.mitre.org/techniques/T1190/"/>
+      <Reference title="MITRE ATT&amp;CK - Active Scanning: Vulnerability Scanning (T1595.002)" url="https://attack.mitre.org/techniques/T1595/002/"/>
+      <Reference title="MITRE ATT&amp;CK - Impact tactic (TA0040)" url="https://attack.mitre.org/tactics/TA0040/"/>
+      <Reference title="MITRE ATT&amp;CK - Reconnaissance tactic (TA0043)" url="https://attack.mitre.org/tactics/TA0043/"/>
+      <Reference title="Elastic Security - Create a threshold rule" url="https://www.elastic.co/guide/en/security/current/rules-ui-create.html#create-threshold-rule"/>
+      <Reference title="Fortinet FortiWeb - Attack log and signature reference" url="https://docs.fortinet.com/product/fortiweb"/>
+      <Reference title="CISA - Understanding and Responding to Distributed Denial-of-Service Attacks" url="https://www.cisa.gov/news-events/news/understanding-and-responding-distributed-denial-service-attacks"/>
+    </References>
+  </Metadata>
+  <AlertContext>
+    <RuleName>High Count Of attacks WAF</RuleName>
+    <RuleId>15eb099c-b22f-467f-a011-ee44c9dc95af</RuleId>
+    <RuleType>threshold</RuleType>
+    <Index>logs-tcp.generic-default</Index>
+    <TriggerLogic>The deployed rule is a threshold rule (language kuery). Its query is empty; two filters define what is counted, and the threshold sets the trigger:
+
+
+
+Plain English: count every FortiWeb record that carries a data.attack_type (i.e. a WAF attack detection, not ordinary traffic) over the last ~2 hours; fire if that count exceeds 15,000. This is a raw-volume alarm on attack-typed events - it does not group by source or host (threshold.field = []), so a firing says "the WAF logged more than 15,000 detections in two hours" without, on its own, telling you whether that is one hostile flood, a distributed campaign, or a single noisy signature.
+
+Live baseline (measured): FortiWeb attack detections currently run at roughly 1,900 per 2 hours estate-wide, dominated (~78%) by the Information Disclosure signature with action Erase. So the 15,000 threshold is ~8× the current baseline - a firing requires a genuine surge, and the first question is what class of detection surged.
+
+One-line Kibana KQL filter for pivoting in Discover (the counted set):</TriggerLogic>
+    <KeyAlertFields>data.type, data.attack_type, data.action, data.main_type, data.http_host, data.http_url, data.http_retcode, data.src, data.original_src, data.policy, data.srccountry, data.severity_level</KeyAlertFields>
+  </AlertContext>
+  <Inputs>
+    <Input name="$http_host"/>
+    <Input name="$client"/>
+  </Inputs>
+  <ExecutiveSummary>
+    <Overview>This playbook drives triage and investigation of the High Count Of attacks WAF detection on NBI's Elastic Security deployment. The rule is a threshold rule that counts FortiWeb attack-detection events and fires when their count crosses 15,000 in the ~2-hour window. A firing is a surge of WAF attack detections against the bank's internet-facing applications.
+
+That surge can mean three very different things, and the number alone is not a verdict - the composition and impact are:
+- a denial-of-service or mass-exploitation flood impacting availability or serving hostile requests (true_positive);
+- a single benign/over-broad signature firing at scale (e.g. the Information Disclosure signature) or a threshold set below the surface's real attack-signature baseline (misconfiguration);
+- a malicious flood the WAF fully absorbed and blocked (false_positive, blocked-malicious, never "benign"); or an authorised high-volume event (false_positive, authorised).
+
+The analyst decomposes the surge - which surface, which attack classes, denied-vs-served, single-source-vs-distributed, and whether the backend was impacted - and classifies the alert as true_positive, false_positive (authorised OR blocked-malicious), misconfiguration, or needs_escalation.</Overview>
+    <BusinessImpact>An alert means: FortiWeb logged more than 15,000 attack detections in ~2 hours. Because the rule is an ungrouped raw count of attack-typed events, the meaning is entirely in the decomposition:
+
+1. What surged? If the count is dominated by one benign/over-broad signature (Information Disclosure / Erase fires on many normal responses), the surge is a signature-tuning issue, not an attack. If it is dominated by serious classes (SQL Injection, Cross Site Scripting, Generic Attacks) or DoS flood-prevention, it is hostile volume.
+2. Blocked or served? data.action = Alert_Deny means the WAF blocked it; a non-deny action (Alert, Erase, none) means the request may have reached the backend. Serious classes served rather than denied is exploitation.
+3. Impact? The backend 5xx/latency on the traffic records shows whether availability was degraded (DoS) - the attack records carry no response code, so impact is read from the traffic slice.
+4. Structure and attribution? One or few real clients (de-proxied from x_forwarded_for) at extreme rate is a single/few-source flood; many clients is distributed or a flash crowd. data.src is a SNAT address - never attribute on it.</BusinessImpact>
+  </ExecutiveSummary>
+  <Investigation>
+    <Goal>Decide true_positive / false_positive / misconfiguration / needs_escalation for High Count Of attacks WAF.</Goal>
+    <Workflow>
+      <Step order="1" name="Reproduce and decompose the threshold count">
+        <Purpose>Reproduce and decompose the threshold count</Purpose>
+        <Query platform="Elastic" language="ES|QL" id="Q-01">
+          <![CDATA[
+FROM logs-tcp.generic-*
+| WHERE @timestamp >= NOW() - 2 hours AND data.attack_type IS NOT NULL
+| STATS attack_events = COUNT(*), denied = SUM(CASE(data.action == "Alert_Deny", 1, 0))
+    BY data.http_host, data.attack_type, data.action
+| SORT attack_events DESC
+| LIMIT 25
+]]>
+        </Query>
+      </Step>
+      <Step order="2" name="Composition on the spiking surface (attacks vs traffic)">
+        <Purpose>Composition on the spiking surface (attacks vs traffic)</Purpose>
+        <Query platform="Elastic" language="ES|QL" id="Q-02">
+          <![CDATA[
+FROM logs-tcp.generic-*
+| WHERE data.http_host == "$http_host" AND @timestamp >= NOW() - 2 hours
+| STATS total = COUNT(*), attacks = COUNT(data.attack_type), denied = COUNT(CASE(data.action == "Alert_Deny", 1, null)), types = VALUES(data.attack_type)
+| LIMIT 10
+]]>
+        </Query>
+      </Step>
+      <Step order="3" name="Entity pivoting">
+        <Purpose>Entity pivoting</Purpose>
+        <Query platform="Elastic" language="ES|QL" id="Q-03">
+          <![CDATA[
+FROM logs-tcp.generic-*
+| WHERE @timestamp >= NOW() - 2 hours
+| STATS hits = COUNT(*), clients = COUNT_DISTINCT(x_forwarded_for), attacks = COUNT(data.attack_type)
+    BY data.http_host
+| SORT hits DESC
+| LIMIT 15
+]]>
+        </Query>
+      </Step>
+      <Step order="4" name="Host investigation">
+        <Purpose>Host investigation</Purpose>
+        <Query platform="Elastic" language="ES|QL" id="Q-04">
+          <![CDATA[
+FROM logs-tcp.generic-default
+| WHERE @timestamp >= NOW() - 2 hours AND data.http_host == "$http_host"
+| EVAL rc = TO_INTEGER(data.http_retcode), real_client = COALESCE(TRIM(MV_FIRST(SPLIT(x_forwarded_for, ","))), data.src)
+| STATS requests = COUNT(*), clients = COUNT_DISTINCT(real_client), attacks = COUNT(data.attack_type),
+        served2xx = SUM(CASE(rc >= 200 AND rc < 300, 1, 0)),
+        rejected4xx = SUM(CASE(rc >= 400 AND rc < 500, 1, 0)),
+        err5xx = SUM(CASE(rc >= 500, 1, 0))
+| LIMIT 5
+]]>
+        </Query>
+      </Step>
+      <Step order="5" name="IP investigation">
+        <Purpose>IP investigation</Purpose>
+        <Query platform="Elastic" language="ES|QL" id="Q-05">
+          <![CDATA[
+FROM logs-tcp.generic-*
+| WHERE data.http_host == "$http_host" AND x_forwarded_for LIKE "*$client*" AND @timestamp >= NOW() - 2 hours
+| EVAL rc = TO_INTEGER(data.http_retcode)
+| STATS hits = COUNT(*), urls = COUNT_DISTINCT(data.http_url),
+        ok2xx = COUNT(CASE(rc >= 200 AND rc < 300, 1, null)),
+        err4xx = COUNT(CASE(rc >= 400 AND rc < 500, 1, null)),
+        err5xx = COUNT(CASE(rc >= 500, 1, null)),
+        uas = VALUES(data.http_agent)
+    BY data.http_method
+| SORT hits DESC
+| LIMIT 20
+]]>
+        </Query>
+      </Step>
+      <Step order="6" name="Domain investigation">
+        <Purpose>Domain investigation</Purpose>
+        <Query platform="Elastic" language="ES|QL" id="Q-06">
+          <![CDATA[
+FROM logs-tcp.generic-default
+| WHERE @timestamp >= NOW() - 2 hours AND data.type == "traffic" AND x_forwarded_for LIKE "*$client*"
+| STATS reqs = COUNT(*), urls = COUNT_DISTINCT(data.http_url), attacks = COUNT(data.attack_type)
+    BY data.http_host, data.srccountry
+| SORT reqs DESC
+| LIMIT 20
+]]>
+        </Query>
+      </Step>
+      <Step order="7" name="URL investigation">
+        <Purpose>URL investigation</Purpose>
+        <Query platform="Elastic" language="ES|QL" id="Q-07">
+          <![CDATA[
+FROM logs-tcp.generic-default
+| WHERE @timestamp >= NOW() - 2 hours AND data.type == "traffic"
+    AND data.http_host == "$http_host" AND x_forwarded_for LIKE "*$client*"
+| EVAL rc = TO_INTEGER(data.http_retcode), endpoint = MV_FIRST(SPLIT(data.http_url, "?"))
+| STATS hits = COUNT(*), served2xx = SUM(CASE(rc >= 200 AND rc < 300, 1, 0)),
+        err5xx = SUM(CASE(rc >= 500, 1, 0)), rejected4xx = SUM(CASE(rc >= 400 AND rc < 500, 1, 0))
+    BY endpoint
+| SORT hits DESC
+| LIMIT 25
+]]>
+        </Query>
+      </Step>
+      <Step order="8" name="Authentication investigation">
+        <Purpose>Authentication investigation</Purpose>
+        <Query platform="Elastic" language="ES|QL" id="Q-08">
+          <![CDATA[
+FROM logs-tcp.generic-default
+| WHERE @timestamp >= NOW() - 2 hours AND data.type == "traffic" AND data.http_host == "$http_host"
+    AND x_forwarded_for LIKE "*$client*"
+    AND (TO_LOWER(data.http_url) LIKE "*login*" OR TO_LOWER(data.http_url) LIKE "*auth*" OR TO_LOWER(data.http_url) LIKE "*token*")
+| EVAL rc = TO_INTEGER(data.http_retcode)
+| STATS reqs = COUNT(*), ok2xx = SUM(CASE(rc >= 200 AND rc < 300, 1, 0)),
+        rejected4xx = SUM(CASE(rc >= 400 AND rc < 500, 1, 0)) BY data.http_url
+| SORT reqs DESC
+| LIMIT 25
+]]>
+        </Query>
+      </Step>
+      <Step order="9" name="Timeline Reconstruction">
+        <Purpose>Timeline Reconstruction</Purpose>
+        <Query platform="Elastic" language="ES|QL" id="Q-09">
+          <![CDATA[
+FROM logs-tcp.generic-default
+| WHERE @timestamp >= NOW() - 2 hours AND data.type == "traffic"
+    AND data.http_host == "$http_host" AND x_forwarded_for LIKE "*$client*"
+| KEEP @timestamp, data.http_method, data.http_url, data.http_retcode, data.http_agent
+| SORT @timestamp ASC
+| LIMIT 200
+]]>
+        </Query>
+      </Step>
+      <Step order="10" name="Lateral movement validation">
+        <Purpose>Lateral movement validation</Purpose>
+        <Query platform="Elastic" language="ES|QL" id="Q-10">
+          <![CDATA[
+FROM logs-tcp.generic-default
+| WHERE @timestamp >= NOW() - 2 hours AND x_forwarded_for LIKE "*$client*" AND data.http_host != "$http_host"
+| STATS reqs = COUNT(*), urls = COUNT_DISTINCT(data.http_url), attacks = COUNT(data.attack_type)
+    BY data.http_host
+| SORT reqs DESC
+| LIMIT 20
+]]>
+        </Query>
+      </Step>
+      <Step order="11" name="Persistence validation">
+        <Purpose>Persistence validation</Purpose>
+        <Query platform="Elastic" language="ES|QL" id="Q-11">
+          <![CDATA[
+FROM logs-tcp.generic-default
+| WHERE @timestamp >= NOW() - 2 hours AND data.type == "traffic"
+    AND data.http_host == "$http_host" AND x_forwarded_for LIKE "*$client*"
+    AND TO_LOWER(data.http_method) IN ("post", "put")
+| EVAL rc = TO_INTEGER(data.http_retcode)
+| STATS reqs = COUNT(*), served2xx = SUM(CASE(rc >= 200 AND rc < 300, 1, 0)) BY data.http_url, data.http_method
+| SORT reqs DESC
+| LIMIT 25
+]]>
+        </Query>
+      </Step>
+      <Step order="12" name="Privilege escalation validation">
+        <Purpose>Privilege escalation validation</Purpose>
+        <Query platform="Elastic" language="ES|QL" id="Q-12">
+          <![CDATA[
+FROM logs-tcp.generic-default
+| WHERE @timestamp >= NOW() - 4 hours AND data.type == "attack" AND data.http_host == "$http_host"
+    AND data.action != "Alert_Deny"
+    AND data.attack_type IN ("SQL Injection", "Cross Site Scripting (Extended)", "Generic Attacks(Extended)", "SQL/XSS Syntax Based Detection", "Generic Attacks")
+| STATS events = COUNT(*), urls = COUNT_DISTINCT(data.http_url) BY data.attack_type, data.action, data.main_type
+| SORT events DESC
+| LIMIT 25
+]]>
+        </Query>
+      </Step>
+      <Step order="13" name="Defense evasion validation">
+        <Purpose>Defense evasion validation</Purpose>
+        <Query platform="Elastic" language="ES|QL" id="Q-13">
+          <![CDATA[
+FROM logs-tcp.generic-default
+| WHERE @timestamp >= NOW() - 2 hours AND data.type == "attack" AND data.http_host == "$http_host"
+| STATS events = COUNT(*), denied = SUM(CASE(data.action == "Alert_Deny", 1, 0)),
+        served = SUM(CASE(data.action != "Alert_Deny", 1, 0)), urls = COUNT_DISTINCT(data.http_url)
+    BY data.attack_type, data.main_type
+| SORT events DESC
+| LIMIT 25
+]]>
+        </Query>
+      </Step>
+      <Step order="14" name="Impact assessment">
+        <Purpose>Impact assessment</Purpose>
+        <Query platform="Elastic" language="ES|QL" id="Q-14">
+          <![CDATA[
+FROM logs-tcp.generic-default
+| WHERE @timestamp >= NOW() - 2 hours AND data.type == "traffic" AND data.http_host == "$http_host"
+| EVAL rc = TO_INTEGER(data.http_retcode), real_client = COALESCE(TRIM(MV_FIRST(SPLIT(x_forwarded_for, ","))), data.src)
+| STATS requests = COUNT(*), sources = COUNT_DISTINCT(real_client),
+        served2xx = SUM(CASE(rc >= 200 AND rc < 300, 1, 0)),
+        svc_unavail_503 = SUM(CASE(rc == 503, 1, 0)), err5xx = SUM(CASE(rc >= 500, 1, 0))
+| EVAL err5xx_pct = (100 * err5xx) / (1 + requests)
+| LIMIT 5
+]]>
+        </Query>
+      </Step>
+      <Step order="15" name="Finalize verdict">
+        <DecisionTree>
+        </DecisionTree>
+      </Step>
+    </Workflow>
+  </Investigation>
+  <ClassificationGuidance>
+    <TruePositive>
+      <Definition></Definition>
+    </TruePositive>
+    <FalsePositive>
+      <Definition></Definition>
+      <Indicators>
+        <Item>A single over-broad signature at scale. The Information Disclosure / Erase signature dominates NBI's attack records; at peak load it can generate enough detections to approach the threshold without a real attack - a signature-tuning (misconfiguration) condition.</Item>
+        <Item>Authorised load / performance tests or an announced campaign spike that also raises signature hits - false_positive only once confirmed with the owner.</Item>
+        <Item>A malicious flood fully blocked by the WAF (attacks ≈ denied, no backend 5xx, nothing served) - a blocked malicious attempt, recorded as such, never "benign".</Item>
+        <Item>Information Disclosure / Erase is ~78% of attack detections. This one signature dominates the counted set, so a surge is most likely driven by it - check the composition (section 14.1/section 14.2) before assuming an attack. If the surge is overwhelmingly Information Disclosure with Erase and no serious classes served, it is a signature-tuning issue.</Item>
+        <Item>The surfaces are genuinely high-volume. mobile.nbi.iq runs ~127k requests / 2h from ~7,000 real clients (but only ~20 attack detections in that slice); businessonline.nbi.iq ~71k requests / 2h with ~1,400 detections. The attack-typed count is normally a small fraction of traffic, so a jump to 15,000 detections is a real change - judge against this baseline, not an absolute feel.</Item>
+        <Item>Attack records lack the client IP and response code. data.original_src, x_forwarded_for, and data.http_retcode are null on attack records (they live on traffic records). Single-source attribution and backend-impact analysis therefore rely on the traffic slice, de-proxied via x_forwarded_for - data.src/original_src is the SNAT front-end.</Item>
+        <Item>The rule is ungrouped. It cannot tell you the source or host by itself; every investigation starts by decomposing the count (section 14.1).</Item>
+      </Indicators>
+    </FalsePositive>
+    <Misconfiguration>
+      <Definition></Definition>
+    </Misconfiguration>
+    <NeedsEscalation>
+      <Definition></Definition>
+    </NeedsEscalation>
+  </ClassificationGuidance>
+  <ResponseActions>
+    <Phase name="Containment">
+      <Action>Apply rate-limiting / source or geo blocking at the edge/WAF for a confirmed hostile surge - on the de-proxied x_forwarded_for clients where a flooder is identified, not blanket on the SNAT data.src.</Action>
+      <Action>Engage the network/ISP team for DDoS scrubbing if the surge is distributed or beyond WAF capacity.</Action>
+      <Action>Protect expensive endpoints identified in section 15.8; remediate any served exploitation with the app owner (section 17.3).</Action>
+      <Action>Check for a concurrent intrusion masked by the surge (section 17.4) and respond in parallel.</Action>
+      <Action>Open an incident and preserve the attack + traffic records. Blocks are applied only via the authorised human-approved DEPLOY path; investigation here is read-only.</Action>
+    </Phase>
+    <Phase name="Eradication">
+      <Action>Right-size the detection if the surge was a signature artifact: count serious attack classes (exclude Information Disclosure/Erase) or a per-source request rate, and raise the threshold above measured peak signature load - so the rule measures hostile volume, not a noisy signature.</Action>
+      <Action>Keep/monitor edge blocks on confirmed hostile sources; add distributed sources to reputation/deny lists.</Action>
+      <Action>Remediate served exploitation (section 17.3) and any planted artifact (section 17.2) with the app/DB owners.</Action>
+      <Action>Validate DDoS protection/scrubbing for customer-facing hosts.</Action>
+    </Phase>
+    <Phase name="Recovery">
+      <Action>Confirm the surge has subsided and availability is restored (5xx back to baseline, 2xx served normally - section 17.5) before standing down.</Action>
+      <Action>Baseline each surface's normal peak (traffic and attack-signature counts) so a genuine surge stands out and the threshold is set correctly.</Action>
+      <Action>Tune the noisy signature (Information Disclosure) if it is the recurring driver, so the rule reflects hostile volume.</Action>
+      <Action>Recommend grouping the threshold by source or host (threshold.field) so a firing carries the offending entity rather than a bare count.</Action>
+    </Phase>
+  </ResponseActions>
+  <Escalation>
+    <Trigger>Escalate to Tier 3 / IR, the network team, and the application owner when any of the following hold:
+
+- Backend 5xx/latency rising under the surge on a customer-facing banking host (section 17.5) - availability impact.
+- Serious attack classes served (not Alert_Deny) at volume (section 17.3) - mass exploitation reaching the backend.
+- A distributed flood beyond WAF capacity, or a single/few-source flood on an expensive endpoint.
+- Concurrent quieter intrusion suspected under cover of the surge (section 17.4).
+- Backend impact and served-vs-blocked cannot be established (no dominant source; attack records lack client IP/retcode) - escalate as needs_escalation with the gaps named.</Trigger>
+    <To>SOC L2 / IR</To>
+  </Escalation>
+  <ClosureCriteria>
+    <Item>false_positive (authorised): an authorised load/performance event is positively matched to the window and owner; served normally, no impact.</Item>
+    <Item>false_positive (blocked-malicious): a malicious flood positively proven fully blocked (attacks ≈ denied, no backend 5xx, nothing served); documented as blocked, never "benign".</Item>
+    <Item>misconfiguration: the count is a single benign signature at scale or a threshold below the surface's real signature baseline; retune to serious classes / per-source rate and raise the threshold.</Item>
+    <Item>true_positive: a hostile surge with impact (DoS 5xx) or served exploitation; mitigation applied, availability restored, served exploitation remediated, incident documented.</Item>
+    <Item>needs_escalation: handed to Tier 3/IR + network + app with the impact and composition gaps documented.</Item>
+  </ClosureCriteria>
+  <Limitations>
+    <Item>The rule counts attacks, not raw traffic - decompose first. The deployed filter is tags:"Fortiweb" AND data.attack_type exists; a firing is &gt;15,000 WAF detections in ~2h. The first move is section 14.1 - what class drove it.</Item>
+    <Item>Information Disclosure/Erase dominates (~78%). A surge is most likely this one signature at scale; confirm it is not masking serious classes served, then treat a pure Information Disclosure surge as a signature-tuning issue.</Item>
+    <Item>The rule is ungrouped - it names no source or host. Every investigation starts by discovering the spiking surface (section 14.1/section 15.1) and de-proxying the top clients (section 15.6). data.src is a SNAT address; the real client is x_forwarded_for.</Item>
+    <Item>Impact lives on the traffic records. Attack records have no data.http_retcode; the 5xx/503 availability signal is on data.type == "traffic". Join by host + time.</Item>
+    <Item>Watch for surge-as-cover. A noisy volume alarm is a classic distraction - always check for serious classes served (section 17.3/section 17.4) during the window.</Item>
+    <Item>KB-worthy (persist to NBI customer scope): (1) deployed threshold counts data.attack_type-exists FortiWeb events (&gt;15,000/~2h), ungrouped; (2) Information Disclosure/Erase ~78% of attack detections; baseline ~1,900 detections/2h estate-wide; (3) attack records lack x_forwarded_for/data.http_retcode - impact from traffic slice; (4) mobile.nbi.iq ~127k req/2h / ~7k clients, businessonline.nbi.iq ~71k / ~1.4k detections. Observed live 2026-08-17.</Item>
+  </Limitations>
+</Playbook>

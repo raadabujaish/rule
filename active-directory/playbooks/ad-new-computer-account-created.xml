@@ -1,0 +1,386 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<Playbook xmlns="https://soc.example/playbooks" id="PB-ad-new-computer-account-created" name="AD — New Computer (Machine) Account Created - SOC Playbook" version="3.0" status="Validated" classification="TLP:AMBER">
+  <Metadata>
+    <Owner>NBI SOC / Detection Engineering</Owner>
+    <LastUpdated>2026-08-19</LastUpdated>
+    <Severity default="medium">medium</Severity>
+    <Confidence default="Medium">Medium</Confidence>
+    <Category>Persistence</Category>
+    <MitreAttack>
+      <Technique id="T1136"/>
+      <Technique id="T1136.002"/>
+      <Technique id="T1098"/>
+      <Tactic id="TA0003"/>
+      <Tactic id="TA0004"/>
+    </MitreAttack>
+    <References>
+      <Reference title="MITRE ATT&amp;CK - Create Account (T1136)" url="https://attack.mitre.org/techniques/T1136/"/>
+      <Reference title="MITRE ATT&amp;CK - Create Account: Domain Account (T1136.002)" url="https://attack.mitre.org/techniques/T1136/002/"/>
+      <Reference title="MITRE ATT&amp;CK - Account Manipulation (T1098)" url="https://attack.mitre.org/techniques/T1098/"/>
+      <Reference title="MITRE ATT&amp;CK - Persistence tactic (TA0003)" url="https://attack.mitre.org/tactics/TA0003/"/>
+      <Reference title="MITRE ATT&amp;CK - Privilege Escalation tactic (TA0004)" url="https://attack.mitre.org/tactics/TA0004/"/>
+      <Reference title="Microsoft Learn - 4741: A computer account was created" url="https://learn.microsoft.com/en-us/previous-versions/windows/it-pro/windows-10/security/threat-protection/auditing/event-4741"/>
+      <Reference title="Microsoft Learn - ms-DS-MachineAccountQuota attribute" url="https://learn.microsoft.com/en-us/windows/win32/adschema/a-ms-ds-machineaccountquota"/>
+      <Reference title="Microsoft Security - KB5008102: Active Directory Security Accounts Manager hardening (noPac / CVE-2021-42278)" url="https://support.microsoft.com/en-us/topic/kb5008102-active-directory-security-accounts-manager-hardening-changes-cve-2021-42278-5975b463-4c95-45e1-831a-d120004e258e"/>
+      <Reference title="Elastic Security - Prebuilt rule reference (Persistence / account creation)" url="https://www.elastic.co/guide/en/security/current/prebuilt-rules.html"/>
+      <Reference title='SpecterOps - "Kerberos Resource-Based Constrained Delegation: Computer Object Takeover" (Elad Shamir)' url="https://posts.specterops.io/kerberos-resource-based-constrained-delegation-computer-object-takeover-7e0d17a5c86e"/>
+      <Reference title="Powermad - New-MachineAccount (Kevin Robertson)" url="https://github.com/Kevin-Robertson/Powermad"/>
+      <Reference title="The Hacker Recipes - Machine accounts / MachineAccountQuota" url="https://www.thehacker.recipes/ad/movement/domain-settings/machineaccountquota"/>
+    </References>
+  </Metadata>
+  <AlertContext>
+    <RuleName>AD — New Computer (Machine) Account Created</RuleName>
+    <RuleId>nbi-ad-computer-account-created</RuleId>
+    <RuleType>query</RuleType>
+    <Index>logs-system.security*</Index>
+    <TriggerLogic>The deployed rule is an ES|QL query rule that anchors on Event 4741 on the Windows Security channel. In plain English: a computer (machine) account was created in Active Directory, captured on the DC that processed the request. The alert carries the creator (winlog.event_data.SubjectUserName), the new computer object (winlog.event_data.TargetUserName, always ending in $), and the DC (host.name).
+
+One-line Kibana KQL detection filter (for fast pivoting in Discover / Timeline):
+
+
+
+Faithful ES|QL form of the deployed logic, shown with the standard 4-hour investigation window (the live rule applies its own scheduled lookback; the WHERE event.code == "4741" predicate is the rule's anchor):
+
+
+
+Why 4741 alone is the signal: Windows emits 4741 only when the *Computer Account Management* audit subcategory is enabled (Success) and a machine object is genuinely created in the directory. There is no benign "noise" version of this event - every 4741 corresponds to a real object creation. The investigative weight therefore falls entirely on context (creator privilege, origin, and follow-on object manipulation), not on the event's mere existence.</TriggerLogic>
+    <KeyAlertFields>user.name, host.name, source.ip, process.name</KeyAlertFields>
+  </AlertContext>
+  <Inputs>
+    <Input name="$actor"/>
+    <Input name="$dc_host"/>
+    <Input name="$new_computer"/>
+    <Input name="$computer_cn"/>
+    <Input name="$source_ip"/>
+  </Inputs>
+  <ExecutiveSummary>
+    <Overview>This playbook drives triage and investigation of the AD - New Computer (Machine) Account Created detection on NBI's Elastic Security deployment. The rule fires on Windows Security Event 4741 - *a computer account was created* - logged on a Domain Controller. Machine accounts are normally created by Domain Admins or by a delegated join/provisioning account during a legitimate domain join. Because the default ms-DS-MachineAccountQuota is 10, *any authenticated user* can create up to ten computer accounts, and an attacker-created machine account is a well-known precursor to Resource-Based Constrained Delegation (RBCD) and noPac (CVE-2021-42278/42287) privilege-escalation chains.
+
+The analyst's job is to decide, quickly and defensibly, whether a given 4741 is a legitimate domain join / provisioning action by an authorised account, an attacker creating a machine account to stage delegation/escalation, or an automation/imaging process creating accounts outside the expected workflow - and to classify the alert as true_positive, false_positive, misconfiguration, or needs_escalation with evidence attached. The two strongest discriminators are who created it (a non-privileged user using MachineAccountQuota is abnormal) and what happened to the new object next (SPN, RBCD delegation, or key-credential writes).</Overview>
+    <BusinessImpact>An alert means: on $dc_host, the account $actor created a new computer object $new_computer in Active Directory. In NBI's directory (DC=nbirq,DC=com, NetBIOS NBIRQ) this is logged with SubjectUserName = the creator, TargetUserName = the machine account (e.g. BZM-TEL-DK-03$), and SubjectDomainName/TargetDomainName = NBIRQ. The 4741 event itself is DC-side and carries no source.ip and no process image - it records the directory outcome, not the network origin or the tool used. The creator's network origin must be recovered by correlating the creator's SubjectLogonId/logons (section 15.6, section 15.12).
+
+Creating the object is only the first move. A machine account becomes an escalation primitive when the attacker then writes one of three attributes on it:
+
+- servicePrincipalName - required to make the account Kerberoastable or to satisfy delegation constraints.
+- msDS-AllowedToActOnBehalfOfOtherIdentity - the RBCD attribute; lets the attacker impersonate any user (including Domain Admins) to a target service.
+- msDS-KeyCredentialLink (or a userCertificate write) - shadow-credentials / certificate-based authentication material that lets the attacker obtain the object's TGT and NTLM h</BusinessImpact>
+  </ExecutiveSummary>
+  <Investigation>
+    <Goal>Decide true_positive / false_positive / misconfiguration / needs_escalation for AD — New Computer (Machine) Account Created.</Goal>
+    <Workflow>
+      <Step order="1" name="Detection Summary">
+        <Purpose>Detection Summary</Purpose>
+        <Query platform="Elastic" language="ES|QL" id="Q-01">
+          <![CDATA[
+FROM logs-system.security*
+| WHERE @timestamp >= NOW() - 4 hours
+    AND event.code == "4741"
+| KEEP @timestamp, host.name, winlog.event_data.SubjectUserName, winlog.event_data.TargetUserName
+| SORT @timestamp DESC
+| LIMIT 100
+]]>
+        </Query>
+      </Step>
+      <Step order="2" name="Reproduce the rule (confirm the detection logic on the DC)">
+        <Purpose>Reproduce the rule (confirm the detection logic on the DC)</Purpose>
+        <Query platform="Elastic" language="ES|QL" id="Q-02">
+          <![CDATA[
+FROM logs-system.security*
+| WHERE @timestamp >= NOW() - 4 hours
+    AND event.code == "4741"
+    AND host.name == "$dc_host"
+| STATS creations = COUNT(*) BY winlog.event_data.SubjectUserName, winlog.event_data.TargetUserName, host.name
+| SORT creations DESC
+| LIMIT 20
+]]>
+        </Query>
+      </Step>
+      <Step order="3" name="Confirm the exact object and its creation record">
+        <Purpose>Confirm the exact object and its creation record</Purpose>
+        <Query platform="Elastic" language="ES|QL" id="Q-03">
+          <![CDATA[
+FROM logs-system.security*
+| WHERE @timestamp >= NOW() - 4 hours
+    AND event.code == "4741"
+    AND host.name == "$dc_host"
+    AND winlog.event_data.TargetUserName == "$new_computer"
+| KEEP @timestamp, host.name, winlog.event_data.SubjectUserName, winlog.event_data.SubjectDomainName, winlog.event_data.TargetUserName, winlog.event_data.SubjectLogonId
+| SORT @timestamp DESC
+| LIMIT 20
+]]>
+        </Query>
+      </Step>
+      <Step order="4" name="Entity pivoting">
+        <Purpose>Entity pivoting</Purpose>
+        <Query platform="Elastic" language="ES|QL" id="Q-04">
+          <![CDATA[
+FROM logs-system.security*
+| WHERE @timestamp >= NOW() - 4 hours
+    AND event.code == "4741"
+    AND host.name == "$dc_host"
+    AND winlog.event_data.SubjectUserName == "$actor"
+| KEEP @timestamp, winlog.event_data.SubjectUserName, winlog.event_data.TargetUserName, winlog.event_data.SubjectLogonId
+| SORT @timestamp DESC
+| LIMIT 50
+]]>
+        </Query>
+      </Step>
+      <Step order="5" name="User investigation">
+        <Purpose>User investigation</Purpose>
+        <Query platform="Elastic" language="ES|QL" id="Q-05">
+          <![CDATA[
+FROM logs-system.security*
+| WHERE @timestamp >= NOW() - 4 hours
+    AND winlog.event_data.SubjectUserName == "$actor"
+| STATS events = COUNT(*), objects = COUNT_DISTINCT(winlog.event_data.ObjectDN) BY event.code, host.name
+| SORT events DESC
+| LIMIT 25
+]]>
+        </Query>
+      </Step>
+      <Step order="6" name="Host investigation">
+        <Purpose>Host investigation</Purpose>
+        <Query platform="Elastic" language="ES|QL" id="Q-06">
+          <![CDATA[
+FROM logs-system.security*
+| WHERE @timestamp >= NOW() - 4 hours
+    AND event.code == "4741"
+    AND host.name == "$dc_host"
+| STATS creations = COUNT(*), objects = COUNT_DISTINCT(winlog.event_data.TargetUserName) BY winlog.event_data.SubjectUserName
+| SORT creations DESC
+| LIMIT 25
+]]>
+        </Query>
+      </Step>
+      <Step order="7" name="IP investigation">
+        <Purpose>IP investigation</Purpose>
+        <Query platform="Elastic" language="ES|QL" id="Q-07">
+          <![CDATA[
+FROM logs-system.security*
+| WHERE @timestamp >= NOW() - 4 hours
+    AND event.code == "4624"
+    AND winlog.event_data.TargetUserName == "$actor"
+    AND source.ip IS NOT NULL
+| STATS logons = COUNT(*), hosts = COUNT_DISTINCT(host.name) BY source.ip, winlog.event_data.LogonType
+| SORT logons DESC
+| LIMIT 20
+]]>
+        </Query>
+      </Step>
+      <Step order="8" name="IP investigation">
+        <Purpose>IP investigation</Purpose>
+        <Query platform="Elastic" language="ES|QL" id="Q-08">
+          <![CDATA[
+FROM logs-system.security*
+| WHERE @timestamp >= NOW() - 4 hours
+    AND event.code == "4624"
+    AND source.ip == "$source_ip"
+| STATS logons = COUNT(*) BY winlog.event_data.TargetUserName, host.name, winlog.event_data.LogonType
+| SORT logons DESC
+| LIMIT 25
+]]>
+        </Query>
+      </Step>
+      <Step order="9" name="File investigation">
+        <Purpose>File investigation</Purpose>
+        <Query platform="Elastic" language="ES|QL" id="Q-09">
+          <![CDATA[
+FROM logs-system.security*
+| WHERE @timestamp >= NOW() - 4 hours
+    AND event.code == "5136"
+    AND winlog.event_data.ObjectDN LIKE "CN=$computer_cn,*"
+| STATS writes = COUNT(*), first_seen = MIN(@timestamp), last_seen = MAX(@timestamp) BY winlog.event_data.AttributeLDAPDisplayName, winlog.event_data.SubjectUserName
+| SORT writes DESC
+| LIMIT 30
+]]>
+        </Query>
+      </Step>
+      <Step order="10" name="Authentication investigation">
+        <Purpose>Authentication investigation</Purpose>
+        <Query platform="Elastic" language="ES|QL" id="Q-10">
+          <![CDATA[
+FROM logs-system.security*
+| WHERE @timestamp >= NOW() - 4 hours
+    AND event.code IN ("4624", "4625", "4634", "4647", "4768", "4769")
+    AND winlog.event_data.TargetUserName == "$actor"
+| STATS events = COUNT(*), first_seen = MIN(@timestamp), last_seen = MAX(@timestamp) BY event.code, winlog.event_data.LogonType, source.ip
+| SORT events DESC
+| LIMIT 30
+]]>
+        </Query>
+      </Step>
+      <Step order="11" name="Timeline Reconstruction">
+        <Purpose>Timeline Reconstruction</Purpose>
+        <Query platform="Elastic" language="ES|QL" id="Q-11">
+          <![CDATA[
+FROM logs-system.security*
+| WHERE @timestamp >= NOW() - 4 hours
+    AND host.name == "$dc_host"
+    AND (
+        (event.code == "4741" AND winlog.event_data.TargetUserName == "$new_computer")
+        OR (event.code IN ("5136", "4742") AND winlog.event_data.ObjectDN LIKE "CN=$computer_cn,*")
+        OR (event.code == "4741" AND winlog.event_data.SubjectUserName == "$actor")
+    )
+| KEEP @timestamp, event.code, winlog.event_data.SubjectUserName, winlog.event_data.TargetUserName, winlog.event_data.AttributeLDAPDisplayName, winlog.event_data.ObjectDN
+| SORT @timestamp ASC
+| LIMIT 200
+]]>
+        </Query>
+      </Step>
+      <Step order="12" name="Lateral movement validation">
+        <Purpose>Lateral movement validation</Purpose>
+        <Query platform="Elastic" language="ES|QL" id="Q-12">
+          <![CDATA[
+FROM logs-system.security*
+| WHERE @timestamp >= NOW() - 4 hours
+    AND event.code IN ("4624", "4648", "4769", "5140", "5145")
+    AND winlog.event_data.SubjectUserName == "$actor"
+    AND host.name != "$dc_host"
+| STATS events = COUNT(*) BY host.name, event.code
+| SORT events DESC
+| LIMIT 30
+]]>
+        </Query>
+      </Step>
+      <Step order="13" name="Persistence validation">
+        <Purpose>Persistence validation</Purpose>
+        <Query platform="Elastic" language="ES|QL" id="Q-13">
+          <![CDATA[
+FROM logs-system.security*
+| WHERE @timestamp >= NOW() - 4 hours
+    AND event.code == "5136"
+    AND winlog.event_data.SubjectUserName == "$actor"
+    AND winlog.event_data.AttributeLDAPDisplayName IN ("servicePrincipalName", "msDS-AllowedToActOnBehalfOfOtherIdentity", "msDS-KeyCredentialLink", "userCertificate", "userAccountControl")
+| STATS writes = COUNT(*) BY winlog.event_data.AttributeLDAPDisplayName, winlog.event_data.ObjectDN
+| SORT writes DESC
+| LIMIT 30
+]]>
+        </Query>
+      </Step>
+      <Step order="14" name="Privilege escalation validation">
+        <Purpose>Privilege escalation validation</Purpose>
+        <Query platform="Elastic" language="ES|QL" id="Q-14">
+          <![CDATA[
+FROM logs-system.security*
+| WHERE @timestamp >= NOW() - 4 hours
+    AND event.code == "4672"
+    AND host.name == "$dc_host"
+| STATS special_priv_logons = COUNT(*) BY winlog.event_data.SubjectUserName
+| SORT special_priv_logons DESC
+| LIMIT 25
+]]>
+        </Query>
+      </Step>
+      <Step order="15" name="Defense evasion validation">
+        <Purpose>Defense evasion validation</Purpose>
+        <Query platform="Elastic" language="ES|QL" id="Q-15">
+          <![CDATA[
+FROM logs-system.security*
+| WHERE @timestamp >= NOW() - 4 hours
+    AND host.name == "$dc_host"
+    AND (
+        (event.code == "4743")
+        OR (event.code == "5136" AND winlog.event_data.AttributeLDAPDisplayName == "userAccountControl" AND winlog.event_data.ObjectDN LIKE "CN=$computer_cn,*")
+        OR event.code == "1102"
+        OR event.code == "4739"
+    )
+| STATS events = COUNT(*) BY event.code, winlog.event_data.SubjectUserName, winlog.event_data.TargetUserName
+| SORT events DESC
+| LIMIT 30
+]]>
+        </Query>
+      </Step>
+      <Step order="16" name="Impact assessment">
+        <Purpose>Impact assessment</Purpose>
+        <Query platform="Elastic" language="ES|QL" id="Q-16">
+          <![CDATA[
+FROM logs-system.security*
+| WHERE @timestamp >= NOW() - 4 hours
+    AND host.name == "$dc_host"
+    AND (
+        (event.code == "5136" AND winlog.event_data.ObjectDN LIKE "CN=$computer_cn,*")
+        OR (event.code == "4769" AND winlog.event_data.TargetUserName == "$new_computer")
+    )
+| STATS events = COUNT(*), attrs = COUNT_DISTINCT(winlog.event_data.AttributeLDAPDisplayName) BY event.code
+| SORT events DESC
+| LIMIT 20
+]]>
+        </Query>
+      </Step>
+      <Step order="17" name="Finalize verdict">
+        <DecisionTree>
+        </DecisionTree>
+      </Step>
+    </Workflow>
+  </Investigation>
+  <ClassificationGuidance>
+    <TruePositive>
+      <Definition></Definition>
+    </TruePositive>
+    <FalsePositive>
+      <Definition></Definition>
+      <Indicators>
+        <Item>Legitimate domain joins. The single most common benign cause: a workstation or server joins the domain and the join account (or the machine itself under a delegated context) creates the computer object. A normal join also writes a servicePrincipalName (HOST/…, RestrictedKrbHost/…) - so an SPN write alone is *not* proof of abuse; it is expected on every join.</Item>
+        <Item>Bulk provisioning / imaging. Build servers, MDT/SCCM/Autopilot, and branch-rollout scripts create many machine accounts in a short burst under a service or delegated account. Expect clusters of 4741 from one actor across a branch OU.</Item>
+        <Item>Staging/renaming workflows. Pre-staging a computer object before a join (delegated to helpdesk) legitimately produces 4741 by a non-admin, provisioning-delegated user.</Item>
+        <Item>Re-join after rebuild. A reimaged endpoint whose stale object was deleted then recreated.</Item>
+        <Item>Mohammed.Adnan is an active provisioning/helpdesk-delegated account. In the validation window this account created BZM-TEL-DK-01$/-02$/-03$ on nim-dc-dbap01 and immediately wrote servicePrincipalName, dNSHostName, sAMAccountName, and userAccountControl on each - the canonical *legitimate* domain-join footprint for the Basra Zubair Mall branch OU (OU=Computers,OU=Basra Zubair Mall,OU=NBI-Branches,DC=nbirq,DC=com). Its broader footprint (4728, 4724, 4722, 4737 account/group management on the DCs) is consistent with an IT provisioning identity, not an attacker. Creations by this account into branch OUs, matching a rollout, are the expected authorised pattern.</Item>
+        <Item>Machine-account creation is concentrated on the two DCs. 4741 is logged on nim-dc-dbap01 and nim-dc2-dbap (the accounts they process). Creations appearing on any *other* host, or attributed to an ordinary end-user account with no provisioning role, are the anomaly to chase.</Item>
+        <Item>source.ip is not on the 4741 itself. The event is DC-side; the creator's origin (validated 10.10.213.71 for Mohammed.Adnan, LogonType 3) must be recovered from that account's 4624 logons. Treat origin as a corroborating pivot, not a field on the alert.</Item>
+        <Item>No blanket allow-list. Do not create a standing exception for Mohammed.Adnan or any provisioning account off a single alert; a delegated account is exactly what an attacker would target or impersonate. Scope any exception to actor + branch OU + expected object-naming pattern, and only after a documented rollout.</Item>
+      </Indicators>
+    </FalsePositive>
+    <Misconfiguration>
+      <Definition></Definition>
+    </Misconfiguration>
+    <NeedsEscalation>
+      <Definition></Definition>
+    </NeedsEscalation>
+  </ClassificationGuidance>
+  <ResponseActions>
+    <Phase name="Containment">
+      <Action>Disable or delete the new computer object $new_computer if a true_positive is confirmed, to remove the attacker-controlled principal from the directory before any delegation is exercised. Preserve the object's attribute state (section 15.10/section 17.2 output) as evidence first.</Action>
+      <Action>Remove any delegation written on the new object or on target objects (msDS-AllowedToActOnBehalfOfOtherIdentity, msDS-KeyCredentialLink, rogue servicePrincipalName) discovered in section 17.2/section 17.5.</Action>
+      <Action>Disable / investigate the creating account $actor if it is not a sanctioned provisioning identity, or if it is a provisioning account that appears compromised (anomalous origin in section 15.6, activity outside its normal branch OUs). Reset its credentials (section 20).</Action>
+      <Action>Preserve volatile evidence on the creator's origin host ($source_ip) - the client tool, tickets in memory, and any dropped payload - because NBI does not capture the creation tool from the DC event.</Action>
+      <Action>Deploy/confirm changes only via the authorised human-approved DEPLOY path; investigation itself is read-only.</Action>
+    </Phase>
+    <Phase name="Eradication">
+      <Action>Remove the machine account and its delegation discovered in section 17.2/section 17.5, and audit peer objects for the same RBCD/key-credential writes (an attacker often stages more than one).</Action>
+      <Action>Revoke shadow credentials - delete any msDS-KeyCredentialLink/userCertificate written on the new or target objects, and rotate affected computer/service secrets so recovered hashes are useless.</Action>
+      <Action>Remediate the initial-access vector that gave $actor's foothold, and hunt for the same tradecraft (machine-account creation + delegation) across both DCs and any host the actor touched (section 15.4, section 17.1).</Action>
+      <Action>If noPac was staged (sAMAccountName spoofing on the new object), ensure CVE-2021-42278/42287 patches are applied and correlate with the sAMAccountName-spoofing detection.</Action>
+    </Phase>
+    <Phase name="Recovery">
+      <Action>Reset $actor's password if the account was compromised or misused, and rotate any privileged/service credentials exposed on the origin host during the window.</Action>
+      <Action>Restore MachineAccountQuota hygiene - the durable fix is setting ms-DS-MachineAccountQuota = 0 and delegating machine-account creation explicitly to the provisioning accounts, so ordinary users can no longer create computer objects.</Action>
+      <Action>Validate directory integrity - confirm the malicious object and all delegation are gone, and that no residual RBCD trust remains on legitimate objects.</Action>
+      <Action>Return the account/object to service only after section 22 closing criteria are met and monitoring confirms no recurrence.</Action>
+    </Phase>
+  </ResponseActions>
+  <Escalation>
+    <Trigger>Escalate to Tier 3 / Incident Response (and notify the customer) when any of the following hold:
+
+- A machine account was created by a non-provisioning / ordinary account (MachineAccountQuota abuse) - this alone warrants IR.
+- The new object received an RBCD (msDS-AllowedToActOnBehalfOfOtherIdentity), key-credential (msDS-KeyCredentialLink), or userCertificate write (section 17.2), or Kerberos ticketing for the new/spoofed name is observed (section 17.5).
+- The creating account is admin-equivalent or a sensitive service identity and the creation is unexplained.
+- Lateral movement from $actor toward other DCs or privileged systems is observed (section 17.1).
+- Evidence is incomplete because of NBI's telemetry gaps (the creation tool is not captured DC-side) and the alert cannot be safely cleared - escalate as needs_escalation with the gaps named.</Trigger>
+    <To>SOC L2 / IR</To>
+  </Escalation>
+  <ClosureCriteria>
+    <Item>false_positive (authorised): a domain-join / provisioning / rollout record, or a build service, is positively matched to the exact $actor + $new_computer + $dc_host + time, the object lands in a matching branch OU, and only a normal join footprint (SPN/dNSHostName/UAC) is present. Record the reference. Scope any exception narrowly (actor + OU + naming pattern), never a blanket allow-list.</Item>
+    <Item>false_positive (blocked malicious attempt): a hostile creation positively proven removed before the object was used; documented as blocked-malicious, never "benign".</Item>
+    <Item>misconfiguration: an automation/imaging process created the object outside the intended workflow without attacker involvement; a reconcile/hardening action is raised.</Item>
+    <Item>true_positive: unauthorised creation confirmed; the object and any delegation removed, the creating account and origin investigated, scope of peers established, and no residual delegation or recurrence on monitoring.</Item>
+    <Item>needs_escalation: handed to Tier 3/IR with the specific evidence gaps documented.</Item>
+  </ClosureCriteria>
+  <Limitations>
+    <Item>Re-validate before you trust a cached "blocked" note. The XML predecessor recorded 4741 as *not observed* in its discovery window and pre-marked the confirm step VALIDATION_BLOCKED. On live re-check, 4741 is present in NBI (multiple creations per 4-hour window on nim-dc-dbap01/nim-dc2-dbap). Customer state drifts - prove from current telemetry, don't inherit a stale gap.</Item>
+    <Item>The follow-on write, not the creation, decides severity. Every legitimate join also writes a servicePrincipalName; do not treat an SPN write as abuse. The discriminating attributes are msDS-AllowedToActOnBehalfOfOtherIdentity (RBCD), msDS-KeyCredentialLink/userCertificate (shadow creds), and suspicious userAccountControl flips. section 17.2 is the pivot that matters most.</Item>
+    <Item>The 4672 test is your fastest privilege discriminator. Whether $actor holds admin-equivalent privilege on the DC (section 17.3) separates MachineAccountQuota abuse by an ordinary user from expected admin/provisioning creation. Validated: Mohammed.Adnan (a provisioning account) is absent from 4672 - so *absence from 4672 is normal for delegated join accounts*; weigh it together with the account's directory-management footprint (section 15.4), not in isolation.</Item>
+    <Item>No process telemetry on the DC event. 4741 carries no process image and NBI has no Sysmon, so the creation *tool* is invisible - build the case on the directory footprint (object DN attribute history, section 15.10/section 16) and recover the client tool host-side. Empty != safe.</Item>
+    <Item>source.ip lives on the logon, not the 4741. Recover the creator's origin by correlating SubjectLogonId/4624 (section 15.6); the validated origin for Mohammed.Adnan is 10.10.213.71 (LogonType 3), likely shared branch/provisioning infrastructure - correlate IP + user + host, never trust the IP alone.</Item>
+    <Item>KB-worthy (persist to NBI customer scope): (1) 4741 is LIVE on logs-system.security* (contradicts the earlier "not observed" note) - creations concentrated on nim-dc-dbap01/nim-dc2-dbap; (2) Mohammed.Adnan = delegated branch-provisioning account (creates BZM-*$, writes SPN/dNSHostName/UAC, absent from DC 4672); (3) 4741 carries no process.name/ProcessName and no source.ip on NBI; (4) AttributeLDAPDisplayName/ObjectDN populated on 5136 and usable for CN-anchored object-history pivots. All observed live on 2026-08-17.</Item>
+  </Limitations>
+</Playbook>

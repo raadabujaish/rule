@@ -1,0 +1,86 @@
+{
+  "name": "Potential Remote Install via MsiExec [NBI-4688]",
+  "tags": [
+    "Domain: Endpoint",
+    "OS: Windows",
+    "Use Case: Threat Detection",
+    "Tactic: Defense Evasion",
+    "Data Source: Elastic Endgame",
+    "Data Source: Elastic Defend",
+    "Data Source: Windows Security Event Logs",
+    "Data Source: Microsoft Defender for Endpoint",
+    "Data Source: Sysmon",
+    "Data Source: SentinelOne",
+    "Data Source: Crowdstrike",
+    "Resources: Investigation Guide",
+    "NBI-Recovered",
+    "Phase2-Batch2",
+    "Windows-4688",
+    "coverage:partial-29pct"
+  ],
+  "interval": "5m",
+  "enabled": true,
+  "description": "Identifies attempts to install a file from a remote server using MsiExec. Adversaries may abuse Windows Installers for initial access and delivery of malware.",
+  "risk_score": 73,
+  "severity": "high",
+  "note": "## Coverage\nThis rule runs on Windows Security 4688 process-creation events. Command-line-dependent conditions currently apply to hosts where command-line auditing is enabled.\n\n## Detection guidance\n## Triage and analysis\n\n> **Disclaimer**:\n> This investigation guide was created using generative AI technology and has been reviewed to improve its accuracy and relevance. While every effort has been made to ensure its quality, we recommend validating the content and adapting it to suit your specific environment and operational needs.\n\n### Investigating Potential Remote Install via MsiExec\n\nMsiExec is a Windows utility for installing, maintaining, and removing software. Adversaries exploit it to execute malicious payloads by disguising them as legitimate installations. The detection rule identifies suspicious child processes spawned by MsiExec that initiate network activity, which is atypical for standard installations. By focusing on unusual executable paths and network connections, the rule helps uncover potential misuse indicative of malware delivery or initial access attempts.\n\n### Possible investigation steps\n\n- Review the process tree to identify the parent and child processes of the suspicious MsiExec activity, focusing on the process.entity_id and process.parent.name fields to understand the execution flow.\n- Examine the process.executable path to determine if it deviates",
+  "output_index": "",
+  "investigation_fields": {
+    "field_names": [
+      "user.name",
+      "process.name",
+      "process.parent.name",
+      "process.command_line",
+      "host.name"
+    ]
+  },
+  "author": [
+    "raadabujaish"
+  ],
+  "false_positives": [],
+  "from": "now-9m",
+  "rule_id": "nbi-b2-potential-remote-install-via-msiexec",
+  "max_signals": 100,
+  "risk_score_mapping": [],
+  "severity_mapping": [],
+  "threat": [
+    {
+      "framework": "MITRE ATT&CK",
+      "tactic": {
+        "id": "TA0005",
+        "name": "Defense Evasion",
+        "reference": "https://attack.mitre.org/tactics/TA0005/"
+      },
+      "technique": [
+        {
+          "id": "T1218",
+          "name": "System Binary Proxy Execution",
+          "reference": "https://attack.mitre.org/techniques/T1218/",
+          "subtechnique": [
+            {
+              "id": "T1218.007",
+              "name": "Msiexec",
+              "reference": "https://attack.mitre.org/techniques/T1218/007/"
+            }
+          ]
+        }
+      ]
+    }
+  ],
+  "to": "now",
+  "references": [
+    "https://www.elastic.co/guide/en/security/current/prebuilt-rules.html"
+  ],
+  "version": 1,
+  "exceptions_list": [],
+  "related_integrations": [],
+  "required_fields": [],
+  "setup": "",
+  "type": "eql",
+  "language": "eql",
+  "index": [
+    "logs-system.security-*"
+  ],
+  "query": "process where host.os.type == \"windows\" and event.type == \"start\" and\n  process.name : \"msiexec.exe\" and process.args : (\"-i\", \"/i\") and process.command_line : \"*http*\" and\n  process.args : (\"/qn\", \"-qn\", \"-q\", \"/q\", \"/quiet\") and\n  process.parent.name : (\"sihost.exe\", \"explorer.exe\", \"cmd.exe\", \"wscript.exe\", \"mshta.exe\", \"powershell.exe\", \"wmiprvse.exe\", \"pcalua.exe\", \"forfiles.exe\", \"conhost.exe\") and\n  not process.command_line : (\"*--set-server=*\", \"*UPGRADEADD=*\" , \"*--url=*\",\n                              \"*USESERVERCONFIG=*\", \"*RCTENTERPRISESERVER=*\", \"*app.ninjarmm.com*\", \"*zoom.us/client*\",\n                              \"*SUPPORTSERVERSTSURI=*\", \"*START_URL=*\", \"*AUTOCONFIG=*\", \"*awscli.amazonaws.com*\")\n",
+  "actions": []
+}

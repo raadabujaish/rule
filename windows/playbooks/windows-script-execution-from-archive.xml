@@ -1,0 +1,442 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<Playbook xmlns="https://soc.example/playbooks" id="PB-windows-script-execution-from-archive" name="Windows Script Execution from Archive [NBI-4688] - SOC Playbook" version="3.0" status="Validated" classification="TLP:AMBER">
+  <Metadata>
+    <Owner>NBI SOC / Detection Engineering</Owner>
+    <LastUpdated>2026-08-19</LastUpdated>
+    <Severity default="Medium">Medium</Severity>
+    <Confidence default="Medium">Medium</Confidence>
+    <Category>Execution</Category>
+    <MitreAttack>
+      <Technique id="T1204"/>
+      <Technique id="T1204.002"/>
+      <Technique id="T1059"/>
+      <Technique id="T1059.005"/>
+      <Technique id="T1059.007"/>
+      <Tactic id="TA0002"/>
+    </MitreAttack>
+    <References>
+      <Reference title="MITRE ATT&amp;CK - User Execution: Malicious File (T1204.002)" url="https://attack.mitre.org/techniques/T1204/002/"/>
+      <Reference title="MITRE ATT&amp;CK - Command and Scripting Interpreter: Visual Basic (T1059.005)" url="https://attack.mitre.org/techniques/T1059/005/"/>
+      <Reference title="MITRE ATT&amp;CK - Command and Scripting Interpreter: JavaScript (T1059.007)" url="https://attack.mitre.org/techniques/T1059/007/"/>
+      <Reference title="MITRE ATT&amp;CK - Execution tactic (TA0002)" url="https://attack.mitre.org/tactics/TA0002/"/>
+      <Reference title="LOLBAS - Wscript.exe" url="https://lolbas-project.github.io/lolbas/Binaries/Wscript/"/>
+      <Reference title="LOLBAS - Cscript.exe (evasion sibling)" url="https://lolbas-project.github.io/lolbas/Binaries/Cscript/"/>
+      <Reference title="Microsoft Learn - Windows Script Host overview" url="https://learn.microsoft.com/en-us/previous-versions/windows/it-pro/windows-server-2003/cc738350(v=ws.10"/>
+      <Reference title="Microsoft Learn - Command line process auditing (Event 4688 command-line GPO)" url="https://learn.microsoft.com/en-us/windows-server/identity/ad-ds/manage/component-updates/command-line-process-auditing"/>
+      <Reference title="Red Canary - Threat Detection: malicious use of Windows Script Host (wscript/cscript)" url="https://redcanary.com/threat-detection-report/techniques/windows-command-shell/"/>
+      <Reference title="CISA - Avoiding Social Engineering and Phishing Attacks" url="https://www.cisa.gov/news-events/news/avoiding-social-engineering-and-phishing-attacks"/>
+    </References>
+  </Metadata>
+  <AlertContext>
+    <RuleName>Windows Script Execution from Archive [NBI-4688]</RuleName>
+    <RuleId>nbi-b2-windows-script-execution-from-archive</RuleId>
+    <RuleType>eql</RuleType>
+    <Index>logs-system.security-*</Index>
+    <TriggerLogic>The deployed rule is an EQL process rule. Its behavioural core, expressed against NBI 4688 telemetry, is:
+
+
+
+Plain English: a new wscript.exe whose parent is Explorer or an archive tool (WinRAR / 7-Zip File Manager) and whose command line / arguments reference a Temp archive-extraction folder. An explorer.exe parent means the archive was extracted to disk first and the script was then double-clicked from the folder; a winrar.exe/7zFM.exe parent means the script was launched from inside the open archive window. Every such execution is a user running scripted content that arrived packaged - the behaviour phishing operators rely on.
+
+One-line Kibana KQL detection filter (for fast pivoting in Discover / Timeline):
+
+
+
+Note the two telemetry realities that shape every step below: process.command_line is only ~50% populated on NBI 4688 (bimodal by host - see section 8), and the script's own contents are never in 4688 - the event records only the launch and the path. The archive extraction folder in process.args is therefore the primary on-host artifact the rule gives you.</TriggerLogic>
+    <KeyAlertFields>process.name, process.executable, wscript.exe, process.parent.name, process.parent.executable, explorer.exe, winrar.exe, process.pid, process.parent.pid, process.entity_id, user.name, user.domain</KeyAlertFields>
+  </AlertContext>
+  <Inputs>
+    <Input name="$host"/>
+    <Input name="$user"/>
+    <Input name="$source_ip"/>
+    <Input name="$pid"/>
+  </Inputs>
+  <ExecutiveSummary>
+    <Overview>This playbook drives triage and investigation of the Windows Script Execution from Archive detection on NBI's Elastic Security deployment. The rule fires when wscript.exe is created (Event 4688) with a parent of explorer.exe, winrar.exe, or 7zFM.exe and a process argument that points into an archive-extraction folder under AppData\Local\Temp (7z*, *.zip.*, Rar$*, Temp?_*, BNZ.*). That combination is the observable signature of a user double-clicking a script that was delivered inside a downloaded or mailed archive - the classic phishing-to-script-execution path where an archive smuggles a .vbs/.js/.wsf past mail filters and the recipient runs it straight out of the extraction folder.
+
+The analyst's job is to decide, quickly and defensibly, whether the script is one the user legitimately received and ran (false_positive - authorised, or proven-blocked), a benign business workflow that ships scripts in archives (misconfiguration), or a malicious dropper/loader executed from a phishing archive (true_positive) - and to classify the alert as true_positive, false_positive, misconfiguration, or needs_escalation with evidence attached. The discriminators are the archive tool, the script type and name, the script contents, and what the script spawns next.</Overview>
+    <BusinessImpact>wscript.exe is the Windows Script Host GUI interpreter for .vbs, .js, and .wsf files. When it is launched by Explorer or an archive tool from a Temp extraction path, a human just opened a container file (a .zip, .rar, .7z, or a nested archive) and ran a script that was inside it. Archives are the delivery wrapper of choice for commodity phishing because they defeat naive attachment scanning, preserve the script verbatim, and (until Mark-of-the-Web is enforced end-to-end) often strip the "downloaded from the Internet" flag on the extracted contents, so SmartScreen and Protected View do not intervene.
+
+An alert therefore means: on $host, $user executed a Windows Script Host script directly out of an archive-extraction folder. That is the exact moment a phishing lure can become code execution. It is not proof of compromise - plenty of scripts are benign - but it is the *initial-execution* juncture, so the investigative questions are: what was the script, where did the archive come from, and did the script go on to download or execute anything (the difference between an inert file and a working loader).</BusinessImpact>
+  </ExecutiveSummary>
+  <Investigation>
+    <Goal>Decide true_positive / false_positive / misconfiguration / needs_escalation for Windows Script Execution from Archive [NBI-4688].</Goal>
+    <Workflow>
+      <Step order="1" name="Confirm the archived-script execution on the host">
+        <Purpose>Confirm the archived-script execution on the host</Purpose>
+        <Query platform="Elastic" language="ES|QL" id="Q-01">
+          <![CDATA[
+FROM logs-system.security-*
+| WHERE event.code == "4688" AND host.name == "$host"
+    AND TO_LOWER(process.name) == "wscript.exe"
+    AND TO_LOWER(process.parent.name) IN ("explorer.exe", "winrar.exe", "7zfm.exe")
+    AND @timestamp >= NOW() - 4 hours
+| EVAL cl = TO_LOWER(CONCAT(COALESCE(process.command_line, ""), " ", COALESCE(MV_CONCAT(process.args, " "), "")))
+| WHERE cl LIKE "*temp*" AND (cl LIKE "*7z*" OR cl LIKE "*rar$*" OR cl LIKE "*.zip.*" OR cl LIKE "*temp?_*" OR cl LIKE "*bnz.*")
+| KEEP @timestamp, host.name, user.name, process.parent.name, process.command_line, process.args
+| SORT @timestamp DESC
+| LIMIT 20
+]]>
+        </Query>
+      </Step>
+      <Step order="2" name="Identify the archive tool and script type">
+        <Purpose>Identify the archive tool and script type</Purpose>
+        <Query platform="Elastic" language="ES|QL" id="Q-02">
+          <![CDATA[
+FROM logs-system.security-*
+| WHERE event.code == "4688" AND host.name == "$host"
+    AND TO_LOWER(process.name) == "wscript.exe"
+    AND TO_LOWER(process.parent.name) IN ("explorer.exe", "winrar.exe", "7zfm.exe")
+    AND @timestamp >= NOW() - 4 hours
+| EVAL cl = TO_LOWER(CONCAT(COALESCE(process.command_line, ""), " ", COALESCE(MV_CONCAT(process.args, " "), "")))
+| WHERE cl LIKE "*temp*"
+| EVAL archiver = CASE(
+    TO_LOWER(process.parent.name) == "winrar.exe", "winrar",
+    TO_LOWER(process.parent.name) == "7zfm.exe", "7zip",
+    TO_LOWER(process.parent.name) == "explorer.exe", "explorer-doubleclick",
+    "other")
+| EVAL script_type = CASE(cl LIKE "*.vbs*", "vbscript", cl LIKE "*.js*", "jscript", cl LIKE "*.wsf*", "wsf", "other")
+| STATS execs = COUNT(*) BY archiver, script_type, user.name
+| SORT execs DESC
+| LIMIT 20
+]]>
+        </Query>
+      </Step>
+      <Step order="3" name="Entity pivoting">
+        <Purpose>Entity pivoting</Purpose>
+        <Query platform="Elastic" language="ES|QL" id="Q-03">
+          <![CDATA[
+FROM logs-system.security-*
+| WHERE @timestamp >= NOW() - 4 hours
+    AND event.code == "4688"
+    AND host.name == "$host"
+    AND TO_LOWER(process.name) == "wscript.exe"
+    AND TO_LOWER(process.parent.name) IN ("explorer.exe", "winrar.exe", "7zfm.exe")
+| KEEP @timestamp, host.name, user.name, user.domain, process.name, process.executable, process.parent.name, process.parent.executable, process.pid, process.parent.pid
+| SORT @timestamp DESC
+| LIMIT 50
+]]>
+        </Query>
+      </Step>
+      <Step order="4" name="Process investigation">
+        <Purpose>Process investigation</Purpose>
+        <Query platform="Elastic" language="ES|QL" id="Q-04">
+          <![CDATA[
+FROM logs-system.security-*
+| WHERE @timestamp >= NOW() - 4 hours
+    AND event.code == "4688"
+    AND TO_LOWER(process.name) == "wscript.exe"
+| STATS executions = COUNT(*), hosts = COUNT_DISTINCT(host.name), users = COUNT_DISTINCT(user.name) BY process.executable, process.parent.name
+| SORT executions DESC
+| LIMIT 50
+]]>
+        </Query>
+      </Step>
+      <Step order="5" name="Process investigation">
+        <Purpose>Process investigation</Purpose>
+        <Query platform="Elastic" language="ES|QL" id="Q-05">
+          <![CDATA[
+FROM logs-system.security-*
+| WHERE @timestamp >= NOW() - 4 hours
+    AND event.code == "4688"
+    AND host.name == "$host"
+    AND TO_LOWER(process.name) == "wscript.exe"
+    AND process.args IS NOT NULL
+| EVAL arguments = MV_CONCAT(process.args, " ")
+| KEEP @timestamp, host.name, user.name, process.executable, process.parent.name, arguments
+| SORT @timestamp DESC
+| LIMIT 50
+]]>
+        </Query>
+      </Step>
+      <Step order="6" name="Parent-Child process analysis">
+        <Purpose>Parent-Child process analysis</Purpose>
+        <Query platform="Elastic" language="ES|QL" id="Q-06">
+          <![CDATA[
+FROM logs-system.security-*
+| WHERE @timestamp >= NOW() - 4 hours
+    AND event.code == "4688"
+    AND host.name == "$host"
+    AND (TO_LOWER(process.name) == "wscript.exe" OR TO_LOWER(process.parent.name) == "wscript.exe"
+         OR TO_LOWER(process.name) IN ("winrar.exe", "7zfm.exe") OR TO_LOWER(process.parent.name) IN ("winrar.exe", "7zfm.exe"))
+| KEEP @timestamp, user.name, process.parent.name, process.parent.pid, process.name, process.pid, process.executable
+| SORT @timestamp DESC
+| LIMIT 50
+]]>
+        </Query>
+      </Step>
+      <Step order="7" name="Parent-Child process analysis">
+        <Purpose>Parent-Child process analysis</Purpose>
+        <Query platform="Elastic" language="ES|QL" id="Q-07">
+          <![CDATA[
+FROM logs-system.security-*
+| WHERE @timestamp >= NOW() - 4 hours
+    AND event.code == "4688"
+    AND host.name == "$host"
+    AND process.parent.pid == $pid
+| KEEP @timestamp, user.name, process.parent.name, process.parent.pid, process.name, process.pid, process.executable
+| SORT @timestamp ASC
+| LIMIT 100
+]]>
+        </Query>
+      </Step>
+      <Step order="8" name="User investigation">
+        <Purpose>User investigation</Purpose>
+        <Query platform="Elastic" language="ES|QL" id="Q-08">
+          <![CDATA[
+FROM logs-system.security-*
+| WHERE @timestamp >= NOW() - 4 hours
+    AND event.code == "4688"
+    AND user.name == "$user"
+| STATS executions = COUNT(*), distinct_procs = COUNT_DISTINCT(process.name) BY host.name
+| SORT executions DESC
+| LIMIT 20
+]]>
+        </Query>
+      </Step>
+      <Step order="9" name="Host investigation">
+        <Purpose>Host investigation</Purpose>
+        <Query platform="Elastic" language="ES|QL" id="Q-09">
+          <![CDATA[
+FROM logs-system.security-*
+| WHERE @timestamp >= NOW() - 4 hours
+    AND event.code == "4688"
+    AND host.name == "$host"
+| STATS executions = COUNT(*), users = COUNT_DISTINCT(user.name) BY process.name, process.parent.name
+| SORT executions ASC
+| LIMIT 40
+]]>
+        </Query>
+      </Step>
+      <Step order="10" name="IP investigation">
+        <Purpose>IP investigation</Purpose>
+        <Query platform="Elastic" language="ES|QL" id="Q-10">
+          <![CDATA[
+FROM logs-system.security-*
+| WHERE @timestamp >= NOW() - 4 hours
+    AND event.code == "4624"
+    AND host.name == "$host" AND user.name == "$user"
+    AND source.ip IS NOT NULL
+| STATS logons = COUNT(*) BY source.ip, winlog.event_data.LogonType
+| SORT logons DESC
+| LIMIT 20
+]]>
+        </Query>
+      </Step>
+      <Step order="11" name="IP investigation">
+        <Purpose>IP investigation</Purpose>
+        <Query platform="Elastic" language="ES|QL" id="Q-11">
+          <![CDATA[
+FROM logs-system.security-*
+| WHERE @timestamp >= NOW() - 4 hours
+    AND event.code == "4624"
+    AND source.ip == "$source_ip"
+| STATS logons = COUNT(*) BY user.name, host.name, winlog.event_data.LogonType
+| SORT logons DESC
+| LIMIT 25
+]]>
+        </Query>
+      </Step>
+      <Step order="12" name="File investigation">
+        <Purpose>File investigation</Purpose>
+        <Query platform="Elastic" language="ES|QL" id="Q-12">
+          <![CDATA[
+FROM logs-system.security-*
+| WHERE @timestamp >= NOW() - 4 hours
+    AND event.code == "4688"
+    AND host.name == "$host"
+    AND TO_LOWER(process.name) == "wscript.exe"
+| EVAL arguments = MV_CONCAT(process.args, " ")
+| STATS executions = COUNT(*), first_seen = MIN(@timestamp), last_seen = MAX(@timestamp) BY process.executable, arguments
+| SORT executions DESC
+| LIMIT 30
+]]>
+        </Query>
+      </Step>
+      <Step order="13" name="Authentication investigation">
+        <Purpose>Authentication investigation</Purpose>
+        <Query platform="Elastic" language="ES|QL" id="Q-13">
+          <![CDATA[
+FROM logs-system.security-*
+| WHERE @timestamp >= NOW() - 4 hours
+    AND event.code IN ("4624", "4625", "4634", "4647")
+    AND host.name == "$host" AND user.name == "$user"
+| STATS events = COUNT(*), first_seen = MIN(@timestamp), last_seen = MAX(@timestamp) BY event.code, winlog.event_data.LogonType, source.ip
+| SORT events DESC
+| LIMIT 30
+]]>
+        </Query>
+      </Step>
+      <Step order="14" name="Timeline Reconstruction">
+        <Purpose>Timeline Reconstruction</Purpose>
+        <Query platform="Elastic" language="ES|QL" id="Q-14">
+          <![CDATA[
+FROM logs-system.security-*
+| WHERE @timestamp >= NOW() - 4 hours
+    AND event.code == "4688"
+    AND host.name == "$host"
+    AND user.name == "$user"
+| KEEP @timestamp, process.parent.name, process.parent.pid, process.name, process.pid, process.executable
+| SORT @timestamp ASC
+| LIMIT 200
+]]>
+        </Query>
+      </Step>
+      <Step order="15" name="Lateral movement validation">
+        <Purpose>Lateral movement validation</Purpose>
+        <Query platform="Elastic" language="ES|QL" id="Q-15">
+          <![CDATA[
+FROM logs-system.security-*
+| WHERE @timestamp >= NOW() - 4 hours
+    AND event.code IN ("4624", "4648", "4768", "4769", "5140")
+    AND user.name == "$user"
+    AND host.name != "$host"
+| STATS events = COUNT(*) BY host.name, event.code, winlog.event_data.LogonType
+| SORT events DESC
+| LIMIT 30
+]]>
+        </Query>
+      </Step>
+      <Step order="16" name="Persistence validation">
+        <Purpose>Persistence validation</Purpose>
+        <Query platform="Elastic" language="ES|QL" id="Q-16">
+          <![CDATA[
+FROM logs-system.security-*
+| WHERE @timestamp >= NOW() - 4 hours
+    AND host.name == "$host"
+    AND (
+        (event.code == "4688" AND TO_LOWER(process.name) IN ("schtasks.exe", "reg.exe", "sc.exe", "at.exe", "powershell.exe", "wscript.exe", "cscript.exe", "rundll32.exe", "mshta.exe"))
+        OR event.code == "7045"
+        OR event.code == "4720"
+        OR event.code == "4698"
+    )
+| STATS events = COUNT(*) BY event.code, process.name, user.name
+| SORT events DESC
+| LIMIT 40
+]]>
+        </Query>
+      </Step>
+      <Step order="17" name="Privilege escalation validation">
+        <Purpose>Privilege escalation validation</Purpose>
+        <Query platform="Elastic" language="ES|QL" id="Q-17">
+          <![CDATA[
+FROM logs-system.security-*
+| WHERE @timestamp >= NOW() - 4 hours
+    AND event.code == "4672"
+    AND host.name == "$host"
+| STATS special_priv_logons = COUNT(*) BY user.name
+| SORT special_priv_logons DESC
+| LIMIT 25
+]]>
+        </Query>
+      </Step>
+      <Step order="18" name="Defense evasion validation">
+        <Purpose>Defense evasion validation</Purpose>
+        <Query platform="Elastic" language="ES|QL" id="Q-18">
+          <![CDATA[
+FROM logs-system.security-*
+| WHERE @timestamp >= NOW() - 4 hours
+    AND host.name == "$host"
+    AND (
+        (event.code == "4688" AND TO_LOWER(process.name) IN ("wevtutil.exe", "fsutil.exe", "vssadmin.exe", "wmic.exe", "cipher.exe", "sdelete.exe", "sdelete64.exe"))
+        OR event.code == "1102"
+        OR event.code == "4719"
+    )
+| STATS events = COUNT(*) BY event.code, process.name, user.name
+| SORT events DESC
+| LIMIT 30
+]]>
+        </Query>
+      </Step>
+      <Step order="19" name="Impact assessment">
+        <Purpose>Impact assessment</Purpose>
+        <Query platform="Elastic" language="ES|QL" id="Q-19">
+          <![CDATA[
+FROM logs-system.security-*
+| WHERE @timestamp >= NOW() - 4 hours
+    AND host.name == "$host"
+    AND event.code == "4688"
+    AND process.parent.pid == $pid
+| STATS children = COUNT(*), distinct_children = COUNT_DISTINCT(process.name) BY process.name
+| SORT children DESC
+| LIMIT 30
+]]>
+        </Query>
+      </Step>
+      <Step order="20" name="Finalize verdict">
+        <DecisionTree>
+        </DecisionTree>
+      </Step>
+    </Workflow>
+  </Investigation>
+  <ClassificationGuidance>
+    <TruePositive>
+      <Definition></Definition>
+    </TruePositive>
+    <FalsePositive>
+      <Definition></Definition>
+      <Indicators>
+        <Item>Legitimate scripts a user knowingly received - an IT helper .vbs, a vendor-supplied .js, or an internal tool distributed as a zip that the user extracts and runs. These are *authorised*, not "benign": confirm the sender and business purpose against a ticket or the user before clearing.</Item>
+        <Item>Software-distribution or setup workflows that ship a script inside an archive and expect the user to run it from the extracted folder. Rare, but seen on freshly-imaged or heavily-managed machines.</Item>
+        <Item>Admin/red-team/purple-team testing that deliberately runs the archive-to-script chain. This is authorised malicious-technique execution - confirm against a change ticket or exercise ROE and record it as such; never dismiss on sight.</Item>
+        <Item>cscript.exe and non-listed extractors are *not* covered by this rule (see section 23 evasion), so they will not appear here as FPs - but their absence is not evidence of safety.</Item>
+        <Item>wscript.exe from an archive tool has a near-zero baseline in NBI. Over a 4-hour estate-wide window, wscript.exe appeared 0 times in 4688 at all - and 0 times with an explorer.exe/winrar.exe/7zFM.exe parent. NBI's Windows telemetry is overwhelmingly server-side (the busiest hosts - nim-est-apv07, nim-est-apv04, nim-fti-apv01 - are application/backup servers running scheduled and service workloads, not interactive desktops). There is no noisy legitimate source of this behaviour to tune out, so any firing is a strong anomaly.</Item>
+        <Item>The realistic locus is a jump/VDI host. The multi-user Citrix/RDS jump hosts - nim-jump-apv02/-apv03/-apv22 - carry real interactive sessions (validated: nim-jump-apv02 had 19 named interactive users active in the window: Sam.Rajendran, Mustafa.Kareem, Marwan.Hussein, and others). If a user genuinely opens a delivered archive and runs a script, it will surface on this host class. Confirm against the user's identity, mailbox, and a change record.</Item>
+        <Item>No historical NBI benign-true-positive is on record for this rule. There is no environment-specific allow-list to apply. Do not create a blanket exception off a single alert; scope any exception to an exact script name + extraction path + parent + user, and only after a documented authorised cause.</Item>
+      </Indicators>
+    </FalsePositive>
+    <Misconfiguration>
+      <Definition></Definition>
+    </Misconfiguration>
+    <NeedsEscalation>
+      <Definition></Definition>
+    </NeedsEscalation>
+  </ClassificationGuidance>
+  <ResponseActions>
+    <Phase name="Containment">
+      <Action>Isolate $host (network-contain / quarantine) if a true_positive is confirmed, to stop post-execution download and C2. On a shared jump/VDI host, coordinate with IT to avoid dropping unrelated user sessions unnecessarily, but prioritise containment.</Action>
+      <Action>Suspend or force-logoff $user's session on $host and disable the account pending investigation if the user context is implicated; reset its credentials (section 20).</Action>
+      <Action>Terminate the wscript.exe process and its descendants ($pid tree from section 15.3b / section 17.5) if the host cannot yet be isolated.</Action>
+      <Action>Preserve volatile evidence first where feasible: capture the script from the Temp extraction folder and the delivering archive before they self-delete, plus the running process list and any dropped payload path from section 15.10. NBI does not collect the script body - host-side capture is the only way to recover it.</Action>
+      <Action>Deploy/confirm changes only via the authorised human-approved DEPLOY path; investigation itself is read-only.</Action>
+    </Phase>
+    <Phase name="Eradication">
+      <Action>Remove the persistence discovered in section 17.2 (services, scheduled tasks, Run keys, rogue accounts) and any dropped payload identified via section 15.10 and the recovered script.</Action>
+      <Action>Delete the malicious script and archive from the Temp extraction folder and the user's Downloads/mail cache, and quarantine the delivering email/archive at the mail gateway.</Action>
+      <Action>Run a full anti-malware / EDR scan on $host and hunt for the same script/payload hash and persistence across peers - especially the other jump/VDI hosts (nim-jump-apv03, nim-jump-apv22) and any host $user touched (section 15.4, section 17.1).</Action>
+      <Action>Remediate the delivery vector: pull the phishing message from other recipients' mailboxes, and confirm no second-stage payload persists.</Action>
+    </Phase>
+    <Phase name="Recovery">
+      <Action>Reset $user's password and any credentials that were accessible from $host during the session; if privileged accounts were used there (section 17.3), rotate those too and review for Kerberos/NTLM secret exposure.</Action>
+      <Action>Restore $host from a known-good image if a loader established persistence or tampering was extensive; otherwise validate that all eradication actions hold after reboot.</Action>
+      <Action>Return the host/account to service only after section 22 closing criteria are met and monitoring confirms the archive-to-script behaviour does not recur.</Action>
+      <Action>Consider host hardening (section 23): changing the default .vbs/.js/.wsf handler to notepad.exe, blocking Script Host execution from archive/Temp paths (AppLocker/WDAC), enforcing Mark-of-the-Web, and stripping risky script types from archives at the mail gateway.</Action>
+    </Phase>
+  </ResponseActions>
+  <Escalation>
+    <Trigger>Escalate to Tier 3 / Incident Response (and notify the customer, and the email-security team) when any of the following hold:
+
+- The recovered script is malicious, or the wscript.exe process spawned download/execution tooling (powershell/cmd/certutil/bitsadmin/curl/mshta/rundll32) or a LOLBIN burst (section 15.3b, section 17.5).
+- Persistence was installed (section 17.2), credentials were accessed, or the acting account is privileged (section 17.3).
+- Lateral movement from $host/$user is observed (section 17.1), especially toward domain controllers or other privileged systems.
+- Log clearing or audit-policy tampering appears (section 17.4).
+- Evidence is incomplete because of NBI's telemetry gaps (script body, network, mail not collected here) and the alert cannot be safely cleared - escalate as needs_escalation with the gaps named.</Trigger>
+    <To>SOC L2 / IR</To>
+  </Escalation>
+  <ClosureCriteria>
+    <Item>false_positive (authorised): a known sender, ticketed script distribution, or sanctioned red/purple-team ROE is positively matched to the exact script + $user + $host + time, with the recovered script confirmed benign. Record the reference. Scope any exception narrowly (script name + extraction path + parent + user), never a blanket host/user exclusion.</Item>
+    <Item>false_positive (blocked/authorised exercise): confirmed test execution of the technique, or the script positively proven to have failed with no effect (Script Host disabled, errored, no child/network) - documented as blocked, never "benign".</Item>
+    <Item>misconfiguration: a legitimate business process shipped a script inside an archive that the user ran from Temp; a hardening/tuning action is raised.</Item>
+    <Item>true_positive: a malicious script executed; containment/eradication/recovery completed, scope of $user/$host/peers established, delivering mail quarantined, and no residual persistence or recurrence on monitoring.</Item>
+    <Item>needs_escalation: handed to Tier 3/IR with the specific evidence gaps documented.</Item>
+  </ClosureCriteria>
+  <Limitations>
+    <Item>Zero baseline = high fidelity. wscript.exe does not appear at all in NBI's 4-hour Windows telemetry (0 executions, 0 with an archive-tool/Explorer parent). There is nothing legitimate to tune out, so this rule should be near-silent; when it fires, believe it and read the script.</Item>
+    <Item>The script body is invisible on NBI - recover it host-side. 4688 gives you the launch and the extraction path only. Do not wait for script contents the telemetry cannot provide; retrieve the .vbs/.js/.wsf from the Temp folder and preserve the archive.</Item>
+    <Item>Command-line capture is bimodal, and the "wrong" tier for this attack. It is enabled on some servers (e.g. nim-est-apv07 ~100%) but absent on the jump/VDI hosts where an interactive archive-open is most likely. Expect process.command_line/process.args (and thus the archive path) to be null exactly where you most want them; lean on lineage (PID), the recovered script, and follow-on behaviour instead. Enabling the "Include command line in process creation events" GPO on the jump/workstation class is the single highest-value hardening ask coming out of this rule.</Item>
+    <Item>No Sysmon → PID-based lineage. With process.entity_id unavailable, reconstruct trees with process.pid/process.parent.pid in a tight window and corroborate with process.parent.name (PIDs are reused). This works well on NBI (validated: userinit → cmd → conhost chains are legible).</Item>
+    <Item>source.ip is shared infrastructure. A single VDI/jump egress IP (validated example: 10.11.102.15) fronts many users. Never treat source.ip as an individual identifier; correlate IP + user + host.</Item>
+    <Item>Evasion to expect: cscript.exe instead of wscript.exe, a .lnk launcher, a non-listed extractor/parent, or extraction to a non-Temp path - none of which this rule sees. Complement with mail-gateway archive inspection, Mark-of-the-Web enforcement, and Script-Host execution monitoring (section 24).</Item>
+    <Item>KB-worthy (persist to NBI customer scope): (1) wscript.exe zero-baseline over 4h on logs-system.security*; (2) command-line/process.args host-bimodality (nim-est-apv07 populated vs jump hosts null); (3) process.hash.* absent on 4688; (4) 10.11.102.15 = shared VDI/jump egress; (5) nim-jump-apv02 = active multi-user (19) interactive jump host. Observed live 2026-08-19.</Item>
+  </Limitations>
+</Playbook>

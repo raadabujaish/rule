@@ -1,0 +1,91 @@
+{
+  "name": "Script Execution via Microsoft HTML Application [NBI-4688]",
+  "tags": [
+    "Domain: Endpoint",
+    "OS: Windows",
+    "Use Case: Threat Detection",
+    "Tactic: Defense Evasion",
+    "Data Source: Windows Security Event Logs",
+    "Data Source: Sysmon",
+    "Data Source: SentinelOne",
+    "Data Source: Microsoft Defender for Endpoint",
+    "Data Source: Elastic Defend",
+    "Data Source: Crowdstrike",
+    "Resources: Investigation Guide",
+    "Data Source: Elastic Endgame",
+    "NBI-Recovered",
+    "Phase2-Batch2",
+    "Windows-4688",
+    "coverage:partial-29pct"
+  ],
+  "interval": "5m",
+  "enabled": true,
+  "description": "Identifies the execution of scripts via HTML applications using Windows utilities rundll32.exe or mshta.exe. Adversaries may bypass process and/or signature-based defenses by proxying execution of malicious content with signed binaries.",
+  "risk_score": 73,
+  "severity": "high",
+  "note": "## Coverage\nThis rule runs on Windows Security 4688 process-creation events. Command-line-dependent conditions currently apply to hosts where command-line auditing is enabled.\n\n## Detection guidance\n## Triage and analysis\n\n> **Disclaimer**:\n> This investigation guide was created using generative AI technology and has been reviewed to improve its accuracy and relevance. While every effort has been made to ensure its quality, we recommend validating the content and adapting it to suit your specific environment and operational needs.\n\n### Investigating Script Execution via Microsoft HTML Application\n\nMicrosoft HTML Applications (HTA) allow scripts to run in a trusted environment, often using utilities like `rundll32.exe` or `mshta.exe`. Adversaries exploit this by executing malicious scripts under the guise of legitimate processes, bypassing defenses. The detection rule identifies suspicious script execution patterns, such as unusual command lines or execution from common download locations, to flag potential abuse.\n\n### Possible investigation steps\n\n- Review the process command line details to identify any suspicious patterns or indicators of malicious activity, such as the presence of script execution commands like \"eval\", \"GetObject\", or \"WScript.Shell\".\n- Check the parent process executable path to determine if the process was spawned by a known legitimate application or if i",
+  "output_index": "",
+  "investigation_fields": {
+    "field_names": [
+      "user.name",
+      "process.name",
+      "process.parent.name",
+      "process.command_line",
+      "host.name"
+    ]
+  },
+  "author": [
+    "raadabujaish"
+  ],
+  "false_positives": [],
+  "from": "now-9m",
+  "rule_id": "nbi-b2-script-execution-via-microsoft-html-application",
+  "max_signals": 100,
+  "risk_score_mapping": [],
+  "severity_mapping": [],
+  "threat": [
+    {
+      "framework": "MITRE ATT&CK",
+      "tactic": {
+        "id": "TA0005",
+        "name": "Defense Evasion",
+        "reference": "https://attack.mitre.org/tactics/TA0005/"
+      },
+      "technique": [
+        {
+          "id": "T1218",
+          "name": "System Binary Proxy Execution",
+          "reference": "https://attack.mitre.org/techniques/T1218/",
+          "subtechnique": [
+            {
+              "id": "T1218.005",
+              "name": "Mshta",
+              "reference": "https://attack.mitre.org/techniques/T1218/005/"
+            },
+            {
+              "id": "T1218.011",
+              "name": "Rundll32",
+              "reference": "https://attack.mitre.org/techniques/T1218/011/"
+            }
+          ]
+        }
+      ]
+    }
+  ],
+  "to": "now",
+  "references": [
+    "https://www.elastic.co/guide/en/security/current/prebuilt-rules.html"
+  ],
+  "version": 1,
+  "exceptions_list": [],
+  "related_integrations": [],
+  "required_fields": [],
+  "setup": "",
+  "type": "eql",
+  "language": "eql",
+  "index": [
+    "logs-system.security-*"
+  ],
+  "query": "process where host.os.type == \"windows\" and event.type == \"start\" and\n process.name : (\"rundll32.exe\", \"mshta.exe\") and\n  (\n     (process.command_line :\n        (\n        \"*script*eval(*\",\n         \"*script*GetObject*\",\n         \"*.regread(*\",\n         \"*WScript.Shell*\",\n         \"*.run(*\",\n         \"*).Exec()*\",\n         \"*mshta*http*\",\n         \"*mshtml*RunHTMLApplication*\",\n         \"*mshtml*,#135*\",\n         \"*StrReverse*\",\n         \"*.RegWrite*\",\n         /* Issue #379 */\n         \"*window.close(*\",\n         \"* Chr(*\"\n         )\n     and not ?process.parent.executable :\n                  (\"?:\\\\Program Files (x86)\\\\Citrix\\\\System32\\\\wfshell.exe\",\n                   \"?:\\\\Program Files (x86)\\\\Microsoft Office\\\\Office*\\\\MSACCESS.EXE\",\n                   \"?:\\\\Program Files\\\\Quokka.Works GTInstaller\\\\GTInstaller.exe\")\n     ) or\n\n    (process.name : \"mshta.exe\" and\n     not process.command_line : (\"*.hta*\", \"*.htm*\", \"-Embedding\") and ?process.args_count >=2) or\n\n     /* Execution of HTA file downloaded from the internet */\n     (process.name : \"mshta.exe\" and process.command_line : \"*\\\\Users\\\\*\\\\Downloads\\\\*.hta*\") or\n\n     /* Execution of HTA file from archive */\n     (process.name : \"mshta.exe\" and\n      process.args : (\"?:\\\\Users\\\\*\\\\Temp\\\\7z*\", \"?:\\\\Users\\\\*\\\\Temp\\\\Rar$*\", \"?:\\\\Users\\\\*\\\\Temp\\\\Temp?_*\", \"?:\\\\Users\\\\*\\\\Temp\\\\BNZ.*\"))\n   )\n",
+  "actions": []
+}

@@ -1,0 +1,458 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<Playbook xmlns="https://soc.example/playbooks" id="PB-windows-lockbit-ransomware-markers" name="Lockbit 3.0 Ransomware - SOC Playbook" version="3.0" status="Validated" classification="TLP:AMBER">
+  <Metadata>
+    <Owner>NBI SOC / Detection Engineering</Owner>
+    <LastUpdated>2026-08-19</LastUpdated>
+    <Severity default="critical">critical</Severity>
+    <Confidence default="Medium">Medium</Confidence>
+    <Category>Impact</Category>
+    <MitreAttack>
+      <Technique id="T1486"/>
+      <Technique id="T1490"/>
+      <Technique id="T1489"/>
+      <Technique id="T1562.001"/>
+      <Technique id="T1070.001"/>
+      <Tactic id="TA0040"/>
+    </MitreAttack>
+    <References>
+      <Reference title="MITRE ATT&amp;CK - Data Encrypted for Impact (T1486)" url="https://attack.mitre.org/techniques/T1486/"/>
+      <Reference title="MITRE ATT&amp;CK - Inhibit System Recovery (T1490)" url="https://attack.mitre.org/techniques/T1490/"/>
+      <Reference title="MITRE ATT&amp;CK - Impact tactic (TA0040)" url="https://attack.mitre.org/tactics/TA0040/"/>
+      <Reference title="MITRE ATT&amp;CK - LockBit 3.0 (Software S1202)" url="https://attack.mitre.org/software/S1202/"/>
+      <Reference title="MITRE ATT&amp;CK - Conti (Software S0575)" url="https://attack.mitre.org/software/S0575/"/>
+      <Reference title="CISA #StopRansomware: LockBit 3.0 (AA23-075A)" url="https://www.cisa.gov/news-events/cybersecurity-advisories/aa23-075a"/>
+      <Reference title="CISA - Understanding Ransomware Threat Actors: LockBit (AA23-165A)" url="https://www.cisa.gov/news-events/cybersecurity-advisories/aa23-165a"/>
+      <Reference title="Elastic - Detection Rules (T1486/T1490 impact analytics, incl. shadow-copy deletion)" url="https://github.com/elastic/detection-rules"/>
+      <Reference title="Microsoft Learn - Command line process auditing (Event 4688 command-line GPO)" url="https://learn.microsoft.com/en-us/windows-server/identity/ad-ds/manage/component-updates/command-line-process-auditing"/>
+    </References>
+  </Metadata>
+  <AlertContext>
+    <RuleName>Lockbit 3.0 Ransomware</RuleName>
+    <RuleId>2abde34a-e809-4af4-a3ef-783d82eff693</RuleId>
+    <RuleType>query</RuleType>
+    <Index>logs-system.security*</Index>
+    <TriggerLogic>The deployed rule is a query rule (Kibana KQL / kuery). Verbatim from the rule definition:
+
+
+
+Plain English - the alert fires if any one of three string markers appears in an event on the endpoint:
+
+- **process.args : "*lockbit*" - a process was launched with an argument token containing lockbit (e.g. a payload path, switch, or family reference).
+- file.extension : ".lockbit" - a file whose extension is .lockbit, the encrypted-file marker LockBit appends after encryption.
+- process.name : "*conti*" - a process whose image name contains conti (the Conti family; a deliberately broad substring).
+
+One-line Kibana KQL detection filter (for fast pivoting in Discover / Timeline) - identical to the deployed query above.
+
+Three properties of this logic drive the whole investigation and are proven against NBI telemetry in section 8:
+
+1. The .lockbit branch is effectively inert on NBI.** In logs-system.security*, file.extension is stored without a leading dot (live values are pol, xml, ini, inf… - verified: zero dotted or *lockbit* extension values in a 4h window). A KQL match on the literal ".lockbit" will therefore rarely, if ever, fire from this index. The encrypted-file marker must be con</TriggerLogic>
+    <KeyAlertFields>process.name, process.executable, process.parent.name, process.parent.pid, process.pid, process.entity_id, user.name, user.domain, host.name, host.os.type, process.command_line, process.args</KeyAlertFields>
+  </AlertContext>
+  <Inputs>
+    <Input name="$host"/>
+    <Input name="$user"/>
+    <Input name="$process"/>
+    <Input name="$source_ip"/>
+    <Input name="$suspicious_pid"/>
+  </Inputs>
+  <ExecutiveSummary>
+    <Overview>This playbook drives triage and response for the Lockbit 3.0 Ransomware detection on NBI's Elastic Security deployment. The rule is a string-marker analytic: it fires when Windows telemetry contains any of three indicators associated with the LockBit or Conti ransomware families - a process argument containing lockbit, a file extension of .lockbit (the marker LockBit appends to encrypted files), or a process name containing conti.
+
+Because LockBit 3.0 (aka *LockBit Black*) and Conti are fast, human-operated ransomware that delete shadow copies, inhibit recovery, and encrypt data estate-wide within minutes, a genuine hit on a banking endpoint is a potential mass-encryption event in progress. The analyst's job is to decide - quickly and defensibly - whether real ransomware is executing/encrypting on $host (true_positive), whether the marker is an authorised security test or a positively blocked malicious attempt (false_positive), whether it is a broad-substring misclassification of benign software with a clean hash and no impact (misconfiguration), or whether the nature/impact cannot be established from available telemetry (needs_escalation). Because impact is catastrophic and time-critical, $host is treated as an active ransomware incident until disproven - containment precedes full analysis.</Overview>
+    <BusinessImpact>An alert means: on $host, at least one of the three LockBit/Conti string markers matched. It is a *possible ransomware indicator*, not proof of detonation. Two independent facts must then be established, because neither is guaranteed by the marker alone:
+
+- Nature of the artifact - is the marker-bearing process a genuinely malicious/unsigned binary from a suspicious path, or a benign substring collision / authorised tool? On NBI this is settled by image path (section 15.10) and out-of-band hash reputation (section 15.9), since telemetry carries no hashes.
+- Impact - did actual ransomware behaviour occur: shadow-copy deletion, recovery inhibition, or encrypted-file naming (section 17.5)? The defining behaviour - mass file encryption/rename - is not directly observable on NBI (no file-modification event stream; section 8), so impact is inferred from the recovery-inhibition commands that LockBit/Conti run and from host-side confirmation.
+
+LockBit 3.0 and Conti are Ransomware-as-a-Service families run by affiliates who first gain access, move laterally, disable defences, and only then detonate. A confirmed marker on a banking endpoint therefore implies a possible late-stage intrusion w</BusinessImpact>
+  </ExecutiveSummary>
+  <Investigation>
+    <Goal>Decide true_positive / false_positive / misconfiguration / needs_escalation for Lockbit 3.0 Ransomware.</Goal>
+    <Workflow>
+      <Step order="1" name="Reproduce the detection estate-wide + fleet spread (confirm the logic)">
+        <Purpose>Reproduce the detection estate-wide + fleet spread (confirm the logic)</Purpose>
+        <Query platform="Elastic" language="ES|QL" id="Q-01">
+          <![CDATA[
+FROM logs-system.security*
+| WHERE @timestamp >= NOW() - 4 hours
+    AND event.code == "4688"
+    AND (process.command_line LIKE "*lockbit*" OR process.name LIKE "*lockbit*"
+         OR process.name LIKE "*conti*")
+| STATS events = COUNT(*), hosts = COUNT_DISTINCT(host.name), host_list = VALUES(host.name) BY process.name
+| SORT hosts DESC
+| LIMIT 15
+]]>
+        </Query>
+      </Step>
+      <Step order="2" name="Confirm on the alert host (marker detail)">
+        <Purpose>Confirm on the alert host (marker detail)</Purpose>
+        <Query platform="Elastic" language="ES|QL" id="Q-02">
+          <![CDATA[
+FROM logs-system.security*
+| WHERE host.name == "$host" AND event.code == "4688"
+    AND (process.command_line LIKE "*lockbit*" OR process.name LIKE "*lockbit*"
+         OR process.name LIKE "*conti*")
+    AND @timestamp >= NOW() - 4 hours
+| KEEP @timestamp, process.name, process.command_line, process.parent.name, user.name
+| SORT @timestamp DESC
+| LIMIT 20
+]]>
+        </Query>
+      </Step>
+      <Step order="3" name="Entity pivoting">
+        <Purpose>Entity pivoting</Purpose>
+        <Query platform="Elastic" language="ES|QL" id="Q-03">
+          <![CDATA[
+FROM logs-system.security*
+| WHERE @timestamp >= NOW() - 4 hours
+    AND event.code == "4688"
+    AND host.name == "$host"
+    AND process.name == "$process"
+| KEEP @timestamp, host.name, user.name, user.domain, process.name, process.executable, process.parent.name, process.parent.executable, process.pid, process.parent.pid, process.command_line
+| SORT @timestamp DESC
+| LIMIT 50
+]]>
+        </Query>
+      </Step>
+      <Step order="4" name="Process investigation">
+        <Purpose>Process investigation</Purpose>
+        <Query platform="Elastic" language="ES|QL" id="Q-04">
+          <![CDATA[
+FROM logs-system.security*
+| WHERE @timestamp >= NOW() - 4 hours
+    AND event.code == "4688"
+    AND process.name == "$process"
+| STATS executions = COUNT(*), hosts = COUNT_DISTINCT(host.name), users = COUNT_DISTINCT(user.name) BY process.executable, process.parent.name
+| SORT executions DESC
+| LIMIT 50
+]]>
+        </Query>
+      </Step>
+      <Step order="5" name="Process investigation">
+        <Purpose>Process investigation</Purpose>
+        <Query platform="Elastic" language="ES|QL" id="Q-05">
+          <![CDATA[
+FROM logs-system.security*
+| WHERE @timestamp >= NOW() - 4 hours
+    AND event.code == "4688"
+    AND process.name == "$process"
+    AND process.args IS NOT NULL
+| EVAL arguments = MV_CONCAT(process.args, " ")
+| KEEP @timestamp, host.name, user.name, process.executable, process.parent.name, arguments
+| SORT @timestamp DESC
+| LIMIT 50
+]]>
+        </Query>
+      </Step>
+      <Step order="6" name="Parent-Child process analysis">
+        <Purpose>Parent-Child process analysis</Purpose>
+        <Query platform="Elastic" language="ES|QL" id="Q-06">
+          <![CDATA[
+FROM logs-system.security*
+| WHERE @timestamp >= NOW() - 4 hours
+    AND event.code == "4688"
+    AND host.name == "$host"
+    AND (process.name == "$process" OR process.parent.name == "$process")
+| KEEP @timestamp, user.name, process.parent.name, process.parent.pid, process.name, process.pid, process.executable, process.command_line
+| SORT @timestamp DESC
+| LIMIT 50
+]]>
+        </Query>
+      </Step>
+      <Step order="7" name="Parent-Child process analysis">
+        <Purpose>Parent-Child process analysis</Purpose>
+        <Query platform="Elastic" language="ES|QL" id="Q-07">
+          <![CDATA[
+FROM logs-system.security*
+| WHERE @timestamp >= NOW() - 4 hours
+    AND event.code == "4688"
+    AND host.name == "$host"
+    AND process.parent.pid == $suspicious_pid
+| KEEP @timestamp, user.name, process.parent.name, process.parent.pid, process.name, process.pid, process.executable, process.command_line
+| SORT @timestamp ASC
+| LIMIT 100
+]]>
+        </Query>
+      </Step>
+      <Step order="8" name="User investigation">
+        <Purpose>User investigation</Purpose>
+        <Query platform="Elastic" language="ES|QL" id="Q-08">
+          <![CDATA[
+FROM logs-system.security*
+| WHERE @timestamp >= NOW() - 4 hours
+    AND event.code == "4688"
+    AND user.name == "$user"
+| STATS executions = COUNT(*), distinct_procs = COUNT_DISTINCT(process.name) BY host.name
+| SORT executions DESC
+| LIMIT 20
+]]>
+        </Query>
+      </Step>
+      <Step order="9" name="Host investigation">
+        <Purpose>Host investigation</Purpose>
+        <Query platform="Elastic" language="ES|QL" id="Q-09">
+          <![CDATA[
+FROM logs-system.security*
+| WHERE @timestamp >= NOW() - 4 hours
+    AND event.code == "4688"
+    AND host.name == "$host"
+| STATS executions = COUNT(*), users = COUNT_DISTINCT(user.name) BY process.name, process.parent.name
+| SORT executions ASC
+| LIMIT 40
+]]>
+        </Query>
+      </Step>
+      <Step order="10" name="IP investigation">
+        <Purpose>IP investigation</Purpose>
+        <Query platform="Elastic" language="ES|QL" id="Q-10">
+          <![CDATA[
+FROM logs-system.security*
+| WHERE @timestamp >= NOW() - 4 hours
+    AND event.code == "4624"
+    AND host.name == "$host" AND user.name == "$user"
+    AND source.ip IS NOT NULL
+| STATS logons = COUNT(*) BY source.ip, winlog.event_data.LogonType
+| SORT logons DESC
+| LIMIT 20
+]]>
+        </Query>
+      </Step>
+      <Step order="11" name="IP investigation">
+        <Purpose>IP investigation</Purpose>
+        <Query platform="Elastic" language="ES|QL" id="Q-11">
+          <![CDATA[
+FROM logs-system.security*
+| WHERE @timestamp >= NOW() - 4 hours
+    AND event.code == "4624"
+    AND source.ip == "$source_ip"
+| STATS logons = COUNT(*) BY user.name, host.name, winlog.event_data.LogonType
+| SORT logons DESC
+| LIMIT 25
+]]>
+        </Query>
+      </Step>
+      <Step order="12" name="File investigation">
+        <Purpose>File investigation</Purpose>
+        <Query platform="Elastic" language="ES|QL" id="Q-12">
+          <![CDATA[
+FROM logs-system.security*
+| WHERE @timestamp >= NOW() - 4 hours
+    AND event.code == "4688"
+    AND host.name == "$host"
+    AND process.name == "$process"
+| STATS executions = COUNT(*), first_seen = MIN(@timestamp), last_seen = MAX(@timestamp) BY process.executable
+| SORT executions DESC
+| LIMIT 30
+]]>
+        </Query>
+      </Step>
+      <Step order="13" name="Authentication investigation">
+        <Purpose>Authentication investigation</Purpose>
+        <Query platform="Elastic" language="ES|QL" id="Q-13">
+          <![CDATA[
+FROM logs-system.security*
+| WHERE @timestamp >= NOW() - 4 hours
+    AND event.code IN ("4624", "4625", "4634", "4647")
+    AND host.name == "$host" AND user.name == "$user"
+| STATS events = COUNT(*), first_seen = MIN(@timestamp), last_seen = MAX(@timestamp) BY event.code, winlog.event_data.LogonType, source.ip
+| SORT events DESC
+| LIMIT 30
+]]>
+        </Query>
+      </Step>
+      <Step order="14" name="Timeline Reconstruction">
+        <Purpose>Timeline Reconstruction</Purpose>
+        <Query platform="Elastic" language="ES|QL" id="Q-14">
+          <![CDATA[
+FROM logs-system.security*
+| WHERE @timestamp >= NOW() - 4 hours
+    AND event.code == "4688"
+    AND host.name == "$host"
+    AND user.name == "$user"
+| KEEP @timestamp, process.parent.name, process.parent.pid, process.name, process.pid, process.executable, process.command_line
+| SORT @timestamp ASC
+| LIMIT 200
+]]>
+        </Query>
+      </Step>
+      <Step order="15" name="Lateral movement validation">
+        <Purpose>Lateral movement validation</Purpose>
+        <Query platform="Elastic" language="ES|QL" id="Q-15">
+          <![CDATA[
+FROM logs-system.security*
+| WHERE @timestamp >= NOW() - 4 hours
+    AND event.code IN ("4624", "4648", "4768", "4769", "5140")
+    AND user.name == "$user"
+    AND host.name != "$host"
+| STATS events = COUNT(*) BY host.name, event.code, winlog.event_data.LogonType
+| SORT events DESC
+| LIMIT 30
+]]>
+        </Query>
+      </Step>
+      <Step order="16" name="Persistence validation">
+        <Purpose>Persistence validation</Purpose>
+        <Query platform="Elastic" language="ES|QL" id="Q-16">
+          <![CDATA[
+FROM logs-system.security*
+| WHERE @timestamp >= NOW() - 4 hours
+    AND host.name == "$host"
+    AND (
+        (event.code == "4688" AND TO_LOWER(process.name) IN ("schtasks.exe", "reg.exe", "sc.exe", "at.exe", "powershell.exe", "wscript.exe", "cscript.exe", "rundll32.exe", "mshta.exe"))
+        OR event.code == "7045"
+        OR event.code == "4720"
+        OR event.code == "4698"
+    )
+| STATS events = COUNT(*) BY event.code, process.name, user.name
+| SORT events DESC
+| LIMIT 40
+]]>
+        </Query>
+      </Step>
+      <Step order="17" name="Privilege escalation validation">
+        <Purpose>Privilege escalation validation</Purpose>
+        <Query platform="Elastic" language="ES|QL" id="Q-17">
+          <![CDATA[
+FROM logs-system.security*
+| WHERE @timestamp >= NOW() - 4 hours
+    AND event.code == "4672"
+    AND host.name == "$host"
+| STATS special_priv_logons = COUNT(*) BY user.name
+| SORT special_priv_logons DESC
+| LIMIT 25
+]]>
+        </Query>
+      </Step>
+      <Step order="18" name="Defense evasion validation">
+        <Purpose>Defense evasion validation</Purpose>
+        <Query platform="Elastic" language="ES|QL" id="Q-18">
+          <![CDATA[
+FROM logs-system.security*
+| WHERE @timestamp >= NOW() - 4 hours
+    AND host.name == "$host"
+    AND (
+        (event.code == "4688" AND TO_LOWER(process.name) IN ("wevtutil.exe", "fsutil.exe", "cipher.exe", "net.exe", "net1.exe", "taskkill.exe", "sc.exe", "sdelete.exe", "sdelete64.exe"))
+        OR event.code == "1102"
+        OR event.code == "4719"
+    )
+| STATS events = COUNT(*) BY event.code, process.name, user.name
+| SORT events DESC
+| LIMIT 30
+]]>
+        </Query>
+      </Step>
+      <Step order="19" name="Impact assessment">
+        <Purpose>Impact assessment</Purpose>
+        <Query platform="Elastic" language="ES|QL" id="Q-19">
+          <![CDATA[
+FROM logs-system.security*
+| WHERE host.name == "$host" AND event.code == "4688"
+    AND (process.command_line LIKE "*shadow*" OR process.command_line LIKE "*vssadmin*delete*"
+         OR process.command_line LIKE "*wbadmin*delete*" OR process.command_line LIKE "*bcdedit*"
+         OR process.command_line LIKE "*wmic*shadowcopy*" OR process.command_line LIKE "*.lockbit*")
+    AND @timestamp >= NOW() - 4 hours
+| STATS events = COUNT(*), commands = VALUES(process.command_line) BY process.name
+| SORT events DESC
+| LIMIT 15
+]]>
+        </Query>
+      </Step>
+      <Step order="20" name="Impact assessment">
+        <Purpose>Impact assessment</Purpose>
+        <Query platform="Elastic" language="ES|QL" id="Q-20">
+          <![CDATA[
+FROM logs-system.security*
+| WHERE @timestamp >= NOW() - 4 hours
+    AND host.name == "$host"
+    AND event.code == "4688"
+    AND process.parent.pid == $suspicious_pid
+| STATS children = COUNT(*), distinct_children = COUNT_DISTINCT(process.name) BY process.name
+| SORT children DESC
+| LIMIT 30
+]]>
+        </Query>
+      </Step>
+      <Step order="21" name="Finalize verdict">
+        <DecisionTree>
+        </DecisionTree>
+      </Step>
+    </Workflow>
+  </Investigation>
+  <ClassificationGuidance>
+    <TruePositive>
+      <Definition></Definition>
+    </TruePositive>
+    <FalsePositive>
+      <Definition></Definition>
+      <Indicators>
+        <Item>Authorised security tests / red-team / purple-team / EDR-detonation exercises that use LockBit/Conti samples or these literal strings. These are not benign - they are authorised execution of a malicious technique and must be positively matched to a change ticket or exercise ROE, then classified false_positive (authorised), never dismissed on sight.</Item>
+        <Item>Security tooling and threat-intel content that legitimately references the family strings - an AV/EDR signature update, a YARA/Sigma rule file, an IOC list, a malware-analysis sample share, or a sandbox artifact whose path or argument contains lockbit/conti. These are substring collisions; confirm the exact process, its on-disk path, and its hash reputation before dismissing.</Item>
+        <Item>**Broad *conti* name matches on benign software** - any legitimate image whose name merely contains the letters c-o-n-t-i (utilities, product components) will match. Confirm the exact process.name and hash.</Item>
+        <Item>A benign file literally carrying a .lockbit extension (a test artifact, a mislabelled file). Note this branch is largely inert on NBI telemetry anyway (section 2, section 8) and would more likely be seen host-side.</Item>
+        <Item>Zero baseline. Over a 4-hour estate-wide window the three process markers returned 0 matches (verified live). There is no noisy legitimate source to tune out, so any firing is high-signal. NBI's Windows telemetry is heavily server-side (the busiest hosts nim-est-apv07/nim-est-apv04 are application/backup servers with tens of thousands of 4688s/4h and near-100% command-line auditing).</Item>
+        <Item>The interactive locus is the jump/VDI tier. Hosts such as nim-jump-apv02/-apv03/-apv22 carry real interactive user sessions (Citrix SelfService, msedge.exe, putty.exe, RDP). A hands-on-keyboard ransomware operator staging from a jump host would surface there - but command-line auditing is null on that tier, so the process.args : *lockbit* branch is blind exactly where an interactive operator would leave it.</Item>
+        <Item>The .lockbit extension branch is telemetry-degraded on NBI. file.extension is stored without a leading dot and there is no Sysmon file-event stream (section 8), so the encrypted-file marker rarely fires from this index and must be confirmed on the endpoint.</Item>
+        <Item>No NBI benign-true-positive is on record for this rule, and there is no allow-list. Do not create a blanket exception for a host or user off a single alert; if a refinement is warranted, scope it to the exact process image + path + hash + user after a documented authorised cause.</Item>
+      </Indicators>
+    </FalsePositive>
+    <Misconfiguration>
+      <Definition></Definition>
+    </Misconfiguration>
+    <NeedsEscalation>
+      <Definition></Definition>
+    </NeedsEscalation>
+  </ClassificationGuidance>
+  <ResponseActions>
+    <Phase name="Containment">
+      <Action>Isolate $host immediately (network-contain / quarantine) to stop encryption and lateral spread. On a shared jump/VDI host, coordinate with IT to minimise collateral session loss, but prioritise containment - a live encryptor on a jump host threatens everything it can reach.</Action>
+      <Action>Isolate any spread hosts surfaced by section 14.1 / section 17.1 in the same action; assume the marker on multiple hosts is an active outbreak.</Action>
+      <Action>Suspend/force-logoff $user's session on $host and disable the account pending investigation if the user context is implicated; disable any account observed spreading (section 17.1). Rotate credentials in section 20.</Action>
+      <Action>Terminate the marker process and its descendants ($suspicious_pid tree from section 15.3b / section 17.5) if the host cannot yet be isolated, to interrupt encryption.</Action>
+      <Action>Block C2/egress for $host at the FortiGate if network indicators are recovered out of band (section 15.7/section 15.8).</Action>
+      <Action>Preserve volatile evidence first where feasible (running process list, the marker binary, memory, shadow-copy state) - NBI does not collect the file-event stream or hashes, so host-side capture is the only way to recover the encryptor and encryption scope.</Action>
+      <Action>Perform deploy/isolation actions only via the authorised human-approved path; investigation itself is read-only.</Action>
+    </Phase>
+    <Phase name="Eradication">
+      <Action>Identify and remove the ransomware binary ($process image path from section 15.10) and any loader/dropper in the delivery chain (section 15.3a grandparent), across $host and every peer it touched.</Action>
+      <Action>Remove persistence discovered in section 17.2 - services (7045), scheduled tasks (4698), Run keys, and rogue accounts (4720) - and any GPO/fleet-deployment mechanism the operator used to push the encryptor.</Action>
+      <Action>Hunt the same artifact fleet-wide by the marker image name, its file hash (obtained host-side, section 15.9), and the recovery-inhibition pattern (section 17.5), especially on file/backup servers, DCs, and other jump/VDI hosts.</Action>
+      <Action>Remediate the initial-access vector (section 4) - phishing payload, exposed RDP/VPN, exploited service, or valid-account misuse - so the operator cannot re-enter.</Action>
+      <Action>Restore security controls the operator disabled (AV/EDR services, logging, audit policy from section 17.4) and confirm they hold after reboot.</Action>
+    </Phase>
+    <Phase name="Recovery">
+      <Action>Restore encrypted data from known-good immutable/offline backups only after eradication is confirmed on the restore target; validate backup integrity before mass restore, and confirm shadow-copy/backup protections are re-enforced (LockBit/Conti specifically destroy these).</Action>
+      <Action>Rebuild affected hosts from a trusted image where encryption, persistence, or tampering was extensive - preferred over in-place cleanup for a confirmed detonation.</Action>
+      <Action>Reset $user's password and rotate all credentials exposed on $host during the incident window; if privileged/service accounts logged on there (section 17.3), rotate those and review for Kerberos/NTLM secret exposure and for golden-ticket risk if a DC was reached (section 17.1).</Action>
+      <Action>Return hosts/accounts to service only after section 22 closing criteria are met and monitoring confirms the marker and recovery-inhibition behaviour do not recur.</Action>
+      <Action>Harden: enabling the "Include command line in process creation events" GPO on the jump/workstation tier (null today, section 8) and adding a behavioural mass-encryption analytic (section 23) are the two highest-value follow-ups from this rule.</Action>
+    </Phase>
+  </ResponseActions>
+  <Escalation>
+    <Trigger>Ransomware is a declared-incident trigger. Escalate to Tier 3 / Incident Response and notify IR lead + management immediately when any of the following hold:
+
+- Impact confirmed - section 17.5 shows shadow-copy deletion, bcdedit/wbadmin recovery inhibition, or a .lockbit command-line reference on $host.
+- Spread - the same marker on more than one host (section 14.1), or lateral movement from $host/$user (section 17.1), especially toward file/backup servers or domain controllers.
+- Malicious binary - the marker image is unsigned / oddly-named / in a user-writable path, or its hash reputation returns malicious (section 15.9).
+- Critical asset - $host is a server, DC, or ATM/critical banking endpoint.
+- Evidence gap - command line not captured on $host, endpoint offline, or hash unresolved and the alert cannot be safely cleared - escalate as needs_escalation with the specific gaps named. Gi</Trigger>
+    <To>SOC L2 / IR</To>
+  </Escalation>
+  <ClosureCriteria>
+    <Item>true_positive: ransomware execution/impact confirmed; all affected hosts contained and rebuilt, backups restored, credentials rotated, patient zero and initial-access vector identified, and no residual persistence or recurrence on monitoring. Incident fully documented.</Item>
+    <Item>false_positive (authorised test): a change ticket or sanctioned red/purple-team ROE is positively matched to the exact $process + $user + $host + time. Record the reference. Do not create a broad exception; scope any refinement to the exact image + path + hash + user.</Item>
+    <Item>false_positive (blocked-malicious): a genuine malicious sample was positively proven blocked/quarantined before any encryption or recovery inhibition (section 17.5 empty, EDR/AV quarantine evidenced) - documented as blocked-malicious, never "benign"; still preserve evidence and hunt the delivery vector.</Item>
+    <Item>misconfiguration: a broad-substring/string match on benign software with a clean hash reputation and no impact in section 17.5 - a detection-content defect. Verify the hash, raise an evidence-backed refinement (tighten the *conti* substring, gate the .lockbit/args branches), and close as misclassification.</Item>
+    <Item>needs_escalation: handed to Tier 3/IR with the specific evidence gaps documented.</Item>
+  </ClosureCriteria>
+  <Limitations>
+    <Item>Marker != detonation. This is a string/substring rule; a hit is a *possible* indicator. The two questions telemetry cannot fully answer - is the binary malicious (hash) and did encryption occur (file events) - are settled host-side/out-of-band on NBI. Never close on the marker alone.</Item>
+    <Item>Two of three branches are degraded on NBI. The .lockbit file-extension branch is effectively inert (file.extension stored without a leading dot; no file-event stream), and the process.args : *lockbit* branch is null on the jump/VDI tier where a hands-on operator is most likely. In practice the rule fires on process name markers; treat the other two as opportunistic.</Item>
+    <Item>***conti* is broad - always hash-verify.** A benign image whose name merely contains c-o-n-t-i will match. The misconfiguration verdict *requires* a clean hash, not just a plausible-looking name.</Item>
+    <Item>The durable behavioural signal is recovery inhibition (section 17.5). vssadmin/wmic shadowcopy/wbadmin/bcdedit around the marker time is stronger corroboration than the family string - but it too rides on ~50% command-line capture, and LockBit 3.0 often deletes shadows via COM/API. Empty != safe.</Item>
+    <Item>No Sysmon → PID-based lineage. With process.entity_id unavailable, reconstruct trees with process.pid/process.parent.pid in a tight window and corroborate with process.parent.name (PIDs are reused). Validated live: PID 127364 → conhost.exe, acregl.exe.</Item>
+    <Item>source.ip is shared infrastructure. A single VDI/jump egress IP (validated: 10.11.102.15) fronts many users; never treat it as an individual identifier - correlate IP + user + host.</Item>
+    <Item>The rule carries no threat[]. Add the section 9 ATT&amp;CK mapping (Data Encrypted for Impact, Inhibit System Recovery, the Impact tactic, plus the Service Stop / Impair Defenses / Clear Windows Event Logs corroborators) to the deployed rule so alerts carry the mapping natively.</Item>
+    <Item>KB-worthy (persist to NBI customer scope): (1) LockBit/Conti process markers zero-baseline over 4h on logs-system.security*; (2) file.extension stored without leading dot → file.extension : ".lockbit" branch inert; (3) process.command_line/process.args host-bimodality (~49.6%; nim-est-apv07≈100% vs jump hosts=null); (4) process.hash.* absent on 4688; (5) 10.11.102.15 = shared VDI/jump egress; (6) deployed rule threat[] empty. All observed live on 2026-08-19.</Item>
+    <Item>Complementary analytic (coverage gap). Because family strings are trivially evaded, a behavioural rule - mass file rename / high write-rate plus shadow-copy deletion - is required so detection does not depend on the lockbit/conti strings. This needs a file-event source NBI does not currently collect; flag as a telemetry/engineering gap.</Item>
+  </Limitations>
+</Playbook>

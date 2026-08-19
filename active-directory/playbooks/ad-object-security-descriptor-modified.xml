@@ -1,0 +1,388 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<Playbook xmlns="https://soc.example/playbooks" id="PB-ad-object-security-descriptor-modified" name="AD — Object Security Descriptor Modified (DACL backdoor) - SOC Playbook" version="3.0" status="Validated" classification="TLP:AMBER">
+  <Metadata>
+    <Owner>NBI SOC / Detection Engineering</Owner>
+    <LastUpdated>2026-08-19</LastUpdated>
+    <Severity default="high">high</Severity>
+    <Confidence default="Medium">Medium</Confidence>
+    <Category>Persistence</Category>
+    <MitreAttack>
+      <Technique id="T1098"/>
+      <Technique id="T1222"/>
+      <Tactic id="TA0003"/>
+      <Tactic id="TA0005"/>
+    </MitreAttack>
+    <References>
+      <Reference title="MITRE ATT&amp;CK - Account Manipulation (T1098)" url="https://attack.mitre.org/techniques/T1098/"/>
+      <Reference title="MITRE ATT&amp;CK - File and Directory Permissions Modification (T1222)" url="https://attack.mitre.org/techniques/T1222/"/>
+      <Reference title="MITRE ATT&amp;CK - Persistence tactic (TA0003)" url="https://attack.mitre.org/tactics/TA0003/"/>
+      <Reference title="MITRE ATT&amp;CK - Defense Evasion tactic (TA0005)" url="https://attack.mitre.org/tactics/TA0005/"/>
+      <Reference title="Microsoft Learn - 5136: A directory service object was modified" url="https://learn.microsoft.com/en-us/previous-versions/windows/it-pro/windows-10/security/threat-protection/auditing/event-5136"/>
+      <Reference title="Microsoft Learn - Security Descriptor Definition Language (SDDL)" url="https://learn.microsoft.com/en-us/windows/win32/secauthz/security-descriptor-definition-language"/>
+      <Reference title='SpecterOps - "An ACE Up the Sleeve: Designing Active Directory DACL Backdoors" (Robbins/Schroeder)' url="https://specterops.io/wp-content/uploads/sites/3/2022/06/an_ace_up_the_sleeve.pdf"/>
+      <Reference title="Sean Metcalf (ADSecurity) - Sneaky Persistence via AdminSDHolder and SDProp" url="https://adsecurity.org/?p=1906"/>
+      <Reference title="The Hacker Recipes - Abusing Active Directory ACEs/DACLs" url="https://www.thehacker.recipes/ad/movement/dacl"/>
+      <Reference title="Elastic Security - Prebuilt rule reference (Persistence / directory ACL)" url="https://www.elastic.co/guide/en/security/current/prebuilt-rules.html"/>
+    </References>
+  </Metadata>
+  <AlertContext>
+    <RuleName>AD — Object Security Descriptor Modified (DACL backdoor)</RuleName>
+    <RuleId>nbi-ad-acl-backdoor</RuleId>
+    <RuleType>query</RuleType>
+    <Index>logs-system.security*</Index>
+    <TriggerLogic>The deployed rule is an ES|QL query rule. Plain English: a non-SYSTEM principal rewrote the security descriptor (ACL) of an Active Directory object. The alert carries the actor (winlog.event_data.SubjectUserName), the object (winlog.event_data.ObjectDN), the new SDDL (winlog.event_data.AttributeValue), and the DC (host.name). SYSTEM is excluded because SYSTEM legitimately rewrites descriptors during AdminSDHolder/SDProp propagation - the rule targets the *human/tool-driven* changes.
+
+One-line Kibana KQL detection filter (for fast pivoting in Discover / Timeline):
+
+
+
+Faithful ES|QL form of the deployed logic, shown with the standard 4-hour investigation window:
+
+
+
+Because SYSTEM propagation is filtered out and human ACL edits on directory objects are rare, this rule is quiet by design - a firing is high-signal. The granted ACE must be read from the SDDL in AttributeValue (see section 11), which requires decoding to name the right and the grantee.</TriggerLogic>
+    <KeyAlertFields>user.name, host.name, source.ip, process.name</KeyAlertFields>
+  </AlertContext>
+  <Inputs>
+    <Input name="$actor"/>
+    <Input name="$object_dn"/>
+    <Input name="$dc_host"/>
+    <Input name="$source_ip"/>
+  </Inputs>
+  <ExecutiveSummary>
+    <Overview>This playbook drives triage and investigation of the AD - Object Security Descriptor Modified (DACL backdoor) detection on NBI's Elastic Security deployment. The rule fires on Windows Security Event 5136 (*a directory-service object was modified*) where winlog.event_data.AttributeLDAPDisplayName is nTSecurityDescriptor and the subject is not SYSTEM. Changing an object's security descriptor rewrites who can do what to that object. A human-driven descriptor change on a Tier-0 object (the domain root, AdminSDHolder, privileged groups, DC objects) is exactly how attackers plant durable ACL backdoors - a new ACE granting GenericAll, WriteDACL, WriteOwner, or DS-Replication rights to a principal they control.
+
+The analyst decides whether the change is authorised delegation/administration (false_positive - authorised), an attacker planting an ACL backdoor to regain or retain privileged access (true_positive), or an over-broad but benign permissions change (misconfiguration) - classifying the alert as true_positive, false_positive, misconfiguration, or needs_escalation with evidence attached. The concern concentrates on object sensitivity (is it Tier-0?) and the granted right (is a broad control right handed to a non-Tier-0 principal?), plus the actor/origin and whether the actor backdoored multiple objects.</Overview>
+    <BusinessImpact>An alert means: on $dc_host, the non-SYSTEM principal $actor rewrote the nTSecurityDescriptor (ACL) of the directory object $object_dn. Whether that is benign delegation or a backdoor depends on three things:
+
+- Object sensitivity. A descriptor change on a routine user/OU is ordinary delegation. A change on a Tier-0 object - the domain head (DC=nbirq,DC=com), AdminSDHolder (CN=AdminSDHolder,CN=System,DC=nbirq,DC=com, whose ACL SDProp stamps onto every protected group), Domain/Enterprise Admins, krbtgt, or a DC computer object - is the classic domain-persistence target.
+- The granted right. A new ACE granting GenericAll / WriteDACL / WriteOwner (full control / take-ownership / re-permission) or DS-Replication-Get-Changes-All (DCSync) to a non-Tier-0 principal is a backdoor: it lets the grantee re-escalate at will, even after passwords are reset.
+- The actor and origin. A recognised delegated administrator from a sanctioned admin host is expected; an unrecognised principal, or a Tier-0 ACL edited by an account that is not itself Tier-0, is an escalation signal.
+
+The 5136 is DC-side and carries no source.ip - the actor's origin is recovered from their 4624/4768 (section 15.6). ACL bac</BusinessImpact>
+  </ExecutiveSummary>
+  <Investigation>
+    <Goal>Decide true_positive / false_positive / misconfiguration / needs_escalation for AD — Object Security Descriptor Modified (DACL backdoor).</Goal>
+    <Workflow>
+      <Step order="1" name="Detection Summary">
+        <Purpose>Detection Summary</Purpose>
+        <Query platform="Elastic" language="ES|QL" id="Q-01">
+          <![CDATA[
+FROM logs-system.security*
+| WHERE @timestamp >= NOW() - 4 hours
+    AND event.code == "5136"
+    AND winlog.event_data.AttributeLDAPDisplayName == "nTSecurityDescriptor"
+    AND winlog.event_data.SubjectUserName != "SYSTEM"
+| KEEP @timestamp, host.name, winlog.event_data.SubjectUserName, winlog.event_data.ObjectDN, winlog.event_data.AttributeValue
+| SORT @timestamp DESC
+| LIMIT 100
+]]>
+        </Query>
+      </Step>
+      <Step order="2" name="Reproduce the rule (confirm the descriptor change)">
+        <Purpose>Reproduce the rule (confirm the descriptor change)</Purpose>
+        <Query platform="Elastic" language="ES|QL" id="Q-02">
+          <![CDATA[
+FROM logs-system.security*
+| WHERE @timestamp >= NOW() - 4 hours
+    AND event.code == "5136"
+    AND winlog.event_data.AttributeLDAPDisplayName == "nTSecurityDescriptor"
+    AND winlog.event_data.SubjectUserName != "SYSTEM"
+    AND host.name == "$dc_host"
+    AND winlog.event_data.ObjectDN == "$object_dn"
+| KEEP @timestamp, winlog.event_data.SubjectUserName, winlog.event_data.ObjectDN, winlog.event_data.AttributeValue
+| SORT @timestamp DESC
+| LIMIT 20
+]]>
+        </Query>
+      </Step>
+      <Step order="3" name="Estate-wide non-SYSTEM descriptor changes (who is editing ACLs at all)">
+        <Purpose>Estate-wide non-SYSTEM descriptor changes (who is editing ACLs at all)</Purpose>
+        <Query platform="Elastic" language="ES|QL" id="Q-03">
+          <![CDATA[
+FROM logs-system.security*
+| WHERE @timestamp >= NOW() - 4 hours
+    AND event.code == "5136"
+    AND winlog.event_data.AttributeLDAPDisplayName == "nTSecurityDescriptor"
+    AND winlog.event_data.SubjectUserName != "SYSTEM"
+| STATS changes = COUNT(*), objects = COUNT_DISTINCT(winlog.event_data.ObjectDN) BY winlog.event_data.SubjectUserName, host.name
+| SORT changes DESC
+| LIMIT 25
+]]>
+        </Query>
+      </Step>
+      <Step order="4" name="Entity pivoting">
+        <Purpose>Entity pivoting</Purpose>
+        <Query platform="Elastic" language="ES|QL" id="Q-04">
+          <![CDATA[
+FROM logs-system.security*
+| WHERE @timestamp >= NOW() - 4 hours
+    AND event.code == "5136"
+    AND winlog.event_data.AttributeLDAPDisplayName == "nTSecurityDescriptor"
+    AND winlog.event_data.SubjectUserName == "$actor"
+| KEEP @timestamp, host.name, winlog.event_data.ObjectDN, winlog.event_data.AttributeValue
+| SORT @timestamp DESC
+| LIMIT 50
+]]>
+        </Query>
+      </Step>
+      <Step order="5" name="User investigation">
+        <Purpose>User investigation</Purpose>
+        <Query platform="Elastic" language="ES|QL" id="Q-05">
+          <![CDATA[
+FROM logs-system.security*
+| WHERE @timestamp >= NOW() - 4 hours
+    AND event.code == "5136"
+    AND winlog.event_data.SubjectUserName == "$actor"
+| STATS changes = COUNT(*), objects = COUNT_DISTINCT(winlog.event_data.ObjectDN) BY winlog.event_data.AttributeLDAPDisplayName
+| SORT changes DESC
+| LIMIT 20
+]]>
+        </Query>
+      </Step>
+      <Step order="6" name="Host investigation">
+        <Purpose>Host investigation</Purpose>
+        <Query platform="Elastic" language="ES|QL" id="Q-06">
+          <![CDATA[
+FROM logs-system.security*
+| WHERE @timestamp >= NOW() - 4 hours
+    AND event.code == "5136"
+    AND winlog.event_data.AttributeLDAPDisplayName == "nTSecurityDescriptor"
+    AND winlog.event_data.SubjectUserName != "SYSTEM"
+    AND host.name == "$dc_host"
+| STATS changes = COUNT(*), objects = COUNT_DISTINCT(winlog.event_data.ObjectDN) BY winlog.event_data.SubjectUserName
+| SORT changes DESC
+| LIMIT 25
+]]>
+        </Query>
+      </Step>
+      <Step order="7" name="IP investigation">
+        <Purpose>IP investigation</Purpose>
+        <Query platform="Elastic" language="ES|QL" id="Q-07">
+          <![CDATA[
+FROM logs-system.security*
+| WHERE @timestamp >= NOW() - 4 hours
+    AND event.code == "4624"
+    AND winlog.event_data.TargetUserName == "$actor"
+    AND source.ip IS NOT NULL
+| STATS logons = COUNT(*), hosts = COUNT_DISTINCT(host.name) BY source.ip, winlog.event_data.LogonType
+| SORT logons DESC
+| LIMIT 20
+]]>
+        </Query>
+      </Step>
+      <Step order="8" name="IP investigation">
+        <Purpose>IP investigation</Purpose>
+        <Query platform="Elastic" language="ES|QL" id="Q-08">
+          <![CDATA[
+FROM logs-system.security*
+| WHERE @timestamp >= NOW() - 4 hours
+    AND event.code == "4624"
+    AND source.ip == "$source_ip"
+| STATS logons = COUNT(*) BY winlog.event_data.TargetUserName, host.name, winlog.event_data.LogonType
+| SORT logons DESC
+| LIMIT 25
+]]>
+        </Query>
+      </Step>
+      <Step order="9" name="File investigation">
+        <Purpose>File investigation</Purpose>
+        <Query platform="Elastic" language="ES|QL" id="Q-09">
+          <![CDATA[
+FROM logs-system.security*
+| WHERE @timestamp >= NOW() - 4 hours
+    AND event.code == "5136"
+    AND winlog.event_data.ObjectDN == "$object_dn"
+| STATS changes = COUNT(*), first_seen = MIN(@timestamp), last_seen = MAX(@timestamp) BY winlog.event_data.AttributeLDAPDisplayName, winlog.event_data.SubjectUserName
+| SORT changes DESC
+| LIMIT 25
+]]>
+        </Query>
+      </Step>
+      <Step order="10" name="Authentication investigation">
+        <Purpose>Authentication investigation</Purpose>
+        <Query platform="Elastic" language="ES|QL" id="Q-10">
+          <![CDATA[
+FROM logs-system.security*
+| WHERE @timestamp >= NOW() - 4 hours
+    AND event.code IN ("4624", "4625", "4634", "4768", "4769")
+    AND winlog.event_data.TargetUserName == "$actor"
+| STATS events = COUNT(*), first_seen = MIN(@timestamp), last_seen = MAX(@timestamp) BY event.code, winlog.event_data.LogonType, source.ip
+| SORT events DESC
+| LIMIT 30
+]]>
+        </Query>
+      </Step>
+      <Step order="11" name="Timeline Reconstruction">
+        <Purpose>Timeline Reconstruction</Purpose>
+        <Query platform="Elastic" language="ES|QL" id="Q-11">
+          <![CDATA[
+FROM logs-system.security*
+| WHERE @timestamp >= NOW() - 4 hours
+    AND host.name == "$dc_host"
+    AND winlog.event_data.SubjectUserName == "$actor"
+    AND event.code IN ("5136", "4662", "4728", "4756", "4738")
+| KEEP @timestamp, event.code, winlog.event_data.ObjectDN, winlog.event_data.AttributeLDAPDisplayName, winlog.event_data.AttributeValue
+| SORT @timestamp ASC
+| LIMIT 200
+]]>
+        </Query>
+      </Step>
+      <Step order="12" name="Lateral movement validation">
+        <Purpose>Lateral movement validation</Purpose>
+        <Query platform="Elastic" language="ES|QL" id="Q-12">
+          <![CDATA[
+FROM logs-system.security*
+| WHERE @timestamp >= NOW() - 4 hours
+    AND event.code IN ("4624", "4648", "4769", "5140", "5145")
+    AND winlog.event_data.SubjectUserName == "$actor"
+    AND host.name != "$dc_host"
+| STATS events = COUNT(*) BY host.name, event.code
+| SORT events DESC
+| LIMIT 30
+]]>
+        </Query>
+      </Step>
+      <Step order="13" name="Persistence validation">
+        <Purpose>Persistence validation</Purpose>
+        <Query platform="Elastic" language="ES|QL" id="Q-13">
+          <![CDATA[
+FROM logs-system.security*
+| WHERE @timestamp >= NOW() - 4 hours
+    AND event.code == "5136"
+    AND winlog.event_data.SubjectUserName == "$actor"
+    AND winlog.event_data.AttributeLDAPDisplayName IN ("nTSecurityDescriptor", "servicePrincipalName", "msDS-KeyCredentialLink", "userCertificate", "member", "msDS-AllowedToActOnBehalfOfOtherIdentity")
+| STATS writes = COUNT(*), objects = COUNT_DISTINCT(winlog.event_data.ObjectDN) BY winlog.event_data.AttributeLDAPDisplayName
+| SORT writes DESC
+| LIMIT 20
+]]>
+        </Query>
+      </Step>
+      <Step order="14" name="Privilege escalation validation">
+        <Purpose>Privilege escalation validation</Purpose>
+        <Query platform="Elastic" language="ES|QL" id="Q-14">
+          <![CDATA[
+FROM logs-system.security*
+| WHERE @timestamp >= NOW() - 4 hours
+    AND event.code == "4672"
+    AND host.name == "$dc_host"
+| STATS special_priv_logons = COUNT(*) BY winlog.event_data.SubjectUserName
+| SORT special_priv_logons DESC
+| LIMIT 25
+]]>
+        </Query>
+      </Step>
+      <Step order="15" name="Defense evasion validation">
+        <Purpose>Defense evasion validation</Purpose>
+        <Query platform="Elastic" language="ES|QL" id="Q-15">
+          <![CDATA[
+FROM logs-system.security*
+| WHERE @timestamp >= NOW() - 4 hours
+    AND host.name == "$dc_host"
+    AND (
+        event.code == "1102"
+        OR event.code == "4719"
+        OR (event.code == "5136" AND winlog.event_data.AttributeLDAPDisplayName == "nTSecurityDescriptor" AND winlog.event_data.SubjectUserName != "SYSTEM")
+    )
+| STATS events = COUNT(*) BY event.code, winlog.event_data.SubjectUserName
+| SORT events DESC
+| LIMIT 25
+]]>
+        </Query>
+      </Step>
+      <Step order="16" name="Impact assessment">
+        <Purpose>Impact assessment</Purpose>
+        <Query platform="Elastic" language="ES|QL" id="Q-16">
+          <![CDATA[
+FROM logs-system.security*
+| WHERE @timestamp >= NOW() - 4 hours
+    AND winlog.event_data.SubjectUserName == "$actor"
+    AND (
+        (event.code == "5136" AND winlog.event_data.AttributeLDAPDisplayName == "nTSecurityDescriptor")
+        OR event.code == "4728"
+        OR event.code == "4756"
+    )
+| STATS events = COUNT(*), objects = COUNT_DISTINCT(winlog.event_data.ObjectDN) BY event.code
+| SORT events DESC
+| LIMIT 15
+]]>
+        </Query>
+      </Step>
+      <Step order="17" name="Finalize verdict">
+        <DecisionTree>
+        </DecisionTree>
+      </Step>
+    </Workflow>
+  </Investigation>
+  <ClassificationGuidance>
+    <TruePositive>
+      <Definition></Definition>
+    </TruePositive>
+    <FalsePositive>
+      <Definition></Definition>
+      <Indicators>
+        <Item>Delegated administration. Help-desk and IT admins legitimately re-permission OUs, groups, and user objects as part of role delegation, group-management, and onboarding/offboarding - these are scoped nTSecurityDescriptor changes on routine objects.</Item>
+        <Item>Identity-management / provisioning products (e.g. MIM, delegation tooling) that programmatically set ACLs on user/group objects under a service account within their sanctioned scope.</Item>
+        <Item>Group Policy / tiering rollouts that re-permission OUs during an authorised administrative-model change.</Item>
+        <Item>Exchange / application setup that stamps ACLs on its own containers during install or schema/RBAC configuration.</Item>
+        <Item>The rule is genuinely quiet. In the validation window there were zero non-SYSTEM nTSecurityDescriptor changes across the estate (and none SYSTEM-driven in-window either). There is no noisy legitimate source to tune out - a firing is a real, rare event to be believed.</Item>
+        <Item>NBI has active delegated directory admins. Accounts such as jamal.admin, Abdulrahman.Diaa, Yasser.Amar, Amani.Ammar, and Wahab.Admin make routine 5136 directory changes (group membership member, userAccountControl, lockoutTime unlocks, attribute edits) on nim-dc-dbap01/nim-dc2-dbap. These are the accounts most likely to *legitimately* edit an ACL - so a descriptor change by one of them on a routine object is the plausible authorised case, while the same account editing a Tier-0 object's ACL still needs a change record.</Item>
+        <Item>source.ip is not on the 5136. The validated actor jamal.admin authenticates from multiple internal IPs (primary 10.10.85.85, LogonType 3) - a mobile admin. Recover origin from 4624/4768 and correlate; a single admin can appear from several hosts legitimately.</Item>
+        <Item>No blanket allow-list. Do not exempt an admin account from this rule; a compromised delegated admin is precisely how ACL backdoors are planted. Scope any exception to actor + specific non-Tier-0 object + expected right, and only after a documented delegation task.</Item>
+      </Indicators>
+    </FalsePositive>
+    <Misconfiguration>
+      <Definition></Definition>
+    </Misconfiguration>
+    <NeedsEscalation>
+      <Definition></Definition>
+    </NeedsEscalation>
+  </ClassificationGuidance>
+  <ResponseActions>
+    <Phase name="Containment">
+      <Action>Restore the intended security descriptor on $object_dn and remove the added ACE identified from the SDDL, once a true_positive is confirmed - this closes the backdoor. Preserve the malicious SDDL (AttributeValue, section 14.1) and the object's prior descriptor as evidence first.</Action>
+      <Action>Remove companion persistence (rogue SPN, msDS-KeyCredentialLink, unauthorised group membership) discovered in section 17.2/section 17.5.</Action>
+      <Action>Disable / investigate $actor if it is not a sanctioned admin, or if a sanctioned admin appears compromised (anomalous origin section 15.6, activity outside its normal scope). Reset its credentials (section 20).</Action>
+      <Action>Contain the grantee principal - the account/computer the backdoor granted rights to - pending investigation, and watch for its use of the right (4662 replication, 4728 group add).</Action>
+      <Action>Preserve volatile evidence on the actor's origin host ($source_ip) - the ACL-editing tool is not captured DC-side.</Action>
+      <Action>Deploy/confirm changes only via the authorised human-approved DEPLOY path; investigation itself is read-only.</Action>
+    </Phase>
+    <Phase name="Eradication">
+      <Action>Remove all backdoor ACEs across every object the actor rewrote (section 17.5), and revert AdminSDHolder if it was modified (SDProp will otherwise re-stamp a malicious ACL onto all protected groups).</Action>
+      <Action>Remove companion persistence - rogue SPNs, key-credentials, and unauthorised group memberships - and rotate any secrets the backdoor could have exposed (if DS-Replication was granted, treat as DCSync exposure: krbtgt double-rotation).</Action>
+      <Action>Remediate the initial-access / WriteDACL vector that let the actor edit the descriptor, and hunt for the same ACL-write tradecraft across both DCs and other Tier-0 objects.</Action>
+      <Action>Baseline Tier-0 ACLs and confirm no residual unauthorised ACEs remain.</Action>
+    </Phase>
+    <Phase name="Recovery">
+      <Action>Reset $actor's password if the account was compromised, and rotate credentials of any principal the backdoor exposed; if replication rights were granted, complete krbtgt double-rotation.</Action>
+      <Action>Re-baseline and monitor Tier-0 ACLs - snapshot the intended descriptors for the domain head, AdminSDHolder, privileged groups, and DC objects, and alert on drift.</Action>
+      <Action>Restrict descriptor-edit rights on sensitive objects to a minimal Tier-0 admin set, and confirm SACLs/auditing are enabled so future changes emit 5136.</Action>
+      <Action>Return the object/account to service only after section 22 closing criteria are met and monitoring confirms no recurrence or exploitation.</Action>
+    </Phase>
+  </ResponseActions>
+  <Escalation>
+    <Trigger>Escalate to Tier 3 / Incident Response (and notify the customer) when any of the following hold:
+
+- A Tier-0/sensitive object gained a broad ACE (GenericAll / WriteDACL / WriteOwner / DS-Replication) for a non-Tier-0 principal (section 14, SDDL decode) - this alone warrants IR.
+- The actor is not a recognised Tier-0 admin (absent from 4672 - section 17.3) or the origin is anomalous (section 15.6).
+- The actor rewrote multiple objects' ACLs (section 17.5) or mixed in SPN/key-credential/member writes (section 17.2).
+- Exploitation is visible - the granted principal added to a privileged group (4728/4756) or beginning to replicate/use the right (4662).
+- Evidence is incomplete because of NBI's telemetry gaps (tool not captured DC-side; possible SACL coverage gaps on Tier-0 objects) and the alert cannot be safely cleared - escalate as needs_escalation with the gaps named.</Trigger>
+    <To>SOC L2 / IR</To>
+  </Escalation>
+  <ClosureCriteria>
+    <Item>false_positive (authorised): a scoped delegation change on a routine (non-Tier-0) object by a recognised admin from a sanctioned origin, positively matched to a change record, with the SDDL decoded and no multi-object campaign. Record the reference; scope any exception narrowly.</Item>
+    <Item>false_positive (blocked malicious attempt): a hostile ACE positively proven removed before use, with no exploitation; documented as blocked-malicious, never "benign".</Item>
+    <Item>misconfiguration: a legitimate but over-broad permissions change made in error (wrong principal/right) without malicious intent; tighten the ACL and record the process gap.</Item>
+    <Item>true_positive: an ACL backdoor confirmed; the added ACE removed, the descriptor restored, companion persistence eradicated, the actor and grantee investigated, exploitation hunt completed, and no recurrence on monitoring.</Item>
+    <Item>needs_escalation: SDDL undecoded or object/actor/authorisation unresolved; handed to Tier 3 / the AD team with the decoded ACE (where available) and the specific gaps documented.</Item>
+  </ClosureCriteria>
+  <Limitations>
+    <Item>Decode the SDDL first - everything hinges on it. The 5136 tells you an ACL changed; only the SDDL in AttributeValue tells you *which right was granted to whom*. GenericAll/WriteDACL/WriteOwner/DS-Replication to a non-Tier-0 principal on a Tier-0 object is the backdoor; a scoped ACE on a routine object is delegation.</Item>
+    <Item>Object sensitivity is the second axis. Keep a live map of Tier-0 objects (domain head DC=nbirq,DC=com, CN=AdminSDHolder,CN=System,DC=nbirq,DC=com, Domain/Enterprise Admins, krbtgt, DC objects). AdminSDHolder is the highest-value target because SDProp re-stamps its ACL onto every protected group - a backdoor there is self-healing.</Item>
+    <Item>The rule is quiet, so believe a firing. Validated: zero non-SYSTEM nTSecurityDescriptor changes in the window. There is nothing legitimate to tune out; empty is the norm and a hit is real. Empty != safe - confirm SACL/auditing coverage on Tier-0 objects, because a change on an un-audited object emits nothing.</Item>
+    <Item>The 4672 test frames the actor. Whether $actor is a recognised Tier-0 admin (section 17.3) separates plausible delegation from escalation. Validated: jamal.admin is a real Tier-0 admin - so for a known admin the decisive questions become object sensitivity and the granted right, not merely "who".</Item>
+    <Item>No tool visibility DC-side. PowerView/dsacls/ADSI run on the actor's host, uninstrumented here - build the case on the directory footprint (SDDL, attribute-write breadth, exploitation) and recover the tool host-side.</Item>
+    <Item>KB-worthy (persist to NBI customer scope): (1) non-SYSTEM nTSecurityDescriptor (5136) changes are effectively zero-baseline on logs-system.security* - high-signal; (2) active delegated admins = jamal.admin, Abdulrahman.Diaa, Yasser.Amar, Amani.Ammar, Wahab.Admin (routine member/userAccountControl/lockoutTime writes); (3) 5136 carries AttributeValue (SDDL) but no source.ip/process.name; (4) jamal.admin is Tier-0 (in DC 4672), primary origin 10.10.85.85. All observed live on 2026-08-17.</Item>
+  </Limitations>
+</Playbook>

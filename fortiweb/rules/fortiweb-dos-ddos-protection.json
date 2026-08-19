@@ -1,0 +1,75 @@
+{
+  "name": "FortiWeb — Web Application DoS/DDoS Protection Triggered",
+  "tags": [
+    "NBI-Perimeter",
+    "Phase3",
+    "FortiWeb",
+    "WAF"
+  ],
+  "interval": "5m",
+  "enabled": true,
+  "description": "Detects FortiWeb DoS/DDoS protection triggering (HTTP or TCP flood prevention) against a public banking application — indicating a volumetric or application-layer denial-of-service attempt on the bank's web services.",
+  "risk_score": 56,
+  "severity": "medium",
+  "note": "## Investigation\n1. `data.original_src`/`x_forwarded_for` and `data.http_host` show the source and target; assess the request rate.\n2. Distinguish a genuine DDoS from a traffic spike or a misbehaving client.\n## Response\nIf a real flood, engage upstream DDoS mitigation and rate-limit the source(s).",
+  "output_index": "",
+  "investigation_fields": {
+    "field_names": [
+      "data.attack_type",
+      "data.action",
+      "data.severity_level",
+      "data.http_host",
+      "data.http_url",
+      "data.http_method",
+      "data.original_src",
+      "data.src",
+      "data.srccountry",
+      "data.policy",
+      "data.msg",
+      "x_forwarded_for"
+    ]
+  },
+  "author": [
+    "raadabujaish"
+  ],
+  "false_positives": [],
+  "from": "now-9m",
+  "rule_id": "nbi-fweb-dos-protection",
+  "max_signals": 100,
+  "risk_score_mapping": [],
+  "severity_mapping": [],
+  "threat": [
+    {
+      "framework": "MITRE ATT&CK",
+      "tactic": {
+        "id": "TA0040",
+        "name": "Impact",
+        "reference": "https://attack.mitre.org/tactics/TA0040/"
+      },
+      "technique": [
+        {
+          "id": "T1498",
+          "name": "Network Denial of Service",
+          "reference": "https://attack.mitre.org/techniques/T1498/"
+        }
+      ]
+    }
+  ],
+  "to": "now",
+  "references": [
+    "https://attack.mitre.org/",
+    "https://docs.fortinet.com/product/fortiweb"
+  ],
+  "version": 1,
+  "exceptions_list": [],
+  "related_integrations": [],
+  "required_fields": [],
+  "setup": "",
+  "type": "query",
+  "language": "kuery",
+  "index": [
+    "logs-tcp.generic-*"
+  ],
+  "query": "tags:\"Fortiweb\" and data.type:\"attack\" and (data.main_type:\"DoS Protection\" or data.attack_type:(\"TCP Flood Prevention\" or \"HTTP Flood Prevention\"))",
+  "actions": []
+}

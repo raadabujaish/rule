@@ -1,0 +1,349 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<Playbook xmlns="https://soc.example/playbooks" id="PB-fortiweb-dos-ddos-protection" name="FortiWeb — Web Application DoS/DDoS Protection Triggered - SOC Playbook" version="3.0" status="Validated" classification="TLP:AMBER">
+  <Metadata>
+    <Owner>NBI SOC / Detection Engineering</Owner>
+    <LastUpdated>2026-08-19</LastUpdated>
+    <Severity default="medium">medium</Severity>
+    <Confidence default="Medium">Medium</Confidence>
+    <Category>Impact</Category>
+    <MitreAttack>
+      <Technique id="T1499"/>
+      <Technique id="T1498"/>
+      <Tactic id="TA0040"/>
+    </MitreAttack>
+    <References>
+      <Reference title="MITRE ATT&amp;CK - Endpoint Denial of Service (T1499)" url="https://attack.mitre.org/techniques/T1499/"/>
+      <Reference title="MITRE ATT&amp;CK - Network Denial of Service (T1498)" url="https://attack.mitre.org/techniques/T1498/"/>
+      <Reference title="MITRE ATT&amp;CK - Impact tactic (TA0040)" url="https://attack.mitre.org/tactics/TA0040/"/>
+      <Reference title="Fortinet FortiWeb - DoS protection (TCP/HTTP flood prevention) reference" url="https://docs.fortinet.com/product/fortiweb"/>
+      <Reference title="CISA - Understanding and Responding to Distributed Denial-of-Service Attacks" url="https://www.cisa.gov/news-events/news/understanding-and-responding-distributed-denial-service-attacks"/>
+      <Reference title="OWASP - Denial of Service Cheat Sheet" url="https://cheatsheetseries.owasp.org/cheatsheets/Denial_of_Service_Cheat_Sheet.html"/>
+      <Reference title="Elastic Security - Create a custom query rule" url="https://www.elastic.co/guide/en/security/current/rules-ui-create.html"/>
+    </References>
+  </Metadata>
+  <AlertContext>
+    <RuleName>FortiWeb — Web Application DoS/DDoS Protection Triggered</RuleName>
+    <RuleId>nbi-fweb-dos-protection</RuleId>
+    <RuleType>query</RuleType>
+    <Index>logs-tcp.generic-*</Index>
+    <TriggerLogic>The deployed rule is a KQL (kuery) query rule (verbatim from the rule definition):
+
+
+
+Plain English: a FortiWeb attack record where the WAF's DoS/flood-protection engine engaged. It runs every 5 minutes over a now-9m look-back against logs-tcp.generic-*. TCP Flood Prevention is a connection/volumetric flood; HTTP Flood Prevention is an application-layer request flood (more likely to exhaust backend resources). The record carries data.action (whether FortiWeb blocked/rate-limited or only alerted), data.severity_level, data.policy, data.msg (the signature message), and the attributed data.src - but, being an attack record, it carries no x_forwarded_for, data.original_src, or data.http_retcode (those live on the traffic records; see section 8).
+
+One-line Kibana KQL filter for pivoting in Discover:
+
+
+
+Live reality at authoring time: DoS-Protection attack records are sparse but present - a 4-hour estate scan showed a small number (e.g. HTTP Flood Prevention and Malicious IPs violations on businessonline.nbi.iq, both Alert_Deny, policy FCC.Prod-Link2). An earlier XML validation window captured none; the record volume is low and bursty, so an empty result on a given host does not mean the</TriggerLogic>
+    <KeyAlertFields>data.type, data.attack_type, data.main_type, data.action, data.severity_level, data.policy, data.msg, data.src, data.http_retcode, data.http_host, data.http_url, data.original_src</KeyAlertFields>
+  </AlertContext>
+  <Inputs>
+    <Input name="$host"/>
+    <Input name="$src"/>
+  </Inputs>
+  <ExecutiveSummary>
+    <Overview>This playbook drives triage and investigation of the FortiWeb - Web Application DoS/DDoS Protection Triggered detection on NBI's Elastic Security deployment. The rule is a KQL query rule that fires on FortiWeb attack records (tag Fortiweb, data.type: attack) whose data.main_type is DoS Protection, or whose data.attack_type is TCP Flood Prevention or HTTP Flood Prevention. It signals that FortiWeb's rate/flood protection engaged against a volumetric or connection flood - a rate event, not a payload event.
+
+The analyst's job is to decide, from rate and availability rather than payload, whether a real flood degraded availability for customers (true_positive), was absorbed/mitigated by FortiWeb (false_positive, blocked-malicious, never "benign"), was an authorised load-test / announced spike (false_positive, authorised), was triggered by proxy-aggregated normal traffic or a benign retry storm / low threshold (misconfiguration), or cannot be resolved (needs_escalation). Because the DoS record attributes the flood to a source that is often a shared FortiWeb SNAT address, the rate must be re-measured against the real clients behind it before concluding an attack.</Overview>
+    <BusinessImpact>An alert means: FortiWeb's DoS/DDoS protection engaged on $host, attributing a flood to $src. Three questions decide the verdict, and none is answered by the DoS record alone:
+
+1. Structure - is this ONE source at an extreme rate, MANY sources (distributed), or a legitimate flash crowd / batch job? The DoS record attributes to a data.src that is frequently a shared SNAT proxy, so the structure must be re-derived from the de-proxied real clients (section 14.2).
+2. Impact - did the flood degrade availability for real users (rising 503/5xx and timeouts), or was it absorbed (excess rejected/rate-limited, availability held)? Only the traffic records carry data.http_retcode to answer this (section 14.3).
+3. Authorisation - is this an announced load-test or a campaign/marketing spike, confirmed from source and schedule?
+
+A flood mitigated with no user impact is a blocked malicious attempt; a flood that degrades a customer-facing banking service is an availability incident - and DoS is sometimes used as cover/distraction for a concurrent intrusion (section 17.4).</BusinessImpact>
+  </ExecutiveSummary>
+  <Investigation>
+    <Goal>Decide true_positive / false_positive / misconfiguration / needs_escalation for FortiWeb — Web Application DoS/DDoS Protection Triggered.</Goal>
+    <Workflow>
+      <Step order="1" name="Characterise the DoS protection event">
+        <Purpose>Characterise the DoS protection event</Purpose>
+        <Query platform="Elastic" language="ES|QL" id="Q-01">
+          <![CDATA[
+FROM logs-tcp.generic-*
+| WHERE @timestamp >= NOW() - 4 hours AND data.type == "attack" AND data.http_host == "$host"
+    AND (data.main_type == "DoS Protection" OR data.attack_type IN ("TCP Flood Prevention", "HTTP Flood Prevention"))
+| STATS events = COUNT(*), sources = COUNT_DISTINCT(data.src), attributed = VALUES(data.src),
+        signatures = VALUES(data.msg), policies = VALUES(data.policy)
+    BY data.attack_type, data.action, data.severity_level
+| SORT events DESC
+| LIMIT 20
+]]>
+        </Query>
+      </Step>
+      <Step order="2" name="Re-measure the rate against real clients (de-proxy)">
+        <Purpose>Re-measure the rate against real clients (de-proxy)</Purpose>
+        <Query platform="Elastic" language="ES|QL" id="Q-02">
+          <![CDATA[
+FROM logs-tcp.generic-default
+| WHERE @timestamp >= NOW() - 1 hours AND data.type == "traffic"
+    AND data.src == "$src" AND data.http_host == "$host"
+| EVAL real_client = COALESCE(TRIM(MV_FIRST(SPLIT(x_forwarded_for, ","))), data.src),
+       rc = TO_INTEGER(data.http_retcode)
+| STATS requests = COUNT(*), urls = COUNT_DISTINCT(data.http_url),
+        served2xx = SUM(CASE(rc >= 200 AND rc < 300, 1, 0)), err5xx = SUM(CASE(rc >= 500, 1, 0))
+    BY real_client
+| SORT requests DESC
+| LIMIT 15
+]]>
+        </Query>
+      </Step>
+      <Step order="3" name="Availability impact on the banking host">
+        <Purpose>Availability impact on the banking host</Purpose>
+        <Query platform="Elastic" language="ES|QL" id="Q-03">
+          <![CDATA[
+FROM logs-tcp.generic-default
+| WHERE @timestamp >= NOW() - 1 hours AND data.type == "traffic" AND data.http_host == "$host"
+| EVAL rc = TO_INTEGER(data.http_retcode),
+       real_client = COALESCE(TRIM(MV_FIRST(SPLIT(x_forwarded_for, ","))), data.src)
+| STATS requests = COUNT(*), sources = COUNT_DISTINCT(real_client),
+        served2xx = SUM(CASE(rc >= 200 AND rc < 300, 1, 0)),
+        svc_unavail_503 = SUM(CASE(rc == 503, 1, 0)), err5xx = SUM(CASE(rc >= 500, 1, 0)),
+        rejected4xx = SUM(CASE(rc >= 400 AND rc < 500, 1, 0))
+    BY data.http_host
+| LIMIT 5
+]]>
+        </Query>
+      </Step>
+      <Step order="4" name="Entity pivoting">
+        <Purpose>Entity pivoting</Purpose>
+        <Query platform="Elastic" language="ES|QL" id="Q-04">
+          <![CDATA[
+FROM logs-tcp.generic-default
+| WHERE @timestamp >= NOW() - 4 hours AND data.type == "attack"
+    AND data.http_host == "$host" AND data.src == "$src"
+| KEEP @timestamp, data.attack_type, data.main_type, data.action, data.severity_level, data.policy, data.msg
+| SORT @timestamp DESC
+| LIMIT 50
+]]>
+        </Query>
+      </Step>
+      <Step order="5" name="Host investigation">
+        <Purpose>Host investigation</Purpose>
+        <Query platform="Elastic" language="ES|QL" id="Q-05">
+          <![CDATA[
+FROM logs-tcp.generic-default
+| WHERE @timestamp >= NOW() - 4 hours AND data.type == "traffic" AND data.http_host == "$host"
+| EVAL rc = TO_INTEGER(data.http_retcode), real_client = COALESCE(TRIM(MV_FIRST(SPLIT(x_forwarded_for, ","))), data.src)
+| STATS requests = COUNT(*), sources = COUNT_DISTINCT(real_client),
+        served2xx = SUM(CASE(rc >= 200 AND rc < 300, 1, 0)),
+        svc_unavail_503 = SUM(CASE(rc == 503, 1, 0)), err5xx = SUM(CASE(rc >= 500, 1, 0)),
+        rejected4xx = SUM(CASE(rc >= 400 AND rc < 500, 1, 0))
+| LIMIT 5
+]]>
+        </Query>
+      </Step>
+      <Step order="6" name="IP investigation">
+        <Purpose>IP investigation</Purpose>
+        <Query platform="Elastic" language="ES|QL" id="Q-06">
+          <![CDATA[
+FROM logs-tcp.generic-default
+| WHERE @timestamp >= NOW() - 1 hours AND data.type == "traffic"
+    AND data.src == "$src" AND data.http_host == "$host"
+| EVAL real_client = COALESCE(TRIM(MV_FIRST(SPLIT(x_forwarded_for, ","))), data.src), rc = TO_INTEGER(data.http_retcode)
+| STATS requests = COUNT(*), urls = COUNT_DISTINCT(data.http_url),
+        served2xx = SUM(CASE(rc >= 200 AND rc < 300, 1, 0)), err5xx = SUM(CASE(rc >= 500, 1, 0)),
+        agents = VALUES(data.http_agent)
+    BY real_client
+| EVAL reqs_per_url = requests / (1 + urls)
+| SORT requests DESC
+| LIMIT 15
+]]>
+        </Query>
+      </Step>
+      <Step order="7" name="Domain investigation">
+        <Purpose>Domain investigation</Purpose>
+        <Query platform="Elastic" language="ES|QL" id="Q-07">
+          <![CDATA[
+FROM logs-tcp.generic-default
+| WHERE @timestamp >= NOW() - 1 hours AND data.type == "traffic" AND data.src == "$src"
+| EVAL real_client = COALESCE(TRIM(MV_FIRST(SPLIT(x_forwarded_for, ","))), data.src)
+| STATS requests = COUNT(*), real_clients = COUNT_DISTINCT(real_client), urls = COUNT_DISTINCT(data.http_url)
+    BY data.http_host
+| SORT requests DESC
+| LIMIT 20
+]]>
+        </Query>
+      </Step>
+      <Step order="8" name="URL investigation">
+        <Purpose>URL investigation</Purpose>
+        <Query platform="Elastic" language="ES|QL" id="Q-08">
+          <![CDATA[
+FROM logs-tcp.generic-default
+| WHERE @timestamp >= NOW() - 1 hours AND data.type == "traffic"
+    AND data.src == "$src" AND data.http_host == "$host"
+| EVAL rc = TO_INTEGER(data.http_retcode), endpoint = MV_FIRST(SPLIT(data.http_url, "?"))
+| STATS requests = COUNT(*), served2xx = SUM(CASE(rc >= 200 AND rc < 300, 1, 0)),
+        err5xx = SUM(CASE(rc >= 500, 1, 0)), rejected4xx = SUM(CASE(rc >= 400 AND rc < 500, 1, 0))
+    BY endpoint
+| SORT requests DESC
+| LIMIT 25
+]]>
+        </Query>
+      </Step>
+      <Step order="9" name="Authentication investigation">
+        <Purpose>Authentication investigation</Purpose>
+        <Query platform="Elastic" language="ES|QL" id="Q-09">
+          <![CDATA[
+FROM logs-tcp.generic-default
+| WHERE @timestamp >= NOW() - 1 hours AND data.type == "traffic" AND data.http_host == "$host"
+    AND (TO_LOWER(data.http_url) LIKE "*login*" OR TO_LOWER(data.http_url) LIKE "*auth*" OR TO_LOWER(data.http_url) LIKE "*token*")
+| EVAL rc = TO_INTEGER(data.http_retcode), real_client = COALESCE(TRIM(MV_FIRST(SPLIT(x_forwarded_for, ","))), data.src)
+| STATS requests = COUNT(*), clients = COUNT_DISTINCT(real_client),
+        ok2xx = SUM(CASE(rc >= 200 AND rc < 300, 1, 0)),
+        rejected4xx = SUM(CASE(rc >= 400 AND rc < 500, 1, 0)) BY data.http_url
+| SORT requests DESC
+| LIMIT 25
+]]>
+        </Query>
+      </Step>
+      <Step order="10" name="Timeline Reconstruction">
+        <Purpose>Timeline Reconstruction</Purpose>
+        <Query platform="Elastic" language="ES|QL" id="Q-10">
+          <![CDATA[
+FROM logs-tcp.generic-default
+| WHERE @timestamp >= NOW() - 2 hours AND data.type == "traffic"
+    AND data.src == "$src" AND data.http_host == "$host"
+| EVAL real_client = COALESCE(TRIM(MV_FIRST(SPLIT(x_forwarded_for, ","))), data.src)
+| KEEP @timestamp, real_client, data.http_method, data.http_url, data.http_retcode
+| SORT @timestamp ASC
+| LIMIT 200
+]]>
+        </Query>
+      </Step>
+      <Step order="11" name="Lateral movement validation">
+        <Purpose>Lateral movement validation</Purpose>
+        <Query platform="Elastic" language="ES|QL" id="Q-11">
+          <![CDATA[
+FROM logs-tcp.generic-default
+| WHERE @timestamp >= NOW() - 2 hours AND data.type == "traffic" AND data.src == "$src" AND data.http_host != "$host"
+| EVAL real_client = COALESCE(TRIM(MV_FIRST(SPLIT(x_forwarded_for, ","))), data.src)
+| STATS requests = COUNT(*), real_clients = COUNT_DISTINCT(real_client), urls = COUNT_DISTINCT(data.http_url)
+    BY data.http_host
+| SORT requests DESC
+| LIMIT 20
+]]>
+        </Query>
+      </Step>
+      <Step order="12" name="Persistence validation">
+        <Purpose>Persistence validation</Purpose>
+        <Query platform="Elastic" language="ES|QL" id="Q-12">
+          <![CDATA[
+FROM logs-tcp.generic-default
+| WHERE @timestamp >= NOW() - 4 hours AND data.type == "traffic"
+    AND data.src == "$src" AND data.http_host == "$host"
+| EVAL real_client = COALESCE(TRIM(MV_FIRST(SPLIT(x_forwarded_for, ","))), data.src)
+| STATS requests = COUNT(*), urls = COUNT_DISTINCT(data.http_url),
+        first_seen = MIN(@timestamp), last_seen = MAX(@timestamp) BY real_client
+| SORT requests DESC
+| LIMIT 15
+]]>
+        </Query>
+      </Step>
+      <Step order="13" name="Defense evasion validation">
+        <Purpose>Defense evasion validation</Purpose>
+        <Query platform="Elastic" language="ES|QL" id="Q-13">
+          <![CDATA[
+FROM logs-tcp.generic-default
+| WHERE @timestamp >= NOW() - 4 hours AND data.type == "attack" AND data.http_host == "$host"
+    AND NOT (data.main_type == "DoS Protection" OR data.attack_type IN ("TCP Flood Prevention", "HTTP Flood Prevention"))
+| STATS events = COUNT(*), denied = SUM(CASE(data.action == "Alert_Deny", 1, 0)), urls = COUNT_DISTINCT(data.http_url)
+    BY data.attack_type, data.action
+| SORT events DESC
+| LIMIT 25
+]]>
+        </Query>
+      </Step>
+      <Step order="14" name="Impact assessment">
+        <Purpose>Impact assessment</Purpose>
+        <Query platform="Elastic" language="ES|QL" id="Q-14">
+          <![CDATA[
+FROM logs-tcp.generic-default
+| WHERE @timestamp >= NOW() - 1 hours AND data.type == "traffic" AND data.http_host == "$host"
+| EVAL rc = TO_INTEGER(data.http_retcode), real_client = COALESCE(TRIM(MV_FIRST(SPLIT(x_forwarded_for, ","))), data.src)
+| STATS requests = COUNT(*), sources = COUNT_DISTINCT(real_client),
+        served2xx = SUM(CASE(rc >= 200 AND rc < 300, 1, 0)),
+        svc_unavail_503 = SUM(CASE(rc == 503, 1, 0)), err5xx = SUM(CASE(rc >= 500, 1, 0))
+| EVAL unavail_pct = (100 * svc_unavail_503) / (1 + requests)
+| LIMIT 5
+]]>
+        </Query>
+      </Step>
+      <Step order="15" name="Finalize verdict">
+        <DecisionTree>
+        </DecisionTree>
+      </Step>
+    </Workflow>
+  </Investigation>
+  <ClassificationGuidance>
+    <TruePositive>
+      <Definition></Definition>
+    </TruePositive>
+    <FalsePositive>
+      <Definition></Definition>
+      <Indicators>
+        <Item>Authorised load / performance tests run by NBI or a vendor against the external surface - high volume by design. Classified false_positive only once confirmed with the owner (source, window, scope).</Item>
+        <Item>Announced campaign / marketing spikes (a promotion, a payroll day, a statement release) that drive a legitimate flash crowd - high 2xx, normal error rates.</Item>
+        <Item>Benign retry storms - a misbehaving client or app that retries aggressively on error, inflating the rate without hostile intent.</Item>
+        <Item>Proxy-aggregated normal traffic - many legitimate clients behind one SNAT address summing to a count that trips a per-data.src threshold, when no single real client is flooding.</Item>
+        <Item>$src is a FortiWeb SNAT address, so raw per-source rate overstates single-client rate. The attributed source (e.g. 159.60.162.33, in the 159.60.162-170.0/24 and 185.56.154.0/24 pools) fronts many real clients. Measured live, the traffic behind one attributed source de-proxied into many distinct real clients each sending moderate, all-2xx request counts - the fingerprint of proxy-aggregated normal traffic, not one flooder. Always de-proxy before concluding an attack (section 14.2).</Item>
+        <Item>The banking surfaces are genuinely high-volume. businessonline.nbi.iq served ~38k requests from ~170 real clients in 1h with availability largely holding (~35k 2xx, a few hundred 503/5xx), and mobile.nbi.iq runs even higher. A raw count that looks alarming can simply be peak business load - judge against the surface's baseline, not an absolute number.</Item>
+        <Item>DoS-Protection records are sparse and bursty. A handful in a 4-hour window (and none in an earlier window). Empty != safe; when the rule fires, the record is real, but the impact question is answered from the traffic rate, not the DoS record count.</Item>
+        <Item>Availability held in the validated sample. The observed DoS records were Alert_Deny with no concurrent availability collapse - consistent with a mitigated attempt. That does not generalise; re-measure impact every time (section 14.3).</Item>
+      </Indicators>
+    </FalsePositive>
+    <Misconfiguration>
+      <Definition></Definition>
+    </Misconfiguration>
+    <NeedsEscalation>
+      <Definition></Definition>
+    </NeedsEscalation>
+  </ClassificationGuidance>
+  <ResponseActions>
+    <Phase name="Containment">
+      <Action>Rate-limit / block the top real clients (from section 14.2/section 15.6) at the FortiWeb/edge - on the de-proxied x_forwarded_for clients where a genuine flooder is identified, not blanket on the SNAT $src (which fronts legitimate users).</Action>
+      <Action>Engage upstream DDoS mitigation / scrubbing (network/ISP) if the flood is distributed or beyond edge capacity.</Action>
+      <Action>Protect the expensive endpoint identified in section 15.8 (caching, rate-limit, temporary challenge) if it is the pressure point.</Action>
+      <Action>Check for a concurrent intrusion using the DoS as cover (section 17.4) and respond to that in parallel.</Action>
+      <Action>Open an availability incident and preserve the DoS records + traffic slice. Blocks are applied only via the authorised human-approved DEPLOY path; investigation here is read-only.</Action>
+    </Phase>
+    <Phase name="Eradication">
+      <Action>Keep/monitor blocks or rate-limits on confirmed hostile sources; add distributed sources to edge deny/reputation lists.</Action>
+      <Action>Tune FortiWeb DoS thresholds to de-proxied per-real-client rates so proxy aggregation does not trip the rule and genuine floods are caught earlier.</Action>
+      <Action>Remediate any misbehaving benign client (retry storm) at the source.</Action>
+      <Action>If DoS was cover, eradicate the concurrent intrusion per its own playbook before closing.</Action>
+    </Phase>
+    <Phase name="Recovery">
+      <Action>Confirm availability is restored - 503/5xx back to baseline, 2xx served normally (section 14.3/section 17.5) - before standing down.</Action>
+      <Action>Add caching / autoscaling for the pressured endpoint and pre-arrange upstream scrubbing for customer-facing hosts.</Action>
+      <Action>Baseline each surface's normal peak so a genuine surge stands out from business-hours load.</Action>
+      <Action>Recommend populating a real client-rate signal (de-proxied) into the detection so future thresholds measure per-real-client rate, not proxy aggregate.</Action>
+    </Phase>
+  </ResponseActions>
+  <Escalation>
+    <Trigger>Escalate to Tier 3 / IR, the application/infrastructure owner, and the network/ISP team when any of the following hold:
+
+- Availability degraded (sustained 503/5xx) on a customer-facing banking host (section 14.3/section 17.5).
+- A distributed flood beyond edge mitigation capacity, or a genuine single/few-source flood on an expensive endpoint.
+- Concurrent non-DoS attack activity during the flood window (section 17.4) - possible cover for an intrusion.
+- Hostile-vs-legitimate and true impact cannot be established from the available logs - escalate as needs_escalation with the gaps named (request capacity/planned-events context and upstream netflow).</Trigger>
+    <To>SOC L2 / IR</To>
+  </Escalation>
+  <ClosureCriteria>
+    <Item>false_positive (authorised): an authorised load-test / announced spike is positively matched to the source and window; served normally, no availability loss.</Item>
+    <Item>false_positive (blocked-malicious): a real flood positively proven mitigated (availability held, excess rejected/rate-limited); documented as blocked, never "benign".</Item>
+    <Item>misconfiguration: the rate is proxy-aggregated normal traffic, a benign retry storm, or a threshold below the real peak; thresholds tuned, client fixed, peak baselined.</Item>
+    <Item>true_positive: a real flood degraded availability on a banking host; sources rate-limited/blocked, upstream mitigation applied, availability restored, concurrent-intrusion check done, incident documented.</Item>
+    <Item>needs_escalation: handed to Tier 3/IR + app/infra + network with the impact and capacity gaps documented.</Item>
+  </ClosureCriteria>
+  <Limitations>
+    <Item>De-proxy before you conclude a flood. The DoS record attributes to data.src, a FortiWeb SNAT address (159.60.162-170.0/24, 185.56.154.0/24). Measured live, one attributed source de-proxied into many normal clients (moderate counts, all 2xx) - proxy aggregation, not one attacker. Re-measure the rate on the real x_forwarded_for clients every time (section 14.2).</Item>
+    <Item>Impact lives on the traffic records, not the DoS record. The DoS attack record has no data.http_retcode; the 503/5xx availability signal is on data.type == "traffic". Join them by host + time.</Item>
+    <Item>DoS records are sparse and bursty - empty != safe. A low-and-slow or widely distributed flood may never trip a per-source threshold; the availability evidence (section 14.3) is the backstop, and the traffic log is always populated.</Item>
+    <Item>Watch for DoS-as-cover. Always check for concurrent non-DoS attack signatures on the host in the flood window (section 17.4) - a flood is a classic distraction for a concurrent intrusion.</Item>
+    <Item>Judge against baseline, not an absolute count. businessonline.nbi.iq (~38k req/h, ~170 clients) and mobile.nbi.iq are genuinely high-volume; a scary-looking number can be peak business load.</Item>
+    <Item>KB-worthy (persist to NBI customer scope): (1) DoS-Protection attack records present but sparse (e.g. HTTP Flood Prevention/Malicious IPs on businessonline.nbi.iq, Alert_Deny, policy FCC.Prod-Link2); (2) attack records lack data.http_retcode/x_forwarded_for - impact from traffic slice; (3) data.src = SNAT pool, de-proxy via x_forwarded_for; (4) businessonline.nbi.iq ~38k req/h, ~170 real clients, availability held in sample. Observed live 2026-08-17.</Item>
+  </Limitations>
+</Playbook>

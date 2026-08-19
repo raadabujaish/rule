@@ -1,0 +1,369 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<Playbook xmlns="https://soc.example/playbooks" id="PB-mssql-clr-assembly-loaded" name="MS SQL — CLR Assembly Loaded (Code Execution) - SOC Playbook" version="3.0" status="Validated" classification="TLP:AMBER">
+  <Metadata>
+    <Owner>NBI SOC / Detection Engineering</Owner>
+    <LastUpdated>2026-08-19</LastUpdated>
+    <Severity default="High">High</Severity>
+    <Confidence default="Medium">Medium</Confidence>
+    <Category>Execution</Category>
+    <MitreAttack>
+      <Technique id="T1505.001"/>
+      <Technique id="T1505"/>
+      <Technique id="T1059"/>
+      <Technique id="T1620"/>
+      <Tactic id="TA0002"/>
+      <Tactic id="TA0003"/>
+    </MitreAttack>
+    <References>
+      <Reference title="MITRE ATT&amp;CK - Server Software Component: SQL Stored Procedures (T1505.001)" url="https://attack.mitre.org/techniques/T1505/001/"/>
+      <Reference title="MITRE ATT&amp;CK - Command and Scripting Interpreter (T1059)" url="https://attack.mitre.org/techniques/T1059/"/>
+      <Reference title="MITRE ATT&amp;CK - Reflective Code Loading (T1620)" url="https://attack.mitre.org/techniques/T1620/"/>
+      <Reference title="MITRE ATT&amp;CK - Execution tactic (TA0002)" url="https://attack.mitre.org/tactics/TA0002/"/>
+      <Reference title="MITRE ATT&amp;CK - Persistence tactic (TA0003)" url="https://attack.mitre.org/tactics/TA0003/"/>
+      <Reference title="Microsoft Learn - CREATE ASSEMBLY (Transact-SQL)" url="https://learn.microsoft.com/en-us/sql/t-sql/statements/create-assembly-transact-sql"/>
+      <Reference title="Microsoft Learn - CLR integration security / permission sets" url="https://learn.microsoft.com/en-us/sql/relational-databases/clr-integration/security/clr-integration-code-access-security"/>
+      <Reference title="Microsoft Learn - clr strict security &amp; sp_add_trusted_assembly" url="https://learn.microsoft.com/en-us/sql/database-engine/configure-windows/clr-strict-security"/>
+      <Reference title="NetSPI / PowerUpSQL - SQL Server CLR assembly command execution" url="https://www.netspi.com/blog/technical-blog/network-penetration-testing/attacking-sql-server-clr-assemblies/"/>
+      <Reference title="Elastic - Microsoft SQL Server integration (audit logs)" url="https://docs.elastic.co/integrations/microsoft_sqlserver"/>
+    </References>
+  </Metadata>
+  <AlertContext>
+    <RuleName>MS SQL — CLR Assembly Loaded (Code Execution)</RuleName>
+    <RuleId>nbi-sql-clr-assembly</RuleId>
+    <RuleType>query (custom NBI rule)</RuleType>
+    <Index>logs-microsoft_sqlserver.audit-*</Index>
+    <TriggerLogic>The deployed rule is an Elastic query-type rule over the SQL Server audit stream. Its detection logic as a one-line Kibana KQL filter (use it for fast pivoting in Discover / Timeline):
+
+
+
+Plain English: any audited statement whose text contains CREATE ASSEMBLY (register a new assembly) or ALTER ASSEMBLY (replace/extend an existing one) fires the rule. CLR integration lets SQL Server run .NET code exposed as functions, procedures, triggers, and types. The danger is the permission set declared on the assembly:
+
+- SAFE - computation only; no file/network/registry/OS access. Lowest risk.
+- EXTERNAL_ACCESS - may reach files, network, environment; runs as the SQL service account.
+- UNSAFE - unrestricted managed code, including unmanaged/P-Invoke calls; full code execution inside the engine process.
+
+ALTER ASSEMBLY is caught alongside CREATE ASSEMBLY deliberately: an attacker can update the bytes of an already-trusted assembly to introduce new code without a fresh CREATE.</TriggerLogic>
+    <KeyAlertFields>sqlserver.audit.session_server_principal_name, sqlserver.audit.server_principal_name, sqlserver.audit.statement, sqlserver.audit.client_ip, sqlserver.audit.database_name, sqlserver.audit.application_name, sqlserver.audit.host_name, host.name, sqlserver.audit.action_id, sqlserver.audit.class_type, event.action, sys.assemblies</KeyAlertFields>
+  </AlertContext>
+  <Inputs>
+    <Input name="$principal"/>
+    <Input name="$client_ip"/>
+  </Inputs>
+  <ExecutiveSummary>
+    <Overview>This playbook drives triage and investigation of the MS SQL - CLR Assembly Loaded (Code Execution) detection on NBI's Elastic Security deployment. The rule fires when an audited SQL statement contains CREATE ASSEMBLY or ALTER ASSEMBLY - the moment a .NET CLR assembly (managed code) is registered into, or updated inside, SQL Server. An assembly registered with the EXTERNAL_ACCESS or UNSAFE permission set escapes the database sandbox and can run arbitrary managed/OS code (file, network, process) inside the SQL Server process, under the SQL Server service account. The load is the instant code enters the engine.
+
+The analyst's job is to decide whether the load is authorised application/feature deployment (false_positive) or attacker code loading (true_positive), and to classify as true_positive, false_positive (authorised deployment OR positively-proven-blocked attempt), misconfiguration, or needs_escalation. The decision is driven by four facts: the assembly's permission set (SAFE vs EXTERNAL_ACCESS/UNSAFE), where its bytes came from (an inline 0x hex blob smuggled in the statement vs a signed, reviewed artifact), which principal loaded it, and from which client.</Overview>
+    <BusinessImpact>An alert means that on a SQL Server audited into logs-microsoft_sqlserver.audit-*, a session under $principal from $client_ip registered or modified a CLR assembly. Because CLR assemblies run in-process with the reach of the SQL Server service account, a loaded UNSAFE (or EXTERNAL_ACCESS) assembly is effectively code execution and persistence inside the database tier - one of NBI's most sensitive host classes. It:
+
+- Executes attacker code (spawn processes, read/write files, open network sockets) from within sqlservr.exe, under the service account's privileges.
+- Survives service restarts - the assembly is stored in the database, so it is durable persistence, not a transient run.
+- Is stealthier than xp_cmdshell: no child process of sqlservr.exe is strictly required, and defenders watching for xp_cmdshell may miss a CLR method bound to an innocuous-looking stored procedure via CREATE PROCEDURE ... EXTERNAL NAME.
+
+So the alert is not "an unusual admin action" by default - it is the database engine being extended with new executable code. The investigative question is whether that code is a signed, reviewed, SAFE feature or an attacker's smuggled binary. The answer is in the assembly</BusinessImpact>
+  </ExecutiveSummary>
+  <Investigation>
+    <Goal>Decide true_positive / false_positive / misconfiguration / needs_escalation for MS SQL — CLR Assembly Loaded (Code Execution).</Goal>
+    <Workflow>
+      <Step order="1" name="Recover the assembly definition">
+        <Purpose>Recover the assembly definition</Purpose>
+        <Query platform="Elastic" language="ES|QL" id="Q-01">
+          <![CDATA[
+FROM logs-microsoft_sqlserver.audit-*
+| WHERE sqlserver.audit.session_server_principal_name == "$principal"
+    AND (sqlserver.audit.statement LIKE "*CREATE ASSEMBLY*" OR sqlserver.audit.statement LIKE "*ALTER ASSEMBLY*")
+    AND @timestamp >= NOW() - 2 hours
+| STATS execs = COUNT(*), statements = VALUES(sqlserver.audit.statement)
+    BY sqlserver.audit.client_ip, sqlserver.audit.database_name, host.name
+| SORT execs DESC
+| LIMIT 10
+]]>
+        </Query>
+      </Step>
+      <Step order="2" name="Check CLR enablement and trust changes by the same principal">
+        <Purpose>Check CLR enablement and trust changes by the same principal</Purpose>
+        <Query platform="Elastic" language="ES|QL" id="Q-02">
+          <![CDATA[
+FROM logs-microsoft_sqlserver.audit-*
+| WHERE sqlserver.audit.session_server_principal_name == "$principal"
+    AND @timestamp >= NOW() - 2 hours
+| EVAL assembly = CASE(sqlserver.audit.statement LIKE "*CREATE ASSEMBLY*" OR sqlserver.audit.statement LIKE "*ALTER ASSEMBLY*", 1, 0),
+       clr_enable = CASE(sqlserver.audit.statement LIKE "*sp_configure*" AND sqlserver.audit.statement LIKE "*clr*", 1, 0),
+       trust = CASE(sqlserver.audit.statement LIKE "*sp_add_trusted_assembly*" OR sqlserver.audit.statement LIKE "*TRUSTWORTHY*", 1, 0)
+| STATS total = COUNT(*), assembly_ops = SUM(assembly), clr_enable_ops = SUM(clr_enable), trust_ops = SUM(trust)
+    BY sqlserver.audit.database_name, sqlserver.audit.client_ip
+| SORT assembly_ops DESC
+| LIMIT 10
+]]>
+        </Query>
+      </Step>
+      <Step order="3" name="Entity pivoting">
+        <Purpose>Entity pivoting</Purpose>
+        <Query platform="Elastic" language="ES|QL" id="Q-03">
+          <![CDATA[
+FROM logs-microsoft_sqlserver.audit-*
+| WHERE sqlserver.audit.session_server_principal_name == "$principal"
+    AND @timestamp >= NOW() - 2 hours
+| STATS events = COUNT(*), dbs = COUNT_DISTINCT(sqlserver.audit.database_name)
+    BY sqlserver.audit.client_ip, sqlserver.audit.host_name, host.name, sqlserver.audit.application_name
+| SORT events DESC
+| LIMIT 20
+]]>
+        </Query>
+      </Step>
+      <Step order="4" name="Process investigation">
+        <Purpose>Process investigation</Purpose>
+        <Query platform="Elastic" language="ES|QL" id="Q-04">
+          <![CDATA[
+FROM logs-microsoft_sqlserver.audit-*
+| WHERE sqlserver.audit.session_server_principal_name == "$principal"
+    AND @timestamp >= NOW() - 2 hours
+| STATS events = COUNT(*), clients = COUNT_DISTINCT(sqlserver.audit.client_ip)
+    BY sqlserver.audit.application_name
+| SORT events DESC
+| LIMIT 15
+]]>
+        </Query>
+      </Step>
+      <Step order="5" name="User investigation">
+        <Purpose>User investigation</Purpose>
+        <Query platform="Elastic" language="ES|QL" id="Q-05">
+          <![CDATA[
+FROM logs-microsoft_sqlserver.audit-*
+| WHERE sqlserver.audit.session_server_principal_name == "$principal"
+    AND @timestamp >= NOW() - 2 hours
+| STATS events = COUNT(*), clients = COUNT_DISTINCT(sqlserver.audit.client_ip)
+    BY host.name, sqlserver.audit.database_name
+| SORT events DESC
+| LIMIT 20
+]]>
+        </Query>
+      </Step>
+      <Step order="6" name="Host investigation">
+        <Purpose>Host investigation</Purpose>
+        <Query platform="Elastic" language="ES|QL" id="Q-06">
+          <![CDATA[
+FROM logs-microsoft_sqlserver.audit-*
+| WHERE host.name == "nim-kta-dbv01"
+    AND @timestamp >= NOW() - 1 hours
+| STATS events = COUNT(*), clients = COUNT_DISTINCT(sqlserver.audit.client_ip)
+    BY sqlserver.audit.session_server_principal_name, sqlserver.audit.database_name
+| SORT events DESC
+| LIMIT 20
+]]>
+        </Query>
+      </Step>
+      <Step order="7" name="IP investigation">
+        <Purpose>IP investigation</Purpose>
+        <Query platform="Elastic" language="ES|QL" id="Q-07">
+          <![CDATA[
+FROM logs-microsoft_sqlserver.audit-*
+| WHERE sqlserver.audit.client_ip == "$client_ip"
+    AND @timestamp >= NOW() - 2 hours
+| STATS statements = COUNT(*), principals = COUNT_DISTINCT(sqlserver.audit.session_server_principal_name),
+        dbs = COUNT_DISTINCT(sqlserver.audit.database_name), apps = VALUES(sqlserver.audit.application_name)
+    BY sqlserver.audit.host_name, host.name
+| SORT statements DESC
+| LIMIT 10
+]]>
+        </Query>
+      </Step>
+      <Step order="8" name="File investigation">
+        <Purpose>File investigation</Purpose>
+        <Query platform="Elastic" language="ES|QL" id="Q-08">
+          <![CDATA[
+FROM logs-microsoft_sqlserver.audit-*
+| WHERE sqlserver.audit.session_server_principal_name == "$principal"
+    AND (sqlserver.audit.statement LIKE "*CREATE ASSEMBLY*" OR sqlserver.audit.statement LIKE "*ALTER ASSEMBLY*")
+    AND @timestamp >= NOW() - 2 hours
+| KEEP @timestamp, sqlserver.audit.client_ip, sqlserver.audit.database_name, sqlserver.audit.statement
+| SORT @timestamp DESC
+| LIMIT 25
+]]>
+        </Query>
+      </Step>
+      <Step order="9" name="Authentication investigation">
+        <Purpose>Authentication investigation</Purpose>
+        <Query platform="Elastic" language="ES|QL" id="Q-09">
+          <![CDATA[
+FROM logs-microsoft_sqlserver.audit-*
+| WHERE sqlserver.audit.session_server_principal_name == "$principal"
+    AND sqlserver.audit.class_type == "LOGIN"
+    AND @timestamp >= NOW() - 2 hours
+| STATS events = COUNT(*) BY sqlserver.audit.action_id, sqlserver.audit.client_ip, host.name
+| SORT events DESC
+| LIMIT 20
+]]>
+        </Query>
+      </Step>
+      <Step order="10" name="Timeline Reconstruction">
+        <Purpose>Timeline Reconstruction</Purpose>
+        <Query platform="Elastic" language="ES|QL" id="Q-10">
+          <![CDATA[
+FROM logs-microsoft_sqlserver.audit-*
+| WHERE sqlserver.audit.session_server_principal_name == "$principal"
+    AND sqlserver.audit.client_ip == "$client_ip"
+    AND @timestamp >= NOW() - 2 hours
+| KEEP @timestamp, sqlserver.audit.action_id, sqlserver.audit.database_name, sqlserver.audit.statement
+| SORT @timestamp ASC
+| LIMIT 200
+]]>
+        </Query>
+      </Step>
+      <Step order="11" name="Lateral movement validation">
+        <Purpose>Lateral movement validation</Purpose>
+        <Query platform="Elastic" language="ES|QL" id="Q-11">
+          <![CDATA[
+FROM logs-microsoft_sqlserver.audit-*
+| WHERE sqlserver.audit.session_server_principal_name == "$principal"
+    AND host.name != "nim-kta-dbv01"
+    AND @timestamp >= NOW() - 2 hours
+| STATS events = COUNT(*) BY host.name, sqlserver.audit.client_ip
+| SORT events DESC
+| LIMIT 20
+]]>
+        </Query>
+      </Step>
+      <Step order="12" name="Persistence validation">
+        <Purpose>Persistence validation</Purpose>
+        <Query platform="Elastic" language="ES|QL" id="Q-12">
+          <![CDATA[
+FROM logs-microsoft_sqlserver.audit-*
+| WHERE sqlserver.audit.session_server_principal_name == "$principal"
+    AND @timestamp >= NOW() - 2 hours
+| EVAL persist = CASE(
+    sqlserver.audit.statement LIKE "*EXTERNAL NAME*" OR sqlserver.audit.statement LIKE "*sp_add_trusted_assembly*"
+    OR (sqlserver.audit.statement LIKE "*CREATE PROCEDURE*" AND sqlserver.audit.statement LIKE "*EXTERNAL NAME*"), 1, 0)
+| STATS total = COUNT(*), persistence_ops = SUM(persist) BY sqlserver.audit.database_name
+| SORT persistence_ops DESC
+| LIMIT 15
+]]>
+        </Query>
+      </Step>
+      <Step order="13" name="Privilege escalation validation">
+        <Purpose>Privilege escalation validation</Purpose>
+        <Query platform="Elastic" language="ES|QL" id="Q-13">
+          <![CDATA[
+FROM logs-microsoft_sqlserver.audit-*
+| WHERE sqlserver.audit.session_server_principal_name == "$principal"
+    AND sqlserver.audit.statement LIKE "*sp_configure*"
+    AND @timestamp >= NOW() - 2 hours
+| STATS execs = COUNT(*), statements = VALUES(sqlserver.audit.statement)
+    BY sqlserver.audit.client_ip, host.name
+| SORT execs DESC
+| LIMIT 10
+]]>
+        </Query>
+      </Step>
+      <Step order="14" name="Defense evasion validation">
+        <Purpose>Defense evasion validation</Purpose>
+        <Query platform="Elastic" language="ES|QL" id="Q-14">
+          <![CDATA[
+FROM logs-microsoft_sqlserver.audit-*
+| WHERE sqlserver.audit.session_server_principal_name == "$principal"
+    AND @timestamp >= NOW() - 2 hours
+| EVAL tamper = CASE(
+    sqlserver.audit.statement LIKE "*ALTER SERVER AUDIT*" OR sqlserver.audit.statement LIKE "*DROP SERVER AUDIT*"
+    OR sqlserver.audit.statement LIKE "*sp_audit*" OR sqlserver.audit.statement LIKE "*ALTER DATABASE AUDIT*", 1, 0)
+| STATS total = COUNT(*), tamper_ops = SUM(tamper) BY sqlserver.audit.database_name
+| SORT tamper_ops DESC
+| LIMIT 15
+]]>
+        </Query>
+      </Step>
+      <Step order="15" name="Impact assessment">
+        <Purpose>Impact assessment</Purpose>
+        <Query platform="Elastic" language="ES|QL" id="Q-15">
+          <![CDATA[
+FROM logs-microsoft_sqlserver.audit-*
+| WHERE sqlserver.audit.session_server_principal_name == "$principal"
+    AND host.name == "nim-kta-dbv01"
+    AND @timestamp >= NOW() - 2 hours
+| EVAL exec_surface = CASE(
+    sqlserver.audit.statement LIKE "*xp_cmdshell*" OR sqlserver.audit.statement LIKE "*sp_OACreate*"
+    OR sqlserver.audit.statement LIKE "*sp_execute_external_script*", 1, 0)
+| STATS ops = COUNT(*), exec_ops = SUM(exec_surface) BY sqlserver.audit.action_id
+| SORT ops DESC
+| LIMIT 20
+]]>
+        </Query>
+      </Step>
+      <Step order="16" name="Finalize verdict">
+        <DecisionTree>
+        </DecisionTree>
+      </Step>
+    </Workflow>
+  </Investigation>
+  <ClassificationGuidance>
+    <TruePositive>
+      <Definition></Definition>
+    </TruePositive>
+    <FalsePositive>
+      <Definition></Definition>
+      <Indicators>
+        <Item>Authorised deployment of a signed, reviewed SAFE assembly - a vendor/application feature installed by a recognised deployment principal from a known host under change control. This is the primary benign cause and must be matched to a deployment/change record, not assumed.</Item>
+        <Item>Vendor product features that ship a CLR assembly (some ETL, spatial, cryptographic, or integration components). Recognisable by a named, signed assembly with a SAFE (occasionally EXTERNAL_ACCESS) permission set, deployed once and stable.</Item>
+        <Item>DBA re-deployment / patching of an existing legitimate assembly via ALTER ASSEMBLY during a maintenance window.</Item>
+        <Item>Positively-blocked attempts - the CREATE/ALTER ASSEMBLY was refused by CLR strict security or a permission error, with no assembly registered. Recorded as a blocked attempt (documented, principal/client investigated), never "benign".</Item>
+        <Item>Assembly loading is off-baseline. In the validation windows, assembly_ops = 0, clr_enable_ops = 0, and trust_ops = 0 for the sampled principals - the estate's SQL workload is application ORM/stored-procedure traffic (SELECT/UPDATE/EXECUTE via .Net SqlClient Data Provider and EntityFrameworkMUE), not CLR management. Any firing is therefore off-baseline and warrants review; there is no legitimate CLR-load noise to tune out at the estate level.</Item>
+        <Item>The busiest SQL host is a banking-onboarding platform. nim-kta-dbv01 hosts the Kofax TotalAgility databases plus KYC/onboarding databases (KYC_Individual, Individual_Customer_Onboarding, OnboardingLookups, iLOP, CB_BPM_Business_Data). A CLR load here is both the most likely place a legitimate vendor feature would appear and the most damaging place to gain in-engine code execution. Verify any "vendor feature" claim against the actual assembly metadata and a deployment record.</Item>
+        <Item>app_admin is a shared application identity, in three case-variants (app_admin/App_admin/APP_ADMIN, same login, case-preserved in the audit). An application account loading a CLR assembly is a strong anomaly - application ORMs do not register assemblies - and points toward injection reaching code-load capability. Do not treat the app account as trusted.</Item>
+        <Item>No historical NBI benign-true-positive is on record for this rule. There is no environment-specific allow-list. If a genuine authorised assembly is confirmed, scope any exception to the exact assembly name + hash + permission set + principal + database, never a blanket host/principal exception.</Item>
+      </Indicators>
+    </FalsePositive>
+    <Misconfiguration>
+      <Definition></Definition>
+    </Misconfiguration>
+    <NeedsEscalation>
+      <Definition></Definition>
+    </NeedsEscalation>
+  </ClassificationGuidance>
+  <ResponseActions>
+    <Phase name="Containment">
+      <Action>If a true_positive is confirmed, isolate the SQL host and treat the SQL Server service account and the server as compromised - CLR code runs in-process with the service account's reach.</Action>
+      <Action>Capture the assembly evidence before removal. Preserve the assembly bytes and metadata (sys.assemblies / sys.assembly_files, the raw audit statement, the SHA-512 hash) - do not drop the assembly until evidence is captured.</Action>
+      <Action>Disable the implicated login ($principal) or its source path; if it is the shared application account, coordinate with the app owner but prioritise stopping in-engine code execution.</Action>
+      <Action>Block egress from the SQL host - an EXTERNAL_ACCESS/UNSAFE assembly may open outbound C2.</Action>
+      <Action>Contain the origin. If section 15.6 shows an application-server origin, isolate that app server too - the injection point lives there.</Action>
+      <Action>All containment changes go through the authorised, human-approved DEPLOY path; investigation itself is read-only.</Action>
+    </Phase>
+    <Phase name="Eradication">
+      <Action>Drop the malicious assembly and its callable bindings (the EXTERNAL NAME procedures/functions/triggers from section 17.2) after evidence capture.</Action>
+      <Action>Revert trust and feature changes (section 17.2/section 17.3): remove the assembly hash from sp_add_trusted_assembly / sys.trusted_assemblies, set the database TRUSTWORTHY OFF, re-enable clr strict security, and disable clr enabled if the feature is unused.</Action>
+      <Action>Remove code-load rights from application logins - application principals should never hold CREATE ASSEMBLY/ALTER ASSEMBLY or CONTROL SERVER; strip the excess permission.</Action>
+      <Action>Hunt for what the code did - files written, network connections, additional persistence - and for the same assembly hash/behaviour across peer SQL hosts (section 15.4, section 17.1).</Action>
+      <Action>Fix the injection point if the origin is an application server (parameterise queries; remediate the SQL-injection vulnerability).</Action>
+    </Phase>
+    <Phase name="Recovery">
+      <Action>Rotate the SQL Server service account and the implicated login's credentials; rotate any secrets readable from the SQL host during the exposure window.</Action>
+      <Action>Restore from a known-good state if the assembly's code tampered with data or additional persistence is suspected - validate affected databases (especially TotalAgility*/KYC) against backups.</Action>
+      <Action>Return the login/host to service only after section 22 closing criteria are met and monitoring confirms no new assembly loads or CLR-enable/trust changes.</Action>
+      <Action>Harden: keep CLR disabled where unused, enforce clr strict security, remove TRUSTWORTHY and unnecessary trusted-assembly hashes, least-privilege the SQL service account and its file-system reach, and require signed, reviewed assemblies for any legitimate CLR feature.</Action>
+    </Phase>
+  </ResponseActions>
+  <Escalation>
+    <Trigger>Escalate to SOC L2 / IR (and notify the customer / DBA + application owner) when any of the following hold:
+
+- The assembly is loaded from an inline 0x hex blob and/or declares UNSAFE/EXTERNAL_ACCESS (section 14.1).
+- CLR-enable or trust preparation (clr enabled, TRUSTWORTHY ON, sp_add_trusted_assembly, clr strict security off) accompanies the load (section 17.2/section 17.3).
+- A callable binding (EXTERNAL NAME) was created and/or the OS-exec surface (xp_cmdshell/OLE/external script) was exercised (section 17.5).
+- The load originates from an internet- or partner-facing banking application server (section 15.6), or the principal is seen on additional SQL hosts (section 17.1).
+- Audit tampering appears (section 17.4), or the assembly definition is truncated/unrecoverable - escalate as needs_escalation with the gap named; empty != safe.</Trigger>
+    <To>SOC L2 / IR</To>
+  </Escalation>
+  <ClosureCriteria>
+    <Item>false_positive (authorised deployment): a deployment/change record positively matches a signed, SAFE assembly to the exact $principal + $client_ip + database (recognised deployment principal from a known host under change control). Record the reference; scope any exception narrowly (assembly name + hash + permission set + principal + database), never a blanket host/principal exception.</Item>
+    <Item>false_positive (blocked attempt): the CREATE/ALTER ASSEMBLY is positively proven to have failed (CLR strict security / permission denied, no assembly registered). Documented as a blocked attempt, principal/client still investigated - never "benign".</Item>
+    <Item>misconfiguration: a legitimate vendor/application feature uses a CLR assembly (recognised, SAFE, no enable/trust manipulation) and was simply not yet baselined. Baseline the assembly, verify its permission set and origin, disable CLR if unused.</Item>
+    <Item>true_positive: unauthorised code loading confirmed; assembly captured and removed, SQL host contained, service account rotated, code effects and persistence hunted, incident documented.</Item>
+    <Item>needs_escalation: handed to Tier 3 / DBA with the specific evidence gaps (truncated definition, missing permission set, unattributable principal/client) documented.</Item>
+  </ClosureCriteria>
+  <Limitations>
+    <Item>The permission set + byte source is the verdict. Inline 0x blob + UNSAFE/EXTERNAL_ACCESS = attacker; signed, reviewed, SAFE from a deployment host under change control = feature. Recover it (section 14.1/section 15.10), and because the byte stream makes CREATE ASSEMBLY the most truncation-prone statement on this estate, confirm from sys.assemblies on the host - an empty/partial audit aggregate is not safety.</Item>
+    <Item>ALTER ASSEMBLY is caught for a reason. An attacker can update the bytes of an already-trusted assembly to introduce new code without a fresh CREATE - treat ALTER ASSEMBLY of an existing assembly as seriously as a new load.</Item>
+    <Item>Keyed queries only - the index will circuit-break otherwise. logs-microsoft_sqlserver.audit-* runs at ~3M events/hour; every LIKE "*...*" here is safe only because a $principal/$client_ip/single-host.name filter precedes it. Never run an unkeyed estate-wide leading-wildcard scan.</Item>
+    <Item>server_principal_name is dead here - use session_server_principal_name. On this estate the former is null; the latter is authoritative (and case-preserves app_admin/App_admin/APP_ADMIN, one shared application identity).</Item>
+    <Item>CLR runs in-process - expect no child process. Unlike xp_cmdshell, an UNSAFE/EXTERNAL_ACCESS assembly can act without spawning a child of sqlservr.exe, so host-side process telemetry (which NBI lacks for the SQL host anyway) may show nothing. The engine-level artifacts (sys.assemblies, the bound EXTERNAL NAME object, the audit statement) are the evidence.</Item>
+    <Item>This rule is evadable; pair it with siblings. Pre-stage-and-sign-as-SAFE, ALTER ASSEMBLY updates, OLE Automation, xp_cmdshell, and linked servers all bypass or complement it. Corroborate with the NBI SQL analytics on the same host/principal: sp_configure CLR/feature enablement, OLE Automation use, xp_cmdshell execution, and outbound connections from the SQL host.</Item>
+    <Item>KB-worthy (persist to NBI customer scope): (1) logs-microsoft_sqlserver.audit-* ~3.1M docs/hr - unkeyed leading-wildcard LIKE circuit-breaks; (2) CREATE ASSEMBLY is the most truncation-prone statement (inline blob) - always corroborate with sys.assemblies; (3) sqlserver.audit.server_principal_name null estate-wide, session_server_principal_name authoritative; (4) nim-kta-dbv01 = Kofax TotalAgility onboarding/KYC platform; (5) assembly_ops/clr_enable_ops/trust_ops = 0 in sampled windows (CLR management off-baseline). Observed live 2026-08-17.</Item>
+  </Limitations>
+</Playbook>

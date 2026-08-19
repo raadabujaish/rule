@@ -1,0 +1,68 @@
+{
+  "name": "FortiWeb — SSRF Out-of-Band DNS Callback",
+  "tags": [
+    "raad",
+    "redteam-2026-05",
+    "phase-3",
+    "web",
+    "variant-b",
+    "ssrf"
+  ],
+  "interval": "10m",
+  "enabled": true,
+  "description": "Detects HTTP requests containing URLs that point to out-of-band SSRF interaction domains (Burp Collaborator, interactsh, oast.fun, canarytokens) or to the cloud metadata endpoint (169.254.169.254) — Server-Side Request Forgery exploitation using an external callback.",
+  "risk_score": 70,
+  "severity": "high",
+  "license": "",
+  "output_index": "",
+  "meta": {
+    "kibana_siem_app_url": ""
+  },
+  "investigation_fields": {
+    "field_names": [
+      "data.original_src",
+      "data.http_host",
+      "data.http_url",
+      "data.http_method"
+    ]
+  },
+  "author": [],
+  "false_positives": [
+    "Documentation links — extremely rare on a real customer surface.",
+    "ngrok-using developers behind the corporate proxy — exclude",
+    "ScanWave Variant B — TP-Verified."
+  ],
+  "from": "now-30m",
+  "rule_id": "raad-09-ssrf-oob-dns",
+  "max_signals": 100,
+  "risk_score_mapping": [],
+  "severity_mapping": [],
+  "threat": [
+    {
+      "framework": "MITRE ATT&CK",
+      "tactic": {
+        "id": "TA0001",
+        "name": "if SSRF chains to internal pivot",
+        "reference": "https://attack.mitre.org/tactics/TA0001/"
+      },
+      "technique": [
+        {
+          "id": "T1190",
+          "name": "Exploit Public-Facing Application\n- **T1133** — External Remote Services",
+          "reference": "https://attack.mitre.org/techniques/T1190/"
+        }
+      ]
+    }
+  ],
+  "to": "now",
+  "references": [],
+  "version": 1,
+  "exceptions_list": [],
+  "related_integrations": [],
+  "required_fields": [],
+  "setup": "",
+  "type": "esql",
+  "language": "esql",
+  "query": "FROM logs* METADATA _id, _version, _index\n| WHERE @timestamp >= NOW() - 30 minutes\n        AND data.packet.packet IS NOT NULL\n| EVAL u = TO_LOWER(data.packet.packet)\n| WHERE\n       u LIKE \"*169.254.169.254*\"\n    OR u LIKE \"*metadata.google.internal*\"\n    OR u LIKE \"*100.100.100.200*\"\n    OR u LIKE \"*oast.fun*\"\n    OR u LIKE \"*oast.online*\"\n    OR u LIKE \"*oast.live*\"\n    OR u LIKE \"*interactsh*\"\n    OR u LIKE \"*burpcollaborator.net*\"\n    OR u LIKE \"*requestbin.net*\"\n    OR u LIKE \"*requestbin.com*\"\n    OR u LIKE \"*pipedream.net*\"\n    OR u LIKE \"*ngrok.io*\"\n    OR u LIKE \"*ngrok-free.app*\"\n    OR u LIKE \"*canarytokens.com*\"\n    OR u LIKE \"*dnslog.cn*\"\n    OR u LIKE \"*ceye.io*\"\n    OR u LIKE \"*xip.io*\"\n    OR u LIKE \"*nip.io*\"\n    OR u LIKE \"*sslip.io*\"\n    OR u LIKE \"*gopher://*\"\n    OR u LIKE \"*file:///*\"\n    OR u LIKE \"*dict://*\"\n    OR u LIKE \"*http://localhost*\"\n    OR u LIKE \"*http://127.0.0.1*\"\n    OR u LIKE \"*http://0.0.0.0*\"\n| KEEP _id, _index, @timestamp, x_forwarded_for, data.packet.packet, data.http_method, data.http_agent\n| LIMIT 200",
+  "actions": []
+}

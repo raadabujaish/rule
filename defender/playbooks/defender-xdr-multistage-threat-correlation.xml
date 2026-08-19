@@ -1,0 +1,346 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<Playbook xmlns="https://soc.example/playbooks" id="PB-defender-xdr-multistage-threat-correlation" name="Microsoft Defender XDR — Multi-Stage / High-Impact Threat Correlation (Single Entity) - SOC Playbook" version="3.0" status="Validated" classification="TLP:AMBER">
+  <Metadata>
+    <Owner>NBI SOC / Detection Engineering</Owner>
+    <LastUpdated>2026-08-19</LastUpdated>
+    <Severity default="high">high</Severity>
+    <Confidence default="Medium">Medium</Confidence>
+    <Category>Discovery</Category>
+    <MitreAttack>
+      <Technique id="T1078"/>
+      <Tactic id="TA0007"/>
+      <Tactic id="TA0006"/>
+      <Tactic id="TA0008"/>
+      <Tactic id="TA0010"/>
+    </MitreAttack>
+    <References>
+      <Reference title="MITRE ATT&amp;CK - Valid Accounts (T1078)" url="https://attack.mitre.org/techniques/T1078/"/>
+      <Reference title="MITRE ATT&amp;CK - Discovery tactic (TA0007)" url="https://attack.mitre.org/tactics/TA0007/"/>
+      <Reference title="MITRE ATT&amp;CK - Credential Access tactic (TA0006)" url="https://attack.mitre.org/tactics/TA0006/"/>
+      <Reference title="MITRE ATT&amp;CK - Lateral Movement tactic (TA0008)" url="https://attack.mitre.org/tactics/TA0008/"/>
+      <Reference title="MITRE ATT&amp;CK - Exfiltration tactic (TA0010)" url="https://attack.mitre.org/tactics/TA0010/"/>
+      <Reference title="MITRE ATT&amp;CK - Enterprise tactics overview" url="https://attack.mitre.org/tactics/enterprise/"/>
+      <Reference title="Microsoft Learn - Defender XDR incidents and correlation" url="https://learn.microsoft.com/en-us/defender-xdr/incidents-overview"/>
+      <Reference title="Elastic - ES|QL reference" url="https://www.elastic.co/guide/en/elasticsearch/reference/current/esql.html"/>
+    </References>
+  </Metadata>
+  <AlertContext>
+    <RuleName>Microsoft Defender XDR — Multi-Stage / High-Impact Threat Correlation (Single Entity)</RuleName>
+    <RuleId>nbi-b3-defender-multistage-correlation</RuleId>
+    <RuleType>esql</RuleType>
+    <Index>logs-m365_defender.*</Index>
+    <TriggerLogic>The deployed rule is an Elastic ES|QL correlation rule over logs-m365_defender.*. Conceptually it applies the pre-aggregation filter:
+
+
+
+then sets entity = COALESCE(user.name, MV_FIRST(host.id)), MV_EXPANDs threat.tactic.name, and STATS-aggregates by entity, computing distinct_tactics = COUNT_DISTINCT(threat.tactic.name), high_impact_alerts = COUNT(*) where event.severity &gt;= 73 AND tactic IN ("Exfiltration","CredentialAccess","LateralMovement"), plus tactics, techniques, threat_details, source_ips, device_id, and first/last seen. It fires when distinct_tactics &gt;= 3 OR high_impact_alerts &gt;= 1.
+
+Plain English: one entity is the common denominator of either a broad tactic spread or a genuinely severe impact alert. It flags the *entity*, correlating Defender's own alerts onto one account or host. Live reality (measured, see section 8): right now no named entity in NBI reaches 3 distinct tactics - the maximum is 2 - so the rule currently fires almost entirely on the high-impact-alert arm (a severity-73 credential-access/lateral/exfil alert). Credential Access dominates the high-impact alerts. This differs from the source.ip-keyed alerts-index correlation rule: here the entity is the acc</TriggerLogic>
+    <KeyAlertFields>threat.tactic.name, user.name, wahab.admin, host.id, evidence.device_dns_name, event.severity, m365_defender.alert.detector_id, m365_defender.alert.evidence.device_dns_name, source.ip, threat.technique.subtechnique.id</KeyAlertFields>
+  </AlertContext>
+  <Inputs>
+    <Input name="$entity"/>
+  </Inputs>
+  <ExecutiveSummary>
+    <Overview>This playbook drives triage and investigation of the Multi-Stage / High-Impact Threat Correlation (Single Entity) detection on NBI's Elastic Security deployment. The rule correlates Microsoft Defender XDR alerts onto a single entity (account or host) and fires when that entity either spans three or more distinct attack tactics OR carries at least one high-severity high-impact alert (severity ≥ 73 in Exfiltration, Credential Access, or Lateral Movement) over the rule's ~24-hour schedule.
+
+One entity tripping several independent tactics - recon, then credential access, then lateral movement, then exfiltration - is how a multi-stage intrusion looks on a single pane, and it is the point at which isolated alerts become an incident. It is also how a few legitimate high-activity entities look (an admin/service account touched by several detectors, or adware/PUA generating a spread of unrelated alerts). The SOC job is to read the story and decide whether it is one coordinated attack on a single entity (true_positive), an authorised assessment or benign high-activity entity or a proven-blocked attempt (false_positive), correlated noise from unrelated low-severity detectors (misconfiguration), or unproven (needs_escalation). The discriminators are whether the tactics form a coherent chain, whether the high-impact alerts are genuinely severe, and how wide the device blast radius is.</Overview>
+    <BusinessImpact>An alert means Defender XDR correlated multiple alerts onto one entity that crosses the rule's threshold - either ≥3 tactics or ≥1 high-impact severe alert. For the canonical NBI case (wahab.admin), it means one admin identity accumulated 27 severity-73 overpass-the-hash (Credential Access) alerts plus Discovery alerts across a DC and an app server - a two-stage recon→credential-theft story on a single account.
+
+Reading the meaning requires reading the *shape*:
+- A coherent progression - Discovery → Credential Access → Lateral Movement → Exfiltration in time order on one entity, with high severity on the impact tactics - is a classic intrusion advancing through its stages. This is the true_positive shape.
+- A low-severity unrelated spread - Malware + UnwantedSoftware + a benign anomaly that merely share an entity - is correlated noise (adware/PUA), not an attack.
+- A host-keyed entity - when user.name is absent, the rule falls back to host.id, so the entity may be a DC (e.g. the null-user cluster on NIM-DC-DBAP01.nbirq.com spanning Discovery + Credential Access at severity 73). Host-entity correlations point at a *targeted asset* rather than an acting identity.
+
+The alert asserts c</BusinessImpact>
+  </ExecutiveSummary>
+  <Investigation>
+    <Goal>Decide true_positive / false_positive / misconfiguration / needs_escalation for Microsoft Defender XDR — Multi-Stage / High-Impact Threat Correlation (Single Entity).</Goal>
+    <Workflow>
+      <Step order="1" name="Read the tactic spread for the entity (reuse of the deployed investigation query XDRMULTI-INV-01)">
+        <Purpose>Read the tactic spread for the entity (reuse of the deployed investigation query XDRMULTI-INV-01)</Purpose>
+        <Query platform="Elastic" language="ES|QL" id="Q-01">
+          <![CDATA[
+FROM logs-m365_defender.*
+| MV_EXPAND threat.tactic.name
+| WHERE user.name == "$entity"
+    AND @timestamp >= NOW() - 4 hours
+| STATS alerts = COUNT(*), max_severity = MAX(event.severity),
+        first_seen = MIN(@timestamp), last_seen = MAX(@timestamp)
+    BY threat.tactic.name
+| SORT alerts DESC
+| LIMIT 20
+]]>
+        </Query>
+      </Step>
+      <Step order="2" name="Read the underlying detectors and disposition (reuse of the deployed investigation query XDRMULTI-INV-02)">
+        <Purpose>Read the underlying detectors and disposition (reuse of the deployed investigation query XDRMULTI-INV-02)</Purpose>
+        <Query platform="Elastic" language="ES|QL" id="Q-02">
+          <![CDATA[
+FROM logs-m365_defender.*
+| WHERE user.name == "$entity"
+    AND @timestamp >= NOW() - 4 hours
+| STATS alerts = COUNT(*), max_severity = MAX(event.severity),
+        first_seen = MIN(@timestamp), last_seen = MAX(@timestamp)
+    BY m365_defender.alert.detector_id, m365_defender.alert.title, m365_defender.alert.status
+| SORT max_severity DESC, alerts DESC
+| LIMIT 25
+]]>
+        </Query>
+      </Step>
+      <Step order="3" name="Entity pivoting">
+        <Purpose>Entity pivoting</Purpose>
+        <Query platform="Elastic" language="ES|QL" id="Q-03">
+          <![CDATA[
+FROM logs-m365_defender.*
+| WHERE @timestamp >= NOW() - 4 hours
+    AND event.kind == "alert" AND user.name == "$entity"
+| MV_EXPAND threat.tactic.name
+| STATS alerts = COUNT(*), distinct_tactics = COUNT_DISTINCT(threat.tactic.name),
+        high_impact = COUNT(CASE(event.severity >= 73 AND threat.tactic.name IN ("Exfiltration","CredentialAccess","LateralMovement"), 1, null)),
+        devices = COUNT_DISTINCT(m365_defender.alert.evidence.device_dns_name),
+        max_severity = MAX(event.severity)
+| LIMIT 1
+]]>
+        </Query>
+      </Step>
+      <Step order="4" name="User investigation">
+        <Purpose>User investigation</Purpose>
+        <Query platform="Elastic" language="ES|QL" id="Q-04">
+          <![CDATA[
+FROM logs-m365_defender.*
+| WHERE @timestamp >= NOW() - 4 hours
+    AND event.kind == "alert" AND user.name == "$entity"
+| MV_EXPAND threat.tactic.name
+| STATS alerts = COUNT(*), devices = COUNT_DISTINCT(m365_defender.alert.evidence.device_dns_name),
+        max_severity = MAX(event.severity)
+    BY threat.tactic.name, m365_defender.alert.detector_id, m365_defender.alert.status
+| SORT max_severity DESC, alerts DESC
+| LIMIT 30
+]]>
+        </Query>
+      </Step>
+      <Step order="5" name="Host investigation">
+        <Purpose>Host investigation</Purpose>
+        <Query platform="Elastic" language="ES|QL" id="Q-05">
+          <![CDATA[
+FROM logs-m365_defender.*
+| WHERE user.name == "$entity"
+    AND @timestamp >= NOW() - 4 hours
+| MV_EXPAND m365_defender.alert.evidence.device_dns_name
+| STATS alerts = COUNT(*), tactics = COUNT_DISTINCT(threat.tactic.name),
+        max_severity = MAX(event.severity)
+    BY m365_defender.alert.evidence.device_dns_name
+| SORT alerts DESC
+| LIMIT 20
+]]>
+        </Query>
+      </Step>
+      <Step order="6" name="Authentication investigation">
+        <Purpose>Authentication investigation</Purpose>
+        <Query platform="Elastic" language="ES|QL" id="Q-06">
+          <![CDATA[
+FROM logs-m365_defender.*
+| WHERE @timestamp >= NOW() - 4 hours
+    AND event.kind == "alert" AND user.name == "$entity"
+| MV_EXPAND threat.tactic.name
+| WHERE threat.tactic.name == "CredentialAccess"
+| STATS alerts = COUNT(*), devices = COUNT_DISTINCT(m365_defender.alert.evidence.device_dns_name),
+        first_seen = MIN(@timestamp), last_seen = MAX(@timestamp)
+    BY m365_defender.alert.detector_id, m365_defender.alert.title, m365_defender.alert.status
+| SORT alerts DESC
+| LIMIT 20
+]]>
+        </Query>
+      </Step>
+      <Step order="7" name="Timeline Reconstruction">
+        <Purpose>Timeline Reconstruction</Purpose>
+        <Query platform="Elastic" language="ES|QL" id="Q-07">
+          <![CDATA[
+FROM logs-m365_defender.*
+| WHERE @timestamp >= NOW() - 4 hours
+    AND event.kind == "alert" AND user.name == "$entity"
+| MV_EXPAND threat.tactic.name
+| KEEP @timestamp, threat.tactic.name, m365_defender.alert.detector_id, m365_defender.alert.title,
+       event.severity, m365_defender.alert.status, m365_defender.alert.evidence.device_dns_name
+| SORT @timestamp ASC
+| LIMIT 200
+]]>
+        </Query>
+      </Step>
+      <Step order="8" name="Attack-Chain Validation">
+        <Purpose>Attack-Chain Validation</Purpose>
+        <Query platform="Elastic" language="ES|QL" id="Q-08">
+          <![CDATA[
+FROM logs-m365_defender.*
+| WHERE @timestamp >= NOW() - 4 hours
+    AND event.kind == "alert" AND user.name == "$entity"
+    AND event.severity >= 73
+| MV_EXPAND threat.tactic.name
+| WHERE threat.tactic.name IN ("Exfiltration","CredentialAccess","LateralMovement")
+| STATS high_impact_alerts = COUNT(*), devices = COUNT_DISTINCT(m365_defender.alert.evidence.device_dns_name),
+        detectors = VALUES(m365_defender.alert.detector_id)
+    BY threat.tactic.name
+| SORT high_impact_alerts DESC
+| LIMIT 20
+]]>
+        </Query>
+      </Step>
+      <Step order="9" name="Lateral movement validation">
+        <Purpose>Lateral movement validation</Purpose>
+        <Query platform="Elastic" language="ES|QL" id="Q-09">
+          <![CDATA[
+FROM logs-m365_defender.*
+| WHERE @timestamp >= NOW() - 4 hours AND event.kind == "alert" AND user.name == "$entity"
+| MV_EXPAND threat.tactic.name
+| WHERE threat.tactic.name == "LateralMovement"
+| STATS alerts = COUNT(*), devices = COUNT_DISTINCT(m365_defender.alert.evidence.device_dns_name),
+        max_severity = MAX(event.severity)
+    BY m365_defender.alert.detector_id, m365_defender.alert.title
+| SORT alerts DESC
+| LIMIT 20
+]]>
+        </Query>
+      </Step>
+      <Step order="10" name="Persistence validation">
+        <Purpose>Persistence validation</Purpose>
+        <Query platform="Elastic" language="ES|QL" id="Q-10">
+          <![CDATA[
+FROM logs-m365_defender.*
+| WHERE @timestamp >= NOW() - 4 hours AND event.kind == "alert" AND user.name == "$entity"
+| MV_EXPAND threat.tactic.name
+| WHERE threat.tactic.name == "Persistence"
+| STATS alerts = COUNT(*), devices = COUNT_DISTINCT(m365_defender.alert.evidence.device_dns_name),
+        max_severity = MAX(event.severity)
+    BY m365_defender.alert.detector_id, m365_defender.alert.title
+| SORT alerts DESC
+| LIMIT 20
+]]>
+        </Query>
+      </Step>
+      <Step order="11" name="Privilege escalation validation">
+        <Purpose>Privilege escalation validation</Purpose>
+        <Query platform="Elastic" language="ES|QL" id="Q-11">
+          <![CDATA[
+FROM logs-m365_defender.*
+| WHERE @timestamp >= NOW() - 4 hours AND event.kind == "alert" AND user.name == "$entity"
+| MV_EXPAND threat.tactic.name
+| WHERE threat.tactic.name == "PrivilegeEscalation"
+| STATS alerts = COUNT(*), devices = COUNT_DISTINCT(m365_defender.alert.evidence.device_dns_name),
+        max_severity = MAX(event.severity)
+    BY m365_defender.alert.detector_id, m365_defender.alert.title
+| SORT alerts DESC
+| LIMIT 20
+]]>
+        </Query>
+      </Step>
+      <Step order="12" name="Defense evasion validation">
+        <Purpose>Defense evasion validation</Purpose>
+        <Query platform="Elastic" language="ES|QL" id="Q-12">
+          <![CDATA[
+FROM logs-m365_defender.*
+| WHERE @timestamp >= NOW() - 4 hours AND event.kind == "alert" AND user.name == "$entity"
+| MV_EXPAND threat.tactic.name
+| WHERE threat.tactic.name == "DefenseEvasion"
+| STATS alerts = COUNT(*), devices = COUNT_DISTINCT(m365_defender.alert.evidence.device_dns_name),
+        max_severity = MAX(event.severity)
+    BY m365_defender.alert.detector_id, m365_defender.alert.title
+| SORT alerts DESC
+| LIMIT 20
+]]>
+        </Query>
+      </Step>
+      <Step order="13" name="Impact assessment">
+        <Purpose>Impact assessment</Purpose>
+        <Query platform="Elastic" language="ES|QL" id="Q-13">
+          <![CDATA[
+FROM logs-m365_defender.*
+| WHERE @timestamp >= NOW() - 4 hours AND event.kind == "alert" AND user.name == "$entity"
+| MV_EXPAND threat.tactic.name
+| STATS total_alerts = COUNT(*), distinct_tactics = COUNT_DISTINCT(threat.tactic.name),
+        high_impact = COUNT(CASE(event.severity >= 73 AND threat.tactic.name IN ("Exfiltration","CredentialAccess","LateralMovement"), 1, null)),
+        devices = COUNT_DISTINCT(m365_defender.alert.evidence.device_dns_name),
+        first_seen = MIN(@timestamp), last_seen = MAX(@timestamp)
+| LIMIT 1
+]]>
+        </Query>
+      </Step>
+      <Step order="14" name="Finalize verdict">
+        <DecisionTree>
+        </DecisionTree>
+      </Step>
+    </Workflow>
+  </Investigation>
+  <ClassificationGuidance>
+    <TruePositive>
+      <Definition></Definition>
+    </TruePositive>
+    <FalsePositive>
+      <Definition></Definition>
+      <Indicators>
+        <Item>Authorised multi-tactic assessments. An approved red-team / ScanWave engagement deliberately touches several tactics on one identity and will correlate here. NBI's scanwave.ahmadjamal is a live example - a scanner identity carrying 33 high-impact Kerberoasting (Credential Access) alerts. A sanctioned-test identity is investigated identically and never auto-trusted - authorisation is confirmed against the authorised-testing register by scope and window.</Item>
+        <Item>Benign high-activity entities. A busy admin/service account, or a host touched by many detectors, can accumulate tactics without a coherent attack.</Item>
+        <Item>Correlated low-severity noise. Adware/PUA and benign anomalies (e.g. sinan.salah: Malware + DefenseEvasion, no high-impact) can inflate distinct_tactics without a real chain (section 6, misconfiguration).</Item>
+        <Item>Blocked impactful stages. If the credential-access/lateral/exfil stage was positively proven blocked, it is a *malicious attempt proven blocked* - recorded as blocked-malicious, never "benign".</Item>
+        <Item>No named entity currently spans ≥3 tactics. The maximum for any named identity over 30 days is 2 tactics. The named 2-tactic entities are wahab.admin (Discovery + Credential Access, 27 high-impact), jamal.admin (Discovery + Credential Access, 20 high-impact), hasaan.ali / fatima.mahmood (Initial Access + Exfiltration, 0 high-impact), sinan.salah (Malware + DefenseEvasion, 0 high-impact), mohammadd.admin (Lateral Movement + Discovery). So most firings are on the high-impact arm, and the recon→credential pair (*.admin identities) is the recurring real chain.</Item>
+        <Item>The broadest spreads are null-user host clusters. With user.name absent, the rule keys on host.id: NIM-DC-DBAP01.nbirq.com (Discovery + Credential Access, 71 alerts, sev 73), 10.11.29.113 (Discovery + Credential Access), nim-me-apv02.nbirq.com (Discovery + Privilege Escalation). These host-entity correlations point at *targeted DCs*.</Item>
+        <Item>Entity-key fragmentation is real and weakens the rule. wahab.admin (2 tactics) and Wahab.Admin (Credential Access, 53 high-impact, 7 devices) are the same human under two keys; combined they span Discovery + Credential Access with ~80 high-impact alerts across 7+ devices - a stronger chain than either row shows. Always check case-variants (section 15.4) before judging breadth.</Item>
+        <Item>A pure low-severity spread is the misconfiguration signature. sinan.salah (Malware + DefenseEvasion, high_impact 0) is the "two tactics but no coherent severe chain" case - likely PUA/adware, resolve as correlated noise unless the detectors tell an attack story.</Item>
+      </Indicators>
+    </FalsePositive>
+    <Misconfiguration>
+      <Definition></Definition>
+    </Misconfiguration>
+    <NeedsEscalation>
+      <Definition></Definition>
+    </NeedsEscalation>
+  </ClassificationGuidance>
+  <ResponseActions>
+    <Phase name="Containment">
+      <Action>Isolate $entity and the involved devices (the section 15.5 blast-radius set, including any DCs) if a true_positive is confirmed, to halt the advancing chain.</Action>
+      <Action>Pivot into each contributing behaviour's playbook for $entity (directory-reconnaissance, credential-access, high-volume-exfiltration) and execute their containment - this correlation rule coordinates them.</Action>
+      <Action>De-fragment first: contain all case-variants of the identity (wahab.admin and Wahab.Admin) and, for a host-entity, the acting identity resolved from host logs.</Action>
+      <Action>Preserve evidence: the correlated alert set (section 14/section 15/section 16), the detector chain, and the involved devices' state.</Action>
+      <Action>Deploy changes only via the authorised human-approved DEPLOY path; investigation is read-only.</Action>
+    </Phase>
+    <Phase name="Eradication">
+      <Action>Work each stage's eradication via its playbook: remove enumeration tooling (recon), rotate/gMSA exposed service accounts and invalidate tickets (credential access), block egress (exfiltration), and remove any persistence (section 17.2).</Action>
+      <Action>Remediate across the blast radius: every device in section 15.5, not just the first, and every case-variant of the identity.</Action>
+      <Action>Hunt for the un-correlated remainder: because the entity key fragments, hunt the same behaviours under sibling identities and the null-user host clusters (section 15.4).</Action>
+    </Phase>
+    <Phase name="Recovery">
+      <Action>Restore the affected accounts and hosts (credential resets, ticket invalidation, host rebuild where warranted) once each contributing stage is remediated.</Action>
+      <Action>Return $entity to service only after section 22 closing criteria are met across all stages and monitoring shows the correlation does not recur.</Action>
+      <Action>Harden: address why the stages were not stopped earlier, and - a rule-specific improvement - normalise the user.name casing / multivalue so single-entity correlation is not fragmented, and keep the authorised-testing register current so sanctioned multi-tactic assessments are recognised while still investigated on behaviour.</Action>
+    </Phase>
+  </ResponseActions>
+  <Escalation>
+    <Trigger>Escalate to Tier 3 / IR as a single incident when any hold:
+
+- The tactics form a coherent progression with severe impact tactics (section 14.1 / section 16), and the detector chain (section 14.2) is related and high-severity.
+- The blast radius (section 15.5) spans multiple devices, especially DCs/servers - lateral spread.
+- A single high-impact (severity-73 Exfil/CredAccess/LatMov) alert is confirmed genuine on a non-assessment entity (section 17).
+- De-fragmentation (section 15.4) reveals a broader chain across case-variants or a null-user host cluster than any single row shows.
+- Corroboration is incomplete or the entity is host-keyed with an unresolved acting identity - escalate as needs_escalation.
+
+Pivot into each stage's playbook for this entity as part of the escalation.</Trigger>
+    <To>SOC L2 / IR</To>
+  </Escalation>
+  <ClosureCriteria>
+    <Item>false_positive (authorised assessment): the authorised-testing register positively matches $entity + window across the tactics (including ScanWave). Record the reference; do not auto-trust the name.</Item>
+    <Item>false_positive (benign high-activity entity): the spread is fully explained by a recognised busy admin/service account with no coherent attack and no successful impact. Attach the evidence.</Item>
+    <Item>false_positive (blocked malicious attempt): the impactful stages are proven blocked/unsuccessful. Documented as blocked-malicious, never "benign"; keep watching.</Item>
+    <Item>misconfiguration: the correlation is unrelated low-severity detectors (adware/PUA) sharing an entity; tune the contributing detectors and note the coincidence.</Item>
+    <Item>true_positive: a coordinated multi-stage attack on one entity confirmed; entity and involved devices isolated, each contributing stage worked and contained via its playbook, affected accounts/hosts remediated, incident documented.</Item>
+    <Item>needs_escalation: tactics do not clearly form one attack, or corroboration/impact/attribution (host-keyed entity) undecidable - handed to Tier 3 / IR with the gaps documented.</Item>
+  </ClosureCriteria>
+  <Limitations>
+    <Item>The entity key fragments - this is the rule's biggest live weakness. Case-variant / multivalued user.name (wahab.admin vs Wahab.Admin) splits one human's chain across two entity rows, so the rule *under*-correlates. Always combine case-variants (section 15.4) before judging breadth, and hunt the un-correlated remainder.</Item>
+    <Item>No named entity spans ≥3 tactics right now - the rule fires on the high-impact arm (a severity-73 Credential Access/Lateral/Exfil alert). The recurring real chain is recon + credential access on *.admin identities (wahab.admin, jamal.admin).</Item>
+    <Item>The broadest spreads are null-user host entities (NIM-DC-DBAP01 = Discovery + Credential Access, sev 73) - the COALESCE-to-host.id path points at targeted DCs; resolve the acting identity with the AD team.</Item>
+    <Item>The rule's device_id / source_ips / techniques / threat_details outputs are empty in NBI (host.id and the sparse fields are 0%). Corroborate with evidence.device_dns_name, the detector chain, and the per-behaviour playbooks - not those columns.</Item>
+    <Item>Coherence over count. Two ordered severe tactics (recon → credential access) beat three unrelated low-severity ones. sinan.salah (Malware + DefenseEvasion, high_impact 0) is the misconfiguration signature; wahab.admin (recon + 27 severity-73 OPtH across a DC) is the true_positive signature.</Item>
+    <Item>This is a coordinator, not a terminal analytic. Its value is routing one entity into the recon / credential-access / exfiltration playbooks; the depth lives there.</Item>
+    <Item>KB-worthy (persist to NBI customer scope): (1) named-entity max distinct_tactics = 2 (rule fires mostly on high-impact arm); (2) user.name case-variant fragmentation (wahab.admin/Wahab.Admin) under-correlates single entities; (3) null-user host-entity clusters (NIM-DC-DBAP01 Discovery+CredAccess sev 73) via COALESCE→host.id; (4) rule outputs device_id/source_ips/techniques/threat_details empty in NBI; (5) wahab.admin = recon→credential chain, 27 sev-73 OPtH across NIM-DC-DBAPV01 + nik-kta-apv02. All observed live 2026-08-17.</Item>
+  </Limitations>
+</Playbook>

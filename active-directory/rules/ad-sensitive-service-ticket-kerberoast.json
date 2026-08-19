@@ -1,0 +1,98 @@
+{
+  "name": "AD — Service Ticket for Sensitive Service Account",
+  "tags": [
+    "NBI",
+    "detection-recovery-2026-08",
+    "PT-validated",
+    "credential-access",
+    "kerberoasting",
+    "watchlist"
+  ],
+  "interval": "1h",
+  "enabled": true,
+  "description": "Intended to fire when a Kerberos service ticket (4769) is requested for a service account on a sensitive/Tier-0 watchlist — the request step of Kerberoasting, where an attacker obtains a TGS to crack the service account's password offline. It should key on the requested ServiceName matching a known_infrastructure high-value-SPN group, ideally combined with RC4 ticket encryption. Maps to ATT&CK Credential Access T1558.003 (Kerberoasting). The deployed query is just event.code 4769 and matches every ticket request (~2.06M/24h) — it must be re-scoped before use.",
+  "risk_score": 56,
+  "severity": "medium",
+  "note": "### Investigation\n1. Confirm the requested ServiceName is a sensitive/Tier-0 service account (resolve against the known_infrastructure watchlist).\n2. Check TicketEncryptionType — RC4 (0x17) on a high-value SPN is a strong Kerberoast indicator versus normal AES traffic.\n3. Identify the requesting account (TargetUserName) and source.ip; is this host/user a normal consumer of that service?\n4. Correlate a burst of 4769s for many SPNs from the same source (bulk roasting) and any follow-on logon as the service account.\n5. Escalate if a Tier-0 SPN is requested with RC4 from an unexpected source.\n\n### False positives / benign\nAs currently written there is no discriminator, so every normal Kerberos logon matches — a logic defect, not a benign-traffic problem. Once scoped to the sensitive-SPN watchlist, legitimate consumers of those services still request tickets normally; distinguish real roasting by RC4 encryption downgrade, bulk multi-SPN requests from one source, and requests from hosts that are not normal clients of the service — not by allowlisting.\n\n### Notes\nLOGIC DEFECT (pending Batch-2 rewrite): deployed query matches all 4769 (~2M/24h); scope to the sensitive-SPN watchlist + RC4 before relying on it.",
+  "output_index": "",
+  "investigation_fields": {
+    "field_names": [
+      "winlog.event_data.ServiceName",
+      "winlog.event_data.TargetUserName",
+      "source.ip",
+      "winlog.event_data.TicketEncryptionType",
+      "host.name"
+    ]
+  },
+  "author": [
+    "raadabujaish"
+  ],
+  "false_positives": [
+    "Application servers that legitimately host these service accounts (validate the source.ip, then suppress the account+source pair)."
+  ],
+  "from": "now-70m",
+  "rule_id": "nbi-kerberoast-sensitive-service-ticket",
+  "max_signals": 200,
+  "risk_score_mapping": [],
+  "severity_mapping": [],
+  "threat": [
+    {
+      "framework": "MITRE ATT&CK",
+      "tactic": {
+        "id": "TA0006",
+        "name": "Credential Access",
+        "reference": "https://attack.mitre.org/tactics/TA0006/"
+      },
+      "technique": [
+        {
+          "id": "T1558",
+          "name": "Steal or Forge Kerberos Tickets",
+          "reference": "https://attack.mitre.org/techniques/T1558/",
+          "subtechnique": [
+            {
+              "id": "T1558.003",
+              "name": "Kerberoasting",
+              "reference": "https://attack.mitre.org/techniques/T1558/003/"
+            }
+          ]
+        }
+      ]
+    }
+  ],
+  "to": "now",
+  "references": [],
+  "version": 1,
+  "exceptions_list": [],
+  "related_integrations": [],
+  "required_fields": [],
+  "setup": "",
+  "type": "query",
+  "language": "kuery",
+  "index": [
+    "logs-system.security-*"
+  ],
+  "query": "event.code:\"4769\"",
+  "filters": [
+    {
+      "meta": {
+        "type": "phrases",
+        "key": "winlog.event_data.ServiceName",
+        "params": [
+          "PAM",
+          "igrafxsso.servacc"
+        ],
+        "negate": false,
+        "disabled": false
+      },
+      "query": {
+        "terms": {
+          "winlog.event_data.ServiceName": [
+            "PAM",
+            "igrafxsso.servacc"
+          ]
+        }
+      }
+    }
+  ],
+  "actions": []
+}

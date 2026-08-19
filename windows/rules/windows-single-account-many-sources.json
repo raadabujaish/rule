@@ -1,0 +1,104 @@
+{
+  "name": "Windows — Single Account Failing From Many Sources",
+  "tags": [
+    "NBI",
+    "Identity",
+    "Active Directory",
+    "Credential Access",
+    "class:companion",
+    "PROPOSED"
+  ],
+  "interval": "1h",
+  "enabled": true,
+  "description": "One user account failed network sign-in (Windows 4625, logon type 3) from 5 or more DISTINCT source IPs within an hour — a distributed credential attack (password guessing / credential stuffing) against a single account, the many-sources-to-one-user pattern that the single-source spray primary does not cover. NBI baseline: normal users fail from <=4 distinct sources over a WEEK (typically their own workstation, laptop, Citrix and phone) and <=2 in any hour; only the SRLCL service account legitimately fails from many sources (a stuck/rotating password deployed on ~22 hosts, running processes via 4688) and is excluded as an evidence-backed known service account. Machine accounts (*$) are excluded from THIS analytic because their observed many-source failures are benign auto-managed-credential retry, and machine-account credential abuse is covered by separate account/host-compromise analytics. Keyed on distinct-SOURCE cardinality per account in a short window, so a legitimate multi-device user does not trip it but a coordinated attack against one identity does.",
+  "risk_score": 47,
+  "severity": "medium",
+  "note": "### Investigation — one account attacked from many sources\n1. **WHO / TO WHAT** `winlog.event_data.TargetUserName` — the account under attack. Is it a normal human user (should fail from <=4 sources/week) or a shared/service account?\n2. **DID WHAT / FROM WHERE** it failed network sign-in from >=5 distinct source IPs in an hour. Pull those source IPs (4625 for this account) — internal workstations, a NAT/proxy egress, or unrelated/external hosts (distributed attack)?\n3. **WHY suspicious** breadth of ORIGINS against one identity = distributed guessing/stuffing; correlate `winlog.event_data.SubStatus` (0xc000006a bad-password from many sources).\n4. **Escalate** if the account then SUCCEEDS from any of those sources (see the brute-force-success companion) — treat as compromise; force a reset. De-escalate only after confirming a new legitimate shared/service account (add to known_infrastructure service accounts by evidence, not a blanket allowlist).",
+  "output_index": "",
+  "meta": {
+    "standard": {
+      "lifecycle": "PROPOSED",
+      "analytic_class": "companion",
+      "primitive": "threshold",
+      "rule_type_rationale": "D0 observable = cardinality of distinct SOURCE IPs per target account crossing a baselined number; D2 (cardinality IS the behavior) -> Threshold with cardinality (key = TargetUserName, cardinality = source.ip). Companion to the source->many-users primary; different key covers the many-sources->one-user evasion.",
+      "baseline": "normal users <=4 distinct sources/7d, <=2/24h; threshold 5/1h; SRLCL (service, 22 sources/1h) excluded",
+      "exclusion_record": {
+        "category": "known service account (SRLCL) + machine accounts (*$)",
+        "evidence": "SRLCL runs processes (4688), 7/7 days, peak 22 sources/1h = stuck-password service; machine accounts auto-managed high-entropy",
+        "fp_reduction": "removes the only current high-cardinality account",
+        "coverage_lost": "a distributed attack specifically against SRLCL",
+        "evasion_introduced": "attacker targets SRLCL (a service account) — compensated by the fail->success correlation",
+        "compensating_analytic": "nbi-auth-bruteforce-success",
+        "revalidate_after": "30 days"
+      },
+      "replaces": "raad-13-per-user-distributed-spray (noisy cross-surface: o365 empty, FortiGate user null; fired on SRLCL + multi-device users)"
+    }
+  },
+  "investigation_fields": {
+    "field_names": [
+      "winlog.event_data.TargetUserName"
+    ]
+  },
+  "author": [],
+  "false_positives": [],
+  "from": "now-70m",
+  "rule_id": "nbi-auth-distributed-account-attack",
+  "max_signals": 100,
+  "risk_score_mapping": [],
+  "severity_mapping": [],
+  "threat": [
+    {
+      "framework": "MITRE ATT&CK",
+      "tactic": {
+        "id": "TA0006",
+        "name": "Credential Access",
+        "reference": "https://attack.mitre.org/tactics/TA0006/"
+      },
+      "technique": [
+        {
+          "id": "T1110",
+          "name": "Brute Force",
+          "reference": "https://attack.mitre.org/techniques/T1110/",
+          "subtechnique": [
+            {
+              "id": "T1110.001",
+              "name": "Password Guessing",
+              "reference": "https://attack.mitre.org/techniques/T1110/001/"
+            }
+          ]
+        },
+        {
+          "id": "T1078",
+          "name": "Valid Accounts",
+          "reference": "https://attack.mitre.org/techniques/T1078/"
+        }
+      ]
+    }
+  ],
+  "to": "now",
+  "references": [],
+  "version": 1,
+  "exceptions_list": [],
+  "related_integrations": [],
+  "required_fields": [],
+  "setup": "",
+  "type": "threshold",
+  "language": "kuery",
+  "index": [
+    "logs-system.security-*"
+  ],
+  "query": "event.code:\"4625\" and winlog.event_data.LogonType:\"3\" and source.ip:* and not winlog.event_data.TargetUserName:\"ANONYMOUS LOGON\" and not winlog.event_data.TargetUserName:*$ and not winlog.event_data.TargetUserName:\"SRLCL\"",
+  "threshold": {
+    "field": [
+      "winlog.event_data.TargetUserName"
+    ],
+    "value": 1,
+    "cardinality": [
+      {
+        "field": "source.ip",
+        "value": 5
+      }
+    ]
+  },
+  "actions": []
+}

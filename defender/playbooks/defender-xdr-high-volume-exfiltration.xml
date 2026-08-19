@@ -1,0 +1,337 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<Playbook xmlns="https://soc.example/playbooks" id="PB-defender-xdr-high-volume-exfiltration" name="Microsoft Defender XDR — High-Volume Data Exfiltration Activity (Single Entity) - SOC Playbook" version="3.0" status="Validated" classification="TLP:AMBER">
+  <Metadata>
+    <Owner>NBI SOC / Detection Engineering</Owner>
+    <LastUpdated>2026-08-19</LastUpdated>
+    <Severity default="high">high</Severity>
+    <Confidence default="Medium">Medium</Confidence>
+    <Category>Exfiltration</Category>
+    <MitreAttack>
+      <Technique id="T1048"/>
+      <Technique id="T1567"/>
+      <Technique id="T1041"/>
+      <Tactic id="TA0010"/>
+    </MitreAttack>
+    <References>
+      <Reference title="MITRE ATT&amp;CK - Exfiltration tactic (TA0010)" url="https://attack.mitre.org/tactics/TA0010/"/>
+      <Reference title="MITRE ATT&amp;CK - Exfiltration Over Alternative Protocol (T1048)" url="https://attack.mitre.org/techniques/T1048/"/>
+      <Reference title="MITRE ATT&amp;CK - Exfiltration Over Web Service (T1567)" url="https://attack.mitre.org/techniques/T1567/"/>
+      <Reference title="MITRE ATT&amp;CK - Exfiltration Over C2 Channel (T1041)" url="https://attack.mitre.org/techniques/T1041/"/>
+      <Reference title="Microsoft Learn - Defender XDR: investigate alerts" url="https://learn.microsoft.com/en-us/defender-xdr/investigate-alerts"/>
+      <Reference title="Microsoft Learn - Microsoft Purview Endpoint Data Loss Prevention" url="https://learn.microsoft.com/en-us/purview/endpoint-dlp-learn-about"/>
+      <Reference title="Elastic - ES|QL reference" url="https://www.elastic.co/guide/en/elasticsearch/reference/current/esql.html"/>
+    </References>
+  </Metadata>
+  <AlertContext>
+    <RuleName>Microsoft Defender XDR — High-Volume Data Exfiltration Activity (Single Entity)</RuleName>
+    <RuleId>nbi-b3-defender-exfil-burst</RuleId>
+    <RuleType>esql</RuleType>
+    <Index>logs-m365_defender.*</Index>
+    <TriggerLogic>The deployed rule is an Elastic ES|QL threshold rule over logs-m365_defender.*. Conceptually it applies the pre-aggregation filter:
+
+
+
+then MV_EXPANDs threat.tactic.name, keeps the Exfiltration tactic, and STATS-aggregates by account = user.name, computing exfil_alerts = COUNT(*), max_severity, source_ips (source.ip), techniques (threat.technique.subtechnique.id), threat_details (message), device_id (host.id), and first/last seen - firing when exfil_alerts &gt;= 50 for a single account over the ~24h schedule.
+
+Plain English: one account is the common denominator of a burst (≥50) of Defender exfiltration alerts. It flags the *entity*, not a specific transfer. Live reality (measured, see section 8): in NBI the source_ips, techniques, and threat_details columns the rule computes are empty (those underlying fields are 0% populated on the exfiltration subset), and every exfiltration alert is severity 47 - so the rule effectively keys on account + exfil_alerts + device alone, and the burst is dominated by a single DLP policy. That does not make it safe; it makes characterisation the whole job.</TriggerLogic>
+    <KeyAlertFields>m365_defender.alert.detector_id, user.name, m365_defender.alert.evidence.device_dns_name, event.severity, source.ip, threat.technique.subtechnique.id, host.id, evidence.device_dns_name, evidence.file_details.sha256, host.name</KeyAlertFields>
+  </AlertContext>
+  <Inputs>
+    <Input name="$account"/>
+    <Input name="$device"/>
+  </Inputs>
+  <ExecutiveSummary>
+    <Overview>This playbook drives triage and investigation of the High-Volume Data Exfiltration (Single Entity) burst detection on NBI's Elastic Security deployment. The rule aggregates Microsoft Defender XDR Exfiltration-tactic alerts by account and fires when one account is the common denominator of at least 50 exfiltration alerts over the rule's ~24-hour schedule. That is the footprint of an insider or a compromised account moving data out.
+
+At NBI, however, the exfiltration stream is enormous and almost entirely one medium-severity Microsoft Purview DLP policy firing on routine bulk document activity (card-operations spreadsheets on endpoints). So the SOC job is to characterise the burst, not assume theft: decide whether this account is genuinely stealing data (true_positive), a sanctioned / explained high-volume data mover or a DLP-blocked attempt (false_positive), a noisy / mis-scoped DLP detector not yet baselined (misconfiguration), or unproven because the data/destination cannot be established (needs_escalation). The discriminators are what the underlying detector actually flagged, whether the account also shows a surrounding kill chain, and whether it is a genuine estate outlier.</Overview>
+    <BusinessImpact>An alert means Defender XDR raised ≥50 Exfiltration-tactic alerts attributed to one account over the schedule. In NBI the underlying detector is, overwhelmingly, a Microsoft Purview Endpoint DLP policy: detector_id 3ade9cd5-a544-4bdb-8ab2-cfafd6233421, titled *"DLP policy (NBI Cards-Devices 1.2) matched for document (&lt;name&gt;.xlsx) in a device"*. Each alert is a DLP match on a document on an endpoint (the "in a device" wording indicates Endpoint DLP - removable media, upload, copy, or print of a policy-matched file), and the matched files are business spreadsheets (card-operations / acquirer / reporting .xlsx).
+
+So an alert here typically means: *this account handled many documents that matched the "NBI Cards-Devices" DLP policy on their endpoint.* That is the signature of a business user doing high-volume card-operations reporting or of a real actor collecting and moving regulated data - the two look identical at the burst level. The investigation must recover, from the alert titles and from the DLP/data-owner team, which documents, which channel, and whether data actually left, because the destination and egress-success are not carried in this index (see section 8). An account like</BusinessImpact>
+  </ExecutiveSummary>
+  <Investigation>
+    <Goal>Decide true_positive / false_positive / misconfiguration / needs_escalation for Microsoft Defender XDR — High-Volume Data Exfiltration Activity (Single Entity).</Goal>
+    <Workflow>
+      <Step order="1" name="Characterise the exfiltration burst (reuse of the deployed investigation query XDREXFIL-INV-01)">
+        <Purpose>Characterise the exfiltration burst (reuse of the deployed investigation query XDREXFIL-INV-01)</Purpose>
+        <Query platform="Elastic" language="ES|QL" id="Q-01">
+          <![CDATA[
+FROM logs-m365_defender.*
+| MV_EXPAND threat.tactic.name
+| WHERE user.name == "$account" AND threat.tactic.name == "Exfiltration"
+    AND @timestamp >= NOW() - 4 hours
+| STATS exfil_alerts = COUNT(*), max_severity = MAX(event.severity),
+        devices = COUNT_DISTINCT(m365_defender.alert.evidence.device_dns_name),
+        first_seen = MIN(@timestamp), last_seen = MAX(@timestamp)
+    BY m365_defender.alert.detector_id, m365_defender.alert.title
+| SORT exfil_alerts DESC
+| LIMIT 20
+]]>
+        </Query>
+      </Step>
+      <Step order="2" name="Test whether the account is a genuine outlier (reuse of the deployed investigation query XDREXFIL-INV-03)">
+        <Purpose>Test whether the account is a genuine outlier (reuse of the deployed investigation query XDREXFIL-INV-03)</Purpose>
+        <Query platform="Elastic" language="ES|QL" id="Q-02">
+          <![CDATA[
+FROM logs-m365_defender.*
+| MV_EXPAND threat.tactic.name
+| WHERE threat.tactic.name == "Exfiltration"
+    AND @timestamp >= NOW() - 4 hours
+| STATS exfil_alerts = COUNT(*), last_seen = MAX(@timestamp)
+    BY account = user.name
+| SORT exfil_alerts DESC
+| LIMIT 15
+]]>
+        </Query>
+      </Step>
+      <Step order="3" name="Entity pivoting">
+        <Purpose>Entity pivoting</Purpose>
+        <Query platform="Elastic" language="ES|QL" id="Q-03">
+          <![CDATA[
+FROM logs-m365_defender.*
+| WHERE @timestamp >= NOW() - 4 hours
+    AND event.kind == "alert" AND user.name == "$account"
+| MV_EXPAND threat.tactic.name
+| WHERE threat.tactic.name == "Exfiltration"
+| STATS exfil_alerts = COUNT(*), devices = COUNT_DISTINCT(m365_defender.alert.evidence.device_dns_name),
+        first_seen = MIN(@timestamp), last_seen = MAX(@timestamp)
+    BY m365_defender.alert.detector_id, m365_defender.alert.status
+| SORT exfil_alerts DESC
+| LIMIT 25
+]]>
+        </Query>
+      </Step>
+      <Step order="4" name="User investigation">
+        <Purpose>User investigation</Purpose>
+        <Query platform="Elastic" language="ES|QL" id="Q-04">
+          <![CDATA[
+FROM logs-m365_defender.*
+| WHERE @timestamp >= NOW() - 4 hours
+    AND event.kind == "alert" AND user.name == "$account"
+| MV_EXPAND threat.tactic.name
+| STATS alerts = COUNT(*), devices = COUNT_DISTINCT(m365_defender.alert.evidence.device_dns_name),
+        max_severity = MAX(event.severity)
+    BY threat.tactic.name, m365_defender.alert.detector_id
+| SORT alerts DESC
+| LIMIT 30
+]]>
+        </Query>
+      </Step>
+      <Step order="5" name="Host investigation">
+        <Purpose>Host investigation</Purpose>
+        <Query platform="Elastic" language="ES|QL" id="Q-05">
+          <![CDATA[
+FROM logs-m365_defender.*
+| WHERE @timestamp >= NOW() - 4 hours AND event.kind == "alert"
+| MV_EXPAND m365_defender.alert.evidence.device_dns_name
+| WHERE m365_defender.alert.evidence.device_dns_name == "$device"
+| MV_EXPAND threat.tactic.name
+| WHERE threat.tactic.name == "Exfiltration"
+| STATS alerts = COUNT(*), accounts = COUNT_DISTINCT(user.name), max_severity = MAX(event.severity)
+    BY m365_defender.alert.detector_id
+| SORT alerts DESC
+| LIMIT 20
+]]>
+        </Query>
+      </Step>
+      <Step order="6" name="File investigation">
+        <Purpose>File investigation</Purpose>
+        <Query platform="Elastic" language="ES|QL" id="Q-06">
+          <![CDATA[
+FROM logs-m365_defender.*
+| WHERE @timestamp >= NOW() - 4 hours
+    AND event.kind == "alert" AND user.name == "$account"
+| MV_EXPAND threat.tactic.name
+| WHERE threat.tactic.name == "Exfiltration"
+| STATS occurrences = COUNT(*), first_seen = MIN(@timestamp), last_seen = MAX(@timestamp)
+    BY m365_defender.alert.title, m365_defender.alert.evidence.device_dns_name
+| SORT occurrences DESC
+| LIMIT 40
+]]>
+        </Query>
+      </Step>
+      <Step order="7" name="Timeline Reconstruction">
+        <Purpose>Timeline Reconstruction</Purpose>
+        <Query platform="Elastic" language="ES|QL" id="Q-07">
+          <![CDATA[
+FROM logs-m365_defender.*
+| WHERE @timestamp >= NOW() - 4 hours
+    AND event.kind == "alert" AND user.name == "$account"
+| MV_EXPAND threat.tactic.name
+| KEEP @timestamp, threat.tactic.name, m365_defender.alert.detector_id, m365_defender.alert.title,
+       event.severity, m365_defender.alert.status, m365_defender.alert.evidence.device_dns_name
+| SORT @timestamp ASC
+| LIMIT 200
+]]>
+        </Query>
+      </Step>
+      <Step order="8" name="Attack-Chain Validation">
+        <Purpose>Attack-Chain Validation</Purpose>
+        <Query platform="Elastic" language="ES|QL" id="Q-08">
+          <![CDATA[
+FROM logs-m365_defender.*
+| MV_EXPAND threat.tactic.name
+| WHERE user.name == "$account"
+    AND threat.tactic.name IN ("CredentialAccess","Discovery","LateralMovement","Collection","InitialAccess")
+    AND @timestamp >= NOW() - 4 hours
+| STATS alerts = COUNT(*), max_severity = MAX(event.severity),
+        detectors = VALUES(m365_defender.alert.detector_id)
+    BY threat.tactic.name
+| SORT alerts DESC
+| LIMIT 20
+]]>
+        </Query>
+      </Step>
+      <Step order="9" name="Lateral movement validation">
+        <Purpose>Lateral movement validation</Purpose>
+        <Query platform="Elastic" language="ES|QL" id="Q-09">
+          <![CDATA[
+FROM logs-m365_defender.*
+| WHERE @timestamp >= NOW() - 4 hours AND event.kind == "alert" AND user.name == "$account"
+| MV_EXPAND threat.tactic.name
+| WHERE threat.tactic.name == "LateralMovement"
+| STATS alerts = COUNT(*), devices = COUNT_DISTINCT(m365_defender.alert.evidence.device_dns_name),
+        max_severity = MAX(event.severity)
+    BY m365_defender.alert.detector_id, m365_defender.alert.title
+| SORT alerts DESC
+| LIMIT 20
+]]>
+        </Query>
+      </Step>
+      <Step order="10" name="Persistence validation">
+        <Purpose>Persistence validation</Purpose>
+        <Query platform="Elastic" language="ES|QL" id="Q-10">
+          <![CDATA[
+FROM logs-m365_defender.*
+| WHERE @timestamp >= NOW() - 4 hours AND event.kind == "alert" AND user.name == "$account"
+| MV_EXPAND threat.tactic.name
+| WHERE threat.tactic.name == "Persistence"
+| STATS alerts = COUNT(*), devices = COUNT_DISTINCT(m365_defender.alert.evidence.device_dns_name),
+        max_severity = MAX(event.severity)
+    BY m365_defender.alert.detector_id, m365_defender.alert.title
+| SORT alerts DESC
+| LIMIT 20
+]]>
+        </Query>
+      </Step>
+      <Step order="11" name="Privilege escalation validation">
+        <Purpose>Privilege escalation validation</Purpose>
+        <Query platform="Elastic" language="ES|QL" id="Q-11">
+          <![CDATA[
+FROM logs-m365_defender.*
+| WHERE @timestamp >= NOW() - 4 hours AND event.kind == "alert" AND user.name == "$account"
+| MV_EXPAND threat.tactic.name
+| WHERE threat.tactic.name == "PrivilegeEscalation"
+| STATS alerts = COUNT(*), devices = COUNT_DISTINCT(m365_defender.alert.evidence.device_dns_name),
+        max_severity = MAX(event.severity)
+    BY m365_defender.alert.detector_id, m365_defender.alert.title
+| SORT alerts DESC
+| LIMIT 20
+]]>
+        </Query>
+      </Step>
+      <Step order="12" name="Defense evasion validation">
+        <Purpose>Defense evasion validation</Purpose>
+        <Query platform="Elastic" language="ES|QL" id="Q-12">
+          <![CDATA[
+FROM logs-m365_defender.*
+| WHERE @timestamp >= NOW() - 4 hours AND event.kind == "alert" AND user.name == "$account"
+| MV_EXPAND threat.tactic.name
+| WHERE threat.tactic.name == "DefenseEvasion"
+| STATS alerts = COUNT(*), devices = COUNT_DISTINCT(m365_defender.alert.evidence.device_dns_name),
+        max_severity = MAX(event.severity)
+    BY m365_defender.alert.detector_id, m365_defender.alert.title
+| SORT alerts DESC
+| LIMIT 20
+]]>
+        </Query>
+      </Step>
+      <Step order="13" name="Impact assessment">
+        <Purpose>Impact assessment</Purpose>
+        <Query platform="Elastic" language="ES|QL" id="Q-13">
+          <![CDATA[
+FROM logs-m365_defender.*
+| WHERE @timestamp >= NOW() - 4 hours AND event.kind == "alert" AND user.name == "$account"
+| MV_EXPAND threat.tactic.name
+| WHERE threat.tactic.name == "Exfiltration"
+| STATS exfil_alerts = COUNT(*), devices = COUNT_DISTINCT(m365_defender.alert.evidence.device_dns_name),
+        documents = COUNT_DISTINCT(m365_defender.alert.title), max_severity = MAX(event.severity)
+| LIMIT 1
+]]>
+        </Query>
+      </Step>
+      <Step order="14" name="Finalize verdict">
+        <DecisionTree>
+        </DecisionTree>
+      </Step>
+    </Workflow>
+  </Investigation>
+  <ClassificationGuidance>
+    <TruePositive>
+      <Definition></Definition>
+    </TruePositive>
+    <FalsePositive>
+      <Definition></Definition>
+      <Indicators>
+        <Item>Sanctioned high-volume data movers. Backup, ETL, reporting, and business-operations users (card operations, acquirer reconciliation) legitimately handle large volumes of regulated spreadsheets that match DLP policy - producing exactly this burst. Confirmed with the data owner, this is authorised movement (documented, not assumed).</Item>
+        <Item>DLP policy over-firing. A broadly-scoped Purview policy (like "NBI Cards-Devices 1.2") matching routine daily reports inflates the exfiltration stream fleet-wide across many accounts - a detector-scoping condition (section 6, misconfiguration).</Item>
+        <Item>DLP-blocked / quarantined transfers. If Purview *blocked* or quarantined the egress, this is a *malicious attempt positively proven blocked* - recorded as blocked-malicious, never "benign" - or a policy enforcement working as intended.</Item>
+        <Item>One DLP policy drives the entire stream. Every top exfiltration alert is detector 3ade9cd5-a544-4bdb-8ab2-cfafd6233421 - *"DLP policy (NBI Cards-Devices 1.2) matched for document (…) in a device"* - at severity 47. There is not a single severity-73 exfiltration alert in 30 days. This is the classic single-medium-severity-DLP-detector pattern the rule is most likely to surface.</Item>
+        <Item>Multiple accounts exceed the threshold. yossef.mohammed (~1,114), saif.ahmed (~428), abdulaziz.mohammed (~388), areegf (~258) all far exceed 50, plus a null-actor bucket (~64). Because many accounts show high counts from the same DLP policy, the default hypothesis for any single burst is a fleet-wide DLP pattern (authorised bulk / misconfiguration) - re-scope the detector rather than chase one user, *unless* an account is a stark outlier with a kill chain.</Item>
+        <Item>yossef.mohammed is concentrated on one endpoint. ~994 of its alerts are on hq-ech-lp-mqq.nbirq.com - one user, one laptop, one DLP policy, no surrounding kill chain. That reads as routine bulk card-operations document handling to verify with the data owner, not theft.</Item>
+        <Item>The document identity is in the alert title, not a file field. The matched filenames (card/acquirer/CTF .xlsx reports) appear in m365_defender.alert.title; there is no populated file.* hash/path field (section 8). Use the titles as the investigative lead.</Item>
+        <Item>No environment-specific allow-list exists. There is no recorded benign-true-positive tuning. Do not blanket-except an account; confirm with the data owner and, if warranted, tune the DLP policy scope rather than whitelist the user.</Item>
+      </Indicators>
+    </FalsePositive>
+    <Misconfiguration>
+      <Definition></Definition>
+    </Misconfiguration>
+    <NeedsEscalation>
+      <Definition></Definition>
+    </NeedsEscalation>
+  </ClassificationGuidance>
+  <ResponseActions>
+    <Phase name="Containment">
+      <Action>Contain $account and $device (disable the account, isolate the endpoint) if a true_positive or a stark unexplained outlier on regulated data is confirmed - prioritise stopping further egress.</Action>
+      <Action>Block the egress channel identified with the DLP team (cloud-upload destination, removable-media, email) so in-flight and future transfers are stopped.</Action>
+      <Action>Engage DLP and the data owner immediately to establish the data classification, destination, and whether egress succeeded - the facts this index cannot provide.</Action>
+      <Action>Preserve evidence first: the alert set (section 14/section 15/section 15.10 document list), the DLP channel logs, and the endpoint state.</Action>
+      <Action>Deploy changes only via the authorised human-approved DEPLOY path; investigation is read-only.</Action>
+    </Phase>
+    <Phase name="Eradication">
+      <Action>Revoke the egress and access the actor used (block the channel, remove the account's excess data access), and remove any staged collection on $device.</Action>
+      <Action>If compromise (not insider) is confirmed, work the credential-access playbook for $account - reset credentials, hunt for the entry point and collection stage.</Action>
+      <Action>Re-scope the DLP policy if the investigation shows it is over-firing on routine business reporting (so genuine theft stands out) - a tuning action, not a whitelist.</Action>
+    </Phase>
+    <Phase name="Recovery">
+      <Action>Complete the breach assessment with data protection: what data left, its regulatory classification (customer PII / card data), and notification obligations.</Action>
+      <Action>Return $account / $device to service only after section 22 closing criteria are met and monitoring confirms the egress channel is controlled.</Action>
+      <Action>Harden: tighten DLP egress enforcement (block vs audit for regulated data), re-scope noisy medium-severity detectors so real outliers are visible, and baseline sanctioned high-volume movers (with the data owner) so future bursts triage faster.</Action>
+    </Phase>
+  </ResponseActions>
+  <Escalation>
+    <Trigger>Escalate to Tier 3 / IR, the DLP / data-protection team, and the data owner when any hold:
+
+- The burst uses diverse or higher-severity exfil detectors (not just the single DLP policy), and/or $account shows a surrounding kill chain (section 17).
+- $account is a stark estate outlier (section 14.2) on regulated data with no confirmed authorised-movement explanation.
+- The matched documents (section 15.10) are sensitive exports the user should not hold.
+- Egress success cannot be established from telemetry (the common case) and the data owner cannot immediately confirm authorisation - escalate as needs_escalation to DLP.
+- Any indication the account is compromised (credential-access alerts, anomalous logons in section 15.12).</Trigger>
+    <To>SOC L2 / IR</To>
+  </Escalation>
+  <ClosureCriteria>
+    <Item>false_positive (authorised / explained movement): the data owner confirms a sanctioned high-volume function (card-operations reporting, backup, ETL) with matching documents/destination and no kill chain. Baseline the mover; do not whitelist broadly.</Item>
+    <Item>false_positive (DLP-blocked attempt): Purview proves the transfers were blocked/quarantined with no successful egress. Documented as blocked-malicious, never "benign"; keep watching.</Item>
+    <Item>misconfiguration: the outlier test shows many accounts with comparable counts from one over-firing DLP policy; re-scope/tune the policy and baseline routine bulk movers.</Item>
+    <Item>true_positive: genuine exfiltration confirmed (diverse/high-severity detectors and/or kill chain and/or confirmed sensitive egress); account contained, egress blocked, data moved scoped with the data owner, entry/collection stage hunted, breach assessment and incident documented.</Item>
+    <Item>needs_escalation: data type / destination / egress-success undecidable from telemetry - handed to DLP / data protection with the gaps documented.</Item>
+  </ClosureCriteria>
+  <Limitations>
+    <Item>The exfil stream is one DLP policy. Detector 3ade9cd5-a544-4bdb-8ab2-cfafd6233421 ("NBI Cards-Devices 1.2") drives essentially all top exfiltration, at severity 47, across several high-count accounts. Characterise the policy scope before treating any single burst as theft.</Item>
+    <Item>Severity is uniformly 47. There is not one severity-73 exfiltration alert in 30 days; the rule's own "high" is the burst escalation, not a per-alert verdict. Do not read a single medium-severity DLP match as theft.</Item>
+    <Item>The rule's source_ips / techniques / threat_details / device_id outputs are empty in NBI - the underlying source.ip / subtechnique.id / message / host.id fields are 0% on the exfiltration subset (the XML's ~14/16/20/7% estimates do not hold live). Channel, destination, and egress-success must come from DLP, which is the main driver of needs_escalation.</Item>
+    <Item>The document identity is in the title, not a file field. evidence.file_details.* is 0%; use m365_defender.alert.title (section 15.10) as the document lead.</Item>
+    <Item>Outlier vs fleet-wide is the fork. Many accounts with comparable counts under one policy = misconfiguration / authorised bulk (re-scope the detector); a stark outlier with a kill chain = investigate as theft. yossef.mohammed is a volume outlier but pure-DLP with no kill chain - verify, do not assume either way.</Item>
+    <Item>Complementary signals: FortiGate egress volume for $device/window (logs-fortinet_fortigate.log-*), the multi-stage / high-impact correlation rule (exfiltration alongside credential access on one entity), and Purview DLP channel logs catch low-and-slow or distributed exfiltration that keeps each account under 50.</Item>
+    <Item>KB-worthy (persist to NBI customer scope): (1) exfil stream dominated by DLP policy 3ade9cd5-… "NBI Cards-Devices 1.2", severity uniformly 47; (2) source.ip/message/subtechnique.id/host.id 0% on Exfiltration subset (rule outputs empty); (3) top exfil accounts yossef.mohammed/saif.ahmed/abdulaziz.mohammed/areegf; (4) yossef.mohammed concentrated on hq-ech-lp-mqq.nbirq.com, no kill chain; (5) document identity only in alert title. All observed live 2026-08-17.</Item>
+  </Limitations>
+</Playbook>

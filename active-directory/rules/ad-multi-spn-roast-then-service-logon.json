@@ -1,0 +1,96 @@
+{
+  "name": "AD — Multi-SPN Roast then Service-Account Logon",
+  "tags": [
+    "NBI",
+    "detection-recovery-2026-08",
+    "PT-validated",
+    "credential-access",
+    "lateral-movement",
+    "kerberoasting"
+  ],
+  "interval": "1h",
+  "enabled": true,
+  "description": "A single source IP requested Kerberos service tickets (4769) for 2 or more distinct user service-principal-names and then authenticated (4624 type 3/10) as 3 or more distinct service accounts — the roast-and-use pattern where an attacker Kerberoasts SPNs, cracks the tickets offline, and replays the recovered service-account credentials. The rule correlates 4769 TGS requests and 4624 logons by source.ip. Maps to ATT&CK Credential Access T1558.003 (Kerberoasting) into Lateral Movement.",
+  "risk_score": 73,
+  "severity": "high",
+  "note": "### Investigation\n1. List the roasted SPNs (ServiceName) and the accounts subsequently used — do the requested SPNs match the accounts logged on as?\n2. Check RC4 (etype 0x17) on the 4769s, which strengthens the Kerberoast hypothesis.\n3. Determine whether source.ip is a legitimate multi-service application/broker host (Citrix, integration server) that naturally uses several service accounts.\n4. Pivot to the destination hosts of the 4624 logons for privileged access or fan-out.\n5. Escalate if the SPNs are high-value/Tier-0 accounts and the source is not a sanctioned application host.\n\n### False positives / benign\nMulti-service application and broker hosts (Citrix, integration/middleware servers) legitimately request tickets for and authenticate as several service accounts, matching the roast-and-use shape. Distinguish by whether the requested SPNs correspond to the host's known application role, whether ticket encryption is normal (AES vs RC4-downgrade), and by resolving the source against known_infrastructure — not by allowlisting the IP, which would blind the analytic to an attacker on that segment.",
+  "output_index": "",
+  "investigation_fields": {
+    "field_names": [
+      "source.ip",
+      "sname",
+      "tl",
+      "is_usr_spn",
+      "code",
+      "is_svc_logon"
+    ]
+  },
+  "author": [
+    "raadabujaish"
+  ],
+  "false_positives": [
+    "Multi-service application/broker hosts (e.g. Citrix, integration servers) that legitimately request and use several service accounts — validate and suppress by source.ip."
+  ],
+  "from": "now-12h",
+  "rule_id": "nbi-corr-kerberoast-then-use-v2",
+  "max_signals": 200,
+  "risk_score_mapping": [],
+  "severity_mapping": [],
+  "threat": [
+    {
+      "framework": "MITRE ATT&CK",
+      "tactic": {
+        "id": "TA0006",
+        "name": "Credential Access",
+        "reference": "https://attack.mitre.org/tactics/TA0006/"
+      },
+      "technique": [
+        {
+          "id": "T1558",
+          "name": "Steal or Forge Kerberos Tickets",
+          "reference": "https://attack.mitre.org/techniques/T1558/",
+          "subtechnique": [
+            {
+              "id": "T1558.003",
+              "name": "Kerberoasting",
+              "reference": "https://attack.mitre.org/techniques/T1558/003/"
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "framework": "MITRE ATT&CK",
+      "tactic": {
+        "id": "TA0008",
+        "name": "Lateral Movement",
+        "reference": "https://attack.mitre.org/tactics/TA0008/"
+      },
+      "technique": [
+        {
+          "id": "T1550",
+          "name": "Use Alternate Authentication Material",
+          "reference": "https://attack.mitre.org/techniques/T1550/",
+          "subtechnique": [
+            {
+              "id": "T1550.003",
+              "name": "Pass the Ticket",
+              "reference": "https://attack.mitre.org/techniques/T1550/003/"
+            }
+          ]
+        }
+      ]
+    }
+  ],
+  "to": "now",
+  "references": [],
+  "version": 1,
+  "exceptions_list": [],
+  "related_integrations": [],
+  "required_fields": [],
+  "setup": "",
+  "type": "esql",
+  "language": "esql",
+  "query": "FROM logs-system.security-*\n| WHERE (event.code==\"4769\" AND source.ip IS NOT NULL AND source.ip != \"::1\") OR (event.code==\"4624\" AND winlog.event_data.LogonType IN (\"3\",\"10\"))\n| EVAL sname=TO_LOWER(winlog.event_data.ServiceName), tl = TO_LOWER(winlog.event_data.TargetUserName),\n       is_usr_spn = (event.code==\"4769\" AND NOT sname LIKE \"*$*\" AND NOT sname LIKE \"*/*\" AND sname != \"krbtgt\"),\n       is_svc_logon = (event.code==\"4624\" AND (tl LIKE \"*.admin\" OR tl LIKE \"*sys_user\" OR tl LIKE \"*.servacc\" OR tl LIKE \"*.prod\" OR tl LIKE \"*.srv\" OR tl LIKE \"icbs*\" OR tl LIKE \"sigcap*\" OR tl LIKE \"forti.*\" OR tl LIKE \"custody*\" OR tl LIKE \"citrix*\" OR tl LIKE \"docsafe\" OR tl LIKE \"wss.user\" OR tl LIKE \"sp.admin\" OR tl LIKE \"solarwinds*\" OR tl LIKE \"veeam*\" OR tl LIKE \"sccm*\" OR tl LIKE \"named*\" OR tl LIKE \"ps\" OR tl LIKE \"pam\" OR tl LIKE \"igrafxsso*\" OR tl LIKE \"office365\" OR tl LIKE \"internal.services\" OR tl LIKE \"innscanservice\" OR tl LIKE \"teammatese\" OR tl LIKE \"filenet*\" OR tl LIKE \"los.test\" OR tl LIKE \"aml.eod\" OR tl LIKE \"cms\" OR tl LIKE \"vynamic*\" OR tl LIKE \"svc*\" OR tl LIKE \"*service*\" OR tl LIKE \"*_svc\" OR tl LIKE \"backup*\" OR tl LIKE \"oracle*\" OR tl LIKE \"sql*\"))\n| STATS roasted_spns=COUNT_DISTINCT(CASE(is_usr_spn, winlog.event_data.ServiceName, null)),\n        svc_logon_ids=COUNT_DISTINCT(CASE(is_svc_logon, winlog.event_data.TargetUserName, null)),\n        roasted=VALUES(CASE(is_usr_spn, winlog.event_data.ServiceName, null)),\n        used=VALUES(CASE(is_svc_logon, winlog.event_data.TargetUserName, null)),\n        first_seen=MIN(@timestamp), last_seen=MAX(@timestamp) BY source.ip\n| WHERE roasted_spns >= 2 AND svc_logon_ids >= 3\n| SORT roasted_spns DESC",
+  "actions": []
+}

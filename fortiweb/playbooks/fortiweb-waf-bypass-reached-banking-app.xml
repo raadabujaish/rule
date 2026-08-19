@@ -1,0 +1,369 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<Playbook xmlns="https://soc.example/playbooks" id="PB-fortiweb-waf-bypass-reached-banking-app" name="FortiWeb — Web Attack Bypassed the WAF and Reached a Banking Application - SOC Playbook" version="3.0" status="Validated" classification="TLP:AMBER">
+  <Metadata>
+    <Owner>NBI SOC / Detection Engineering</Owner>
+    <LastUpdated>2026-08-19</LastUpdated>
+    <Severity default="critical">critical</Severity>
+    <Confidence default="Medium">Medium</Confidence>
+    <Category>Initial Access</Category>
+    <MitreAttack>
+      <Technique id="T1190"/>
+      <Technique id="T1211"/>
+      <Tactic id="TA0001"/>
+      <Tactic id="TA0005"/>
+    </MitreAttack>
+    <References>
+      <Reference title="MITRE ATT&amp;CK - Exploit Public-Facing Application (T1190)" url="https://attack.mitre.org/techniques/T1190/"/>
+      <Reference title="MITRE ATT&amp;CK - Exploitation for Defense Evasion (T1211)" url="https://attack.mitre.org/techniques/T1211/"/>
+      <Reference title="MITRE ATT&amp;CK - Initial Access tactic (TA0001)" url="https://attack.mitre.org/tactics/TA0001/"/>
+      <Reference title="MITRE ATT&amp;CK - Defense Evasion tactic (TA0005)" url="https://attack.mitre.org/tactics/TA0005/"/>
+      <Reference title="OWASP Top 10 2021 - A03 Injection" url="https://owasp.org/Top10/A03_2021-Injection/"/>
+      <Reference title="OWASP - SQL Injection" url="https://owasp.org/www-community/attacks/SQL_Injection"/>
+      <Reference title="OWASP - Cross Site Scripting (XSS)" url="https://owasp.org/www-community/attacks/xss/"/>
+      <Reference title="OWASP Web Security Testing Guide" url="https://owasp.org/www-project-web-security-testing-guide/"/>
+      <Reference title="Fortinet - FortiWeb Administration Guide (protection actions: Alert vs Alert &amp; Deny)" url="https://docs.fortinet.com/product/fortiweb"/>
+      <Reference title="Fortinet - FortiWeb log reference (attack log fields, action values)" url="https://docs.fortinet.com/document/fortiweb/latest/log-reference"/>
+    </References>
+  </Metadata>
+  <AlertContext>
+    <RuleName>FortiWeb — Web Attack Bypassed the WAF and Reached a Banking Application</RuleName>
+    <RuleId>nbi-fweb-attack-not-blocked</RuleId>
+    <RuleType>query</RuleType>
+    <Index>logs-tcp.generic-*</Index>
+    <TriggerLogic>The deployed rule is a query (Kibana KQL filter) over the FortiWeb attack stream. Its logic, as a one-line Kibana KQL detection filter (this is the deployed filter form; every *runnable* investigation query below is ES|QL, because NBI is Elastic, not Sentinel):
+
+
+
+Plain English: a FortiWeb attack log for a genuine attack class whose action is Alert (log-only) rather than a deny (Alert_Deny / Erase / Deny). The Alert action is the entire signal - it means the request was not blocked and therefore delivered to the application. The rule intentionally lists specific real attack classes so that log-only bot/ML detections and response-scrubbing signatures do not trip it.
+
+Faithful ES|QL reproduction of the bypass condition, scoped to the alert host (this is section 14.1 and confirms whether the condition currently holds):</TriggerLogic>
+    <KeyAlertFields>businessonline.nbi.iq, data.action, data.attack_type, data.msg, data.http_host, data.http_url, data.http_retcode, data.src, data.http_response_bytes, data.severity_level, data.policy, data.user_name</KeyAlertFields>
+  </AlertContext>
+  <Inputs>
+    <Input name="$src"/>
+    <Input name="$host"/>
+    <Input name="$url"/>
+  </Inputs>
+  <ExecutiveSummary>
+    <Overview>This playbook drives triage and investigation of the FortiWeb - Web Attack Bypassed the WAF and Reached a Banking Application detection on NBI's Elastic Security deployment. The rule fires on FortiWeb attack records (data.type == "attack") where data.action == "Alert" - meaning FortiWeb *detected* the attack but did not deny it - and data.attack_type is a genuine attack class (SQL Injection / (Extended), Cross Site Scripting / (Extended), Known Exploits, SQL/XSS Syntax Based Detection, Generic Attacks / (Extended), Malicious IPs). Because the action was alert-only, the malicious request was passed to the application.
+
+The blocked-versus-reached question is therefore already answered by the rule: it reached the app. The analyst's job is the next, harder question - did it succeed? - and to exclude the two benign explanations: the WAF policy for that signature/host was deliberately in monitor/log-only mode (a configuration gap, not an attacker win), or the signature is a generic false-positive on a legitimate banking parameter. The verdict is true_positive, false_positive, misconfiguration, or needs_escalation, with evidence attached. This is the highest-severity FortiWeb case because the usual mitigating control - the WAF block - is absent by definition.</Overview>
+    <BusinessImpact>An alert means: on $host, FortiWeb recognised a real web attack and passed it to the banking application unblocked. The data.action field is the crux - on NBI it takes values Alert (log-only, the bypass), Alert_Deny and Erase and Deny (blocked/scrubbed), monitor, and device-management values. Only Alert means the request went through. So the alert is not a "possible" attack: a genuine attack signature matched and enforcement did not stop it.
+
+What it does not tell you is whether the attack achieved its effect. The WAF attack log records the *request* and the *signature*, not the *application's response body* or the *backend effect*. Success (data read/modified, session hijacked, code executed) must be inferred from the correlated traffic-log response code for the exact $url (section 14.2) and the source's follow-through (section 15/section 17), then confirmed against application/database audit (Escalation). Until success is excluded, treat the application as having received a live attack.</BusinessImpact>
+  </ExecutiveSummary>
+  <Investigation>
+    <Goal>Decide true_positive / false_positive / misconfiguration / needs_escalation for FortiWeb — Web Attack Bypassed the WAF and Reached a Banking Application.</Goal>
+    <Workflow>
+      <Step order="1" name="Detection Summary">
+        <Purpose>Detection Summary</Purpose>
+        <Query platform="Elastic" language="ES|QL" id="Q-01">
+          <![CDATA[
+FROM logs-tcp.generic-*
+| WHERE @timestamp >= NOW() - 4 hours AND data.type == "attack" AND data.action == "Alert"
+    AND data.http_host == "$host"
+    AND data.attack_type IN ("SQL Injection", "SQL Injection (Extended)", "Cross Site Scripting",
+        "Cross Site Scripting (Extended)", "Known Exploits", "SQL/XSS Syntax Based Detection",
+        "Generic Attacks", "Generic Attacks(Extended)", "Malicious IPs")
+| STATS events = COUNT(*), urls = VALUES(data.http_url), signatures = VALUES(data.msg), srcs = VALUES(data.src)
+    BY data.attack_type, data.severity_level
+| SORT events DESC
+| LIMIT 20
+]]>
+        </Query>
+      </Step>
+      <Step order="2" name="Confirm the bypass and read the attack (on the banking host)">
+        <Purpose>Confirm the bypass and read the attack (on the banking host)</Purpose>
+        <Query platform="Elastic" language="ES|QL" id="Q-02">
+          <![CDATA[
+FROM logs-tcp.generic-*
+| WHERE @timestamp >= NOW() - 4 hours AND data.type == "attack" AND data.action == "Alert"
+    AND data.http_host == "$host"
+    AND data.attack_type IN ("SQL Injection", "SQL Injection (Extended)", "Cross Site Scripting",
+        "Cross Site Scripting (Extended)", "Known Exploits", "SQL/XSS Syntax Based Detection",
+        "Generic Attacks", "Generic Attacks(Extended)", "Malicious IPs")
+| STATS events = COUNT(*), urls = VALUES(data.http_url), signatures = VALUES(data.msg), srcs = VALUES(data.src)
+    BY data.attack_type, data.severity_level
+| SORT events DESC
+| LIMIT 20
+]]>
+        </Query>
+      </Step>
+      <Step order="3" name="What did the application return for the attack URL">
+        <Purpose>What did the application return for the attack URL</Purpose>
+        <Query platform="Elastic" language="ES|QL" id="Q-03">
+          <![CDATA[
+FROM logs-tcp.generic-*
+| WHERE @timestamp >= NOW() - 4 hours AND data.type == "traffic"
+    AND data.http_host == "$host" AND data.http_url == "$url"
+| EVAL rc = TO_INTEGER(data.http_retcode),
+       real_client = COALESCE(TRIM(MV_FIRST(SPLIT(x_forwarded_for, ","))), data.src)
+| STATS requests = COUNT(*), served2xx = SUM(CASE(rc >= 200 AND rc < 300, 1, 0)),
+        err5xx = SUM(CASE(rc >= 500, 1, 0)), rejected4xx = SUM(CASE(rc >= 400 AND rc < 500, 1, 0)),
+        clients = COUNT_DISTINCT(real_client)
+    BY data.http_url
+| LIMIT 10
+]]>
+        </Query>
+      </Step>
+      <Step order="4" name="Post-bypass follow-through from the source">
+        <Purpose>Post-bypass follow-through from the source</Purpose>
+        <Query platform="Elastic" language="ES|QL" id="Q-04">
+          <![CDATA[
+FROM logs-tcp.generic-*
+| WHERE @timestamp >= NOW() - 4 hours AND data.type == "traffic"
+    AND data.src == "$src" AND data.http_host == "$host"
+| EVAL rc = TO_INTEGER(data.http_retcode), endpoint = MV_FIRST(SPLIT(data.http_url, "?"))
+| STATS requests = COUNT(*), served2xx = SUM(CASE(rc >= 200 AND rc < 300, 1, 0)),
+        err5xx = SUM(CASE(rc >= 500, 1, 0)), denied = SUM(CASE(rc == 401 OR rc == 403, 1, 0))
+    BY endpoint
+| SORT served2xx DESC
+| LIMIT 20
+]]>
+        </Query>
+      </Step>
+      <Step order="5" name="Entity pivoting">
+        <Purpose>Entity pivoting</Purpose>
+        <Query platform="Elastic" language="ES|QL" id="Q-05">
+          <![CDATA[
+FROM logs-tcp.generic-*
+| WHERE @timestamp >= NOW() - 4 hours AND data.type == "attack"
+    AND data.http_host == "$host"
+| STATS events = COUNT(*), srcs = COUNT_DISTINCT(data.src), urls = COUNT_DISTINCT(data.http_url)
+    BY data.attack_type, data.action, data.severity_level
+| SORT events DESC
+| LIMIT 30
+]]>
+        </Query>
+      </Step>
+      <Step order="6" name="Host investigation">
+        <Purpose>Host investigation</Purpose>
+        <Query platform="Elastic" language="ES|QL" id="Q-06">
+          <![CDATA[
+FROM logs-tcp.generic-*
+| WHERE @timestamp >= NOW() - 4 hours AND data.type == "attack"
+    AND data.http_host == "$host"
+| EVAL blocked = CASE(data.action == "Alert_Deny" OR data.action == "Erase" OR data.action == "Deny", 1, 0)
+| STATS events = COUNT(*), reached_alert = SUM(CASE(data.action == "Alert", 1, 0)), blocked_events = SUM(blocked)
+    BY data.attack_type, data.severity_level
+| SORT events DESC
+| LIMIT 30
+]]>
+        </Query>
+      </Step>
+      <Step order="7" name="IP investigation">
+        <Purpose>IP investigation</Purpose>
+        <Query platform="Elastic" language="ES|QL" id="Q-07">
+          <![CDATA[
+FROM logs-tcp.generic-*
+| WHERE @timestamp >= NOW() - 4 hours AND data.type == "traffic"
+    AND data.http_host == "$host" AND data.src == "$src"
+| EVAL real_client = COALESCE(TRIM(MV_FIRST(SPLIT(x_forwarded_for, ","))), data.src)
+| STATS reqs = COUNT(*), countries = VALUES(data.srccountry), orig_countries = VALUES(data.original_srccountry)
+    BY real_client
+| SORT reqs DESC
+| LIMIT 20
+]]>
+        </Query>
+      </Step>
+      <Step order="8" name="Domain investigation">
+        <Purpose>Domain investigation</Purpose>
+        <Query platform="Elastic" language="ES|QL" id="Q-08">
+          <![CDATA[
+FROM logs-tcp.generic-*
+| WHERE @timestamp >= NOW() - 4 hours AND data.type == "traffic"
+    AND data.src == "$src"
+| STATS reqs = COUNT(*), refers = VALUES(data.http_refer)
+    BY data.http_host
+| SORT reqs DESC
+| LIMIT 20
+]]>
+        </Query>
+      </Step>
+      <Step order="9" name="URL investigation">
+        <Purpose>URL investigation</Purpose>
+        <Query platform="Elastic" language="ES|QL" id="Q-09">
+          <![CDATA[
+FROM logs-tcp.generic-*
+| WHERE @timestamp >= NOW() - 4 hours AND data.type == "traffic"
+    AND data.http_host == "$host" AND data.src == "$src"
+| EVAL rc = TO_INTEGER(data.http_retcode)
+| STATS reqs = COUNT(*), served2xx = SUM(CASE(rc >= 200 AND rc < 300, 1, 0)),
+        rejected4xx = SUM(CASE(rc >= 400 AND rc < 500, 1, 0))
+    BY data.http_method, data.http_url
+| SORT reqs DESC
+| LIMIT 30
+]]>
+        </Query>
+      </Step>
+      <Step order="10" name="Authentication investigation">
+        <Purpose>Authentication investigation</Purpose>
+        <Query platform="Elastic" language="ES|QL" id="Q-10">
+          <![CDATA[
+FROM logs-tcp.generic-*
+| WHERE @timestamp >= NOW() - 4 hours AND data.type == "traffic"
+    AND data.http_host == "$host" AND data.src == "$src"
+| EVAL rc = TO_INTEGER(data.http_retcode)
+| STATS reqs = COUNT(*)
+    BY rc
+| SORT reqs DESC
+| LIMIT 15
+]]>
+        </Query>
+      </Step>
+      <Step order="11" name="Timeline Reconstruction">
+        <Purpose>Timeline Reconstruction</Purpose>
+        <Query platform="Elastic" language="ES|QL" id="Q-11">
+          <![CDATA[
+FROM logs-tcp.generic-*
+| WHERE @timestamp >= NOW() - 4 hours
+    AND data.http_host == "$host" AND data.src == "$src"
+| KEEP @timestamp, data.type, data.action, data.attack_type, data.http_method, data.http_url, data.http_retcode
+| SORT @timestamp DESC
+| LIMIT 100
+]]>
+        </Query>
+      </Step>
+      <Step order="12" name="Lateral movement validation">
+        <Purpose>Lateral movement validation</Purpose>
+        <Query platform="Elastic" language="ES|QL" id="Q-12">
+          <![CDATA[
+FROM logs-tcp.generic-*
+| WHERE @timestamp >= NOW() - 4 hours AND data.type == "traffic"
+    AND data.src == "$src"
+| STATS reqs = COUNT(*), hosts = COUNT_DISTINCT(data.http_host), host_list = VALUES(data.http_host)
+    BY data.src
+| SORT hosts DESC
+| LIMIT 20
+]]>
+        </Query>
+      </Step>
+      <Step order="13" name="Privilege escalation validation">
+        <Purpose>Privilege escalation validation</Purpose>
+        <Query platform="Elastic" language="ES|QL" id="Q-13">
+          <![CDATA[
+FROM logs-tcp.generic-*
+| WHERE @timestamp >= NOW() - 4 hours AND data.type == "traffic"
+    AND data.http_host == "$host" AND data.src == "$src"
+| EVAL rc = TO_INTEGER(data.http_retcode), endpoint = MV_FIRST(SPLIT(data.http_url, "?"))
+| WHERE endpoint LIKE "*admin*" OR endpoint LIKE "*account*" OR endpoint LIKE "*transfer*"
+    OR endpoint LIKE "*payment*" OR endpoint LIKE "*restportal*"
+| STATS reqs = COUNT(*), served2xx = SUM(CASE(rc >= 200 AND rc < 300, 1, 0))
+    BY endpoint
+| SORT served2xx DESC
+| LIMIT 25
+]]>
+        </Query>
+      </Step>
+      <Step order="14" name="Defense evasion validation">
+        <Purpose>Defense evasion validation</Purpose>
+        <Query platform="Elastic" language="ES|QL" id="Q-14">
+          <![CDATA[
+FROM logs-tcp.generic-*
+| WHERE @timestamp >= NOW() - 4 hours AND data.type == "attack"
+    AND data.http_host == "$host"
+    AND data.attack_type IN ("SQL Injection", "SQL Injection (Extended)", "Cross Site Scripting",
+        "Cross Site Scripting (Extended)", "Known Exploits", "SQL/XSS Syntax Based Detection",
+        "Generic Attacks", "Generic Attacks(Extended)", "Malicious IPs")
+| STATS events = COUNT(*), passed_alert = SUM(CASE(data.action == "Alert", 1, 0)),
+        blocked = SUM(CASE(data.action == "Alert_Deny" OR data.action == "Erase" OR data.action == "Deny", 1, 0))
+    BY data.attack_type
+| SORT events DESC
+| LIMIT 25
+]]>
+        </Query>
+      </Step>
+      <Step order="15" name="Impact assessment">
+        <Purpose>Impact assessment</Purpose>
+        <Query platform="Elastic" language="ES|QL" id="Q-15">
+          <![CDATA[
+FROM logs-tcp.generic-*
+| WHERE @timestamp >= NOW() - 4 hours AND data.type == "traffic"
+    AND data.http_host == "$host" AND data.http_url == "$url"
+| EVAL rc = TO_INTEGER(data.http_retcode)
+| STATS requests = COUNT(*), served2xx = SUM(CASE(rc >= 200 AND rc < 300, 1, 0)),
+        err5xx = SUM(CASE(rc >= 500, 1, 0)), total_resp_bytes = SUM(TO_LONG(data.http_response_bytes))
+    BY data.http_url
+| LIMIT 10
+]]>
+        </Query>
+      </Step>
+      <Step order="16" name="Finalize verdict">
+        <DecisionTree>
+        </DecisionTree>
+      </Step>
+    </Workflow>
+  </Investigation>
+  <ClassificationGuidance>
+    <TruePositive>
+      <Definition></Definition>
+    </TruePositive>
+    <FalsePositive>
+      <Definition></Definition>
+      <Indicators>
+        <Item>Generic signature on a legitimate banking parameter. The estate's FCC-Signature policy and other generic/response-side signatures (e.g. "Invalid HTTP Response Status", Information Disclosure) trip on ordinary corporate-banking endpoints (savePreference, getCustomizeColumn, getCurrentAccountDetail) carrying undefined/empty parameter values. Reading data.msg and the request shows the "attack" is a legitimate parameter pattern - nothing malicious reached the app. (Note: this is a benign *signature match*; it is distinct from a real attack that was not blocked.)</Item>
+        <Item>Authorised security testing. A contracted pen-test or internal red/purple-team exercising the banking app will generate real attack signatures; if the WAF is in monitor mode they land as Alert. Confirm against scope/ROE and close as false_positive (authorised) - never dismiss on sight.</Item>
+        <Item>Reached-but-failed real attack. A genuine attack that reached the app but the application itself rejected (4xx from the app, no follow-through). This is a blocked-at-the-app malicious attempt, documented as such - never a bare "benign".</Item>
+        <Item>ML/Bot detections in log-only mode. FortiWeb ML Based Bot Detection runs in Alert mode on NBI, but the rule deliberately excludes it; if a tuning change accidentally widened the rule to include it, high-volume benign app/bot traffic would flood it.</Item>
+        <Item>The estate is currently enforcing block on every real attack class - so the bypass condition is presently unmet, but that is a live state, not a guarantee. In the window, real attack classes on businessonline.nbi.iq were all denied/scrubbed: Generic Attacks(Extended) = 108 events, 0 in Alert (log-only), 108 blocked; Cross Site Scripting (Extended) = 4 events, 0 alert, 4 blocked; Information Disclosure (a response-side class not in the rule) = thousands, all Erase. INV-01 therefore returns empty right now. This is the single most important operational fact: an empty INV-01 is not "safe" - it means no signature/host is presently mis-set to monitor mode. When this rule *fires*, a signature or host has been (deliberately or accidentally) put in Alert mode, and the record exists at its timestamp; the INV-02/INV-03 correlation still applies.</Item>
+        <Item>The dominant Alert-mode records are ML Based Bot Detection, which the rule excludes. In the window, the only data.action == "Alert" records were ML Based Bot Detection on businessonline.nbi.iq/www.businessonline.nbi.iq (24 records), against normal corporate portal URLs. These are correctly filtered out by the attack-class list; do not treat them as bypasses.</Item>
+        <Item>The FCC-Signature generic policy is the known benign-match source. Attack records on businessonline.nbi.iq are dominated by Information Disclosure / Invalid HTTP Response Status triggered signature ID 080080001 of Signatures policy FCC-Singnature against legitimate endpoints (savePreference, getCurrentAccountDetail, getCustomizeColumn). If a future rule change pulls these in, read data.msg - a generic signature on a known-legitimate parameter is a benign match.</Item>
+        <Item>Attack records lack x_forwarded_for; correlate on data.src. The attack log carries the connecting source (a FortiWeb SNAT address such as 185.56.154.x / 5.182.213.x / 159.60.170.x), not the de-proxied client. Source correlation into the traffic log is on data.src; the real external client can only be recovered where the correlated *traffic* record carries x_forwarded_for.</Item>
+      </Indicators>
+    </FalsePositive>
+    <Misconfiguration>
+      <Definition></Definition>
+    </Misconfiguration>
+    <NeedsEscalation>
+      <Definition></Definition>
+    </NeedsEscalation>
+  </ClassificationGuidance>
+  <ResponseActions>
+    <Phase name="Containment">
+      <Action>Block the source at the WAF/edge once a real attack is confirmed reached-and-plausibly-successful from a non-authorised source. Where the traffic log yields the de-proxied x_forwarded_for client (section 15.6), block that; otherwise block the connecting data.src.</Action>
+      <Action>Switch the offending signature/host to block mode. The defining feature of this alert is that enforcement was off; closing the monitor-mode gap for that signature on $host is the immediate control (section 17.4 identifies the gap).</Action>
+      <Action>Engage app/DB owners immediately for a served/errored attack on a banking host: have them check the application and database audit for $url and the attack time, and prepare to treat affected data/sessions as compromised.</Action>
+      <Action>Preserve evidence: export the section 14.1 attack record(s), the section 14.2/section 14.3 correlations, and request the application/DB logs for the window before any policy change or rotation.</Action>
+      <Action>All blocks/policy changes go through the authorised human-approved DEPLOY path; investigation here is read-only.</Action>
+    </Phase>
+    <Phase name="Eradication">
+      <Action>Fix the underlying application vulnerability (parameterised queries for SQLi, output encoding/CSP for XSS, patch for the known-exploit class) - the WAF was not the control that stopped this, so the app itself must be remediated.</Action>
+      <Action>Move the affected signatures/hosts from monitor to block across the estate, and review *why* the policy was in monitor mode (tuning to suppress the FCC-Signature false-positives is a common cause - refine the exception narrowly instead of disabling enforcement).</Action>
+      <Action>Contain confirmed impact with app/DB owners: revoke/rotate compromised sessions and credentials, roll back or quarantine modified data, and remove any injected content or backend persistence found host-side (section 17.2).</Action>
+      <Action>Hunt the same source and payload across banking hosts (section 17.1) and confirm no other host carries the same monitor-mode gap for the class.</Action>
+    </Phase>
+    <Phase name="Recovery">
+      <Action>Confirm enforcement is restored - re-run section 17.4 for $host and verify the class now shows passed_alert = 0 (blocked), and that a controlled re-test of the attack is denied.</Action>
+      <Action>Validate impact containment - app/DB owners confirm the affected data/sessions are restored/rotated and no residual attacker access remains.</Action>
+      <Action>Return to normal monitoring only after section 22 closing criteria are met and INV-01 stays clean for $host (no real class in Alert mode).</Action>
+      <Action>Recommend telemetry hardening (section 23): forwarding application and database audit into Elastic would let a future instance of this rule confirm or exclude success *inside* the SIEM instead of only via out-of-band audit.</Action>
+    </Phase>
+  </ResponseActions>
+  <Escalation>
+    <Trigger>Escalate to SOC L2 / IR (critical) and notify the application owner and DBA when any of the following hold:
+
+- A real attack class alerted-not-denied on a customer-facing banking host and section 14.2 shows the attack URL served (2xx) or backend-errored (5xx) - page immediately.
+- Post-bypass follow-through from the source (section 14.3/section 17.3): sustained 2xx on sensitive/data endpoints after the attack time.
+- A real attack reached the app but success cannot be confirmed from web logs - this is the needs_escalation path; drive application/database audit for $url and time and treat as a live incident until impact is excluded.
+- The same source is walking multiple NBI banking hosts (section 17.1), indicating a broader campaign.
+- A monitor-mode enforcement gap is found (section 17.4 passed_alert &gt; 0) on a signature that should block - escalate to the WAF/app owner to close it and re</Trigger>
+    <To>SOC L2 / IR</To>
+  </Escalation>
+  <ClosureCriteria>
+    <Item>false_positive (verified benign signature match): data.msg is a generic signature (e.g. FCC-Signature) on a known-legitimate banking parameter, confirmed by reading the request; nothing malicious reached the app. Refine the signature/exception narrowly with evidence.</Item>
+    <Item>false_positive (authorised testing): the source is a known/scoped tester matched to the schedule; record the ROE reference.</Item>
+    <Item>false_positive (reached-but-failed): a real attack reached the app but section 14.2 shows rejected4xx only and section 14.3 shows no follow-through - a malicious attempt that failed at the app; documented as blocked-at-app, never "benign".</Item>
+    <Item>misconfiguration: the non-block was a monitor-mode policy gap (section 17.4); the signature/host is switched to block and the reached attack re-judged for impact.</Item>
+    <Item>true_positive: a real attack reached the banking app unblocked and there is evidence it succeeded (served/errored URL + follow-through); source blocked, WAF switched to block, application vulnerability fixed, data/session/code impact confirmed and contained.</Item>
+    <Item>needs_escalation: a real attack reached the app but success is unconfirmed from web logs; handed to app/DB owners with the exact audit required, treated as live until excluded.</Item>
+  </ClosureCriteria>
+  <Limitations>
+    <Item>Empty INV-01 is not "safe". On 2026-08-17 the estate was enforcing block on every real attack class (Generic Attacks(Extended) 108 events / 0 alert / 108 blocked; Cross Site Scripting (Extended) 4/0/4), so the bypass condition was unmet and INV-01 returned empty. This rule fires only when a signature/host is (deliberately or accidentally) in monitor mode; when it fires, the record exists at its time - do not read a currently-empty reproduction as exoneration.</Item>
+    <Item>The bypass is already decided; success is the question. data.action == "Alert" means it reached the app. Spend the investigation on section 14.2/section 14.3 (did the app serve/err/reject, did the source follow through), not on re-litigating whether it was blocked.</Item>
+    <Item>A 2xx is "possible success", not proof. Web logs carry the response code, not the body or backend effect. Confirm data/session/code impact against application and database audit before calling true_positive.</Item>
+    <Item>FCC-Signature is the estate's benign-match generator. Generic/response-side signatures (Information Disclosure, Invalid HTTP Response Status) trip on legitimate corporate-banking parameters; read data.msg before believing a "reached" attack, but never blanket-suppress - refine narrowly.</Item>
+    <Item>Correlate on data.src; de-proxy in the traffic log. Attack records carry no x_forwarded_for; the real external client is only recoverable where the correlated traffic record has it (section 15.6). One FortiWeb SNAT source fronts many clients - weigh accordingly.</Item>
+    <Item>A clean WAF result is not assurance. The rule only sees attacks FortiWeb recognised-but-didn't-block; an evaded payload leaves no record. Application/DB-side monitoring is the decisive complementary control.</Item>
+    <Item>KB-worthy (persist to NBI customer scope): (1) businessonline.nbi.iq = corporate online-banking app; live attack posture is enforce-block on real classes, only ML Based Bot Detection in Alert mode; (2) data.action value set: Alert (reached), Alert_Deny/Erase/Deny (blocked); (3) FCC-Signature/Information-Disclosure signatures are benign matches on legitimate parameters; (4) attack records lack x_forwarded_for → correlate on data.src; (5) data.user_name = Unknown. All observed live on 2026-08-17.</Item>
+  </Limitations>
+</Playbook>

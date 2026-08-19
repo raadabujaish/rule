@@ -1,0 +1,77 @@
+{
+  "name": "Initial Access — New RDP User→Host Pair (Remote Interactive Logon)",
+  "tags": [
+    "NBI",
+    "detection-recovery-2026-08",
+    "PT-validated",
+    "initial-access",
+    "rdp"
+  ],
+  "interval": "1h",
+  "enabled": true,
+  "description": "First-ever RDP (Type 10) logon of a given user to a given host in the last 14 days. Low severity on its own (seed activity through a shared gateway is common) but correlates with later spray/Kerberoast/lateral movement in the multi-stage rule to elevate.",
+  "risk_score": 30,
+  "severity": "low",
+  "note": "### Investigation\n1. Expected for this user to RDP this host?\n2. Correlate source.ip and subsequent privileged/lateral activity (multi-stage rule).\n### Tuning\nSuppression via new_terms 14d window; a busy admin will only alert on genuinely new destinations.",
+  "output_index": "",
+  "investigation_fields": {
+    "field_names": [
+      "winlog.event_data.TargetUserName",
+      "source.ip",
+      "host.name",
+      "winlog.event_data.LogonType"
+    ]
+  },
+  "author": [
+    "raadabujaish"
+  ],
+  "false_positives": [
+    "Users legitimately accessing a new server for the first time (expected background rate; low severity by design)."
+  ],
+  "from": "now-70m",
+  "rule_id": "nbi-rdp-new-user-host",
+  "max_signals": 100,
+  "risk_score_mapping": [],
+  "severity_mapping": [],
+  "threat": [
+    {
+      "framework": "MITRE ATT&CK",
+      "tactic": {
+        "id": "TA0001",
+        "name": "Initial Access",
+        "reference": "https://attack.mitre.org/tactics/TA0001/"
+      },
+      "technique": [
+        {
+          "id": "T1078.002",
+          "name": "Valid Accounts: Domain",
+          "reference": "https://attack.mitre.org/techniques/T1078/002/"
+        },
+        {
+          "id": "T1021.001",
+          "name": "Remote Desktop Protocol",
+          "reference": "https://attack.mitre.org/techniques/T1021/001/"
+        }
+      ]
+    }
+  ],
+  "to": "now",
+  "references": [],
+  "version": 1,
+  "exceptions_list": [],
+  "related_integrations": [],
+  "required_fields": [],
+  "setup": "",
+  "type": "new_terms",
+  "query": "event.code:\"4624\" and winlog.event_data.LogonType:\"10\" and source.ip:* and not source.ip:\"::1\"",
+  "new_terms_fields": [
+    "winlog.event_data.TargetUserName",
+    "host.name"
+  ],
+  "history_window_start": "now-14d",
+  "index": [
+    "logs-system.security-*"
+  ],
+  "language": "kuery",
+  "actions": []
+}

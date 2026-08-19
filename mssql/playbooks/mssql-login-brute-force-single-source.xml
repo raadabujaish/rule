@@ -1,0 +1,363 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<Playbook xmlns="https://soc.example/playbooks" id="PB-mssql-login-brute-force-single-source" name="MS SQL — Login Brute Force from a Single Source - SOC Playbook" version="3.0" status="Validated" classification="TLP:AMBER">
+  <Metadata>
+    <Owner>NBI SOC / Detection Engineering</Owner>
+    <LastUpdated>2026-08-19</LastUpdated>
+    <Severity default="High">High</Severity>
+    <Confidence default="Medium">Medium</Confidence>
+    <Category>Credential Access</Category>
+    <MitreAttack>
+      <Technique id="T1110"/>
+      <Technique id="T1110.001"/>
+      <Technique id="T1078"/>
+      <Tactic id="TA0006"/>
+    </MitreAttack>
+    <References>
+      <Reference title="MITRE ATT&amp;CK - Brute Force (T1110)" url="https://attack.mitre.org/techniques/T1110/"/>
+      <Reference title="MITRE ATT&amp;CK - Brute Force: Password Guessing (T1110.001)" url="https://attack.mitre.org/techniques/T1110/001/"/>
+      <Reference title="MITRE ATT&amp;CK - Valid Accounts (T1078)" url="https://attack.mitre.org/techniques/T1078/"/>
+      <Reference title="MITRE ATT&amp;CK - Credential Access tactic (TA0006)" url="https://attack.mitre.org/tactics/TA0006/"/>
+      <Reference title="Microsoft Learn - MSSQLSERVER_18456 (Login failed) and failure reasons" url="https://learn.microsoft.com/en-us/sql/relational-databases/errors-events/mssqlserver-18456-database-engine-error"/>
+      <Reference title="Microsoft Learn - SQL Server Audit (Database Engine)" url="https://learn.microsoft.com/en-us/sql/relational-databases/security/auditing/sql-server-audit-database-engine"/>
+      <Reference title="Microsoft Learn - Choose an authentication mode (SQL vs Windows)" url="https://learn.microsoft.com/en-us/sql/relational-databases/security/choose-an-authentication-mode"/>
+      <Reference title="Elastic - Threshold rule type (Detection rules)" url="https://www.elastic.co/guide/en/security/current/rules-ui-create.html"/>
+      <Reference title="Elastic - Microsoft SQL Server integration (audit logs)" url="https://docs.elastic.co/integrations/microsoft_sqlserver"/>
+    </References>
+  </Metadata>
+  <AlertContext>
+    <RuleName>MS SQL — Login Brute Force from a Single Source</RuleName>
+    <RuleId>nbi-sql-login-bruteforce</RuleId>
+    <RuleType>threshold</RuleType>
+    <Index>logs-microsoft_sqlserver.audit-*</Index>
+    <TriggerLogic>The deployed rule is an Elastic Threshold rule. Its detection logic as a Kibana KQL filter with a threshold (use the filter for fast pivoting in Discover / Timeline):
+
+
+Threshold: group by sqlserver.audit.client_ip, fire at count ≥ 15 per interval.
+
+Plain English: count failed SQL logins per source IP; when one source crosses 15 failures in the window, alert naming that source. A crucial telemetry consequence (section 8): the threshold field is the source IP, so the alert names one source - but the *failing login name is not in the principal fields*. On login-failed, sqlserver.audit.session_server_principal_name / server_principal_name are null; the attempted login appears in user.name and inside the failure message in sqlserver.audit.statement. On a subsequent login-succeeded, the principal *is* populated in session_server_principal_name - so correlating a failing login to a success means joining user.name (failure) to session_server_principal_name (success).</TriggerLogic>
+    <KeyAlertFields>sqlserver.audit.client_ip, event.action, user.name, sqlserver.audit.session_server_principal_name, sqlserver.audit.server_principal_name, sqlserver.audit.statement, sqlserver.audit.application_name, host.name, sqlserver.audit.action_id, sqlserver.audit.class_type</KeyAlertFields>
+  </AlertContext>
+  <Inputs>
+    <Input name="$client_ip"/>
+    <Input name="$login"/>
+  </Inputs>
+  <ExecutiveSummary>
+    <Overview>This playbook drives triage and investigation of the MS SQL - Login Brute Force from a Single Source detection on NBI's Elastic Security deployment. It is a Threshold rule on event.action: "login-failed" that fires when a single sqlserver.audit.client_ip produces 15 or more failed SQL logins in the interval.
+
+A failed-login burst from one source is either a misconfigured application/service repeatedly presenting a stale/rotated credential, or password guessing/spraying against SQL logins. The two look similar in volume but differ in shape. The analyst's job is to tell them apart and - decisively - to determine whether any login from this source subsequently succeeded, which would indicate a probable credential compromise. Classification is true_positive (successful brute force / compromise), false_positive (authorised testing OR positively-proven-blocked malicious attempt), misconfiguration (stale service credential), or needs_escalation. The verdict turns on the diversity of attempted logins, the failure reasons, and the success check.</Overview>
+    <BusinessImpact>An alert means one source IP ($client_ip) crossed the failed-SQL-login threshold on servers audited into logs-microsoft_sqlserver.audit-*. SQL logins often front core-banking and application databases, so this matters two ways:
+
+- A successful guess or a compromised service credential grants direct database access - bypassing the application tier entirely.
+- Even a pure misconfiguration is operationally significant - a service hammering a stale credential can trigger account lockouts and can mask a real attack in the noise.
+
+The shape distinguishes the causes:
+
+- Stale/rotated credential (misconfiguration): the same login failing with "Password did not match" across many servers, driven by an application data provider. (This is exactly the live NBI example: dba_admin from 10.11.18.21.)
+- Guessing/spraying (hostile): many distinct login names and/or "login does not exist" errors; a focused guess is high fails against one login on one server.
+
+The single most important question is the success check (section 14.2) - a success after a failure burst for the same login is a probable compromise.</BusinessImpact>
+  </ExecutiveSummary>
+  <Investigation>
+    <Goal>Decide true_positive / false_positive / misconfiguration / needs_escalation for MS SQL — Login Brute Force from a Single Source.</Goal>
+    <Workflow>
+      <Step order="1" name="Profile the failing source">
+        <Purpose>Profile the failing source</Purpose>
+        <Query platform="Elastic" language="ES|QL" id="Q-01">
+          <![CDATA[
+FROM logs-microsoft_sqlserver.audit-*
+| WHERE sqlserver.audit.client_ip == "$client_ip"
+    AND event.action == "login-failed"
+    AND @timestamp >= NOW() - 2 hours
+| STATS fails = COUNT(*), distinct_logins = COUNT_DISTINCT(user.name), target_servers = COUNT_DISTINCT(host.name),
+        attempted_logins = VALUES(user.name), apps = VALUES(sqlserver.audit.application_name)
+| LIMIT 1
+]]>
+        </Query>
+      </Step>
+      <Step order="2" name="Check whether any login succeeded from this source">
+        <Purpose>Check whether any login succeeded from this source</Purpose>
+        <Query platform="Elastic" language="ES|QL" id="Q-02">
+          <![CDATA[
+FROM logs-microsoft_sqlserver.audit-*
+| WHERE sqlserver.audit.client_ip == "$client_ip"
+    AND event.action == "login-succeeded"
+    AND @timestamp >= NOW() - 2 hours
+| STATS successes = COUNT(*), succeeded_logins = VALUES(sqlserver.audit.session_server_principal_name),
+        servers = VALUES(host.name), apps = VALUES(sqlserver.audit.application_name)
+| LIMIT 1
+]]>
+        </Query>
+      </Step>
+      <Step order="3" name="Entity pivoting">
+        <Purpose>Entity pivoting</Purpose>
+        <Query platform="Elastic" language="ES|QL" id="Q-03">
+          <![CDATA[
+FROM logs-microsoft_sqlserver.audit-*
+| WHERE sqlserver.audit.client_ip == "$client_ip"
+    AND @timestamp >= NOW() - 2 hours
+| STATS events = COUNT(*), servers = COUNT_DISTINCT(host.name)
+    BY event.action, sqlserver.audit.application_name
+| SORT events DESC
+| LIMIT 20
+]]>
+        </Query>
+      </Step>
+      <Step order="4" name="Process investigation">
+        <Purpose>Process investigation</Purpose>
+        <Query platform="Elastic" language="ES|QL" id="Q-04">
+          <![CDATA[
+FROM logs-microsoft_sqlserver.audit-*
+| WHERE sqlserver.audit.client_ip == "$client_ip"
+    AND event.action == "login-failed"
+    AND @timestamp >= NOW() - 2 hours
+| STATS fails = COUNT(*), logins = COUNT_DISTINCT(user.name), servers = COUNT_DISTINCT(host.name)
+    BY sqlserver.audit.application_name
+| SORT fails DESC
+| LIMIT 15
+]]>
+        </Query>
+      </Step>
+      <Step order="5" name="User investigation">
+        <Purpose>User investigation</Purpose>
+        <Query platform="Elastic" language="ES|QL" id="Q-05">
+          <![CDATA[
+FROM logs-microsoft_sqlserver.audit-*
+| WHERE sqlserver.audit.client_ip == "$client_ip"
+    AND event.action == "login-failed"
+    AND @timestamp >= NOW() - 2 hours
+| STATS fails = COUNT(*) BY user.name, host.name
+| SORT fails DESC
+| LIMIT 25
+]]>
+        </Query>
+      </Step>
+      <Step order="6" name="User investigation">
+        <Purpose>User investigation</Purpose>
+        <Query platform="Elastic" language="ES|QL" id="Q-06">
+          <![CDATA[
+FROM logs-microsoft_sqlserver.audit-*
+| WHERE user.name == "$login"
+    AND event.action == "login-failed"
+    AND @timestamp >= NOW() - 2 hours
+| STATS fails = COUNT(*), sources = COUNT_DISTINCT(sqlserver.audit.client_ip)
+    BY host.name
+| SORT fails DESC
+| LIMIT 20
+]]>
+        </Query>
+      </Step>
+      <Step order="7" name="Host investigation">
+        <Purpose>Host investigation</Purpose>
+        <Query platform="Elastic" language="ES|QL" id="Q-07">
+          <![CDATA[
+FROM logs-microsoft_sqlserver.audit-*
+| WHERE sqlserver.audit.client_ip == "$client_ip"
+    AND event.action == "login-failed"
+    AND @timestamp >= NOW() - 2 hours
+| STATS fails = COUNT(*), logins = COUNT_DISTINCT(user.name)
+    BY host.name, user.name
+| SORT fails DESC
+| LIMIT 20
+]]>
+        </Query>
+      </Step>
+      <Step order="8" name="IP investigation">
+        <Purpose>IP investigation</Purpose>
+        <Query platform="Elastic" language="ES|QL" id="Q-08">
+          <![CDATA[
+FROM logs-microsoft_sqlserver.audit-*
+| WHERE sqlserver.audit.client_ip == "$client_ip"
+    AND sqlserver.audit.class_type == "LOGIN"
+    AND @timestamp >= NOW() - 2 hours
+| STATS events = COUNT(*), servers = COUNT_DISTINCT(host.name)
+    BY event.action, sqlserver.audit.application_name
+| SORT events DESC
+| LIMIT 20
+]]>
+        </Query>
+      </Step>
+      <Step order="9" name="Authentication investigation">
+        <Purpose>Authentication investigation</Purpose>
+        <Query platform="Elastic" language="ES|QL" id="Q-09">
+          <![CDATA[
+FROM logs-microsoft_sqlserver.audit-*
+| WHERE sqlserver.audit.client_ip == "$client_ip"
+    AND event.action == "login-failed"
+    AND @timestamp >= NOW() - 2 hours
+| EVAL reason = CASE(
+      sqlserver.audit.statement LIKE "*Password did not match*", "wrong_password_login_exists",
+      sqlserver.audit.statement LIKE "*could not be found*" OR sqlserver.audit.statement LIKE "*is not valid*" OR sqlserver.audit.statement LIKE "*does not exist*", "login_unknown",
+      "other_reason")
+| STATS fails = COUNT(*), target_servers = COUNT_DISTINCT(host.name)
+    BY user.name, reason
+| SORT fails DESC
+| LIMIT 25
+]]>
+        </Query>
+      </Step>
+      <Step order="10" name="Timeline Reconstruction">
+        <Purpose>Timeline Reconstruction</Purpose>
+        <Query platform="Elastic" language="ES|QL" id="Q-10">
+          <![CDATA[
+FROM logs-microsoft_sqlserver.audit-*
+| WHERE sqlserver.audit.client_ip == "$client_ip"
+    AND (event.action == "login-failed" OR event.action == "login-succeeded")
+    AND @timestamp >= NOW() - 2 hours
+| KEEP @timestamp, event.action, user.name, sqlserver.audit.session_server_principal_name, host.name, sqlserver.audit.application_name
+| SORT @timestamp ASC
+| LIMIT 200
+]]>
+        </Query>
+      </Step>
+      <Step order="11" name="Lateral movement validation">
+        <Purpose>Lateral movement validation</Purpose>
+        <Query platform="Elastic" language="ES|QL" id="Q-11">
+          <![CDATA[
+FROM logs-microsoft_sqlserver.audit-*
+| WHERE sqlserver.audit.client_ip == "$client_ip"
+    AND event.action == "login-succeeded"
+    AND @timestamp >= NOW() - 2 hours
+| STATS successes = COUNT(*) BY sqlserver.audit.session_server_principal_name, host.name
+| SORT successes DESC
+| LIMIT 20
+]]>
+        </Query>
+      </Step>
+      <Step order="12" name="Persistence validation">
+        <Purpose>Persistence validation</Purpose>
+        <Query platform="Elastic" language="ES|QL" id="Q-12">
+          <![CDATA[
+FROM logs-microsoft_sqlserver.audit-*
+| WHERE sqlserver.audit.client_ip == "$client_ip"
+    AND @timestamp >= NOW() - 2 hours
+| EVAL persist = CASE(
+    sqlserver.audit.statement LIKE "*CREATE LOGIN*" OR sqlserver.audit.statement LIKE "*ALTER SERVER ROLE*"
+    OR sqlserver.audit.statement LIKE "*sp_addsrvrolemember*" OR sqlserver.audit.statement LIKE "*sp_addlinkedserver*"
+    OR sqlserver.audit.statement LIKE "*CREATE ASSEMBLY*", 1, 0)
+| STATS total = COUNT(*), persistence_ops = SUM(persist)
+    BY sqlserver.audit.session_server_principal_name, host.name
+| SORT persistence_ops DESC
+| LIMIT 15
+]]>
+        </Query>
+      </Step>
+      <Step order="13" name="Privilege escalation validation">
+        <Purpose>Privilege escalation validation</Purpose>
+        <Query platform="Elastic" language="ES|QL" id="Q-13">
+          <![CDATA[
+FROM logs-microsoft_sqlserver.audit-*
+| WHERE sqlserver.audit.client_ip == "$client_ip"
+    AND sqlserver.audit.statement LIKE "*sp_configure*"
+    AND @timestamp >= NOW() - 2 hours
+| STATS execs = COUNT(*), statements = VALUES(sqlserver.audit.statement)
+    BY sqlserver.audit.session_server_principal_name, host.name
+| SORT execs DESC
+| LIMIT 10
+]]>
+        </Query>
+      </Step>
+      <Step order="14" name="Defense evasion validation">
+        <Purpose>Defense evasion validation</Purpose>
+        <Query platform="Elastic" language="ES|QL" id="Q-14">
+          <![CDATA[
+FROM logs-microsoft_sqlserver.audit-*
+| WHERE user.name == "$login"
+    AND event.action == "login-failed"
+    AND @timestamp >= NOW() - 2 hours
+| STATS fails = COUNT(*), sources = COUNT_DISTINCT(sqlserver.audit.client_ip), servers = COUNT_DISTINCT(host.name)
+| LIMIT 1
+]]>
+        </Query>
+      </Step>
+      <Step order="15" name="Impact assessment">
+        <Purpose>Impact assessment</Purpose>
+        <Query platform="Elastic" language="ES|QL" id="Q-15">
+          <![CDATA[
+FROM logs-microsoft_sqlserver.audit-*
+| WHERE sqlserver.audit.client_ip == "$client_ip"
+    AND sqlserver.audit.class_type != "LOGIN"
+    AND @timestamp >= NOW() - 2 hours
+| STATS ops = COUNT(*)
+    BY sqlserver.audit.session_server_principal_name, sqlserver.audit.action_id, host.name
+| SORT ops DESC
+| LIMIT 20
+]]>
+        </Query>
+      </Step>
+      <Step order="16" name="Finalize verdict">
+        <DecisionTree>
+        </DecisionTree>
+      </Step>
+    </Workflow>
+  </Investigation>
+  <ClassificationGuidance>
+    <TruePositive>
+      <Definition></Definition>
+    </TruePositive>
+    <FalsePositive>
+      <Definition></Definition>
+      <Indicators>
+        <Item>Authorised security testing / vulnerability scanning from a known source with an approved scope and time window. Not "benign" - it is authorised activity that must be positively matched to the test's ROE before closing.</Item>
+        <Item>A misconfigured application/service presenting a stale credential - this is technically a *misconfiguration* (its own verdict below), the most common non-attack cause, and the live NBI shape.</Item>
+        <Item>A user/service after a password rotation whose old credential is still cached in a connection string or scheduled job.</Item>
+        <Item>Positively-blocked malicious attempts - hostile guessing/enumeration that never succeeded for the whole window. Recorded as a blocked malicious attempt (documented, source contained/monitored), never "benign".</Item>
+        <Item>A real stale-credential source is live on this estate. 10.11.18.21 fails a single login, dba_admin, with "Password did not match that for the login provided", across six servers (nim-sso-dbv03, nim-a2a-dbv04, nim-py-dbv4, nim-a2a-dbv03, nim-py-dbv3, nim-sso-dbv04), all via .Net SqlClient Data Provider, with zero successes. This is distinct_logins = 1, reason = wrong_password_login_exists, an app provider, many targets - the unambiguous stale/rotated-service-credential fingerprint. Its verdict is misconfiguration: the dba_admin credential (or connection strings referencing it) needs updating on the source, and the resulting lockouts cleared.</Item>
+        <Item>But it is a DBA-named login on payment/SSO/integration servers. dba_admin is a privileged-sounding login, and the target servers span SSO (nim-sso-*), application-to-application integration (nim-a2a-*), and payments (nim-py-*). A stale DBA credential hard-wired into a .NET client hammering six sensitive servers is a hygiene and exposure problem in its own right - correct it promptly and ask *why* a DBA credential is embedded in an application client, rather than dismissing it as "just noise".</Item>
+        <Item>login-failed is genuinely low-volume here. Across a 4-hour window the whole estate produced tens of failed logins (dominated by this one source), against ~3M successful/other events per hour. So a new failing source, a new attempted login, or any success after failures is easy to spot and high-signal.</Item>
+        <Item>No historical NBI benign-true-positive (hostile-but-blocked) is on record for this rule. Treat a *new* source, *new* login diversity, or *any* success as real until proven otherwise; do not fold a hostile source into the "known stale-credential" bucket.</Item>
+      </Indicators>
+    </FalsePositive>
+    <Misconfiguration>
+      <Definition></Definition>
+    </Misconfiguration>
+    <NeedsEscalation>
+      <Definition></Definition>
+    </NeedsEscalation>
+  </ClassificationGuidance>
+  <ResponseActions>
+    <Phase name="Containment">
+      <Action>If a success is confirmed (true_positive), reset or disable the compromised login immediately and block the source IP at the network/firewall layer to stop further authentication.</Action>
+      <Action>Force-terminate active sessions of the compromised login on every reached server (section 17.1) via the authorised DEPLOY path.</Action>
+      <Action>Preserve evidence first - the failure/success audit records, the source profile, and the reason breakdown - before resetting, so the attack is documented.</Action>
+      <Action>For a blocked malicious attempt, rate-limit/block the source and preserve evidence; monitor for a renewed or distributed attempt (section 17.4).</Action>
+      <Action>For a stale-credential misconfiguration, do not block a legitimate service source outright - instead route to app support to fix the credential and clear lockouts, but confirm it truly is the known service (a hostile actor can mimic a service provider string).</Action>
+      <Action>All containment changes go through the authorised, human-approved DEPLOY path; investigation itself is read-only.</Action>
+    </Phase>
+    <Phase name="Eradication">
+      <Action>True positive: confirm the login is reset/disabled everywhere it is used, hunt the successful session's post-logon activity on every target server (section 17.1/section 17.5), remove any persistence it created (section 17.2), and revert any feature/config changes (section 17.3).</Action>
+      <Action>Blocked attempt: keep the source blocked/rate-limited; review whether the targeted login(s) should be renamed/disabled (especially sa) and whether SQL should be exposed to that source at all.</Action>
+      <Action>Misconfiguration (stale credential): identify the application/service behind $client_ip, update the credential/connection strings to the rotated password, and clear any resulting account lockouts. Ask why a privileged login (e.g. dba_admin) is embedded in an application client and move it to a least-privilege, ideally Windows-integrated, identity.</Action>
+    </Phase>
+    <Phase name="Recovery">
+      <Action>Rotate the affected login's credential (again, cleanly) after a confirmed compromise, and any credentials it could reach; review the reached servers for residual access.</Action>
+      <Action>Restore from a known-good state only if a compromised session tampered with data - validate affected databases (SSO/payments/onboarding/KYC) against backups.</Action>
+      <Action>Return the login/source to service only after section 22 closing criteria are met and monitoring confirms the failure burst has stopped and no new success occurs.</Action>
+      <Action>Harden: enforce strong SQL login policies and lockout thresholds, prefer Windows-integrated authentication over SQL logins, restrict SQL exposure by network segmentation, and remediate the stale-credential source if that was the cause.</Action>
+    </Phase>
+  </ResponseActions>
+  <Escalation>
+    <Trigger>Escalate to SOC L2 / IR (and notify the customer / DBA + application owner) when any of the following hold:
+
+- Any successful login from the source after the failure burst (section 14.2) - probable compromise; page immediately.
+- The targeted login is privileged (sa, admin/DBA - e.g. dba_admin), regardless of outcome.
+- A sustained high-diversity spray/enumeration (many usernames, login_unknown errors), or the same login is failing from multiple sources (section 17.4 - distributed attack defeating the single-source threshold).
+- Post-success persistence, feature enablement, or lateral movement appears (section 17.1-17.5).
+- The attempted login or success state cannot be resolved from the events - escalate as needs_escalation; and for a still-live burst, empty != safe (re-run near the end of the window).</Trigger>
+    <To>SOC L2 / IR</To>
+  </Escalation>
+  <ClosureCriteria>
+    <Item>true_positive: a failing login succeeded from the source (or guessing/enumeration led to a success); the affected login is reset/disabled, the source blocked, post-logon activity hunted and scoped across all reached servers, and the incident documented.</Item>
+    <Item>false_positive (authorised testing): the source and activity positively match an approved test's ROE, scope, and window. Record the reference.</Item>
+    <Item>false_positive (blocked malicious attempt): hostile guessing/enumeration proven to have failed for the whole window (no success, credentials unchanged); the source contained/monitored and the blocked attempt documented - never "benign".</Item>
+    <Item>misconfiguration: a single service login failing wrong_password_login_exists across servers from an application provider with zero successes; the credential/connection strings updated, lockouts cleared, and (if privileged) the identity moved to least-privilege. (The live NBI example: dba_admin from 10.11.18.21.)</Item>
+    <Item>needs_escalation: handed to Tier 3 / DBA with the specific gaps (unresolvable attempted login, unconfirmed success state, still-live burst) documented.</Item>
+  </ClosureCriteria>
+  <Limitations>
+    <Item>The success check is everything. Volume and shape sort misconfiguration from hostile, but a success after failures (join user.name → session_server_principal_name from the same source) is the line between "clean up a credential" and "declare a compromise". Always run section 14.2, and re-run it near the end of a live burst - empty != safe.</Item>
+    <Item>Login shape sorts the causes. distinct_logins = 1 + wrong_password_login_exists + application provider + many servers = stale credential (the live dba_admin/10.11.18.21 case). Many usernames / login_unknown = spraying/enumeration (hostile). High fails on one login/one server = focused guessing.</Item>
+    <Item>The attempted login hides in user.name, not the principal fields. On login-failed the principal is null; the login is in user.name and the failure message. On login-succeeded the principal is populated - so the failure→success correlation is a user.name → session_server_principal_name join. Carry the attempted login as $login for the cross-source pivots.</Item>
+    <Item>This threshold rule is blind to distribution and throttling. An attacker under 15/interval, spread across IPs, or throttled over hours will not trip it. Always run the by-login cross-source check (section 15.4/section 17.4); a login failing from many sources is the distributed attack this rule misses, and belongs to the aggregate-by-login analytic.</Item>
+    <Item>A privileged targeted login raises the stakes even for a "misconfiguration". dba_admin embedded in a .NET client hammering SSO/payment/integration servers is a real exposure - fix it promptly and question the design; do not file it as harmless noise.</Item>
+    <Item>KB-worthy (persist to NBI customer scope): (1) live stale-credential source 10.11.18.21 = dba_admin failing wrong_password_login_exists across six servers (nim-sso-dbv03, nim-a2a-dbv04, nim-py-dbv4, nim-a2a-dbv03, nim-py-dbv3, nim-sso-dbv04) via .Net SqlClient Data Provider, 0 successes → misconfiguration, DBA cred embedded in an app; (2) on login-failed, session_server_principal_name/server_principal_name null, attempted login in user.name; (3) failure-reason text Password did not match that for the login provided = wrong-password-existing-login; (4) estate login-failed volume is low (tens/4h) so any success or new source is high-signal. Observed live 2026-08-17.</Item>
+  </Limitations>
+</Playbook>

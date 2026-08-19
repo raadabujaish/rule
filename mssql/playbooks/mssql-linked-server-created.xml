@@ -1,0 +1,352 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<Playbook xmlns="https://soc.example/playbooks" id="PB-mssql-linked-server-created" name="MS SQL — Linked Server Created (Lateral Movement) - SOC Playbook" version="3.0" status="Validated" classification="TLP:AMBER">
+  <Metadata>
+    <Owner>NBI SOC / Detection Engineering</Owner>
+    <LastUpdated>2026-08-19</LastUpdated>
+    <Severity default="High">High</Severity>
+    <Confidence default="Medium">Medium</Confidence>
+    <Category>Lateral Movement</Category>
+    <MitreAttack>
+      <Technique id="T1021"/>
+      <Technique id="T1078"/>
+      <Technique id="T1570"/>
+      <Tactic id="TA0008"/>
+    </MitreAttack>
+    <References>
+      <Reference title="MITRE ATT&amp;CK - Remote Services (T1021)" url="https://attack.mitre.org/techniques/T1021/"/>
+      <Reference title="MITRE ATT&amp;CK - Valid Accounts (T1078)" url="https://attack.mitre.org/techniques/T1078/"/>
+      <Reference title="MITRE ATT&amp;CK - Lateral Tool Transfer (T1570)" url="https://attack.mitre.org/techniques/T1570/"/>
+      <Reference title="MITRE ATT&amp;CK - Lateral Movement tactic (TA0008)" url="https://attack.mitre.org/tactics/TA0008/"/>
+      <Reference title="Microsoft Learn - sp_addlinkedserver (Transact-SQL)" url="https://learn.microsoft.com/en-us/sql/relational-databases/system-stored-procedures/sp-addlinkedserver-transact-sql"/>
+      <Reference title="Microsoft Learn - sp_addlinkedsrvlogin (Transact-SQL)" url="https://learn.microsoft.com/en-us/sql/relational-databases/system-stored-procedures/sp-addlinkedsrvlogin-transact-sql"/>
+      <Reference title="Microsoft Learn - OPENQUERY (Transact-SQL)" url="https://learn.microsoft.com/en-us/sql/t-sql/functions/openquery-transact-sql"/>
+      <Reference title="NetSPI / PowerUpSQL - SQL Server link crawling for lateral movement" url="https://www.netspi.com/blog/technical-blog/network-penetration-testing/hacking-sql-server-database-links-lab-setup-and-attacks/"/>
+      <Reference title="Elastic - Microsoft SQL Server integration (audit logs)" url="https://docs.elastic.co/integrations/microsoft_sqlserver"/>
+    </References>
+  </Metadata>
+  <AlertContext>
+    <RuleName>MS SQL — Linked Server Created (Lateral Movement)</RuleName>
+    <RuleId>nbi-sql-linked-server</RuleId>
+    <RuleType>query (custom NBI rule)</RuleType>
+    <Index>logs-microsoft_sqlserver.audit-*</Index>
+    <TriggerLogic>The deployed rule is an Elastic query-type rule over the SQL Server audit stream. Its detection logic as a one-line Kibana KQL filter (use it for fast pivoting in Discover / Timeline):
+
+
+
+Plain English: any audited statement that registers a linked server (sp_addlinkedserver) or maps a local login to remote credentials on one (sp_addlinkedsrvlogin) fires the rule. A linked server is a durable server object:
+
+- sp_addlinkedserver '&lt;name&gt;', ..., @datasrc='&lt;remote&gt;', @provider='&lt;oledb&gt;' - defines the remote endpoint and OLEDB provider.
+- sp_addlinkedsrvlogin '&lt;name&gt;', 'false', NULL, '&lt;remote_login&gt;', '&lt;remote_password&gt;' - supplies stored remote credentials (a self-mapping or a fixed privileged login).
+- Once created, it is reached via SELECT ... FROM OPENQUERY(&lt;name&gt;, '...') or EXEC('...') AT &lt;name&gt;, and - if sp_serveroption '&lt;name&gt;', 'rpc out', 'true' is set - remote procedure/command execution.
+
+Because creating a linked server requires ALTER ANY LINKED SERVER (or membership in setupadmin/sysadmin), an application login doing so is intrinsically anomalous.</TriggerLogic>
+    <KeyAlertFields>sqlserver.audit.session_server_principal_name, sqlserver.audit.server_principal_name, sqlserver.audit.statement, sqlserver.audit.client_ip, sqlserver.audit.database_name, sqlserver.audit.application_name, sqlserver.audit.host_name, host.name, sqlserver.audit.action_id, sqlserver.audit.class_type, event.action, sys.servers</KeyAlertFields>
+  </AlertContext>
+  <Inputs>
+    <Input name="$principal"/>
+    <Input name="$client_ip"/>
+  </Inputs>
+  <ExecutiveSummary>
+    <Overview>This playbook drives triage and investigation of the MS SQL - Linked Server Created (Lateral Movement) detection on NBI's Elastic Security deployment. The rule fires when an audited statement contains sp_addlinkedserver or sp_addlinkedsrvlogin. sp_addlinkedserver registers a persistent path from this SQL Server to another SQL/OLEDB data source; sp_addlinkedsrvlogin maps a local login to remote credentials. Together they create a standing, credential-backed channel that can carry queries and - with rpc out enabled - remote procedure/command execution to another server.
+
+The analyst's job is to decide whether the linked server is authorised integration/reporting configuration (false_positive) or attacker lateral-movement setup (true_positive), and to classify as true_positive, false_positive (authorised integration OR positively-proven-blocked attempt), misconfiguration, or needs_escalation. The decision is driven by the remote target, the login mapping used, which principal created it, and whether it was immediately used to reach the remote server.</Overview>
+    <BusinessImpact>An alert means that on a SQL Server audited into logs-microsoft_sqlserver.audit-*, a session under $principal from $client_ip created a linked server or a linked-server login mapping. This is significant because a linked server:
+
+- Extends a compromise from one database host to another - potentially bridging application, reporting, and core-banking database tiers - under stored credentials.
+- Persists harvested/privileged credentials in the login mapping (sys.linked_logins), giving durable access even if the original foothold is lost.
+- Enables remote code execution when rpc out is armed (EXEC('xp_cmdshell ...') AT &lt;name&gt; runs on the *remote* server).
+
+So the alert is lateral-movement *infrastructure* being stood up. The incident severity turns on the target (a known integration partner vs an unknown/off-estate host) and on use (was the remote server actually queried/executed against). The investigative questions are: to where, with which credentials, armed how, and was it used.</BusinessImpact>
+  </ExecutiveSummary>
+  <Investigation>
+    <Goal>Decide true_positive / false_positive / misconfiguration / needs_escalation for MS SQL — Linked Server Created (Lateral Movement).</Goal>
+    <Workflow>
+      <Step order="1" name="Recover the linked-server definition">
+        <Purpose>Recover the linked-server definition</Purpose>
+        <Query platform="Elastic" language="ES|QL" id="Q-01">
+          <![CDATA[
+FROM logs-microsoft_sqlserver.audit-*
+| WHERE sqlserver.audit.session_server_principal_name == "$principal"
+    AND (sqlserver.audit.statement LIKE "*sp_addlinkedserver*" OR sqlserver.audit.statement LIKE "*sp_addlinkedsrvlogin*")
+    AND @timestamp >= NOW() - 2 hours
+| STATS execs = COUNT(*), statements = VALUES(sqlserver.audit.statement)
+    BY sqlserver.audit.client_ip, sqlserver.audit.database_name, host.name
+| SORT execs DESC
+| LIMIT 10
+]]>
+        </Query>
+      </Step>
+      <Step order="2" name="Check login mapping, rpc out, and cross-server use">
+        <Purpose>Check login mapping, rpc out, and cross-server use</Purpose>
+        <Query platform="Elastic" language="ES|QL" id="Q-02">
+          <![CDATA[
+FROM logs-microsoft_sqlserver.audit-*
+| WHERE sqlserver.audit.session_server_principal_name == "$principal"
+    AND @timestamp >= NOW() - 2 hours
+| EVAL login_map = CASE(sqlserver.audit.statement LIKE "*sp_addlinkedsrvlogin*", 1, 0),
+       rpc_out = CASE(sqlserver.audit.statement LIKE "*sp_serveroption*" AND sqlserver.audit.statement LIKE "*rpc out*", 1, 0),
+       remote_exec = CASE(sqlserver.audit.statement LIKE "*OPENQUERY*" OR sqlserver.audit.statement LIKE "*) AT *", 1, 0)
+| STATS total = COUNT(*), login_maps = SUM(login_map), rpc_out_ops = SUM(rpc_out), remote_execs = SUM(remote_exec), clients = COUNT_DISTINCT(sqlserver.audit.client_ip)
+    BY sqlserver.audit.database_name
+| SORT remote_execs DESC
+| LIMIT 10
+]]>
+        </Query>
+      </Step>
+      <Step order="3" name="Entity pivoting">
+        <Purpose>Entity pivoting</Purpose>
+        <Query platform="Elastic" language="ES|QL" id="Q-03">
+          <![CDATA[
+FROM logs-microsoft_sqlserver.audit-*
+| WHERE sqlserver.audit.session_server_principal_name == "$principal"
+    AND @timestamp >= NOW() - 2 hours
+| STATS events = COUNT(*), dbs = COUNT_DISTINCT(sqlserver.audit.database_name)
+    BY sqlserver.audit.client_ip, sqlserver.audit.host_name, host.name, sqlserver.audit.application_name
+| SORT events DESC
+| LIMIT 20
+]]>
+        </Query>
+      </Step>
+      <Step order="4" name="Process investigation">
+        <Purpose>Process investigation</Purpose>
+        <Query platform="Elastic" language="ES|QL" id="Q-04">
+          <![CDATA[
+FROM logs-microsoft_sqlserver.audit-*
+| WHERE sqlserver.audit.session_server_principal_name == "$principal"
+    AND @timestamp >= NOW() - 2 hours
+| STATS events = COUNT(*), clients = COUNT_DISTINCT(sqlserver.audit.client_ip)
+    BY sqlserver.audit.application_name
+| SORT events DESC
+| LIMIT 15
+]]>
+        </Query>
+      </Step>
+      <Step order="5" name="User investigation">
+        <Purpose>User investigation</Purpose>
+        <Query platform="Elastic" language="ES|QL" id="Q-05">
+          <![CDATA[
+FROM logs-microsoft_sqlserver.audit-*
+| WHERE sqlserver.audit.session_server_principal_name == "$principal"
+    AND @timestamp >= NOW() - 2 hours
+| STATS events = COUNT(*), clients = COUNT_DISTINCT(sqlserver.audit.client_ip)
+    BY host.name, sqlserver.audit.database_name
+| SORT events DESC
+| LIMIT 20
+]]>
+        </Query>
+      </Step>
+      <Step order="6" name="Host investigation">
+        <Purpose>Host investigation</Purpose>
+        <Query platform="Elastic" language="ES|QL" id="Q-06">
+          <![CDATA[
+FROM logs-microsoft_sqlserver.audit-*
+| WHERE host.name == "nim-kta-dbv01"
+    AND @timestamp >= NOW() - 1 hours
+| STATS events = COUNT(*), clients = COUNT_DISTINCT(sqlserver.audit.client_ip)
+    BY sqlserver.audit.session_server_principal_name, sqlserver.audit.database_name
+| SORT events DESC
+| LIMIT 20
+]]>
+        </Query>
+      </Step>
+      <Step order="7" name="IP investigation">
+        <Purpose>IP investigation</Purpose>
+        <Query platform="Elastic" language="ES|QL" id="Q-07">
+          <![CDATA[
+FROM logs-microsoft_sqlserver.audit-*
+| WHERE sqlserver.audit.client_ip == "$client_ip"
+    AND @timestamp >= NOW() - 2 hours
+| STATS statements = COUNT(*), principals = COUNT_DISTINCT(sqlserver.audit.session_server_principal_name),
+        dbs = COUNT_DISTINCT(sqlserver.audit.database_name), apps = VALUES(sqlserver.audit.application_name)
+    BY sqlserver.audit.host_name, host.name
+| SORT statements DESC
+| LIMIT 10
+]]>
+        </Query>
+      </Step>
+      <Step order="8" name="Authentication investigation">
+        <Purpose>Authentication investigation</Purpose>
+        <Query platform="Elastic" language="ES|QL" id="Q-08">
+          <![CDATA[
+FROM logs-microsoft_sqlserver.audit-*
+| WHERE sqlserver.audit.session_server_principal_name == "$principal"
+    AND sqlserver.audit.class_type == "LOGIN"
+    AND @timestamp >= NOW() - 2 hours
+| STATS events = COUNT(*) BY sqlserver.audit.action_id, sqlserver.audit.client_ip, host.name
+| SORT events DESC
+| LIMIT 20
+]]>
+        </Query>
+      </Step>
+      <Step order="9" name="Timeline Reconstruction">
+        <Purpose>Timeline Reconstruction</Purpose>
+        <Query platform="Elastic" language="ES|QL" id="Q-09">
+          <![CDATA[
+FROM logs-microsoft_sqlserver.audit-*
+| WHERE sqlserver.audit.session_server_principal_name == "$principal"
+    AND sqlserver.audit.client_ip == "$client_ip"
+    AND @timestamp >= NOW() - 2 hours
+| KEEP @timestamp, sqlserver.audit.action_id, sqlserver.audit.database_name, sqlserver.audit.statement
+| SORT @timestamp ASC
+| LIMIT 200
+]]>
+        </Query>
+      </Step>
+      <Step order="10" name="Lateral movement validation">
+        <Purpose>Lateral movement validation</Purpose>
+        <Query platform="Elastic" language="ES|QL" id="Q-10">
+          <![CDATA[
+FROM logs-microsoft_sqlserver.audit-*
+| WHERE sqlserver.audit.session_server_principal_name == "$principal"
+    AND @timestamp >= NOW() - 2 hours
+| EVAL remote_exec = CASE(sqlserver.audit.statement LIKE "*OPENQUERY*" OR sqlserver.audit.statement LIKE "*) AT *", 1, 0),
+       rpc_out = CASE(sqlserver.audit.statement LIKE "*sp_serveroption*" AND sqlserver.audit.statement LIKE "*rpc out*", 1, 0)
+| STATS events = COUNT(*), remote_execs = SUM(remote_exec), rpc_out_ops = SUM(rpc_out), hosts = COUNT_DISTINCT(host.name)
+    BY sqlserver.audit.client_ip
+| SORT remote_execs DESC
+| LIMIT 20
+]]>
+        </Query>
+      </Step>
+      <Step order="11" name="Persistence validation">
+        <Purpose>Persistence validation</Purpose>
+        <Query platform="Elastic" language="ES|QL" id="Q-11">
+          <![CDATA[
+FROM logs-microsoft_sqlserver.audit-*
+| WHERE sqlserver.audit.session_server_principal_name == "$principal"
+    AND @timestamp >= NOW() - 2 hours
+| EVAL persist = CASE(
+    sqlserver.audit.statement LIKE "*sp_addlinkedserver*" OR sqlserver.audit.statement LIKE "*sp_addlinkedsrvlogin*"
+    OR sqlserver.audit.statement LIKE "*CREATE LOGIN*" OR sqlserver.audit.statement LIKE "*ALTER SERVER ROLE*"
+    OR sqlserver.audit.statement LIKE "*sp_addsrvrolemember*", 1, 0)
+| STATS total = COUNT(*), persistence_ops = SUM(persist) BY sqlserver.audit.database_name
+| SORT persistence_ops DESC
+| LIMIT 15
+]]>
+        </Query>
+      </Step>
+      <Step order="12" name="Privilege escalation validation">
+        <Purpose>Privilege escalation validation</Purpose>
+        <Query platform="Elastic" language="ES|QL" id="Q-12">
+          <![CDATA[
+FROM logs-microsoft_sqlserver.audit-*
+| WHERE sqlserver.audit.session_server_principal_name == "$principal"
+    AND (sqlserver.audit.statement LIKE "*sp_serveroption*" OR sqlserver.audit.statement LIKE "*sp_configure*")
+    AND @timestamp >= NOW() - 2 hours
+| STATS execs = COUNT(*), statements = VALUES(sqlserver.audit.statement)
+    BY sqlserver.audit.client_ip, host.name
+| SORT execs DESC
+| LIMIT 10
+]]>
+        </Query>
+      </Step>
+      <Step order="13" name="Defense evasion validation">
+        <Purpose>Defense evasion validation</Purpose>
+        <Query platform="Elastic" language="ES|QL" id="Q-13">
+          <![CDATA[
+FROM logs-microsoft_sqlserver.audit-*
+| WHERE sqlserver.audit.session_server_principal_name == "$principal"
+    AND @timestamp >= NOW() - 2 hours
+| EVAL tamper = CASE(
+    sqlserver.audit.statement LIKE "*ALTER SERVER AUDIT*" OR sqlserver.audit.statement LIKE "*DROP SERVER AUDIT*"
+    OR sqlserver.audit.statement LIKE "*sp_audit*" OR sqlserver.audit.statement LIKE "*ALTER DATABASE AUDIT*", 1, 0),
+       drop_link = CASE(sqlserver.audit.statement LIKE "*sp_dropserver*" OR sqlserver.audit.statement LIKE "*sp_droplinkedsrvlogin*", 1, 0)
+| STATS total = COUNT(*), tamper_ops = SUM(tamper), drop_ops = SUM(drop_link) BY sqlserver.audit.database_name
+| SORT tamper_ops DESC
+| LIMIT 15
+]]>
+        </Query>
+      </Step>
+      <Step order="14" name="Impact assessment">
+        <Purpose>Impact assessment</Purpose>
+        <Query platform="Elastic" language="ES|QL" id="Q-14">
+          <![CDATA[
+FROM logs-microsoft_sqlserver.audit-*
+| WHERE sqlserver.audit.session_server_principal_name == "$principal"
+    AND (sqlserver.audit.statement LIKE "*OPENQUERY*" OR sqlserver.audit.statement LIKE "*) AT *")
+    AND @timestamp >= NOW() - 2 hours
+| KEEP @timestamp, sqlserver.audit.client_ip, sqlserver.audit.database_name, sqlserver.audit.statement
+| SORT @timestamp DESC
+| LIMIT 25
+]]>
+        </Query>
+      </Step>
+      <Step order="15" name="Finalize verdict">
+        <DecisionTree>
+        </DecisionTree>
+      </Step>
+    </Workflow>
+  </Investigation>
+  <ClassificationGuidance>
+    <TruePositive>
+      <Definition></Definition>
+    </TruePositive>
+    <FalsePositive>
+      <Definition></Definition>
+      <Indicators>
+        <Item>Authorised reporting/integration configuration - a linked server to a known internal reporting warehouse or an integration partner, created by a recognised DBA/integration principal from a known host under change control, typically with Windows-integrated security (no stored password). This is the primary benign cause and must be matched to a change/integration record, not assumed.</Item>
+        <Item>Vendor/ETL product setup that registers a linked server as part of a documented deployment.</Item>
+        <Item>DBA maintenance/migration creating a temporary linked server for a data move within an approved window.</Item>
+        <Item>Positively-blocked attempts - the sp_addlinkedserver was refused (permission denied, not created). Recorded as a blocked attempt (documented, principal/client investigated), never "benign".</Item>
+        <Item>Linked-server creation is off-baseline. In the validation windows, login_maps = 0, rpc_out_ops = 0, and remote_execs = 0 for the sampled principals - the estate's SQL workload is application ORM/stored-procedure traffic (SELECT/UPDATE/EXECUTE via .Net SqlClient Data Provider and EntityFrameworkMUE), not linked-server management. Any firing is therefore off-baseline and warrants review; there is no legitimate linked-server-creation noise to tune out at the estate level.</Item>
+        <Item>The busiest SQL host is a banking-onboarding platform. nim-kta-dbv01 hosts the Kofax TotalAgility databases plus KYC/onboarding databases (KYC_Individual, Individual_Customer_Onboarding, OnboardingLookups, iLOP, CB_BPM_Business_Data). A linked server from here could bridge onboarding/KYC data to another tier or off-estate; verify any "known integration" claim against the actual sys.servers / sys.linked_logins and a change record.</Item>
+        <Item>app_admin is a shared application identity, in three case-variants (app_admin/App_admin/APP_ADMIN, same login, case-preserved in the audit). An application account creating a linked server is a strong anomaly - application ORMs do not register linked servers - and points toward injection reaching lateral-movement capability. Do not treat the app account as trusted.</Item>
+        <Item>No historical NBI benign-true-positive is on record for this rule. There is no environment-specific allow-list. If a genuine authorised integration is confirmed, scope any exception to the exact linked-server name + remote target + principal + client, never a blanket host/principal exception.</Item>
+      </Indicators>
+    </FalsePositive>
+    <Misconfiguration>
+      <Definition></Definition>
+    </Misconfiguration>
+    <NeedsEscalation>
+      <Definition></Definition>
+    </NeedsEscalation>
+  </ClassificationGuidance>
+  <ResponseActions>
+    <Phase name="Containment">
+      <Action>If a true_positive is confirmed, drop the linked server and its login mapping (sp_dropserver / sp_droplinkedsrvlogin) via the authorised DEPLOY path - but preserve the definition and mapping metadata first (sys.servers / sys.linked_logins, the raw audit statements).</Action>
+      <Action>Treat the mapped remote credentials as exposed and rotate them - a stored/attacker-created mapping is compromised regardless of whether the password is visible in audit.</Action>
+      <Action>Contain both source and target hosts. The linked server bridges two systems; isolate the source SQL host and engage the target system's owners to contain and hunt the *inbound* side.</Action>
+      <Action>Disable the implicated login ($principal) or its source path; if it is the shared application account, coordinate with the app owner but prioritise stopping cross-server movement.</Action>
+      <Action>Block egress from the SQL host - the outbound linked-server connection (and any EXEC ... AT) leaves via the source host.</Action>
+      <Action>All containment changes go through the authorised, human-approved DEPLOY path; investigation itself is read-only.</Action>
+    </Phase>
+    <Phase name="Eradication">
+      <Action>Remove the linked server and mapping after evidence capture, and any further linked servers/logins the principal created (section 17.2 - watch for link-crawling chains).</Action>
+      <Action>Rotate every credential the mapping could use on the remote, plus the SQL service account if it was the outbound identity.</Action>
+      <Action>Disable rpc out on any linked server that does not require it, and revert any feature enablement the principal performed (section 17.3) on source or remote.</Action>
+      <Action>Remove ALTER ANY LINKED SERVER from application logins - application principals should never create linked servers; strip the excess permission.</Action>
+      <Action>Hunt cross-server for what executed remotely (section 17.5) and for the same behaviour across peer SQL hosts (section 15.4, section 17.1); fix the injection point if the origin is an application server.</Action>
+    </Phase>
+    <Phase name="Recovery">
+      <Action>Rotate the mapped remote credentials and the SQL Server service account; review the remote host for any persistence/changes the linked-server session made.</Action>
+      <Action>Restore from a known-good state if the linked server was used to tamper with data on either host - validate affected databases (especially TotalAgility*/KYC and the remote target) against backups.</Action>
+      <Action>Return the login/hosts to service only after section 22 closing criteria are met and monitoring confirms no new linked-server creation or cross-server use.</Action>
+      <Action>Harden: restrict ALTER ANY LINKED SERVER, require least-privilege remote logins (prefer Windows-integrated over stored passwords), keep rpc out disabled unless required, and periodically review existing linked servers in sys.servers for unnecessary reach.</Action>
+    </Phase>
+  </ResponseActions>
+  <Escalation>
+    <Trigger>Escalate to SOC L2 / IR (and notify the customer / DBA + remote-system owners + application owner) when any of the following hold:
+
+- The remote @datasrc is an unknown/off-estate host or internet address (section 14.1).
+- rpc out is armed and/or the remote server was actually used (remote_execs &gt; 0, section 14.2 / section 17.1 / section 17.5).
+- A credentialed mapping supplies a privileged remote login (section 14.1).
+- The creation originates from an internet- or partner-facing application server (section 15.6), or the principal is seen on additional SQL hosts (section 17.1).
+- Audit tampering or create-use-drop appears (section 17.4), or the definition is truncated/unrecoverable - escalate as needs_escalation with the gap named; empty != safe.</Trigger>
+    <To>SOC L2 / IR</To>
+  </Escalation>
+  <ClosureCriteria>
+    <Item>false_positive (authorised integration): a change/integration record positively matches a known reporting/integration target created by a recognised principal from a known host under change control (Windows-integrated security, no rpc-out/credential abuse, no unexpected remote execution). Record the reference; scope any exception narrowly (linked-server name + target + principal + client), never a blanket host/principal exception.</Item>
+    <Item>false_positive (blocked attempt): the sp_addlinkedserver is positively proven to have failed (permission denied / not created, confirmed in sys.servers). Documented as a blocked attempt, principal/client still investigated - never "benign".</Item>
+    <Item>misconfiguration: a legitimate integration/reporting job created the linked server (recognised target, no rpc-out/credential abuse, no unexpected remote execution) and was simply not yet baselined, or it uses an over-privileged remote mapping. Baseline it; enforce least-privilege remote logins; disable rpc out where unused.</Item>
+    <Item>true_positive: attacker lateral-movement setup confirmed; linked server and mapping removed, mapped credentials rotated, source and target hosts contained, remote activity hunted, incident documented.</Item>
+    <Item>needs_escalation: handed to Tier 3 / DBA with the specific evidence gaps (truncated definition, missing target, unattributable principal/client) documented.</Item>
+  </ClosureCriteria>
+  <Limitations>
+    <Item>Target + mapping + use is the verdict. An off-estate/unknown @datasrc, a stored privileged mapping, rpc out armed, and actual OPENQUERY/EXEC ... AT = attacker lateral movement; a known integration partner with Windows-integrated security and no remote use = integration. Recover the definition (section 14.1) and confirm from sys.servers/sys.linked_logins - audit truncation is not safety.</Item>
+    <Item>The source-side audit cannot see the remote. What the linked server *did* on the target executes on the remote host; this index shows only the creation and the source-side OPENQUERY/AT call. Always corroborate cross-server on the target, and treat mapped credentials as compromised for a true_positive.</Item>
+    <Item>Keyed queries only - the index will circuit-break otherwise. logs-microsoft_sqlserver.audit-* runs at ~3M events/hour; every LIKE "*...*" here is safe only because a $principal/$client_ip/single-host.name filter precedes it. Never run an unkeyed estate-wide leading-wildcard scan.</Item>
+    <Item>server_principal_name is dead here - use session_server_principal_name. On this estate the former is null; the latter is authoritative (and case-preserves app_admin/App_admin/APP_ADMIN, one shared application identity).</Item>
+    <Item>This rule is evadable; pair it with siblings. Reuse-existing-linked-server (no creation event), create-use-drop, or lateral movement by OPENROWSET ad-hoc connection / xp_cmdshell / CLR networking all bypass or complement it. Corroborate with the NBI SQL analytics on the same host/principal: OPENROWSET/ad-hoc access, xp_cmdshell execution, CLR assembly load, sp_configure feature enablement, and authentication to the target host from the SQL service account.</Item>
+    <Item>KB-worthy (persist to NBI customer scope): (1) logs-microsoft_sqlserver.audit-* ~3.1M docs/hr - unkeyed leading-wildcard LIKE circuit-breaks; (2) source-side audit does not reveal the remote server - corroborate cross-server on the target; (3) sqlserver.audit.server_principal_name null estate-wide, session_server_principal_name authoritative; (4) nim-kta-dbv01 = Kofax TotalAgility onboarding/KYC platform; (5) login_maps/rpc_out_ops/remote_execs = 0 in sampled windows (linked-server management off-baseline). Observed live 2026-08-17.</Item>
+  </Limitations>
+</Playbook>

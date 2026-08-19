@@ -1,0 +1,355 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<Playbook xmlns="https://soc.example/playbooks" id="PB-ad-member-added-tier0-group" name="AD — Member Added to a Tier-0 Group (Domain/Enterprise/Schema Admins) - SOC Playbook" version="3.0" status="Validated" classification="TLP:AMBER">
+  <Metadata>
+    <Owner>NBI SOC / Detection Engineering</Owner>
+    <LastUpdated>2026-08-19</LastUpdated>
+    <Severity default="critical">critical</Severity>
+    <Confidence default="Medium">Medium</Confidence>
+    <Category>Persistence</Category>
+    <MitreAttack>
+      <Technique id="T1098"/>
+      <Technique id="T1078.002"/>
+      <Technique id="T1078"/>
+      <Tactic id="TA0003"/>
+      <Tactic id="TA0004"/>
+    </MitreAttack>
+    <References>
+      <Reference title="MITRE ATT&amp;CK - Account Manipulation (T1098)" url="https://attack.mitre.org/techniques/T1098/"/>
+      <Reference title="MITRE ATT&amp;CK - Valid Accounts: Domain Accounts (T1078.002)" url="https://attack.mitre.org/techniques/T1078/002/"/>
+      <Reference title="MITRE ATT&amp;CK - Persistence tactic (TA0003)" url="https://attack.mitre.org/tactics/TA0003/"/>
+      <Reference title="MITRE ATT&amp;CK - Privilege Escalation tactic (TA0004)" url="https://attack.mitre.org/tactics/TA0004/"/>
+      <Reference title="Microsoft Learn - 4728(S): A member was added to a security-enabled global group" url="https://learn.microsoft.com/en-us/windows/security/threat-protection/auditing/event-4728"/>
+      <Reference title="Microsoft Learn - 4756(S): A member was added to a security-enabled universal group" url="https://learn.microsoft.com/en-us/windows/security/threat-protection/auditing/event-4756"/>
+      <Reference title="Microsoft Learn - Appendix B: Privileged accounts and groups in Active Directory (Domain/Enterprise/Schema Admins)" url="https://learn.microsoft.com/en-us/windows-server/identity/ad-ds/plan/security-best-practices/appendix-b--privileged-accounts-and-groups-in-active-directory"/>
+      <Reference title="Microsoft - Securing privileged access / Tier-0 model" url="https://learn.microsoft.com/en-us/security/privileged-access-workstations/overview"/>
+      <Reference title="Microsoft Learn - Well-known SID / RID reference" url="https://learn.microsoft.com/en-us/windows-server/identity/ad-ds/manage/understand-security-identifiers"/>
+    </References>
+  </Metadata>
+  <AlertContext>
+    <RuleName>AD — Member Added to a Tier-0 Group (Domain/Enterprise/Schema Admins)</RuleName>
+    <RuleId>nbi-ad-tier0-group-add</RuleId>
+    <RuleType>query</RuleType>
+    <Index>logs-system.security*</Index>
+    <TriggerLogic>The deployed rule's detection filter (Kibana KQL) is, in effect:
+
+
+
+Plain English: someone added a principal to Domain/Enterprise/Schema Admins, Domain Controllers, Group Policy Creator Owners, or Builtin Administrators on a Domain Controller. The rule captures the *actor* (winlog.event_data.SubjectUserName), the *added member* (MemberName DN, MemberSid SID), the *group* (TargetUserName/TargetSid), and the *DC* (host.name). A single matching add fires the rule.
+
+The Tier-0 groups are matched by the RID suffix of TargetSid (domain-relative), plus the well-known built-in S-1-5-32-544. Read the returned TargetSid to identify exactly which Tier-0 group was modified.</TriggerLogic>
+    <KeyAlertFields>event.code, host.name, source.ip</KeyAlertFields>
+  </AlertContext>
+  <Inputs>
+    <Input name="$actor"/>
+    <Input name="$dc_host"/>
+  </Inputs>
+  <ExecutiveSummary>
+    <Overview>This playbook drives triage and investigation of the AD - Member Added to a Tier-0 Group (Domain/Enterprise/Schema Admins) detection on NBI's Elastic Security deployment. The rule is an Elastic query rule that fires on Windows 4728 (member added to a security-enabled *global* group), 4756 (*universal* group), or 4732 (*local* group) when the target group's winlog.event_data.TargetSid ends in a Tier-0 RID or is the built-in Administrators SID:
+
+- Domain Admins - RID -512
+- Enterprise Admins - RID -519
+- Schema Admins - RID -518
+- Domain Controllers - RID -516
+- Group Policy Creator Owners - RID -520
+- Builtin\Administrators - S-1-5-32-544
+
+These are the small set of groups that effectively control the entire Active Directory forest. Membership confers domain-dominance-level rights that survive most remediation short of a full Tier-0 rebuild. The membership change is a completed action; the analyst's job is to decide whether it was an authorised, change-controlled administrative action (false_positive), an attacker granting domain-dominance persistence (true_positive), an operational error such as over-scoping a service account (misconfiguration), or unproven (needs_escalation), with evidence attached.</Overview>
+    <BusinessImpact>An alert means: on $dc_host, $actor added a principal to a Tier-0 group. Because membership is already effective, the added principal now holds forest-controlling rights (Domain/Enterprise Admin power, or schema/GPO/DC control). The investigative question is not *did they gain the rights* (they did) but *was it authorised, who is the member, and are the rights being used*.
+
+In NBI's validation window, no add targeted any Tier-0 RID - the live 4728 stream is automated branch-device onboarding into business groups (see section 6). A Tier-0 hit is therefore exceptional and, given the stakes, is treated as a critical domain-integrity event until an authorised cause is positively proven.</BusinessImpact>
+  </ExecutiveSummary>
+  <Investigation>
+    <Goal>Decide true_positive / false_positive / misconfiguration / needs_escalation for AD — Member Added to a Tier-0 Group (Domain/Enterprise/Schema Admins).</Goal>
+    <Workflow>
+      <Step order="1" name="Reproduce the rule estate-wide (confirm the detection logic)">
+        <Purpose>Reproduce the rule estate-wide (confirm the detection logic)</Purpose>
+        <Query platform="Elastic" language="ES|QL" id="Q-01">
+          <![CDATA[
+FROM logs-system.security*
+| WHERE @timestamp >= NOW() - 4 hours
+    AND event.code IN ("4728", "4756", "4732")
+    AND (winlog.event_data.TargetSid LIKE "*-512" OR winlog.event_data.TargetSid LIKE "*-519" OR winlog.event_data.TargetSid LIKE "*-518" OR winlog.event_data.TargetSid LIKE "*-516" OR winlog.event_data.TargetSid LIKE "*-520" OR winlog.event_data.TargetSid == "S-1-5-32-544")
+| KEEP @timestamp, host.name, event.code, winlog.event_data.SubjectUserName, winlog.event_data.MemberName, winlog.event_data.MemberSid, winlog.event_data.TargetUserName, winlog.event_data.TargetSid
+| SORT @timestamp DESC
+| LIMIT 50
+]]>
+        </Query>
+      </Step>
+      <Step order="2" name="Confirm Tier-0 group changes on the alert DC">
+        <Purpose>Confirm Tier-0 group changes on the alert DC</Purpose>
+        <Query platform="Elastic" language="ES|QL" id="Q-02">
+          <![CDATA[
+FROM logs-system.security*
+| WHERE @timestamp >= NOW() - 4 hours
+    AND event.code IN ("4728", "4756", "4732")
+    AND host.name == "$dc_host"
+    AND (winlog.event_data.TargetSid LIKE "*-512" OR winlog.event_data.TargetSid LIKE "*-519" OR winlog.event_data.TargetSid LIKE "*-518" OR winlog.event_data.TargetSid LIKE "*-516" OR winlog.event_data.TargetSid LIKE "*-520" OR winlog.event_data.TargetSid == "S-1-5-32-544")
+| STATS adds = COUNT(*) BY event.code, winlog.event_data.SubjectUserName, winlog.event_data.MemberName, winlog.event_data.TargetSid
+| SORT adds DESC
+| LIMIT 20
+]]>
+        </Query>
+      </Step>
+      <Step order="3" name="Entity pivoting">
+        <Purpose>Entity pivoting</Purpose>
+        <Query platform="Elastic" language="ES|QL" id="Q-03">
+          <![CDATA[
+FROM logs-system.security*
+| WHERE @timestamp >= NOW() - 4 hours
+    AND event.code IN ("4728", "4756", "4732")
+    AND TO_LOWER(winlog.event_data.SubjectUserName) == "$actor"
+| KEEP @timestamp, host.name, winlog.event_data.MemberName, winlog.event_data.TargetUserName, winlog.event_data.TargetSid
+| SORT @timestamp DESC
+| LIMIT 30
+]]>
+        </Query>
+      </Step>
+      <Step order="4" name="Process investigation">
+        <Purpose>Process investigation</Purpose>
+        <Query platform="Elastic" language="ES|QL" id="Q-04">
+          <![CDATA[
+FROM logs-system.security*
+| WHERE @timestamp >= NOW() - 4 hours
+    AND event.code == "4688"
+    AND TO_LOWER(user.name) == "$actor"
+| STATS executions = COUNT(*), hosts = COUNT_DISTINCT(host.name) BY process.name, process.parent.name
+| SORT executions DESC
+| LIMIT 30
+]]>
+        </Query>
+      </Step>
+      <Step order="5" name="Parent-Child process analysis">
+        <Purpose>Parent-Child process analysis</Purpose>
+        <Query platform="Elastic" language="ES|QL" id="Q-05">
+          <![CDATA[
+FROM logs-system.security*
+| WHERE @timestamp >= NOW() - 4 hours
+    AND event.code == "4688"
+    AND TO_LOWER(user.name) == "$actor"
+| KEEP @timestamp, host.name, process.parent.name, process.parent.pid, process.name, process.pid, process.executable
+| SORT @timestamp DESC
+| LIMIT 50
+]]>
+        </Query>
+      </Step>
+      <Step order="6" name="User investigation">
+        <Purpose>User investigation</Purpose>
+        <Query platform="Elastic" language="ES|QL" id="Q-06">
+          <![CDATA[
+FROM logs-system.security*
+| WHERE @timestamp >= NOW() - 4 hours
+    AND event.code == "4624"
+    AND TO_LOWER(winlog.event_data.TargetUserName) == "$actor"
+| STATS logons = COUNT(*) BY source.ip, host.name, winlog.event_data.LogonType
+| SORT logons DESC
+| LIMIT 25
+]]>
+        </Query>
+      </Step>
+      <Step order="7" name="Host investigation">
+        <Purpose>Host investigation</Purpose>
+        <Query platform="Elastic" language="ES|QL" id="Q-07">
+          <![CDATA[
+FROM logs-system.security*
+| WHERE @timestamp >= NOW() - 4 hours
+    AND host.name == "$dc_host"
+    AND event.code IN ("4728", "4756", "4732", "4729", "4757", "4733")
+| STATS events = COUNT(*), actors = COUNT_DISTINCT(winlog.event_data.SubjectUserName) BY event.code
+| SORT events DESC
+| LIMIT 20
+]]>
+        </Query>
+      </Step>
+      <Step order="8" name="IP investigation">
+        <Purpose>IP investigation</Purpose>
+        <Query platform="Elastic" language="ES|QL" id="Q-08">
+          <![CDATA[
+FROM logs-system.security*
+| WHERE @timestamp >= NOW() - 4 hours
+    AND event.code == "4624"
+    AND TO_LOWER(winlog.event_data.TargetUserName) == "$actor"
+    AND source.ip IS NOT NULL
+| STATS logons = COUNT(*), hosts = COUNT_DISTINCT(host.name) BY source.ip, winlog.event_data.LogonType
+| SORT logons DESC
+| LIMIT 25
+]]>
+        </Query>
+      </Step>
+      <Step order="9" name="Authentication investigation">
+        <Purpose>Authentication investigation</Purpose>
+        <Query platform="Elastic" language="ES|QL" id="Q-09">
+          <![CDATA[
+FROM logs-system.security*
+| WHERE @timestamp >= NOW() - 4 hours
+    AND event.code IN ("4624", "4625", "4634", "4647", "4672")
+    AND TO_LOWER(winlog.event_data.TargetUserName) == "$actor"
+| STATS events = COUNT(*), first_seen = MIN(@timestamp), last_seen = MAX(@timestamp) BY event.code, winlog.event_data.LogonType, source.ip
+| SORT events DESC
+| LIMIT 30
+]]>
+        </Query>
+      </Step>
+      <Step order="10" name="Timeline Reconstruction">
+        <Purpose>Timeline Reconstruction</Purpose>
+        <Query platform="Elastic" language="ES|QL" id="Q-10">
+          <![CDATA[
+FROM logs-system.security*
+| WHERE @timestamp >= NOW() - 4 hours
+    AND TO_LOWER(winlog.event_data.SubjectUserName) == "$actor"
+    AND event.code IN ("4728", "4756", "4732", "4729", "4757", "4733", "4720", "4722", "4724", "5136", "4662")
+| KEEP @timestamp, host.name, event.code, winlog.event_data.MemberName, winlog.event_data.TargetUserName, winlog.event_data.TargetSid
+| SORT @timestamp ASC
+| LIMIT 200
+]]>
+        </Query>
+      </Step>
+      <Step order="11" name="Lateral movement validation">
+        <Purpose>Lateral movement validation</Purpose>
+        <Query platform="Elastic" language="ES|QL" id="Q-11">
+          <![CDATA[
+FROM logs-system.security*
+| WHERE @timestamp >= NOW() - 4 hours
+    AND event.code == "4624"
+    AND TO_LOWER(winlog.event_data.TargetUserName) == "$actor"
+    AND host.name != "$dc_host"
+| STATS logons = COUNT(*) BY host.name, winlog.event_data.LogonType, source.ip
+| SORT logons DESC
+| LIMIT 30
+]]>
+        </Query>
+      </Step>
+      <Step order="12" name="Persistence validation">
+        <Purpose>Persistence validation</Purpose>
+        <Query platform="Elastic" language="ES|QL" id="Q-12">
+          <![CDATA[
+FROM logs-system.security*
+| WHERE @timestamp >= NOW() - 4 hours
+    AND TO_LOWER(winlog.event_data.SubjectUserName) == "$actor"
+    AND event.code IN ("4728", "4756", "4732", "4720", "4722", "4724", "5136", "7045", "4698")
+| STATS events = COUNT(*) BY event.code
+| SORT events DESC
+| LIMIT 20
+]]>
+        </Query>
+      </Step>
+      <Step order="13" name="Privilege escalation validation">
+        <Purpose>Privilege escalation validation</Purpose>
+        <Query platform="Elastic" language="ES|QL" id="Q-13">
+          <![CDATA[
+FROM logs-system.security*
+| WHERE @timestamp >= NOW() - 4 hours
+    AND event.code == "4672"
+    AND host.name == "$dc_host"
+| STATS special_priv_logons = COUNT(*) BY winlog.event_data.SubjectUserName
+| SORT special_priv_logons DESC
+| LIMIT 25
+]]>
+        </Query>
+      </Step>
+      <Step order="14" name="Defense evasion validation">
+        <Purpose>Defense evasion validation</Purpose>
+        <Query platform="Elastic" language="ES|QL" id="Q-14">
+          <![CDATA[
+FROM logs-system.security*
+| WHERE @timestamp >= NOW() - 4 hours
+    AND host.name == "$dc_host"
+    AND (
+        (event.code IN ("4729", "4757", "4733") AND (winlog.event_data.TargetSid LIKE "*-512" OR winlog.event_data.TargetSid LIKE "*-519" OR winlog.event_data.TargetSid LIKE "*-518" OR winlog.event_data.TargetSid == "S-1-5-32-544"))
+        OR event.code == "1102"
+        OR event.code == "4719"
+    )
+| STATS events = COUNT(*) BY event.code, winlog.event_data.SubjectUserName
+| SORT events DESC
+| LIMIT 25
+]]>
+        </Query>
+      </Step>
+      <Step order="15" name="Impact assessment">
+        <Purpose>Impact assessment</Purpose>
+        <Query platform="Elastic" language="ES|QL" id="Q-15">
+          <![CDATA[
+FROM logs-system.security*
+| WHERE @timestamp >= NOW() - 4 hours
+    AND event.code IN ("4728", "4756", "4732")
+    AND (winlog.event_data.TargetSid LIKE "*-512" OR winlog.event_data.TargetSid LIKE "*-519" OR winlog.event_data.TargetSid LIKE "*-518" OR winlog.event_data.TargetSid LIKE "*-516" OR winlog.event_data.TargetSid LIKE "*-520" OR winlog.event_data.TargetSid == "S-1-5-32-544")
+| STATS adds = COUNT(*) BY winlog.event_data.TargetSid, winlog.event_data.SubjectUserName, winlog.event_data.MemberName
+| SORT adds DESC
+| LIMIT 20
+]]>
+        </Query>
+      </Step>
+      <Step order="16" name="Finalize verdict">
+        <DecisionTree>
+        </DecisionTree>
+      </Step>
+    </Workflow>
+  </Investigation>
+  <ClassificationGuidance>
+    <TruePositive>
+      <Definition></Definition>
+    </TruePositive>
+    <FalsePositive>
+      <Definition></Definition>
+      <Indicators>
+        <Item>Authorised Tier-0 administration: a recognised Tier-0 admin adds an approved account to Domain/Enterprise Admins under a change ticket (rare and tightly controlled). Must be matched to the ticket, not assumed.</Item>
+        <Item>Break-glass/emergency access adding an admin to a Tier-0 group during an incident - legitimate but often outside normal change flow (reconcile to the incident).</Item>
+        <Item>Provisioning/IAM error placing a service or user account into a Tier-0 group instead of a correctly scoped delegated group - an over-privileged grant in error (misconfiguration).</Item>
+        <Item>Zero Tier-0 adds in the validation window. The live 4728 stream is automated branch-device onboarding - computer accounts (CN=BZM-*-DK-*,…) added to business groups (Disk Encryption …-23244, Audi.security …-19779) by branch-administration accounts on nim-dc-dbap01. None targeted a Tier-0 RID or S-1-5-32-544. So the Tier-0 rule is silent (healthy) and there is no legitimate Tier-0-add stream to tune out.</Item>
+        <Item>Tier-0 changes are authoritative on the DCs (nim-dc-dbap01 primary, nim-dc2-dbap). A Tier-0 add should appear on a DC; a report elsewhere is a data-quality question first.</Item>
+        <Item>No historical NBI benign Tier-0 add is on record. There is no environment-specific allow-list. Do not create a standing exception; if a controlled Tier-0 change process is formalised, reconcile each occurrence to its change record.</Item>
+      </Indicators>
+    </FalsePositive>
+    <Misconfiguration>
+      <Definition></Definition>
+    </Misconfiguration>
+    <NeedsEscalation>
+      <Definition></Definition>
+    </NeedsEscalation>
+  </ClassificationGuidance>
+  <ResponseActions>
+    <Phase name="Containment">
+      <Action>Remove the Tier-0 membership on a confirmed true_positive (via the authorised DEPLOY path) - this is the highest-priority containment action.</Action>
+      <Action>Disable the added principal and, if the actor is implicated, disable/reset the actor account and suspend its sessions.</Action>
+      <Action>Treat the domain as at risk of dominance: if the member exercised replication/NTDS access (section 17.3/section 17.5), prepare for a Tier-0 and krbtgt rotation.</Action>
+      <Action>Preserve evidence first (both DCs' Security logs, the Tier-0 group's current membership, any member session) - an attacker may add-then-remove to hide the grant.</Action>
+      <Action>All containment changes go through the authorised, human-approved DEPLOY path; investigation itself is read-only.</Action>
+    </Phase>
+    <Phase name="Eradication">
+      <Action>Remove the membership and any other persistence discovered in section 17.2 (rogue accounts, additional group adds, GPO/DACL edits, services, scheduled tasks).</Action>
+      <Action>If the rights were exercised, rotate Tier-0 credentials and krbtgt (twice) and treat all domain credentials as potentially exposed; hunt for prior DCSync/replication and forged tickets.</Action>
+      <Action>Investigate the actor account for compromise and remediate the delegation/over-privilege that let it modify Tier-0 membership.</Action>
+      <Action>Audit nested membership of the Tier-0 groups (the rule keys on the direct SID and can miss nesting) and any direct ACL grants (nTSecurityDescriptor).</Action>
+    </Phase>
+    <Phase name="Recovery">
+      <Action>Rotate credentials in order (member → actor → Tier-0/krbtgt) as warranted by the exposure.</Action>
+      <Action>Restore correct Tier-0 membership and validate no residual Tier-0 members lack an approved basis; confirm replication converges across both DCs.</Action>
+      <Action>Return accounts to service only after section 22 closing criteria are met and monitoring confirms no re-add.</Action>
+      <Action>Harden: enforce an approval workflow and time-bound (JIT) membership for Tier-0 groups, alert on every Tier-0 add and on add-then-remove within a short window, review delegation so routine tasks never require Tier-0 rights, and periodically audit nested Tier-0 membership.</Action>
+    </Phase>
+  </ResponseActions>
+  <Escalation>
+    <Trigger>Escalate to Tier 3 / IR and the AD/Tier-0 team when any of the following hold:
+
+- The Tier-0 add is not reconciled to an approved change/incident record - a Tier-0 add alone warrants IR.
+- The group is Domain/Enterprise/Schema Admins or Builtin\Administrators, or the added member is a service/new/unexpected principal.
+- The actor authenticated from an unexpected origin (section 15.6) or shows a spree (section 17.2); or the member shows replication/special-privilege use (section 17.3/section 17.5).
+- An add-then-remove transient grant or audit tampering appears (section 17.4).
+- Authorisation, member, or actor cannot be established - escalate as needs_escalation with the gaps named.</Trigger>
+    <To>SOC L2 / IR</To>
+  </Escalation>
+  <ClosureCriteria>
+    <Item>false_positive (authorised change): an approved Tier-0 change ticket matches the exact actor + member + group + time; actor from a sanctioned origin; no spree; member shows no abuse. Record the reference; do not create a broad exception.</Item>
+    <Item>false_positive (blocked-malicious): a hostile add positively proven reverted before the member was used; documented as blocked-authorised, never "benign".</Item>
+    <Item>misconfiguration: an over-scoped provisioning error (account placed in a Tier-0 group instead of a scoped group); correct the membership, record the process gap.</Item>
+    <Item>true_positive: an unauthorised Tier-0 grant (optionally with the rights abused); membership removed, added account disabled, actor contained, exposed Tier-0/krbtgt secrets rotated, prior DCSync/forged-ticket hunt closed, domain-dominance incident documented.</Item>
+    <Item>needs_escalation: handed to AD/Tier-0 + IR with the specific evidence gaps documented.</Item>
+  </ClosureCriteria>
+  <Limitations>
+    <Item>Zero Tier-0 baseline = maximum fidelity. NBI's live 4728 stream is branch-device onboarding into business groups; no Tier-0 adds occur normally. When this rule fires, believe it and reconcile to a specific change.</Item>
+    <Item>Read the RID to know the blast radius. -512 Domain Admins and -519 Enterprise Admins are immediate domain/forest dominance; -518 Schema Admins is a long-game schema backdoor; -516/-520/S-1-5-32-544 are DC-control/GPO/local-admin adjacent. Identify the exact group before deciding severity.</Item>
+    <Item>Follow the member by SID. The rule's inputs are actor + DC; the added member is a DN on the add but a sAMAccountName on logons - re-key member pivots on MemberSid/TargetUserSid (the join proven in the Operators-group playbook) rather than matching names.</Item>
+    <Item>Nesting and ACLs evade the SID match. Adding a member to a non-Tier-0 group nested into a Tier-0 group, or a direct nTSecurityDescriptor grant, will not raise a Tier-0 RID; complement with the DACL-modification analytic, add-then-remove correlation (section 17.4), and periodic nested-membership audits.</Item>
+    <Item>Known != trusted. A recognised admin actor or a "known" origin is context to verify against a change record, not an automatic pass; any scanner/automation identity is investigated identically, never auto-trusted.</Item>
+    <Item>KB-worthy (persist to NBI customer scope): (1) zero Tier-0 group adds in NBI's live 4728 window (branch-device onboarding into Disk Encryption/Audi.security dominates); (2) DCs = nim-dc-dbap01 (primary), nim-dc2-dbap; (3) follow added members by MemberSid/TargetUserSid; (4) the rule cannot see nested-group or direct-ACL escalation. All observed live on 2026-08-17.</Item>
+  </Limitations>
+</Playbook>

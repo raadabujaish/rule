@@ -1,0 +1,254 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<Playbook xmlns="https://soc.example/playbooks" id="PB-fortiweb-primary-waf-down" name="Primary WAF Down - SOC Playbook" version="3.0" status="Validated" classification="TLP:AMBER">
+  <Metadata>
+    <Owner>NBI SOC / Detection Engineering</Owner>
+    <LastUpdated>2026-08-19</LastUpdated>
+    <Severity default="Critical">Critical</Severity>
+    <Confidence default="Medium">Medium</Confidence>
+    <Category>Defense Evasion</Category>
+    <MitreAttack>
+      <Technique id="T1562.001"/>
+      <Technique id="T1562"/>
+      <Technique id="T1499"/>
+      <Tactic id="TA0005"/>
+    </MitreAttack>
+    <References>
+      <Reference title="MITRE ATT&amp;CK - Impair Defenses: Disable or Modify Tools (T1562.001)" url="https://attack.mitre.org/techniques/T1562/001/"/>
+      <Reference title="MITRE ATT&amp;CK - Endpoint Denial of Service (T1499)" url="https://attack.mitre.org/techniques/T1499/"/>
+      <Reference title="MITRE ATT&amp;CK - Defense Evasion tactic (TA0005)" url="https://attack.mitre.org/tactics/TA0005/"/>
+      <Reference title="Fortinet FortiWeb - High Availability (HA) configuration" url="https://docs.fortinet.com/document/fortiweb/latest/administration-guide"/>
+      <Reference title="Fortinet FortiWeb - Logging &amp; log forwarding (syslog) reference" url="https://docs.fortinet.com/document/fortiweb/latest/administration-guide"/>
+      <Reference title="Elastic - ES|QL reference (STATS, MAX, DATE_TRUNC, CASE)" url="https://www.elastic.co/guide/en/elasticsearch/reference/current/esql.html"/>
+      <Reference title="Elastic - detecting data-source silence / log-volume monitoring guidance" url="https://www.elastic.co/guide/en/security/current/es-overview.html"/>
+    </References>
+  </Metadata>
+  <AlertContext>
+    <RuleName>Primary WAF Down</RuleName>
+    <RuleId>4db20416-7ab5-4be8-87a9-78c5b915da79</RuleId>
+    <RuleType>esql</RuleType>
+    <Index>logs-tcp.generic-*</Index>
+    <TriggerLogic>The deployed rule is an ES|QL analytic. Among FortiWeb traffic logs (data.type == "traffic" and tags == "Fortiweb"), it takes the most recent event per WAF sensor - STATS last_seen = MAX(@timestamp) BY syslog_location over a 24h look-back - and fires for any syslog_location whose last_seen is older than 30 minutes. In plain English: the WAF has stopped sending traffic logs for more than half an hour.
+
+One-line Kibana KQL pivot filter (Discover; the underlying stream):
+
+
+
+Live note (NBI): there is a single FortiWeb sensor, syslog_location = 10.11.254.23 (100% of FortiWeb events), with no visible redundancy. This playbook's queries cap at 4h per NBI standard, so a WAF dark for more than 4 hours returns zero rows in the liveness query (section 14.1) - that reads as total silence but does not pin the precise onset (widen only in Discover if the onset time is needed).</TriggerLogic>
+    <KeyAlertFields>data.type, data.http_host, log.source.address</KeyAlertFields>
+  </AlertContext>
+  <Inputs>
+  </Inputs>
+  <ExecutiveSummary>
+    <Overview>This playbook drives triage and investigation of the Primary WAF Down availability detection on NBI's Elastic Security deployment. The rule fires when the primary FortiWeb sensor stops sending traffic logs for more than 30 minutes - a heartbeat/availability signal for the web-application firewall protecting the bank's internet-facing applications.
+
+The analyst's task is to determine what the silence means: the WAF appliance has failed or been bypassed (a real protection outage), an attacker has disabled its logging or the device to blind and unshield the banking apps (defense evasion), only the traffic log stream stopped while the device keeps running (a log-type/pipeline misconfiguration), or a transient ingest lag that has recovered. Verdicts skew toward misconfiguration and needs_escalation, but a confirmed outage of the WAF that fronts internet-facing banking applications is a critical exposure. The outcome is one of true_positive / false_positive / misconfiguration / needs_escalation.</Overview>
+    <BusinessImpact>An alert means: the primary WAF $syslog_location sent no traffic log for more than 30 minutes. As with any availability signal, silence is ambiguous until characterised. The WAF-specific discriminators are: is traffic logging fresh again now (transient/recovered), are the OTHER FortiWeb streams (attack/event) still flowing while only traffic stopped (a log-type/pipeline issue, appliance up), and are the protected banking hosts still visibly served through the WAF (business-impact cross-check).
+
+Crucially, syslog_location, data.type, and tags are custom-parsed fields - a parser or tagging change can silently stop the traffic/Fortiweb match even though the appliance is fine. And because this is a heartbeat on WAF logs, an attacker who routes traffic around the WAF straight to the origin (a bypass) causes no gap at all - the WAF keeps logging its own traffic while the apps are attacked unshielded (see section 23).</BusinessImpact>
+  </ExecutiveSummary>
+  <Investigation>
+    <Goal>Decide true_positive / false_positive / misconfiguration / needs_escalation for Primary WAF Down.</Goal>
+    <Workflow>
+      <Step order="1" name="Confirm current WAF traffic liveness (confirm the alert)">
+        <Purpose>Confirm current WAF traffic liveness (confirm the alert)</Purpose>
+        <Query platform="Elastic" language="ES|QL" id="Q-01">
+          <![CDATA[
+FROM logs-tcp.generic-*
+| WHERE syslog_location == "$syslog_location" AND data.type == "traffic"
+    AND @timestamp >= NOW() - 4 hours
+| STATS events = COUNT(*), last_seen = MAX(@timestamp), first_seen = MIN(@timestamp)
+| LIMIT 5
+]]>
+        </Query>
+      </Step>
+      <Step order="2" name="Is only traffic silent, or is the WAF fully dark (stream breakdown)">
+        <Purpose>Is only traffic silent, or is the WAF fully dark (stream breakdown)</Purpose>
+        <Query platform="Elastic" language="ES|QL" id="Q-02">
+          <![CDATA[
+FROM logs-tcp.generic-*
+| WHERE syslog_location == "$syslog_location" AND @timestamp >= NOW() - 4 hours
+| STATS events = COUNT(*), last_seen = MAX(@timestamp)
+    BY data.type
+| SORT last_seen ASC
+| LIMIT 10
+]]>
+        </Query>
+      </Step>
+      <Step order="3" name="Are the protected banking applications still served through the WAF">
+        <Purpose>Are the protected banking applications still served through the WAF</Purpose>
+        <Query platform="Elastic" language="ES|QL" id="Q-03">
+          <![CDATA[
+FROM logs-tcp.generic-*
+| WHERE syslog_location == "$syslog_location" AND @timestamp >= NOW() - 4 hours
+    AND data.http_host IS NOT NULL
+| STATS events = COUNT(*), last_seen = MAX(@timestamp)
+    BY data.http_host
+| SORT events DESC
+| LIMIT 15
+]]>
+        </Query>
+      </Step>
+      <Step order="4" name="Entity pivoting">
+        <Purpose>Entity pivoting</Purpose>
+        <Query platform="Elastic" language="ES|QL" id="Q-04">
+          <![CDATA[
+FROM logs-tcp.generic-*
+| WHERE syslog_location == "$syslog_location" AND @timestamp >= NOW() - 4 hours
+| STATS events = COUNT(*), last_seen = MAX(@timestamp), first_seen = MIN(@timestamp)
+    BY data.type
+| SORT last_seen ASC
+| LIMIT 10
+]]>
+        </Query>
+      </Step>
+      <Step order="5" name="Host investigation">
+        <Purpose>Host investigation</Purpose>
+        <Query platform="Elastic" language="ES|QL" id="Q-05">
+          <![CDATA[
+FROM logs-tcp.generic-*
+| WHERE syslog_location == "$syslog_location" AND @timestamp >= NOW() - 4 hours
+    AND data.http_host IS NOT NULL
+| STATS events = COUNT(*), last_seen = MAX(@timestamp), first_seen = MIN(@timestamp)
+    BY data.http_host
+| SORT events DESC
+| LIMIT 15
+]]>
+        </Query>
+      </Step>
+      <Step order="6" name="IP investigation">
+        <Purpose>IP investigation</Purpose>
+        <Query platform="Elastic" language="ES|QL" id="Q-06">
+          <![CDATA[
+FROM logs-tcp.generic-*
+| WHERE syslog_location == "$syslog_location" AND @timestamp >= NOW() - 4 hours
+| STATS events = COUNT(*), last_seen = MAX(@timestamp) BY log.source.address, syslog_location
+| SORT events DESC
+| LIMIT 10
+]]>
+        </Query>
+      </Step>
+      <Step order="7" name="Domain investigation">
+        <Purpose>Domain investigation</Purpose>
+        <Query platform="Elastic" language="ES|QL" id="Q-07">
+          <![CDATA[
+FROM logs-tcp.generic-*
+| WHERE syslog_location == "$syslog_location" AND @timestamp >= NOW() - 4 hours
+    AND data.http_host IS NOT NULL
+| STATS last_seen = MAX(@timestamp), events = COUNT(*) BY data.http_host
+| SORT last_seen ASC
+| LIMIT 20
+]]>
+        </Query>
+      </Step>
+      <Step order="8" name="Timeline Reconstruction">
+        <Purpose>Timeline Reconstruction</Purpose>
+        <Query platform="Elastic" language="ES|QL" id="Q-08">
+          <![CDATA[
+FROM logs-tcp.generic-*
+| WHERE syslog_location == "$syslog_location" AND @timestamp >= NOW() - 4 hours
+| STATS events = COUNT(*) BY slot = DATE_TRUNC(30 minutes, @timestamp), data.type
+| SORT slot ASC
+| LIMIT 30
+]]>
+        </Query>
+      </Step>
+      <Step order="9" name="Defense evasion validation">
+        <Purpose>Defense evasion validation</Purpose>
+        <Query platform="Elastic" language="ES|QL" id="Q-09">
+          <![CDATA[
+FROM logs-tcp.generic-*
+| WHERE syslog_location == "$syslog_location" AND @timestamp >= NOW() - 4 hours
+| STATS events = COUNT(*), last_seen = MAX(@timestamp), first_seen = MIN(@timestamp)
+    BY data.type
+| SORT last_seen ASC
+| LIMIT 10
+]]>
+        </Query>
+      </Step>
+      <Step order="10" name="Impact assessment">
+        <Purpose>Impact assessment</Purpose>
+        <Query platform="Elastic" language="ES|QL" id="Q-10">
+          <![CDATA[
+FROM logs-tcp.generic-*
+| WHERE syslog_location == "$syslog_location" AND @timestamp >= NOW() - 4 hours
+    AND data.http_host IS NOT NULL
+| EVAL is_banking = CASE(data.http_host IN ("mobile.nbi.iq", "businessonline.nbi.iq", "www.businessonline.nbi.iq", "loyalty.nbi.iq", "mename.nbi.iq"), 1, 0)
+| STATS events = COUNT(*), last_seen = MAX(@timestamp) BY data.http_host, is_banking
+| SORT is_banking DESC, last_seen ASC
+| LIMIT 20
+]]>
+        </Query>
+      </Step>
+      <Step order="11" name="Finalize verdict">
+        <DecisionTree>
+        </DecisionTree>
+      </Step>
+    </Workflow>
+  </Investigation>
+  <ClassificationGuidance>
+    <TruePositive>
+      <Definition></Definition>
+    </TruePositive>
+    <FalsePositive>
+      <Definition></Definition>
+      <Indicators>
+        <Item>Transient ingest lag that has recovered - the pipeline briefly stalled and traffic logging is fresh again by the time the analyst looks (INV-01 shows a seconds-old last_seen).</Item>
+        <Item>Planned WAF maintenance / change window - an authorised outage; confirm against the change record.</Item>
+        <Item>Log-type/parser/forwarding issue - only the traffic stream (or its tag/parse) stopped while the appliance keeps running and enforcing (attack/event streams still fresh) - a telemetry problem, not a protection outage.</Item>
+        <Item>Ingest/onset artifact - because the playbook caps at 4h, a long-recovered gap earlier in the day can still show sparse data.</Item>
+        <Item>A single sensor, no redundancy. syslog_location = 10.11.254.23 is the only FortiWeb sensor (100% of events; ~57k traffic events/hr). There is no peer sensor to compare against - the stream-breakdown (section 14.2, by data.type) and protected-host (section 14.3) cross-checks are the WAF-specific substitutes for a device-vs-pipeline test.</Item>
+        <Item>Custom-parsed fields are the silent-failure risk. syslog_location, data.type (values traffic/attack/event), and tags (Fortiweb) are parser-derived; a parse/tag change stops the traffic/Fortiweb match while the appliance is healthy - the most likely benign cause of this alert on NBI.</Item>
+        <Item>At assessment the sensor was logging within seconds across all three streams and fronting mobile.nbi.iq, businessonline.nbi.iq, and the other banking hosts - the healthy baseline. A firing therefore represents a genuine deviation from a normally-continuous, high-volume feed.</Item>
+        <Item>The 4h query cap vs the rule's 24h look-back - a WAF dark for &gt;4h returns 0 rows in INV-01, which is "total silence" but not the onset; do not read the empty 4h window as *health* (section 8).</Item>
+      </Indicators>
+    </FalsePositive>
+    <Misconfiguration>
+      <Definition></Definition>
+    </Misconfiguration>
+    <NeedsEscalation>
+      <Definition></Definition>
+    </NeedsEscalation>
+  </ClassificationGuidance>
+  <ResponseActions>
+    <Phase name="Containment">
+      <Action>For a confirmed outage/bypass exposing the banking apps: engage the WAF/network and application owners to restore or fail over the WAF immediately; if the apps are exposed, consider temporarily restricting internet exposure (or routing through a healthy protection path) until the WAF is back.</Action>
+      <Action>For a telemetry-only stop: restore the traffic log stream/parser/tag/forwarding - protection is intact, so no exposure containment is needed, but the SOC's WAF visibility must be recovered.</Action>
+      <Action>Preserve evidence first: capture section 14.1-14.3 (liveness, stream breakdown, protected hosts) and section 16 (onset) and attach to the alert; if attacker-driven, preserve the appliance admin/audit log out-of-band before any restart.</Action>
+      <Action>All changes go through the authorised, human-approved change path; investigation is read-only.</Action>
+    </Phase>
+    <Phase name="Eradication">
+      <Action>Identify and remediate the root cause: appliance fault (hardware/software), log-pipeline/parser/tag failure, ingest lag, planned change, or deliberate tampering (if attacker-driven - then treat as an intrusion and pursue the appliance-access vector).</Action>
+      <Action>If bypass is suspected, close the path that let traffic reach the banking origins around the WAF (DNS/routing/host-based) and re-force traffic through the WAF.</Action>
+      <Action>If tampering is confirmed, restore the WAF configuration from a known-good baseline and rotate any appliance credentials that may have been used.</Action>
+    </Phase>
+    <Phase name="Recovery">
+      <Action>Deploy WAF high-availability / failover so a single sensor outage does not remove protection (there is currently no redundancy - 10.11.254.23 is the only sensor).</Action>
+      <Action>Add independent appliance-health monitoring (out-of-band, not dependent on the WAF's own logs) and per-stream log-volume alerting that fires before the 30-minute mark.</Action>
+      <Action>Add a bypass-detection analytic - requests reaching the banking origins not via the WAF, and per-stream WAF volume drops - for durable coverage the heartbeat cannot provide (section 23).</Action>
+      <Action>Return to normal monitoring only after section 22 closing criteria are met and the WAF is confirmed logging and protecting the apps.</Action>
+    </Phase>
+  </ResponseActions>
+  <Escalation>
+    <Trigger>Escalate to the WAF/network team and application owners (and SOC L2/IR) when any hold:
+
+- INV-01 sustained silence + INV-02 all streams dark + INV-03 banking hosts no longer served, with the apps still internet-reachable (out-of-band) - a confirmed outage/bypass exposing the banking apps (critical).
+- Evidence of deliberate tampering with the WAF or its logging (attacker-driven - defense-evasion).
+- Web attacks observed against the banking hosts during the blind window (section 17.5 hunt).
+- Silence confirmed but appliance-outage vs bypass vs pipeline-failure cannot be distinguished, or exposure cannot be verified from telemetry - needs_escalation for out-of-band confirmation.</Trigger>
+    <To>SOC L2 / IR</To>
+  </Escalation>
+  <ClosureCriteria>
+    <Item>true_positive: confirmed WAF outage/bypass exposing the banking apps - WAF restored/failed over and protecting the applications, exposure duration established, blind-window web-attack hunt completed, root cause identified (including whether attacker-driven), incident documented.</Item>
+    <Item>false_positive: an authorised maintenance/change window explains the gap, or a transient ingest lag has recovered (fresh last_seen, banking hosts still served) - documented with evidence, never a bare "benign".</Item>
+    <Item>misconfiguration: the WAF is up and enforcing but only the traffic stream stopped (attack/event fresh, banking hosts served) - traffic-log stream/parser/tag/forwarding restored, protection intact.</Item>
+    <Item>needs_escalation: silence confirmed but outage-vs-bypass-vs-pipeline or exposure cannot be resolved from telemetry - handed to WAF/network and app owners.</Item>
+  </ClosureCriteria>
+  <Limitations>
+    <Item>The bypass blind spot is the key limitation. This is a heartbeat on WAF logs - an attacker routing traffic around the WAF to the application origin causes no gap (the WAF keeps logging its own traffic while the apps are attacked unshielded). A complementary analytic detecting requests reaching the banking origins not via the WAF is required for durable coverage.</Item>
+    <Item>Single sensor, no redundancy. syslog_location = 10.11.254.23 is the only FortiWeb sensor; there is no peer to compare or fail over to in telemetry, so the stream-breakdown (section 14.2) and protected-host (section 14.3) cross-checks are the device-vs-pipeline substitutes, and failover is an out-of-band action.</Item>
+    <Item>Custom-parsed fields fail silently. syslog_location, data.type, and tags are parser-derived; a parse/tag change stops the traffic/Fortiweb match while the appliance is healthy - the most common benign cause. Confirm the appliance out-of-band before declaring an outage.</Item>
+    <Item>The 4h cap vs the rule's 24h look-back. A WAF dark for &gt;4h returns 0 rows in INV-01 - read as *total silence*, not *health*; widen in Discover only to find the precise onset.</Item>
+    <Item>Empty != safe, and appliance health is out-of-band. Neither the appliance's true state nor the apps' internet exposure is in the log - always confirm with the WAF/network and app teams before clearing or escalating.</Item>
+    <Item>KB-worthy (persist to NBI customer scope): (1) single FortiWeb sensor syslog_location = 10.11.254.23 (~57k traffic events/hr), no redundancy; (2) data.type streams traffic/attack/event; tags = Fortiweb; all custom-parsed; (3) protected banking hosts mobile.nbi.iq, businessonline.nbi.iq, loyalty.nbi.iq, mename.nbi.iq; (4) heartbeat cannot see a WAF bypass. Observed live 2026-08-19.</Item>
+  </Limitations>
+</Playbook>

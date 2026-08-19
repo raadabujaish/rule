@@ -1,0 +1,68 @@
+{
+  "name": "Linux — Container Escape Tooling Executed (nsenter/unshare/capsh)",
+  "tags": [
+    "NBI-Endpoint",
+    "Phase3",
+    "Linux-auditd"
+  ],
+  "interval": "5m",
+  "enabled": true,
+  "description": "Detects execution of namespace/capability manipulation tools (nsenter, unshare, capsh) commonly used to break out of a container to the host or to manipulate Linux namespaces for privilege escalation.",
+  "risk_score": 73,
+  "severity": "high",
+  "note": "## Investigation\n1. `user.name` on `host.name` ran `process.executable` with `process.args`.\n2. Determine whether the host is a container node and whether the invocation targets the host namespace/PID 1.\n## Response\nIf unexpected, isolate the node and inspect the originating container/pod.",
+  "output_index": "",
+  "investigation_fields": {
+    "field_names": [
+      "process.executable",
+      "process.args",
+      "process.name",
+      "process.parent.executable",
+      "user.name",
+      "host.name"
+    ]
+  },
+  "author": [
+    "raadabujaish"
+  ],
+  "false_positives": [],
+  "from": "now-9m",
+  "rule_id": "nbi-lnx-container-escape-tools",
+  "max_signals": 100,
+  "risk_score_mapping": [],
+  "severity_mapping": [],
+  "threat": [
+    {
+      "framework": "MITRE ATT&CK",
+      "tactic": {
+        "id": "TA0004",
+        "name": "Privilege Escalation",
+        "reference": "https://attack.mitre.org/tactics/TA0004/"
+      },
+      "technique": [
+        {
+          "id": "T1611",
+          "name": "Escape to Host",
+          "reference": "https://attack.mitre.org/techniques/T1611/"
+        }
+      ]
+    }
+  ],
+  "to": "now",
+  "references": [
+    "https://attack.mitre.org/"
+  ],
+  "version": 1,
+  "exceptions_list": [],
+  "related_integrations": [],
+  "required_fields": [],
+  "setup": "",
+  "type": "query",
+  "language": "kuery",
+  "index": [
+    "logs-auditd.log-*",
+    "logs-auditd_manager.auditd-*"
+  ],
+  "query": "event.category:\"process\" and process.name:(\"nsenter\" or \"unshare\" or \"capsh\")",
+  "actions": []
+}

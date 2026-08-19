@@ -1,0 +1,92 @@
+{
+  "name": "Windows Script Execution from Archive [NBI-4688]",
+  "tags": [
+    "Domain: Endpoint",
+    "OS: Windows",
+    "Use Case: Threat Detection",
+    "Tactic: Execution",
+    "Resources: Investigation Guide",
+    "Data Source: Elastic Endgame",
+    "Data Source: Elastic Defend",
+    "Data Source: Windows Security Event Logs",
+    "Data Source: Microsoft Defender for Endpoint",
+    "Data Source: Sysmon",
+    "Data Source: SentinelOne",
+    "Data Source: Crowdstrike",
+    "NBI-Recovered",
+    "Phase2-Batch2",
+    "Windows-4688",
+    "coverage:partial-29pct"
+  ],
+  "interval": "5m",
+  "enabled": true,
+  "description": "Identifies attempts to execute Jscript/Vbscript files from an archive file. The use of archives is a common delivery method of malicious scripts.",
+  "risk_score": 47,
+  "severity": "medium",
+  "note": "## Coverage\nThis rule runs on Windows Security 4688 process-creation events. Command-line-dependent conditions currently apply to hosts where command-line auditing is enabled.\n\n## Detection guidance\n## Triage and analysis\n\n> **Disclaimer**:\n> This investigation guide was created using generative AI technology and has been reviewed to improve its accuracy and relevance. While every effort has been made to ensure its quality, we recommend validating the content and adapting it to suit your specific environment and operational needs.\n\n### Investigating Windows Script Execution from Archive\n\nWindows scripts, often used for legitimate automation tasks, can be exploited by adversaries to execute malicious code. Attackers may download scripts via browsers or file utilities, then execute them using scripting tools like wscript or mshta. The detection rule identifies such threats by monitoring script creation from internet sources and subsequent execution, focusing on unusual parent-child process relationships and script attributes.\n\n### Possible investigation steps\n\n- Review the file creation event to identify the specific script file that was downloaded, noting its name, path, and extension to understand the potential threat.\n- Examine the origin URL or referrer URL of the downloaded script to determine the source and assess its legitimacy or potential malicious intent.\n- Investigate",
+  "output_index": "",
+  "investigation_fields": {
+    "field_names": [
+      "user.name",
+      "process.name",
+      "process.parent.name",
+      "process.command_line",
+      "host.name"
+    ]
+  },
+  "author": [
+    "raadabujaish"
+  ],
+  "false_positives": [],
+  "from": "now-9m",
+  "rule_id": "nbi-b2-windows-script-execution-from-archive",
+  "max_signals": 100,
+  "risk_score_mapping": [],
+  "severity_mapping": [],
+  "threat": [
+    {
+      "framework": "MITRE ATT&CK",
+      "tactic": {
+        "id": "TA0002",
+        "name": "Execution",
+        "reference": "https://attack.mitre.org/tactics/TA0002/"
+      },
+      "technique": [
+        {
+          "id": "T1059",
+          "name": "Command and Scripting Interpreter",
+          "reference": "https://attack.mitre.org/techniques/T1059/",
+          "subtechnique": [
+            {
+              "id": "T1059.007",
+              "name": "JavaScript",
+              "reference": "https://attack.mitre.org/techniques/T1059/007/"
+            },
+            {
+              "id": "T1059.005",
+              "name": "Visual Basic",
+              "reference": "https://attack.mitre.org/techniques/T1059/005/"
+            }
+          ]
+        }
+      ]
+    }
+  ],
+  "to": "now",
+  "references": [
+    "https://medium.com/walmartglobaltech/smartapesg-4605157a5b80",
+    "https://www.elastic.co/guide/en/security/current/prebuilt-rules.html"
+  ],
+  "version": 1,
+  "exceptions_list": [],
+  "related_integrations": [],
+  "required_fields": [],
+  "setup": "",
+  "type": "eql",
+  "language": "eql",
+  "index": [
+    "logs-system.security-*"
+  ],
+  "query": "process where host.os.type == \"windows\" and event.type == \"start\" and process.name : \"wscript.exe\" and\n process.parent.name : (\"explorer.exe\", \"winrar.exe\", \"7zFM.exe\") and\n process.args :\n        (\"?:\\\\Users\\\\*\\\\AppData\\\\Local\\\\Temp\\\\7z*\\\\*\",\n         \"?:\\\\Users\\\\*\\\\AppData\\\\Local\\\\Temp\\\\*.zip.*\\\\*\",\n         \"?:\\\\Users\\\\*\\\\AppData\\\\Local\\\\Temp\\\\Rar$*\\\\*\",\n         \"?:\\\\Users\\\\*\\\\AppData\\\\Local\\\\Temp\\\\Temp?_*\\\\*\",\n         \"?:\\\\Users\\\\*\\\\AppData\\\\Local\\\\Temp\\\\BNZ.*\")\n",
+  "actions": []
+}

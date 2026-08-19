@@ -1,0 +1,79 @@
+{
+  "name": "AD — New Computer (Machine) Account Created",
+  "tags": [
+    "NBI-AD",
+    "Phase3",
+    "Active-Directory",
+    "Windows-Security"
+  ],
+  "interval": "5m",
+  "enabled": true,
+  "description": "Detects creation of a new Active Directory computer account (event 4741). Attacker-created machine accounts underpin resource-based constrained delegation abuse and the sAMAccountName-spoofing / noPac (CVE-2021-42278) attack chain.",
+  "risk_score": 47,
+  "severity": "medium",
+  "note": "## Investigation\n1. `SubjectUserName` created the computer `TargetUserName`.\n2. Machine accounts are normally created by Domain Admins or during domain join — a standard user creating one (default MachineAccountQuota=10) is suspicious.\n3. Check for subsequent RBCD/SPN changes or noPac renaming on this computer object.\n## Response\nIf unauthorised: delete the computer object and investigate the creating account.",
+  "output_index": "",
+  "investigation_fields": {
+    "field_names": [
+      "winlog.event_data.SubjectUserName",
+      "winlog.event_data.SubjectDomainName",
+      "winlog.event_data.SubjectLogonId",
+      "winlog.event_data.MemberName",
+      "winlog.event_data.MemberSid",
+      "winlog.event_data.TargetUserName",
+      "winlog.event_data.TargetSid",
+      "host.name",
+      "event.code"
+    ]
+  },
+  "author": [
+    "raadabujaish"
+  ],
+  "false_positives": [],
+  "from": "now-9m",
+  "rule_id": "nbi-ad-computer-account-created",
+  "max_signals": 100,
+  "risk_score_mapping": [],
+  "severity_mapping": [],
+  "threat": [
+    {
+      "framework": "MITRE ATT&CK",
+      "tactic": {
+        "id": "TA0003",
+        "name": "Persistence",
+        "reference": "https://attack.mitre.org/tactics/TA0003/"
+      },
+      "technique": [
+        {
+          "id": "T1136",
+          "name": "Create Account",
+          "reference": "https://attack.mitre.org/techniques/T1136/",
+          "subtechnique": [
+            {
+              "id": "T1136.002",
+              "name": "Domain Account",
+              "reference": "https://attack.mitre.org/techniques/T1136/002/"
+            }
+          ]
+        }
+      ]
+    }
+  ],
+  "to": "now",
+  "references": [
+    "https://attack.mitre.org/",
+    "https://learn.microsoft.com/en-us/windows/security/threat-protection/auditing/"
+  ],
+  "version": 1,
+  "exceptions_list": [],
+  "related_integrations": [],
+  "required_fields": [],
+  "setup": "",
+  "type": "query",
+  "language": "kuery",
+  "index": [
+    "logs-system.security-*"
+  ],
+  "query": "event.code:\"4741\"",
+  "actions": []
+}

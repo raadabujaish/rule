@@ -1,0 +1,39 @@
+{
+  "name": "Primary WAF Down",
+  "tags": [],
+  "interval": "5m",
+  "enabled": true,
+  "description": "Detects When The Primary WAF is Down ",
+  "risk_score": 99,
+  "severity": "critical",
+  "license": "",
+  "output_index": "",
+  "meta": {
+    "kibana_siem_app_url": "https://nbi.scanwave.local:8008/app/security"
+  },
+  "investigation_fields": {
+    "field_names": [
+      "syslog_location",
+      "last_seen"
+    ]
+  },
+  "author": [],
+  "false_positives": [],
+  "from": "now-15m",
+  "rule_id": "4db20416-7ab5-4be8-87a9-78c5b915da79",
+  "max_signals": 100,
+  "risk_score_mapping": [],
+  "severity_mapping": [],
+  "threat": [],
+  "to": "now",
+  "references": [],
+  "version": 1,
+  "exceptions_list": [],
+  "related_integrations": [],
+  "required_fields": [],
+  "setup": "",
+  "type": "esql",
+  "language": "esql",
+  "query": "FROM logs-*\r\n| WHERE @timestamp > NOW() - 24 hours \r\n| WHERE data.type == \"traffic\" AND tags == \"Fortiweb\"\r\n| STATS last_seen = MAX(@timestamp) BY syslog_location\r\n| WHERE last_seen < NOW() - 30 minutes",
+  "actions": []
+}

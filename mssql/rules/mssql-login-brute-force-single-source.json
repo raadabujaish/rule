@@ -1,0 +1,78 @@
+{
+  "name": "MS SQL — Login Brute Force from a Single Source",
+  "tags": [
+    "NBI-Database",
+    "Phase3",
+    "MS-SQL-Server"
+  ],
+  "interval": "5m",
+  "enabled": true,
+  "description": "Detects 15 or more failed SQL Server logins from a single client IP within the rule window — indicating password brute-forcing or spraying against the database. (Note: client 10.11.18.21 already generates ~10k failed logins/30d — a persistent misconfiguration or slow brute-force worth investigating.)",
+  "risk_score": 73,
+  "severity": "high",
+  "note": "## Investigation\n1. `sqlserver.audit.client_ip` is the source; review the failed `server_principal_name`(s) and `application_name`.\n2. Distinguish a misconfigured app (same login repeatedly) from spraying (many logins).\n## Response\nBlock/rate-limit the source; reset any account that subsequently succeeded.",
+  "output_index": "",
+  "investigation_fields": {
+    "field_names": [
+      "sqlserver.audit.statement",
+      "sqlserver.audit.server_principal_name",
+      "sqlserver.audit.session_server_principal_name",
+      "sqlserver.audit.database_name",
+      "sqlserver.audit.client_ip",
+      "sqlserver.audit.application_name",
+      "sqlserver.audit.host_name",
+      "event.action",
+      "host.name",
+      "user.name"
+    ]
+  },
+  "author": [
+    "raadabujaish"
+  ],
+  "false_positives": [],
+  "from": "now-6m",
+  "rule_id": "nbi-sql-login-bruteforce",
+  "max_signals": 100,
+  "risk_score_mapping": [],
+  "severity_mapping": [],
+  "threat": [
+    {
+      "framework": "MITRE ATT&CK",
+      "tactic": {
+        "id": "TA0006",
+        "name": "Credential Access",
+        "reference": "https://attack.mitre.org/tactics/TA0006/"
+      },
+      "technique": [
+        {
+          "id": "T1110",
+          "name": "Brute Force",
+          "reference": "https://attack.mitre.org/techniques/T1110/"
+        }
+      ]
+    }
+  ],
+  "to": "now",
+  "references": [
+    "https://attack.mitre.org/",
+    "https://learn.microsoft.com/en-us/sql/relational-databases/security/auditing/"
+  ],
+  "version": 1,
+  "exceptions_list": [],
+  "related_integrations": [],
+  "required_fields": [],
+  "setup": "",
+  "type": "threshold",
+  "language": "kuery",
+  "index": [
+    "logs-microsoft_sqlserver.audit-*"
+  ],
+  "query": "event.action:\"login-failed\"",
+  "threshold": {
+    "field": [
+      "sqlserver.audit.client_ip"
+    ],
+    "value": 15
+  },
+  "actions": []
+}

@@ -1,0 +1,60 @@
+{
+  "name": "Potential DoS/DDoS Attack on ISP-Managed External Destinations",
+  "tags": [],
+  "interval": "5m",
+  "enabled": true,
+  "description": "Detects abnormally high volumes of outbound traffic targeting ISP-managed external destination IPs originating from non-private/non-RFC1918 source addresses. A sustained count exceeding 75,000 events within a 30-minute window represents approximately 2.5x the observed normal baseline (~25,000–30,000 events/30min) and may indicate a volumetric Denial of Service (DoS) or Distributed Denial of Service (DDoS) attack in progress. Private/internal RFC1918 source ranges are excluded to focus on externally-sourced traffic only.",
+  "risk_score": 99,
+  "severity": "critical",
+  "license": "",
+  "output_index": "",
+  "meta": {
+    "kibana_siem_app_url": "https://nbi.scanwave.local:8008/app/security"
+  },
+  "investigation_fields": {
+    "field_names": [
+      "destination.ip",
+      "source.ip",
+      "event_count",
+      "first_seen",
+      "last_seen",
+      "ip_group"
+    ]
+  },
+  "author": [],
+  "false_positives": [],
+  "from": "now-10m",
+  "rule_id": "6c63e680-95f4-465c-b555-2f29437c9425",
+  "max_signals": 100,
+  "risk_score_mapping": [],
+  "severity_mapping": [],
+  "threat": [
+    {
+      "framework": "MITRE ATT&CK",
+      "tactic": {
+        "id": "TA0040",
+        "name": "Impact",
+        "reference": "https://attack.mitre.org/tactics/TA0040/"
+      },
+      "technique": [
+        {
+          "id": "T1498",
+          "name": "Network Denial of Service",
+          "reference": "https://attack.mitre.org/techniques/T1498/",
+          "subtechnique": []
+        }
+      ]
+    }
+  ],
+  "to": "now",
+  "references": [],
+  "version": 1,
+  "exceptions_list": [],
+  "related_integrations": [],
+  "required_fields": [],
+  "setup": "",
+  "type": "esql",
+  "language": "esql",
+  "query": "FROM logs-*\r\n| WHERE @timestamp >= NOW() - 15 minutes\r\n| WHERE destination.ip IN (\r\n    \"185.27.117.243\", \"109.224.43.214\",\r\n    \"109.224.43.213\", \"185.27.117.246\"\r\n  )\r\n| WHERE NOT CIDR_MATCH(source.ip, \"10.0.0.0/8\", \"192.168.0.0/16\", \"172.16.0.0/12\")\r\n| STATS\r\n    event_count = COUNT(*),\r\n    first_seen  = MIN(@timestamp),\r\n    last_seen   = MAX(@timestamp)\r\n    BY destination.ip, source.ip\r\n| WHERE event_count >= 500\r\n| EVAL ip_group = CASE(\r\n    destination.ip IN (\"185.27.117.243\", \"109.224.43.214\"), \"Group-A\",\r\n    destination.ip IN (\"109.224.43.213\", \"185.27.117.246\"), \"Group-B\",\r\n    \"Unknown\"\r\n  )\r\n| EVAL threshold_breach = CASE(\r\n    ip_group == \"Group-A\" AND event_count >= 40000, true,\r\n    ip_group == \"Group-B\" AND event_count >= 15000, true,\r\n    false\r\n  )\r\n| EVAL attack_type = CASE(\r\n    event_count >= 40000, \"CRITICAL - Primary Attacker\",\r\n    event_count >= 20000, \"HIGH - Major Contributor\",\r\n    event_count >= 10000, \"MEDIUM - Contributor\",\r\n    \"LOW - Monitor\"\r\n  )\r\n| WHERE threshold_breach == true\r\n| SORT event_count DESC",
+  "actions": []
+}

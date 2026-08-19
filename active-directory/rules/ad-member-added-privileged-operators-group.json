@@ -1,0 +1,90 @@
+{
+  "name": "AD — Member Added to Privileged Operators Group",
+  "tags": [
+    "NBI-AD",
+    "Phase3",
+    "Active-Directory",
+    "Windows-Security"
+  ],
+  "interval": "5m",
+  "enabled": true,
+  "description": "Fires when an account is added to a built-in privileged operators group — Account (S-1-5-32-548), Server (549), Print (550), Backup (551), or Cryptographic (569) Operators — via events 4728/4732/4756. These groups are Tier-0-adjacent: Backup Operators can read NTDS.dit (DCSync-equivalent) and Server/Account Operators approach Domain Admin, so membership change is a common persistence/privilege-escalation step. Maps to ATT&CK Persistence T1098 (Account Manipulation).",
+  "risk_score": 73,
+  "severity": "high",
+  "note": "### Investigation\n1. Identify the actor (SubjectUserName) and confirm they are authorized to modify these groups.\n2. Identify the member added (MemberName) and which group (TargetSid) — Backup/Server/Account Operators are the highest concern.\n3. Check for an approved change ticket covering this membership change.\n4. Correlate the new member's subsequent activity (privileged logons, NTDS/backup access, DCSync) for abuse of the granted rights.\n5. Escalate immediately if the change is unapproved or the member is an unexpected/newly created account.\n\n### False positives / benign\nSanctioned admin or delegated onboarding legitimately adds Backup or Print Operators; legitimate but must be change-controlled. Distinguish by matching the actor, member, and group against an approved change record — not by allowlisting the actor. An add outside a change window, by an unexpected actor, or granting the most powerful groups (Server/Account/Backup Operators) is treated as malicious until proven otherwise.",
+  "output_index": "",
+  "investigation_fields": {
+    "field_names": [
+      "winlog.event_data.SubjectUserName",
+      "winlog.event_data.MemberName",
+      "winlog.event_data.TargetUserName",
+      "winlog.event_data.TargetSid",
+      "host.name"
+    ]
+  },
+  "author": [
+    "raadabujaish"
+  ],
+  "false_positives": [],
+  "from": "now-9m",
+  "rule_id": "nbi-ad-operators-group-add",
+  "max_signals": 100,
+  "risk_score_mapping": [],
+  "severity_mapping": [],
+  "threat": [
+    {
+      "framework": "MITRE ATT&CK",
+      "tactic": {
+        "id": "TA0003",
+        "name": "Persistence",
+        "reference": "https://attack.mitre.org/tactics/TA0003/"
+      },
+      "technique": [
+        {
+          "id": "T1098",
+          "name": "Account Manipulation",
+          "reference": "https://attack.mitre.org/techniques/T1098/"
+        }
+      ]
+    },
+    {
+      "framework": "MITRE ATT&CK",
+      "tactic": {
+        "id": "TA0008",
+        "name": "Lateral Movement",
+        "reference": "https://attack.mitre.org/tactics/TA0008/"
+      },
+      "technique": [
+        {
+          "id": "T1078",
+          "name": "Valid Accounts",
+          "reference": "https://attack.mitre.org/techniques/T1078/",
+          "subtechnique": [
+            {
+              "id": "T1078.002",
+              "name": "Domain Accounts",
+              "reference": "https://attack.mitre.org/techniques/T1078/002/"
+            }
+          ]
+        }
+      ]
+    }
+  ],
+  "to": "now",
+  "references": [
+    "https://attack.mitre.org/",
+    "https://learn.microsoft.com/en-us/windows/security/threat-protection/auditing/"
+  ],
+  "version": 1,
+  "exceptions_list": [],
+  "related_integrations": [],
+  "required_fields": [],
+  "setup": "",
+  "type": "query",
+  "language": "kuery",
+  "index": [
+    "logs-system.security-*"
+  ],
+  "query": "event.code:(\"4728\" or \"4732\" or \"4756\") and winlog.event_data.TargetSid:(\"S-1-5-32-548\" or \"S-1-5-32-549\" or \"S-1-5-32-550\" or \"S-1-5-32-551\" or \"S-1-5-32-569\")",
+  "actions": []
+}

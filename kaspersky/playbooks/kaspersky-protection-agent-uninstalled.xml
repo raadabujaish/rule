@@ -1,0 +1,290 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<Playbook xmlns="https://soc.example/playbooks" id="PB-kaspersky-protection-agent-uninstalled" name="Kaspersky — Endpoint Protection Agent Uninstalled - SOC Playbook" version="3.0" status="Validated" classification="TLP:AMBER">
+  <Metadata>
+    <Owner>NBI SOC / Detection Engineering</Owner>
+    <LastUpdated>2026-08-19</LastUpdated>
+    <Severity default="High">High</Severity>
+    <Confidence default="Medium">Medium</Confidence>
+    <Category>Defense Evasion</Category>
+    <MitreAttack>
+      <Technique id="T1562"/>
+      <Technique id="T1562.001"/>
+      <Tactic id="TA0005"/>
+    </MitreAttack>
+    <References>
+      <Reference title="MITRE ATT&amp;CK - Impair Defenses (T1562)" url="https://attack.mitre.org/techniques/T1562/"/>
+      <Reference title="MITRE ATT&amp;CK - Impair Defenses: Disable or Modify Tools (T1562.001)" url="https://attack.mitre.org/techniques/T1562/001/"/>
+      <Reference title="MITRE ATT&amp;CK - Defense Evasion tactic (TA0005)" url="https://attack.mitre.org/tactics/TA0005/"/>
+      <Reference title="Kaspersky - Export of events to a SIEM system (KSC CEF event format &amp; KLNAG/KLAUD/GNRL event types)" url="https://support.kaspersky.com/KSC/14/en-US/89299.htm"/>
+      <Reference title="Kaspersky Endpoint Security - Protecting the application from removal (tamper / password-protected uninstall)" url="https://support.kaspersky.com/KESWin/12.5/en-US/123399.htm"/>
+      <Reference title="Kaspersky Security Center - Kaspersky event notifications and severities" url="https://support.kaspersky.com/KSC/14/en-US/151336.htm"/>
+      <Reference title="Elastic - CEF integration (Common Event Format ingestion into logs-cef.log-*)" url="https://www.elastic.co/docs/reference/integrations/cef"/>
+    </References>
+  </Metadata>
+  <AlertContext>
+    <RuleName>Kaspersky — Endpoint Protection Agent Uninstalled</RuleName>
+    <RuleId>nbi-ksc-protection-removed</RuleId>
+    <RuleType>query</RuleType>
+    <Index>logs-cef.log-*</Index>
+    <TriggerLogic>The deployed rule is a query rule over the Kaspersky CEF stream. Its behavioural core, expressed as a one-line Kibana-KQL detection filter (for fast pivoting in Discover / Timeline):
+
+
+
+Plain English: any software-inventory *uninstall* event reported by the KSC Network Agent whose message names a Kaspersky product. The KLNAG_EV_INV_APP_UNINSTALLED event is a general software-inventory signal - the Network Agent reports the removal of *any* application - so the message filter is what narrows it from "an app was removed" to "a protection component was removed". Ordinary third-party uninstalls (a browser, a runtime) are excluded by that filter and do not fire the rule.
+
+Two removal shapes matter and the message distinguishes them:
+
+- KES / Kaspersky Endpoint Security uninstalled → the on-host protection engine is gone; the endpoint loses malware detection and prevention.
+- Network Agent uninstalled → the KSC management/telemetry channel is gone; the endpoint stops reporting to KSC (and therefore to this index). The host goes *dark* even if KES is technically still resident.</TriggerLogic>
+    <KeyAlertFields>event.code, cef.name, destination.domain, host.name, destination.ip, related.ip, source.ip, source.address, cef.extensions.cs9, cef.extensions.message, cef.extensions.filename, file.name</KeyAlertFields>
+  </AlertContext>
+  <Inputs>
+    <Input name="$host"/>
+  </Inputs>
+  <ExecutiveSummary>
+    <Overview>This playbook drives triage and investigation of the Kaspersky - Endpoint Protection Agent Uninstalled detection on NBI's Elastic Security deployment. The rule fires on a Kaspersky Security Center (KSC) CEF event - observer.vendor == "KasperskyLab", event.code == "KLNAG_EV_INV_APP_UNINSTALLED" - whose cef.extensions.message names a Kaspersky protection component (Kaspersky, KES, Endpoint Security, or Network Agent). That is the observable signature of endpoint protection being removed from a managed host: either the anti-malware engine itself (KES / Kaspersky Endpoint Security) or the KSC management/telemetry agent (Network Agent).
+
+Removing endpoint protection is a classic defense-evasion step - an adversary blinds the SOC before or during further malicious action - but it is also a routine part of sanctioned upgrades and decommissions. The analyst's job is to determine, quickly and defensibly, whether protection was removed by an adversary to go dark (true_positive), removed as an authorised upgrade/decommission or an attempt positively blocked by tamper protection (false_positive), removed by an uncoordinated ops action leaving a benign gap (misconfiguration), or cannot be established (needs_escalation) - with evidence attached.</Overview>
+    <BusinessImpact>An alert means: on $host, the KSC Network Agent reported that a Kaspersky protection component was uninstalled. That is the effect the rule observes; it does not, by itself, tell you *who* initiated it or *why*. The KLNAG_EV_INV_APP_UNINSTALLED event carries the component name and version (in cef.extensions.message / cef.extensions.filename), the administration group (cef.extensions.cs9), and the endpoint identity (cef.extensions.destinationHostName / destination.domain / destination.ip) - but it does not carry the acting user, and it does not indicate whether protection was subsequently restored.
+
+The decisive follow-on questions are therefore: (1) which component was removed (protection engine vs management agent), (2) whether a Kaspersky component was reinstalled shortly after (the upgrade/repair pattern), (3) whether the host kept reporting Kaspersky telemetry afterwards or went silent, and (4) whether any malware or protection-state events appeared on the host or its group around the removal. Absence of protection is a state, not an event - so the investigation is as much about what *stops* appearing as about what does.</BusinessImpact>
+  </ExecutiveSummary>
+  <Investigation>
+    <Goal>Decide true_positive / false_positive / misconfiguration / needs_escalation for Kaspersky — Endpoint Protection Agent Uninstalled.</Goal>
+    <Workflow>
+      <Step order="1" name="Reproduce the rule across the estate (confirm the detection logic)">
+        <Purpose>Reproduce the rule across the estate (confirm the detection logic)</Purpose>
+        <Query platform="Elastic" language="ES|QL" id="Q-01">
+          <![CDATA[
+FROM logs-cef.log-*
+| WHERE @timestamp >= NOW() - 4 hours
+    AND observer.vendor == "KasperskyLab"
+    AND event.code == "KLNAG_EV_INV_APP_UNINSTALLED"
+    AND (cef.extensions.message LIKE "*Kaspersky*" OR cef.extensions.message LIKE "*KES*"
+         OR cef.extensions.message LIKE "*Endpoint Security*" OR cef.extensions.message LIKE "*Network Agent*")
+| KEEP @timestamp, cef.extensions.destinationHostName, cef.extensions.cs9, cef.extensions.message, cef.name
+| SORT @timestamp DESC
+| LIMIT 50
+]]>
+        </Query>
+      </Step>
+      <Step order="2" name="Confirm which component was removed on the alert host (INV-01)">
+        <Purpose>Confirm which component was removed on the alert host (INV-01)</Purpose>
+        <Query platform="Elastic" language="ES|QL" id="Q-02">
+          <![CDATA[
+FROM logs-cef.log-*
+| WHERE observer.vendor == "KasperskyLab"
+    AND event.code == "KLNAG_EV_INV_APP_UNINSTALLED"
+    AND cef.extensions.destinationHostName == "$host"
+    AND @timestamp >= NOW() - 4 hours
+| KEEP cef.name, cef.extensions.message, destination.domain
+| LIMIT 10
+]]>
+        </Query>
+      </Step>
+      <Step order="3" name="Entity pivoting">
+        <Purpose>Entity pivoting</Purpose>
+        <Query platform="Elastic" language="ES|QL" id="Q-03">
+          <![CDATA[
+FROM logs-cef.log-*
+| WHERE observer.vendor == "KasperskyLab"
+    AND cef.extensions.destinationHostName == "$host"
+    AND event.code IN ("KLNAG_EV_INV_APP_INSTALLED","KLNAG_EV_INV_APP_UNINSTALLED","KLPRCI_TaskState")
+    AND @timestamp >= NOW() - 4 hours
+| STATS events = COUNT(*), first_seen = MIN(@timestamp), last_seen = MAX(@timestamp)
+    BY event.code, cef.name
+| SORT last_seen DESC
+| LIMIT 15
+]]>
+        </Query>
+      </Step>
+      <Step order="4" name="Process investigation">
+        <Purpose>Process investigation</Purpose>
+        <Query platform="Elastic" language="ES|QL" id="Q-04">
+          <![CDATA[
+FROM logs-cef.log-*
+| WHERE observer.vendor == "KasperskyLab"
+    AND event.code == "KLNAG_EV_INV_APP_UNINSTALLED"
+    AND cef.extensions.destinationHostName == "$host"
+    AND @timestamp >= NOW() - 4 hours
+| KEEP @timestamp, cef.extensions.filename, cef.extensions.message, cef.extensions.deviceCustomString2, cef.extensions.deviceCustomString3
+| SORT @timestamp DESC
+| LIMIT 20
+]]>
+        </Query>
+      </Step>
+      <Step order="5" name="Host investigation">
+        <Purpose>Host investigation</Purpose>
+        <Query platform="Elastic" language="ES|QL" id="Q-05">
+          <![CDATA[
+FROM logs-cef.log-*
+| WHERE observer.vendor == "KasperskyLab"
+    AND cef.extensions.destinationHostName == "$host"
+    AND @timestamp >= NOW() - 4 hours
+| STATS events = COUNT(*) BY event.code, cef.name
+| SORT events DESC
+| LIMIT 15
+]]>
+        </Query>
+      </Step>
+      <Step order="6" name="IP investigation">
+        <Purpose>IP investigation</Purpose>
+        <Query platform="Elastic" language="ES|QL" id="Q-06">
+          <![CDATA[
+FROM logs-cef.log-*
+| WHERE observer.vendor == "KasperskyLab"
+    AND cef.extensions.destinationHostName == "$host"
+    AND @timestamp >= NOW() - 4 hours
+| STATS events = COUNT(*), hostnames = VALUES(cef.extensions.destinationHostName) BY destination.ip
+| SORT events DESC
+| LIMIT 10
+]]>
+        </Query>
+      </Step>
+      <Step order="7" name="File investigation">
+        <Purpose>File investigation</Purpose>
+        <Query platform="Elastic" language="ES|QL" id="Q-07">
+          <![CDATA[
+FROM logs-cef.log-*
+| WHERE observer.vendor == "KasperskyLab"
+    AND event.code == "KLNAG_EV_INV_APP_UNINSTALLED"
+    AND cef.extensions.destinationHostName == "$host"
+    AND @timestamp >= NOW() - 4 hours
+| STATS removals = COUNT(*), first_seen = MIN(@timestamp), last_seen = MAX(@timestamp) BY cef.extensions.filename, cef.extensions.message
+| SORT last_seen DESC
+| LIMIT 20
+]]>
+        </Query>
+      </Step>
+      <Step order="8" name="Authentication investigation">
+        <Purpose>Authentication investigation</Purpose>
+        <Query platform="Elastic" language="ES|QL" id="Q-08">
+          <![CDATA[
+FROM logs-cef.log-*
+| WHERE observer.vendor == "KasperskyLab"
+    AND event.code IN ("KLAUD_EV_OBJECTMODIFY","KLAUD_EV_SERVERCONNECT","KLAUD_EV_ADMGROUP_CHANGED")
+    AND @timestamp >= NOW() - 4 hours
+| KEEP @timestamp, event.code, cef.name, cef.extensions.message, cef.extensions.destinationHostName
+| SORT @timestamp DESC
+| LIMIT 25
+]]>
+        </Query>
+      </Step>
+      <Step order="9" name="Timeline Reconstruction">
+        <Purpose>Timeline Reconstruction</Purpose>
+        <Query platform="Elastic" language="ES|QL" id="Q-09">
+          <![CDATA[
+FROM logs-cef.log-*
+| WHERE observer.vendor == "KasperskyLab"
+    AND cef.extensions.destinationHostName == "$host"
+    AND @timestamp >= NOW() - 4 hours
+| KEEP @timestamp, event.code, cef.name, cef.extensions.message, cef.extensions.cs9
+| SORT @timestamp ASC
+| LIMIT 200
+]]>
+        </Query>
+      </Step>
+      <Step order="10" name="Defense evasion validation">
+        <Purpose>Defense evasion validation</Purpose>
+        <Query platform="Elastic" language="ES|QL" id="Q-10">
+          <![CDATA[
+FROM logs-cef.log-*
+| WHERE observer.vendor == "KasperskyLab"
+    AND event.code IN ("KLNAG_EV_INV_APP_UNINSTALLED","GNRL_EV_VIRUS_FOUND","GNRL_EV_VIRUS_FOUND_BY_KSN","GNRL_EV_OBJECT_NOTCURED","GNRL_EV_DEVCTRL_DEV_PLUG_DENIED")
+    AND @timestamp >= NOW() - 4 hours
+| STATS events = COUNT(*), hosts = COUNT_DISTINCT(cef.extensions.destinationHostName), last_seen = MAX(@timestamp) BY event.code, cef.name
+| SORT events DESC
+| LIMIT 15
+]]>
+        </Query>
+      </Step>
+      <Step order="11" name="Impact assessment">
+        <Purpose>Impact assessment</Purpose>
+        <Query platform="Elastic" language="ES|QL" id="Q-11">
+          <![CDATA[
+FROM logs-cef.log-*
+| WHERE observer.vendor == "KasperskyLab"
+    AND cef.extensions.destinationHostName == "$host"
+    AND @timestamp >= NOW() - 4 hours
+| STATS total_events = COUNT(*), last_event = MAX(@timestamp), distinct_codes = COUNT_DISTINCT(event.code) BY cef.extensions.destinationHostName
+| LIMIT 5
+]]>
+        </Query>
+      </Step>
+      <Step order="12" name="Finalize verdict">
+        <DecisionTree>
+        </DecisionTree>
+      </Step>
+    </Workflow>
+  </Investigation>
+  <ClassificationGuidance>
+    <TruePositive>
+      <Definition></Definition>
+    </TruePositive>
+    <FalsePositive>
+      <Definition></Definition>
+      <Indicators>
+        <Item>Authorised KES/Agent upgrades. The classic upgrade sequence is *uninstall old version → install new version* within a short window on the same host. A KLNAG_EV_INV_APP_UNINSTALLED immediately followed by a KLNAG_EV_INV_APP_INSTALLED of a Kaspersky component (especially a higher version) is the signature of maintenance, not evasion.</Item>
+        <Item>Sanctioned decommission / re-imaging. A host being retired or rebuilt legitimately sheds its agent. This is benign only when matched to a change/decommission record.</Item>
+        <Item>Repair / reinstall workflows that remove and re-add a component to fix a broken agent.</Item>
+        <Item>Tamper-protection-blocked removal attempts. If Kaspersky tamper protection or password-protected uninstall blocked the removal and protection stayed active, the attempt is a *blocked-malicious* event - documented as blocked, never "benign".</Item>
+        <Item>The Kaspersky-product uninstall set is effectively zero-baseline. Over the last 14 days, KLNAG_EV_INV_APP_UNINSTALLED events whose message names a Kaspersky/KES/Endpoint Security/Network Agent component returned 0 rows. The KLNAG_EV_INV_APP_UNINSTALLED stream itself is busy (~88 events/24h) but is 100% third-party software inventory - Google Chrome, Node.js, Microsoft Edge / WebView2, OneDrive, Toad for Oracle, Windows QFE - none of which fire this rule. So the rule is near-silent and high-fidelity: there is no noisy legitimate Kaspersky-uninstall source to tune out, and any firing is a strong anomaly worth believing.</Item>
+        <Item>The most plausible legitimate cause is a coordinated KES version upgrade. NBI runs KES 11.0.0.0 across the SERVERS group; a fleet upgrade would legitimately produce uninstall→install pairs. Confirm against a change window before treating an uninstall as benign (section 15.1 shows the paired install if present).</Item>
+        <Item>No host-level allow-list exists for this rule. Do not create a blanket exception for a host or group off a single alert; scope any exception to an exact component + version + host + change reference, and only after a documented authorised cause.</Item>
+      </Indicators>
+    </FalsePositive>
+    <Misconfiguration>
+      <Definition></Definition>
+    </Misconfiguration>
+    <NeedsEscalation>
+      <Definition></Definition>
+    </NeedsEscalation>
+  </ClassificationGuidance>
+  <ResponseActions>
+    <Phase name="Containment">
+      <Action>Isolate $host (network-contain / quarantine) if a true_positive is confirmed, to stop activity in the protection gap. On core banking servers or ATMs, coordinate with IT to avoid unnecessary service disruption, but prioritise containment.</Action>
+      <Action>Re-enforce protection immediately: reinstall/repush KES and the Network Agent from KSC and confirm the host reports again. Until it does, treat the host as unmonitored.</Action>
+      <Action>Preserve volatile evidence first where feasible (running process list, autoruns, recent artifacts on $host) - because the agent was down, host-side capture is the only record of what happened during the gap.</Action>
+      <Action>Disable/limit the initiating account if the removal is attributed to a compromised admin or KSC operator (section 15.12); rotate its credentials (section 20).</Action>
+      <Action>Deploy/confirm changes only via the authorised human-approved DEPLOY path; investigation itself is read-only.</Action>
+    </Phase>
+    <Phase name="Eradication">
+      <Action>Remove any tooling/persistence the adversary planted during the gap - hunt services, scheduled tasks, Run keys, and dropped payloads on $host via logs-system.security* and host-side inspection (the removed agent will not have reported them).</Action>
+      <Action>Restore full protection (KES + Network Agent, current version, policy applied) and verify tamper protection / password-protected uninstall is enforced going forward.</Action>
+      <Action>Run a full anti-malware / EDR scan on $host once protection is back, and hunt the same activity across the host's administration group and any peer the host touched during the gap.</Action>
+      <Action>Remediate the initiating vector - the compromised admin credential, KSC console access, or foothold that enabled the removal.</Action>
+    </Phase>
+    <Phase name="Recovery">
+      <Action>Reset credentials exposed on $host during the unprotected window, and rotate the initiating admin/KSC-operator account if implicated (section 15.12).</Action>
+      <Action>Confirm the host is fully reporting to KSC again (task, inventory, and - under test - detection events resume) before returning it to normal monitoring.</Action>
+      <Action>Restore $host from a known-good image if tampering was extensive or trust cannot be re-established; otherwise validate eradication holds after reboot.</Action>
+      <Action>Return the host/account to service only after section 22 closing criteria are met and monitoring confirms protection persists and the removal does not recur.</Action>
+      <Action>Recommend hardening (section 23): enforce Kaspersky tamper protection / password-protected uninstall group-wide, and alert on protection removal without a matching change ticket.</Action>
+    </Phase>
+  </ResponseActions>
+  <Escalation>
+    <Trigger>Escalate to Tier 3 / Incident Response (and notify the customer) when any of the following hold:
+
+- A protection engine (KES) was removed and not restored, with no change record - this alone warrants IR.
+- The host went silent in Kaspersky telemetry after a Network-Agent removal (blind spot confirmed, section 17.5).
+- Malware, not-cured objects, or other protection-state tampering appears on $host or its group around the removal (section 17.4) - evade-and-execute.
+- The removal is attributed to a suspicious or compromised admin/KSC operator, or spans multiple hosts in a group.
+- The host is an ATM or core banking server, or evidence is incomplete because of the CEF telemetry gaps and the alert cannot be safely cleared - escalate as needs_escalation with the gaps named.</Trigger>
+    <To>SOC L2 / IR</To>
+  </Escalation>
+  <ClosureCriteria>
+    <Item>false_positive (authorised upgrade/decommission): an immediate newer-version Kaspersky reinstall (section 15.1) or a documented decommission is positively matched to $host + component + time; no malware context. Record the change reference. Scope any exception narrowly (component + version + host).</Item>
+    <Item>false_positive (blocked-malicious): tamper protection blocked the removal and protection remained active and reporting; documented as a blocked attempt (never "benign"), initiator investigated.</Item>
+    <Item>misconfiguration: a recognised but uncoordinated ops action removed protection with no malicious context; protection restored and the team aligned with change control.</Item>
+    <Item>true_positive: unauthorised removal confirmed; host isolated, protection restored, the gap-window activity hunted in Windows telemetry, scope across the group established, and no residual persistence or recurrence on monitoring.</Item>
+    <Item>needs_escalation: handed to the endpoint team + SOC L2 with the specific evidence gaps (authorisation unknown, current protection state unknown) documented.</Item>
+  </ClosureCriteria>
+  <Limitations>
+    <Item>Zero baseline = high fidelity. Over 14 days, genuine Kaspersky-component uninstalls returned 0 rows; the KLNAG_EV_INV_APP_UNINSTALLED stream is otherwise 100% third-party inventory (Chrome, Node.js, Edge, OneDrive, Toad, Windows QFE). There is nothing legitimate to tune out - when this rule fires, believe it.</Item>
+    <Item>The event names the "what", not the "who". KLNAG_EV_INV_APP_UNINSTALLED has no acting-user field on NBI. Attribution comes from KSC admin audit (KLAUD_EV_*, operator inside the message string) and, for on-host action, Windows Security for $host - both separate from this event.</Item>
+    <Item>Silence is signal. The Network Agent is also the sensor for this index; a genuine agent removal makes the host's Kaspersky stream stop. Use section 17.5 (last_event) as a first-class indicator - an empty follow-on is the blind spot forming, not an all-clear.</Item>
+    <Item>This CEF index has no host.name/user.name/source.ip. The endpoint is the *destination* (destination.domain/destination.ip/cef.extensions.destinationHostName); SHA256 lives in deviceCustomString4 only on detection events, not on this inventory event. Do not reach for Windows-style fields here.</Item>
+    <Item>Coverage gap the rule does not close: protection *disabled* without a full uninstall (paused components, policy tampering) does not raise this event.code. Pair this rule with the Kaspersky malware-remediation-failed / protection-state detections and with Windows execution/logon telemetry for the host during any gap.</Item>
+    <Item>KB-worthy (persist to NBI customer scope): (1) Kaspersky-product uninstall zero-baseline over 14d on logs-cef.log-*; (2) KLNAG_EV_INV_APP_UNINSTALLED carries no user and no hash (both present only on detection events); (3) endpoint modelled as CEF *destination* - destination.ip present, source.ip absent; (4) KLAUD_EV_* names the operator inside cef.extensions.message. All observed live on 2026-08-17 (KSC 15.1.0.20748, KES 11.0.0.0).</Item>
+  </Limitations>
+</Playbook>

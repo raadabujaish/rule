@@ -1,0 +1,415 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<Playbook xmlns="https://soc.example/playbooks" id="PB-windows-fake-captcha-phishing" name="Potential Fake CAPTCHA Phishing Attack [NBI-4688] - SOC Playbook" version="3.0" status="Validated" classification="TLP:AMBER">
+  <Metadata>
+    <Owner>NBI SOC / Detection Engineering</Owner>
+    <LastUpdated>2026-08-19</LastUpdated>
+    <Severity default="High">High</Severity>
+    <Confidence default="Medium">Medium</Confidence>
+    <Category>Execution</Category>
+    <MitreAttack>
+      <Technique id="T1204"/>
+      <Technique id="T1059.001"/>
+      <Technique id="T1059"/>
+      <Tactic id="TA0002"/>
+    </MitreAttack>
+    <References>
+      <Reference title="MITRE ATT&amp;CK - User Execution (T1204)" url="https://attack.mitre.org/techniques/T1204/"/>
+      <Reference title="MITRE ATT&amp;CK - Command and Scripting Interpreter: PowerShell (T1059.001)" url="https://attack.mitre.org/techniques/T1059/001/"/>
+      <Reference title="MITRE ATT&amp;CK - Execution tactic (TA0002)" url="https://attack.mitre.org/tactics/TA0002/"/>
+      <Reference title='Microsoft Security - "ClickFix" fake-CAPTCHA / paste-to-run social engineering' url="https://www.microsoft.com/en-us/security/blog/"/>
+      <Reference title='Proofpoint - "ClickFix" social engineering leads to malware (fake CAPTCHA / verification lure)' url="https://www.proofpoint.com/us/blog/threat-insight/clickfix-social-engineering-technique-floods-threat-landscape"/>
+      <Reference title="Microsoft Learn - Command line process auditing (Event 4688 command-line GPO)" url="https://learn.microsoft.com/en-us/windows-server/identity/ad-ds/manage/component-updates/command-line-process-auditing"/>
+      <Reference title="Microsoft Learn - 4688: A new process has been created" url="https://learn.microsoft.com/en-us/windows/security/threat-protection/auditing/event-4688"/>
+    </References>
+  </Metadata>
+  <AlertContext>
+    <RuleName>Potential Fake CAPTCHA Phishing Attack [NBI-4688]</RuleName>
+    <RuleId>nbi-b2-potential-fake-captcha-phishing-attack</RuleId>
+    <RuleType>eql</RuleType>
+    <Index>logs-system.security*</Index>
+    <TriggerLogic>Deployed logic (plain English): a 4688 where process.parent.name is explorer.exe, process.name is powershell.exe/cmd.exe/mshta.exe, and the effective command line matches one of the fake-CAPTCHA lure strings. NBI's investigation folds process.command_line and the multivalued process.args into a single lowercased string (host-dependent capture - section 8) before matching the lure text.
+
+One-line Kibana KQL detection filter (for fast pivoting in Discover / Timeline):
+
+
+
+Why this is meaningful: an explorer.exe-spawned shell is the fingerprint of a Win+R Run-dialog paste (explorer hosts the Run box), and the lure wording carried in the command line is the delivery tell. The two together rarely occur benignly - a user does not normally paste "I am not a robot" into a shell.</TriggerLogic>
+    <KeyAlertFields>process.name, process.executable, process.parent.name, process.parent.executable, explorer.exe, process.pid, process.parent.pid, process.entity_id, user.name, user.id, host.name, host.os.type</KeyAlertFields>
+  </AlertContext>
+  <Inputs>
+    <Input name="$host"/>
+    <Input name="$user"/>
+    <Input name="$process"/>
+  </Inputs>
+  <ExecutiveSummary>
+    <Overview>This playbook drives triage and investigation of the Potential Fake CAPTCHA Phishing Attack detection on NBI's Elastic Security deployment. The rule fires on a Windows process start (Event 4688) where powershell.exe, cmd.exe, or mshta.exe is spawned by explorer.exe and the command line contains fake-CAPTCHA / "ClickFix" lure text - recaptcha, CAPTCHA Verif, complete verification, Verification ID/Code/UID, human validation/ID, not a robot, Click OK to, anti-robot test, Cloudflare ID, and look-alike variants.
+
+That signature is the residue of a paste-and-run social-engineering attack: a web page shows a bogus "verify you are human" prompt and instructs the victim to press Win+R and paste a clipboard-delivered command, so explorer.exe (the Run dialog's launcher) spawns a shell whose command line still contains the lure wording. It is one of the most common current initial-access techniques for infostealers and loaders, and it lands directly at code execution.
+
+Because the command already ran, the analyst's decision is not "will it" but "what did it do": classify the alert as true_positive (a live user-execution compromise), false_positive (the command positively proven inert/blocked, recorded as blocked-malicious never "benign"), misconfiguration (a benign tool merely echoing lure-like text), or needs_escalation.</Overview>
+    <BusinessImpact>An alert means: on $host, a shell ($process) was launched by explorer.exe with a command line containing fake-CAPTCHA lure text. Because the shell already executed, the alert asserts the paste-execution *happened*; the open questions are what payload the command carried (a download/execute cradle) and what ran next.
+
+This maps to Execution / User Execution. It is a high-fidelity signal of successful social engineering at the point of code execution - treat as a live compromise unless the payload is positively proven inert.</BusinessImpact>
+  </ExecutiveSummary>
+  <Investigation>
+    <Goal>Decide true_positive / false_positive / misconfiguration / needs_escalation for Potential Fake CAPTCHA Phishing Attack [NBI-4688].</Goal>
+    <Workflow>
+      <Step order="1" name="Recover the pasted command (on $host)">
+        <Purpose>Recover the pasted command (on $host)</Purpose>
+        <Query platform="Elastic" language="ES|QL" id="Q-01">
+          <![CDATA[
+FROM logs-system.security*
+| WHERE event.code == "4688" AND host.name == "$host" AND process.name == "$process" AND TO_LOWER(process.parent.name) == "explorer.exe" AND @timestamp >= NOW() - 4 hours
+| EVAL cl = TO_LOWER(COALESCE(process.command_line, MV_CONCAT(process.args, " ")))
+| WHERE cl LIKE "*recaptcha*" OR cl LIKE "*captcha*" OR cl LIKE "*verification*" OR cl LIKE "*not a robot*" OR cl LIKE "*click ok to*" OR cl LIKE "*human*" OR cl LIKE "*cloudflare*" OR cl LIKE "*robot test*" OR cl LIKE "*validation*"
+| KEEP @timestamp, user.name, process.name, process.pid, process.command_line, process.args
+| SORT @timestamp DESC
+| LIMIT 20
+]]>
+        </Query>
+      </Step>
+      <Step order="2" name="Download / execution intent in the pasted command">
+        <Purpose>Download / execution intent in the pasted command</Purpose>
+        <Query platform="Elastic" language="ES|QL" id="Q-02">
+          <![CDATA[
+FROM logs-system.security*
+| WHERE event.code == "4688" AND host.name == "$host" AND user.name == "$user" AND process.name IN ("powershell.exe", "cmd.exe", "mshta.exe") AND TO_LOWER(process.parent.name) == "explorer.exe" AND @timestamp >= NOW() - 4 hours
+| EVAL cl = TO_LOWER(COALESCE(process.command_line, MV_CONCAT(process.args, " ")))
+| EVAL payload = CASE(cl LIKE "*http*" OR cl LIKE "*-enc*" OR cl LIKE "*frombase64*" OR cl LIKE "*iwr*" OR cl LIKE "*invoke-*" OR cl LIKE "*curl*" OR cl LIKE "*certutil*" OR cl LIKE "*downloadstring*" OR cl LIKE "*.hta*", 1, 0)
+| STATS runs = COUNT(*), payload_runs = SUM(payload) BY process.name
+| SORT runs DESC
+| LIMIT 20
+]]>
+        </Query>
+      </Step>
+      <Step order="3" name="Follow-on process tree">
+        <Purpose>Follow-on process tree</Purpose>
+        <Query platform="Elastic" language="ES|QL" id="Q-03">
+          <![CDATA[
+FROM logs-system.security*
+| WHERE event.code == "4688" AND host.name == "$host" AND user.name == "$user" AND process.parent.name IN ("powershell.exe", "cmd.exe", "mshta.exe") AND @timestamp >= NOW() - 4 hours
+| STATS execs = COUNT(*), first_seen = MIN(@timestamp), last_seen = MAX(@timestamp) BY process.name, process.parent.name
+| SORT execs DESC
+| LIMIT 25
+]]>
+        </Query>
+      </Step>
+      <Step order="4" name="Entity pivoting">
+        <Purpose>Entity pivoting</Purpose>
+        <Query platform="Elastic" language="ES|QL" id="Q-04">
+          <![CDATA[
+FROM logs-system.security*
+| WHERE @timestamp >= NOW() - 4 hours
+    AND event.code == "4688"
+    AND host.name == "$host"
+    AND user.name == "$user"
+    AND process.name == "$process"
+| KEEP @timestamp, host.name, user.name, process.name, process.executable, process.parent.name, process.parent.pid, process.pid
+| SORT @timestamp DESC
+| LIMIT 50
+]]>
+        </Query>
+      </Step>
+      <Step order="5" name="Process investigation">
+        <Purpose>Process investigation</Purpose>
+        <Query platform="Elastic" language="ES|QL" id="Q-05">
+          <![CDATA[
+FROM logs-system.security*
+| WHERE @timestamp >= NOW() - 4 hours
+    AND event.code == "4688"
+    AND host.name == "$host"
+    AND TO_LOWER(process.parent.name) == "explorer.exe"
+| STATS execs = COUNT(*), users = COUNT_DISTINCT(user.name) BY process.name
+| SORT execs DESC
+| LIMIT 30
+]]>
+        </Query>
+      </Step>
+      <Step order="6" name="Process investigation">
+        <Purpose>Process investigation</Purpose>
+        <Query platform="Elastic" language="ES|QL" id="Q-06">
+          <![CDATA[
+FROM logs-system.security*
+| WHERE @timestamp >= NOW() - 4 hours
+    AND event.code == "4688"
+    AND host.name == "$host"
+    AND process.name == "$process"
+| STATS execs = COUNT(*), users = COUNT_DISTINCT(user.name) BY process.parent.name
+| SORT execs DESC
+| LIMIT 25
+]]>
+        </Query>
+      </Step>
+      <Step order="7" name="Parent-Child process analysis">
+        <Purpose>Parent-Child process analysis</Purpose>
+        <Query platform="Elastic" language="ES|QL" id="Q-07">
+          <![CDATA[
+FROM logs-system.security*
+| WHERE @timestamp >= NOW() - 4 hours
+    AND event.code == "4688"
+    AND host.name == "$host"
+    AND TO_LOWER(process.parent.name) == "explorer.exe"
+    AND process.name IN ("powershell.exe", "cmd.exe", "mshta.exe", "wscript.exe", "cscript.exe")
+| KEEP @timestamp, user.name, process.parent.name, process.parent.pid, process.name, process.pid, process.executable
+| SORT @timestamp DESC
+| LIMIT 50
+]]>
+        </Query>
+      </Step>
+      <Step order="8" name="Parent-Child process analysis">
+        <Purpose>Parent-Child process analysis</Purpose>
+        <Query platform="Elastic" language="ES|QL" id="Q-08">
+          <![CDATA[
+FROM logs-system.security*
+| WHERE @timestamp >= NOW() - 4 hours
+    AND event.code == "4688"
+    AND host.name == "$host"
+    AND process.parent.name == "$process"
+| KEEP @timestamp, user.name, process.parent.name, process.parent.pid, process.name, process.pid, process.executable
+| SORT @timestamp ASC
+| LIMIT 100
+]]>
+        </Query>
+      </Step>
+      <Step order="9" name="User investigation">
+        <Purpose>User investigation</Purpose>
+        <Query platform="Elastic" language="ES|QL" id="Q-09">
+          <![CDATA[
+FROM logs-system.security*
+| WHERE @timestamp >= NOW() - 4 hours
+    AND event.code == "4688"
+    AND user.name == "$user"
+| STATS executions = COUNT(*), distinct_procs = COUNT_DISTINCT(process.name) BY host.name
+| SORT executions DESC
+| LIMIT 20
+]]>
+        </Query>
+      </Step>
+      <Step order="10" name="Host investigation">
+        <Purpose>Host investigation</Purpose>
+        <Query platform="Elastic" language="ES|QL" id="Q-10">
+          <![CDATA[
+FROM logs-system.security*
+| WHERE @timestamp >= NOW() - 4 hours
+    AND event.code == "4688"
+    AND host.name == "$host"
+| STATS executions = COUNT(*), users = COUNT_DISTINCT(user.name) BY process.name, process.parent.name
+| SORT executions ASC
+| LIMIT 40
+]]>
+        </Query>
+      </Step>
+      <Step order="11" name="IP investigation">
+        <Purpose>IP investigation</Purpose>
+        <Query platform="Elastic" language="ES|QL" id="Q-11">
+          <![CDATA[
+FROM logs-system.security*
+| WHERE @timestamp >= NOW() - 4 hours
+    AND event.code == "4624"
+    AND host.name == "$host" AND user.name == "$user"
+    AND source.ip IS NOT NULL
+| STATS logons = COUNT(*) BY source.ip, winlog.event_data.LogonType
+| SORT logons DESC
+| LIMIT 20
+]]>
+        </Query>
+      </Step>
+      <Step order="12" name="File investigation">
+        <Purpose>File investigation</Purpose>
+        <Query platform="Elastic" language="ES|QL" id="Q-12">
+          <![CDATA[
+FROM logs-system.security*
+| WHERE @timestamp >= NOW() - 4 hours
+    AND event.code == "4688"
+    AND host.name == "$host"
+    AND (process.name == "$process" OR process.parent.name == "$process")
+| STATS executions = COUNT(*), first_seen = MIN(@timestamp), last_seen = MAX(@timestamp) BY process.name, process.executable
+| SORT executions DESC
+| LIMIT 30
+]]>
+        </Query>
+      </Step>
+      <Step order="13" name="Authentication investigation">
+        <Purpose>Authentication investigation</Purpose>
+        <Query platform="Elastic" language="ES|QL" id="Q-13">
+          <![CDATA[
+FROM logs-system.security*
+| WHERE @timestamp >= NOW() - 4 hours
+    AND event.code IN ("4624", "4625", "4634", "4647")
+    AND host.name == "$host" AND user.name == "$user"
+| STATS events = COUNT(*), first_seen = MIN(@timestamp), last_seen = MAX(@timestamp) BY event.code, winlog.event_data.LogonType, source.ip
+| SORT events DESC
+| LIMIT 30
+]]>
+        </Query>
+      </Step>
+      <Step order="14" name="Timeline Reconstruction">
+        <Purpose>Timeline Reconstruction</Purpose>
+        <Query platform="Elastic" language="ES|QL" id="Q-14">
+          <![CDATA[
+FROM logs-system.security*
+| WHERE @timestamp >= NOW() - 4 hours
+    AND event.code == "4688"
+    AND host.name == "$host"
+    AND user.name == "$user"
+| KEEP @timestamp, process.parent.name, process.parent.pid, process.name, process.pid, process.executable
+| SORT @timestamp ASC
+| LIMIT 200
+]]>
+        </Query>
+      </Step>
+      <Step order="15" name="Lateral movement validation">
+        <Purpose>Lateral movement validation</Purpose>
+        <Query platform="Elastic" language="ES|QL" id="Q-15">
+          <![CDATA[
+FROM logs-system.security*
+| WHERE @timestamp >= NOW() - 4 hours
+    AND event.code IN ("4624", "4648", "4768", "4769", "5140")
+    AND user.name == "$user"
+    AND host.name != "$host"
+| STATS events = COUNT(*) BY host.name, event.code, winlog.event_data.LogonType
+| SORT events DESC
+| LIMIT 30
+]]>
+        </Query>
+      </Step>
+      <Step order="16" name="Persistence validation">
+        <Purpose>Persistence validation</Purpose>
+        <Query platform="Elastic" language="ES|QL" id="Q-16">
+          <![CDATA[
+FROM logs-system.security*
+| WHERE @timestamp >= NOW() - 4 hours
+    AND host.name == "$host"
+    AND (
+        (event.code == "4688" AND TO_LOWER(process.name) IN ("schtasks.exe", "reg.exe", "sc.exe", "at.exe", "powershell.exe", "wscript.exe", "cscript.exe", "rundll32.exe", "regsvr32.exe", "mshta.exe"))
+        OR event.code == "7045"
+        OR event.code == "4720"
+        OR event.code == "4698"
+    )
+| STATS events = COUNT(*) BY event.code, process.name, user.name
+| SORT events DESC
+| LIMIT 40
+]]>
+        </Query>
+      </Step>
+      <Step order="17" name="Privilege escalation validation">
+        <Purpose>Privilege escalation validation</Purpose>
+        <Query platform="Elastic" language="ES|QL" id="Q-17">
+          <![CDATA[
+FROM logs-system.security*
+| WHERE @timestamp >= NOW() - 4 hours
+    AND event.code == "4672"
+    AND host.name == "$host"
+| STATS special_priv_logons = COUNT(*) BY user.name
+| SORT special_priv_logons DESC
+| LIMIT 25
+]]>
+        </Query>
+      </Step>
+      <Step order="18" name="Defense evasion validation">
+        <Purpose>Defense evasion validation</Purpose>
+        <Query platform="Elastic" language="ES|QL" id="Q-18">
+          <![CDATA[
+FROM logs-system.security*
+| WHERE @timestamp >= NOW() - 4 hours
+    AND host.name == "$host"
+    AND (
+        (event.code == "4688" AND TO_LOWER(process.name) IN ("wevtutil.exe", "fsutil.exe", "vssadmin.exe", "wmic.exe", "cipher.exe", "sdelete.exe", "sdelete64.exe"))
+        OR event.code == "1102"
+        OR event.code == "4719"
+    )
+| STATS events = COUNT(*) BY event.code, process.name, user.name
+| SORT events DESC
+| LIMIT 30
+]]>
+        </Query>
+      </Step>
+      <Step order="19" name="Impact assessment">
+        <Purpose>Impact assessment</Purpose>
+        <Query platform="Elastic" language="ES|QL" id="Q-19">
+          <![CDATA[
+FROM logs-system.security*
+| WHERE @timestamp >= NOW() - 4 hours
+    AND host.name == "$host"
+    AND event.code == "4688"
+    AND process.parent.name == "$process"
+| STATS children = COUNT(*), distinct_children = COUNT_DISTINCT(process.name) BY process.name, process.executable
+| SORT children DESC
+| LIMIT 30
+]]>
+        </Query>
+      </Step>
+      <Step order="20" name="Finalize verdict">
+        <DecisionTree>
+        </DecisionTree>
+      </Step>
+    </Workflow>
+  </Investigation>
+  <ClassificationGuidance>
+    <TruePositive>
+      <Definition></Definition>
+    </TruePositive>
+    <FalsePositive>
+      <Definition></Definition>
+      <Indicators>
+        <Item>A benign tool or test that echoes CAPTCHA/verification-like text with no shell payload and no explorer-driven paste - a lexical match, not an attack.</Item>
+        <Item>A security-awareness or QA exercise that deliberately simulates the paste - authorised, but confirmed against the exercise ROE, not assumed.</Item>
+        <Item>The explorer-spawned-shell-with-lure-text combination has a zero baseline. No explorer.exe-spawned powershell/cmd/mshta carrying lure text was present in the live 4-hour window. The lure-string + explorer-parent pairing rarely occurs benignly, so any true hit is high-fidelity.</Item>
+        <Item>The victim tier has command-line auditing OFF. $host (nim-jump-apv02) and the jump/VDI class measure 0% process.command_line/process.args on 4688. So on the exact host class where an interactive user would fall for this lure, the pasted lure text and payload are not captured in this index - the rule's *string* match cannot fire here, and confirmation must come from EDR. This is a genuine detection gap, not a clean bill of health: an interactive paste on the jump tier can occur without the command line ever reaching NBI.</Item>
+        <Item>explorer.exe on the jump host normally spawns GUI apps, not shells. In-window it launched WinRAR.exe, WinSCP.exe, putty.exe, MobaXterm.exe, firefox.exe, mstsc.exe, notepad++.exe, sqldeveloper.exe - an interactive-tooling profile. An explorer→powershell/cmd/mshta is already anomalous against that baseline, independent of lure text.</Item>
+        <Item>No NBI benign-true-positive is on record. There is no allow-list; scope any future exception to the exact lure string + parent + user after a documented benign cause.</Item>
+      </Indicators>
+    </FalsePositive>
+    <Misconfiguration>
+      <Definition></Definition>
+    </Misconfiguration>
+    <NeedsEscalation>
+      <Definition></Definition>
+    </NeedsEscalation>
+  </ClassificationGuidance>
+  <ResponseActions>
+    <Phase name="Containment">
+      <Action>Isolate $host (network-contain / quarantine) once a payload or second stage is confirmed, to stop infostealer exfiltration and C2. On a shared jump/VDI host, coordinate with IT to avoid dropping unrelated sessions unnecessarily, but prioritise containment.</Action>
+      <Action>Kill the pasted shell and its descendants (the PID tree from section 15.3b / section 17.5) if the host cannot yet be isolated.</Action>
+      <Action>Disable $user's account and revoke sessions/tokens, and reset the user's credentials and browser sessions - infostealers target saved passwords, cookies, and tokens (section 20).</Action>
+      <Action>Block the payload infrastructure (download URL/host and C2) at the perimeter once recovered from EDR/browser history.</Action>
+      <Action>Preserve volatile evidence first - the pasted command (from EDR), clipboard contents, running processes, and any dropped payload - since the command line is not captured in this index. Apply changes only via the authorised human-approved DEPLOY path.</Action>
+    </Phase>
+    <Phase name="Eradication">
+      <Action>Remove dropped payloads identified via section 15.10 (process.executable paths in Temp/AppData/Downloads) and any second-stage binaries.</Action>
+      <Action>Remove persistence discovered in section 17.2 (scheduled tasks, services, Run keys, rogue accounts).</Action>
+      <Action>Run a full anti-malware / EDR scan on $host and hunt for the same payload hash and C2 across peers, especially other jump/VDI hosts and any host $user touched (section 15.4, section 17.1).</Action>
+      <Action>Remediate the delivery - block the fake-CAPTCHA page domain and report it; hunt other users who reached the same page.</Action>
+    </Phase>
+    <Phase name="Recovery">
+      <Action>Reset $user's credentials and revoke all sessions/tokens, and force re-authentication for banking/privileged applications the user can reach - assume saved credentials and cookies were stolen.</Action>
+      <Action>Restore $host from a known-good image if the loader established persistence or the scope is uncertain; otherwise validate eradication holds after reboot and re-scan.</Action>
+      <Action>Return the host/account to service only after section 22 closing criteria are met and monitoring confirms no recurrence.</Action>
+      <Action>Recommend hardening (section 23): command-line auditing on the jump/VDI tier (currently 0% - the single highest-value gap for this rule), Win+R/clipboard-to-shell policy restrictions where feasible, AMSI/constrained-language mode, and targeted awareness on fake-CAPTCHA/ClickFix lures.</Action>
+    </Phase>
+  </ResponseActions>
+  <Escalation>
+    <Trigger>Escalate to Tier 3 / Incident Response (and notify the identity team) when any of the following hold:
+
+- A download/execution payload is recovered (EDR), or second-stage children appear under the pasted shell (section 14.3/section 15.3b/section 17.5).
+- Persistence is installed (section 17.2), or lateral movement from $host/$user is observed (section 17.1).
+- The victim holds privileged or banking access, or a service/privileged account is implicated.
+- Log clearing or audit-policy tampering appears (section 17.4).
+- The payload cannot be recovered because command-line auditing is off and no EDR detail exists - escalate as needs_escalation with the gap named and the user interviewed.</Trigger>
+    <To>SOC L2 / IR</To>
+  </Escalation>
+  <ClosureCriteria>
+    <Item>misconfiguration: a benign tool/test echoes CAPTCHA/verification-like text with no shell payload and no explorer-driven paste - a lexical match; refine the lure-string set and baseline the source.</Item>
+    <Item>false_positive (proven-blocked): the payload positively proven to have failed/been blocked (AMSI/EDR block, unreachable download, no second stage) - documented as a blocked-malicious attempt, never "benign"; the user is still reset/monitored and educated.</Item>
+    <Item>true_positive: paste attack executed (payload/second-stage confirmed); host isolated and cleaned, payload infrastructure blocked, persistence removed, user credentials/sessions reset, scope established, incident documented.</Item>
+    <Item>needs_escalation: payload unrecoverable / second-stage indeterminate - handed to Tier 3/IR with the gap documented and the user interviewed.</Item>
+  </ClosureCriteria>
+  <Limitations>
+    <Item>EDR is mandatory here. On the jump/VDI victim tier process.command_line/process.args are 0% populated, so the pasted lure text and payload are not in this index - the rule's string match cannot fire on that host class, and confirmation must come from EDR. Do not clear the alert on an empty in-index result.</Item>
+    <Item>Lineage still works and is your anchor. process.pid/process.parent.pid are ~100% populated, so explorer.exe → shell → descendants is legible by PID even without the command line. The follow-on tree (section 15.3b/section 17.5) is the strongest in-index evidence on this tier.</Item>
+    <Item>explorer-spawned shells are anomalous on the jump host. The in-window explorer child profile was GUI tools (WinRAR, WinSCP, putty, MobaXterm, firefox, mstsc) - not shells. An explorer→powershell/cmd/mshta is already notable, lure text or not.</Item>
+    <Item>The victim is a target regardless of outcome. Even a proven-blocked payload means the user fell for the lure - reset, monitor, and educate; never close as "benign".</Item>
+    <Item>source.ip on the jump host is shared infrastructure (validated egress 10.11.102.15 fronts many users). Correlate IP + user + host; do not treat the IP as an individual identifier.</Item>
+    <Item>KB-worthy (persist to NBI customer scope): (1) explorer-spawned-shell-with-lure-text zero baseline over 4h; (2) nim-jump-apv02/jump-VDI tier command-line auditing 0% (rule's string match blind on this class - EDR required); (3) jump-host explorer child profile = GUI tools, shells anomalous; (4) MUNTADHER.ASAAD RDP logon type 10 from shared egress 10.11.102.15. All observed live on 2026-08-19.</Item>
+  </Limitations>
+</Playbook>

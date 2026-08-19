@@ -1,0 +1,410 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<Playbook xmlns="https://soc.example/playbooks" id="PB-windows-vscode-remote-tunnel" name="Attempt to Establish VScode Remote Tunnel [NBI-4688] - SOC Playbook" version="3.0" status="Validated" classification="TLP:AMBER">
+  <Metadata>
+    <Owner>NBI SOC / Detection Engineering</Owner>
+    <LastUpdated>2026-08-19</LastUpdated>
+    <Severity default="medium">medium</Severity>
+    <Confidence default="Medium">Medium</Confidence>
+    <Category>Command and Control</Category>
+    <MitreAttack>
+      <Technique id="T1219"/>
+      <Technique id="T1102"/>
+      <Tactic id="TA0011"/>
+    </MitreAttack>
+    <References>
+      <Reference title="MITRE ATT&amp;CK - Remote Access Software (T1219)" url="https://attack.mitre.org/techniques/T1219/"/>
+      <Reference title="MITRE ATT&amp;CK - Web Service (T1102)" url="https://attack.mitre.org/techniques/T1102/"/>
+      <Reference title="MITRE ATT&amp;CK - Command and Control tactic (TA0011)" url="https://attack.mitre.org/tactics/TA0011/"/>
+      <Reference title="Microsoft Learn - Visual Studio Code Remote Tunnels" url="https://code.visualstudio.com/docs/remote/tunnels"/>
+      <Reference title="Microsoft Learn - What are dev tunnels?" url="https://learn.microsoft.com/en-us/azure/developer/dev-tunnels/overview"/>
+      <Reference title="Elastic - Detection rules repository (prebuilt rules reference)" url="https://github.com/elastic/detection-rules"/>
+      <Reference title="Microsoft Learn - 4688(S): A new process has been created" url="https://learn.microsoft.com/en-us/windows/security/threat-protection/auditing/event-4688"/>
+      <Reference title="Microsoft Learn - Command line process auditing (Event 4688 command-line GPO)" url="https://learn.microsoft.com/en-us/windows-server/identity/ad-ds/manage/component-updates/command-line-process-auditing"/>
+    </References>
+  </Metadata>
+  <AlertContext>
+    <RuleName>Attempt to Establish VScode Remote Tunnel [NBI-4688]</RuleName>
+    <RuleId>nbi-b2-attempt-to-establish-vscode-remote-tunnel</RuleId>
+    <RuleType>eql</RuleType>
+    <Index>logs-system.security*</Index>
+    <TriggerLogic>The deployed rule is an EQL process rule on Windows Event 4688. Plain-English logic: a process start where the concatenated arguments contain the substring tunnel, and either the arguments also contain accept-server-license-terms or the process name starts with code - with the single exclusion of Code.exe spawning code-tunnel.exe status (a benign health check).
+
+Because NBI's 4688 stream carries process.command_line only intermittently, the equivalent investigation logic corroborates using the multivalued process.args field via MV_CONCAT (see section 14.1). One-line Kibana-KQL filter for fast Discover pivoting:
+
+
+
+Note the filter above depends on process.command_line, which is null on the host that actually runs Code.exe in NBI (see the callout and section 8); the ES|QL in section 14.1 additionally reads process.args, but on a 0%-args host both are empty - an empty result there is a telemetry gap, not evidence of safety.</TriggerLogic>
+    <KeyAlertFields>process.name, process.executable, process.parent.name, process.parent.executable, explorer.exe, user.name, user.id, process.pid, process.parent.pid, process.entity_id, process.command_line, process.args</KeyAlertFields>
+  </AlertContext>
+  <Inputs>
+    <Input name="$host"/>
+    <Input name="$user"/>
+    <Input name="$parent"/>
+  </Inputs>
+  <ExecutiveSummary>
+    <Overview>This playbook drives triage and investigation of the Attempt to Establish VScode Remote Tunnel [NBI-4688] detection on NBI's Elastic Security deployment. The rule fires when Windows Event 4688 records a Visual Studio Code CLI invocation whose command line/arguments contain tunnel together with either the --accept-server-license-terms argument or a process name matching code*.exe (it excludes only the benign code-tunnel.exe status child of Code.exe).
+
+A VS Code "tunnel" (Microsoft Dev Tunnels) authenticates the machine to a Microsoft-hosted relay and then exposes an interactive terminal and the filesystem to whoever holds the tunnel URL / GitHub identity, over ordinary outbound HTTPS. It is a legitimate developer feature and an increasingly common living-off-the-land remote-access / C2 channel because it is signed, Microsoft-hosted, and firewall-friendly.
+
+The analyst's goal is to decide whether the invocation is a sanctioned developer using VS Code Remote (false_positive - authorised), an attacker planting a resilient backdoor on a reached host (true_positive), a developer tool run outside policy on a server it should not touch (misconfiguration), or insufficiently evidenced (needs_escalation).</Overview>
+    <BusinessImpact>An alert means: on $host, the VS Code CLI was invoked to stand up a remote tunnel. The tunnel, once established, is a full interactive foothold - a remote operator (or the developer) gets a shell and file access to $host through outbound HTTPS that bypasses inbound firewall controls and survives reboots if installed as a service.
+
+The investigative pivot is intent and authorisation, read from three signals: the argument form (an unattended tunnel --accept-server-license-terms [--name …] service form vs. an interactive developer launch), the parent (an interactive Code.exe/explorer.exe vs. a script/automation host), and the host + account (a sanctioned developer workstation with a real dev footprint vs. a server/Tier-0/ATM host where no development should occur).</BusinessImpact>
+  </ExecutiveSummary>
+  <Investigation>
+    <Goal>Decide true_positive / false_positive / misconfiguration / needs_escalation for Attempt to Establish VScode Remote Tunnel [NBI-4688].</Goal>
+    <Workflow>
+      <Step order="1" name="Reproduce the rule estate-wide (confirm the detection logic)">
+        <Purpose>Reproduce the rule estate-wide (confirm the detection logic)</Purpose>
+        <Query platform="Elastic" language="ES|QL" id="Q-01">
+          <![CDATA[
+FROM logs-system.security-*
+| WHERE event.code == "4688" AND @timestamp >= NOW() - 4 hours
+| EVAL argline = TO_LOWER(MV_CONCAT(process.args, " "))
+| WHERE argline LIKE "*tunnel*" AND (argline LIKE "*accept-server-license-terms*" OR TO_LOWER(process.name) LIKE "code*")
+| KEEP @timestamp, host.name, user.name, process.name, process.parent.name, process.command_line, process.args
+| SORT @timestamp DESC
+| LIMIT 50
+]]>
+        </Query>
+      </Step>
+      <Step order="2" name="Confirm the VS Code CLI presence on the alert host">
+        <Purpose>Confirm the VS Code CLI presence on the alert host</Purpose>
+        <Query platform="Elastic" language="ES|QL" id="Q-02">
+          <![CDATA[
+FROM logs-system.security-*
+| WHERE event.code == "4688" AND host.name == "$host" AND @timestamp >= NOW() - 4 hours
+| WHERE TO_LOWER(process.name) LIKE "code*"
+| EVAL arguments = MV_CONCAT(process.args, " ")
+| KEEP @timestamp, user.name, process.name, process.executable, process.parent.name, process.command_line, arguments
+| SORT @timestamp DESC
+| LIMIT 20
+]]>
+        </Query>
+      </Step>
+      <Step order="3" name="Entity pivoting">
+        <Purpose>Entity pivoting</Purpose>
+        <Query platform="Elastic" language="ES|QL" id="Q-03">
+          <![CDATA[
+FROM logs-system.security*
+| WHERE @timestamp >= NOW() - 4 hours
+    AND event.code == "4688"
+    AND host.name == "$host"
+    AND user.name == "$user"
+    AND TO_LOWER(process.name) LIKE "code*"
+| KEEP @timestamp, host.name, user.name, user.id, process.name, process.executable, process.parent.name, process.parent.executable, process.pid, process.parent.pid
+| SORT @timestamp DESC
+| LIMIT 50
+]]>
+        </Query>
+      </Step>
+      <Step order="4" name="Process investigation">
+        <Purpose>Process investigation</Purpose>
+        <Query platform="Elastic" language="ES|QL" id="Q-04">
+          <![CDATA[
+FROM logs-system.security*
+| WHERE @timestamp >= NOW() - 4 hours
+    AND event.code == "4688"
+    AND TO_LOWER(process.name) LIKE "code*"
+| STATS executions = COUNT(*), users = COUNT_DISTINCT(user.name) BY host.name, process.name, process.executable
+| SORT executions DESC
+| LIMIT 50
+]]>
+        </Query>
+      </Step>
+      <Step order="5" name="Process investigation">
+        <Purpose>Process investigation</Purpose>
+        <Query platform="Elastic" language="ES|QL" id="Q-05">
+          <![CDATA[
+FROM logs-system.security*
+| WHERE @timestamp >= NOW() - 4 hours
+    AND event.code == "4688"
+    AND host.name == "$host"
+    AND TO_LOWER(process.name) LIKE "code*"
+    AND process.args IS NOT NULL
+| EVAL arguments = MV_CONCAT(process.args, " ")
+| KEEP @timestamp, user.name, process.name, process.parent.name, arguments
+| SORT @timestamp DESC
+| LIMIT 30
+]]>
+        </Query>
+      </Step>
+      <Step order="6" name="Parent-Child process analysis">
+        <Purpose>Parent-Child process analysis</Purpose>
+        <Query platform="Elastic" language="ES|QL" id="Q-06">
+          <![CDATA[
+FROM logs-system.security*
+| WHERE @timestamp >= NOW() - 4 hours
+    AND event.code == "4688"
+    AND host.name == "$host"
+    AND process.parent.name == "$parent"
+| STATS spawned = COUNT(*), users = COUNT_DISTINCT(user.name) BY process.name
+| SORT spawned DESC
+| LIMIT 25
+]]>
+        </Query>
+      </Step>
+      <Step order="7" name="Parent-Child process analysis">
+        <Purpose>Parent-Child process analysis</Purpose>
+        <Query platform="Elastic" language="ES|QL" id="Q-07">
+          <![CDATA[
+FROM logs-system.security*
+| WHERE @timestamp >= NOW() - 4 hours
+    AND event.code == "4688"
+    AND host.name == "$host"
+    AND (TO_LOWER(process.name) LIKE "code*" OR TO_LOWER(process.parent.name) LIKE "code*")
+| KEEP @timestamp, user.name, process.parent.name, process.parent.pid, process.name, process.pid, process.executable
+| SORT @timestamp DESC
+| LIMIT 50
+]]>
+        </Query>
+      </Step>
+      <Step order="8" name="User investigation">
+        <Purpose>User investigation</Purpose>
+        <Query platform="Elastic" language="ES|QL" id="Q-08">
+          <![CDATA[
+FROM logs-system.security*
+| WHERE @timestamp >= NOW() - 4 hours
+    AND event.code == "4688"
+    AND host.name == "$host"
+    AND user.name == "$user"
+| EVAL n = TO_LOWER(process.name)
+| WHERE n LIKE "code*" OR n IN ("node.exe", "git.exe", "ssh.exe", "npm.cmd", "pwsh.exe", "devenv.exe")
+| STATS execs = COUNT(*), first_seen = MIN(@timestamp), last_seen = MAX(@timestamp) BY process.name
+| SORT execs DESC
+| LIMIT 20
+]]>
+        </Query>
+      </Step>
+      <Step order="9" name="Host investigation">
+        <Purpose>Host investigation</Purpose>
+        <Query platform="Elastic" language="ES|QL" id="Q-09">
+          <![CDATA[
+FROM logs-system.security*
+| WHERE @timestamp >= NOW() - 4 hours
+    AND event.code == "4688"
+    AND host.name == "$host"
+| STATS executions = COUNT(*), users = COUNT_DISTINCT(user.name) BY process.name, process.parent.name
+| SORT executions ASC
+| LIMIT 40
+]]>
+        </Query>
+      </Step>
+      <Step order="10" name="IP investigation">
+        <Purpose>IP investigation</Purpose>
+        <Query platform="Elastic" language="ES|QL" id="Q-10">
+          <![CDATA[
+FROM logs-system.security*
+| WHERE @timestamp >= NOW() - 4 hours
+    AND event.code == "4624"
+    AND host.name == "$host" AND user.name == "$user"
+    AND source.ip IS NOT NULL
+| STATS logons = COUNT(*) BY source.ip, winlog.event_data.LogonType
+| SORT logons DESC
+| LIMIT 20
+]]>
+        </Query>
+      </Step>
+      <Step order="11" name="File investigation">
+        <Purpose>File investigation</Purpose>
+        <Query platform="Elastic" language="ES|QL" id="Q-11">
+          <![CDATA[
+FROM logs-system.security*
+| WHERE @timestamp >= NOW() - 4 hours
+    AND event.code == "4688"
+    AND host.name == "$host"
+    AND TO_LOWER(process.name) LIKE "code*"
+| STATS executions = COUNT(*), first_seen = MIN(@timestamp), last_seen = MAX(@timestamp) BY process.executable
+| SORT executions DESC
+| LIMIT 30
+]]>
+        </Query>
+      </Step>
+      <Step order="12" name="Authentication investigation">
+        <Purpose>Authentication investigation</Purpose>
+        <Query platform="Elastic" language="ES|QL" id="Q-12">
+          <![CDATA[
+FROM logs-system.security*
+| WHERE @timestamp >= NOW() - 4 hours
+    AND event.code IN ("4624", "4625", "4634", "4647")
+    AND host.name == "$host" AND user.name == "$user"
+| STATS events = COUNT(*), first_seen = MIN(@timestamp), last_seen = MAX(@timestamp) BY event.code, winlog.event_data.LogonType, source.ip
+| SORT events DESC
+| LIMIT 30
+]]>
+        </Query>
+      </Step>
+      <Step order="13" name="Timeline Reconstruction">
+        <Purpose>Timeline Reconstruction</Purpose>
+        <Query platform="Elastic" language="ES|QL" id="Q-13">
+          <![CDATA[
+FROM logs-system.security*
+| WHERE @timestamp >= NOW() - 4 hours
+    AND event.code == "4688"
+    AND host.name == "$host"
+    AND user.name == "$user"
+| KEEP @timestamp, process.parent.name, process.parent.pid, process.name, process.pid, process.executable
+| SORT @timestamp ASC
+| LIMIT 200
+]]>
+        </Query>
+      </Step>
+      <Step order="14" name="Lateral movement validation">
+        <Purpose>Lateral movement validation</Purpose>
+        <Query platform="Elastic" language="ES|QL" id="Q-14">
+          <![CDATA[
+FROM logs-system.security*
+| WHERE @timestamp >= NOW() - 4 hours
+    AND event.code IN ("4624", "4648", "4768", "4769", "5140")
+    AND user.name == "$user"
+    AND host.name != "$host"
+| STATS events = COUNT(*) BY host.name, event.code, winlog.event_data.LogonType
+| SORT events DESC
+| LIMIT 30
+]]>
+        </Query>
+      </Step>
+      <Step order="15" name="Persistence validation">
+        <Purpose>Persistence validation</Purpose>
+        <Query platform="Elastic" language="ES|QL" id="Q-15">
+          <![CDATA[
+FROM logs-system.security*
+| WHERE @timestamp >= NOW() - 4 hours
+    AND host.name == "$host"
+    AND (
+        (event.code == "4688" AND TO_LOWER(process.name) IN ("sc.exe", "schtasks.exe", "reg.exe", "at.exe", "powershell.exe", "pwsh.exe", "wscript.exe", "cscript.exe", "mshta.exe"))
+        OR event.code == "7045"
+        OR event.code == "4720"
+        OR event.code == "4698"
+    )
+| STATS events = COUNT(*) BY event.code, process.name, user.name
+| SORT events DESC
+| LIMIT 40
+]]>
+        </Query>
+      </Step>
+      <Step order="16" name="Privilege escalation validation">
+        <Purpose>Privilege escalation validation</Purpose>
+        <Query platform="Elastic" language="ES|QL" id="Q-16">
+          <![CDATA[
+FROM logs-system.security*
+| WHERE @timestamp >= NOW() - 4 hours
+    AND event.code == "4672"
+    AND host.name == "$host"
+| STATS special_priv_logons = COUNT(*) BY user.name
+| SORT special_priv_logons DESC
+| LIMIT 25
+]]>
+        </Query>
+      </Step>
+      <Step order="17" name="Defense evasion validation">
+        <Purpose>Defense evasion validation</Purpose>
+        <Query platform="Elastic" language="ES|QL" id="Q-17">
+          <![CDATA[
+FROM logs-system.security*
+| WHERE @timestamp >= NOW() - 4 hours
+    AND host.name == "$host"
+    AND (
+        (event.code == "4688" AND TO_LOWER(process.name) IN ("wevtutil.exe", "fsutil.exe", "vssadmin.exe", "wmic.exe", "cipher.exe", "sdelete.exe", "sdelete64.exe"))
+        OR event.code == "1102"
+        OR event.code == "4719"
+    )
+| STATS events = COUNT(*) BY event.code, process.name, user.name
+| SORT events DESC
+| LIMIT 30
+]]>
+        </Query>
+      </Step>
+      <Step order="18" name="Impact assessment">
+        <Purpose>Impact assessment</Purpose>
+        <Query platform="Elastic" language="ES|QL" id="Q-18">
+          <![CDATA[
+FROM logs-system.security*
+| WHERE @timestamp >= NOW() - 4 hours
+    AND host.name == "$host"
+    AND event.code == "4688"
+    AND TO_LOWER(process.parent.name) LIKE "code*"
+| STATS children = COUNT(*), distinct_children = COUNT_DISTINCT(process.name) BY process.name
+| SORT children DESC
+| LIMIT 30
+]]>
+        </Query>
+      </Step>
+      <Step order="19" name="Finalize verdict">
+        <DecisionTree>
+        </DecisionTree>
+      </Step>
+    </Workflow>
+  </Investigation>
+  <ClassificationGuidance>
+    <TruePositive>
+      <Definition></Definition>
+    </TruePositive>
+    <FalsePositive>
+      <Definition></Definition>
+      <Indicators>
+        <Item>Authorised developers using VS Code Remote. The dominant benign cause: a real developer on a permitted workstation opening a tunnel to their own dev box. Confirmed against the developer's identity, role, and (ideally) a documented VS Code Remote workflow - verified, not assumed.</Item>
+        <Item>Interactive launches from Code.exe/explorer.exe with a rich surrounding developer footprint (code, git, node, ssh).</Item>
+        <Item>Proven-failed tunnel attempts - the CLI ran but the relay was unreachable or authentication was denied, so no channel was established. Recorded as a blocked attempt, never "benign".</Item>
+        <Item>The excluded code-tunnel.exe status health check - already filtered by the rule and not alertable.</Item>
+        <Item>VS Code exists in exactly one place, and it is a real developer. Only nim-fti-apv01 ran Code.exe in the validated window (E:\Microsoft VS Code\Microsoft VS Code\Code.exe, ~76 execs), driven by IBC.MahmoudHamoud interactively under explorer.exe/Code.exe. That account also holds local special privileges (4672) on the host. A tunnel from this identity/host would lean toward authorised developer - but must still be confirmed, because this account's local-admin rights make any implant here high-impact.</Item>
+        <Item>The detection is largely telemetry-blocked in NBI's current state. nim-fti-apv01 populates 0% process.command_line and 0% process.args, so the tunnel argument the rule keys on is not captured there; and the hosts that *do* audit command lines (e.g. nim-est-apv07 ~100%) do not run Code.exe. In practice the rule can only fire where both the CLI runs and arguments are audited - currently no observed host. Treat any real firing as notable precisely because it implies a host/config outside this validated norm.</Item>
+        <Item>A tunnel anywhere other than nim-fti-apv01 is anomalous by construction. No server, DC, database, or ATM host ran the VS Code CLI. A code/code-tunnel execution on those roles is a policy violation at minimum (misconfiguration) and a backdoor at worst (true_positive) - never an auto-pass.</Item>
+      </Indicators>
+    </FalsePositive>
+    <Misconfiguration>
+      <Definition></Definition>
+    </Misconfiguration>
+    <NeedsEscalation>
+      <Definition></Definition>
+    </NeedsEscalation>
+  </ClassificationGuidance>
+  <ResponseActions>
+    <Phase name="Containment">
+      <Action>Isolate $host (network-contain / quarantine) if a true_positive is confirmed, to sever the tunnel's outbound relay and any interactive session. On a shared/developer host, coordinate with IT but prioritise cutting the operator's access.</Action>
+      <Action>Terminate the tunnel and CLI processes - code-tunnel.exe and the parent Code.exe/CLI tree (section 15.3b / section 17.5) - to drop the interactive channel immediately.</Action>
+      <Action>Revoke the tunnel's authorisation out-of-band: the tunnel is bound to a GitHub/Microsoft device identity; revoking that device/token (and rotating the associated account) prevents re-establishment even if the binary remains. Coordinate with the identity owner via the authorised path.</Action>
+      <Action>Block the relay egress at the FortiGate for $host if isolation is not yet possible (outbound to *.tunnels.api.visualstudio.com), as a stop-gap.</Action>
+      <Action>Preserve volatile evidence first where feasible - running processes, the CLI binary, any ~/.vscode/tunnel config and service registration, and FortiGate egress records.</Action>
+      <Action>Investigation is read-only; make changes only via the authorised human-approved DEPLOY path.</Action>
+    </Phase>
+    <Phase name="Eradication">
+      <Action>Remove the tunnel persistence discovered in section 17.2 - uninstall the tunnel service (code tunnel service uninstall) / delete the scheduled task, and remove any Run-key or startup entry.</Action>
+      <Action>Remove a standalone/dropped CLI if the binary was placed in a user-writable/temp path (section 15.10) rather than a sanctioned install, after capturing it (section 15.9).</Action>
+      <Action>Hunt for what the tunnel delivered - enumerate children of the CLI (section 17.5) and any files staged during the interactive session; scan $host with anti-malware/EDR.</Action>
+      <Action>Rotate credentials exposed inside the tunnel shell, prioritising the account whose rights the operator inherited (section 17.3), and the GitHub/Microsoft identity the tunnel was bound to.</Action>
+      <Action>Remediate the initial-access vector that placed the operator on $host.</Action>
+    </Phase>
+    <Phase name="Recovery">
+      <Action>Restore $host from a known-good image if persistence/tampering was extensive; otherwise validate that the tunnel service/task is gone, the CLI cannot re-authenticate, and the relay egress no longer occurs.</Action>
+      <Action>Return the host/account to service only after section 22 closing criteria are met and monitoring confirms no new tunnel establishment.</Action>
+      <Action>Fleet hardening: application-control the VS Code CLI (code.exe/code-tunnel.exe) on server-class, Tier-0, ATM and database hosts where development is not permitted; restrict outbound to Dev Tunnel / GitHub relays except from sanctioned developer subnets; and baseline the one legitimate developer host (nim-fti-apv01) so a genuine tunnel there is distinguishable from an implant. Enabling command-line auditing on that host would let this rule actually fire on the argument it targets - currently its highest-value gap.</Action>
+    </Phase>
+  </ResponseActions>
+  <Escalation>
+    <Trigger>Escalate to Tier 3 / Incident Response (and notify the customer) when any of the following hold:
+
+- The CLI ran on a server / DC / database / ATM / Tier-0 host, or under a script/automation parent, or in the unattended service form (section 14/section 15.3) - any of these warrants IR.
+- The tunnel was installed for persistence (service/7045/scheduled task, section 17.2) or the CLI spawned an interactive shell / recon / credential tooling (section 17.5).
+- Lateral movement from $host/$user follows the tunnel (section 17.1), especially toward domain controllers or other privileged systems.
+- FortiGate/EDR confirms an active relay connection to the Dev Tunnel endpoints from a host that should not run it.
+- Whether the tunnel actually connected, or the account's developer status, cannot be resolved from available telemetry and the alert cannot be safely cleared - escalate as needs_escalation</Trigger>
+    <To>SOC L2 / IR</To>
+  </Escalation>
+  <ClosureCriteria>
+    <Item>false_positive (authorised): the developer, workstation, and VS Code Remote workflow are positively documented (change/role record). Record the reference; because NBI's sole VS Code developer holds local admin, note the quick implant check performed. Do not create a broad exception; scope any to the exact host + user.</Item>
+    <Item>false_positive (proven-blocked attempt): the tunnel establishment positively failed (relay unreachable / auth denied) - documented as blocked, never "benign".</Item>
+    <Item>misconfiguration: a real developer/tool ran the CLI on a host or account policy does not permit; the tunnel is removed, the user briefed, and the CLI application-controlled on that host class.</Item>
+    <Item>true_positive: an unsanctioned tunnel was established as a remote-access/C2 channel; host contained, tunnel torn down and authorisation revoked, delivered payload/persistence hunted and removed, scope established, no recurrence on monitoring.</Item>
+    <Item>needs_escalation: handed to L2/IR with the specific evidence gaps (args/network) documented.</Item>
+  </ClosureCriteria>
+  <Limitations>
+    <Item>Read the host role first. On NBI, VS Code legitimately runs in exactly one place (nim-fti-apv01, developer IBC.MahmoudHamoud). A code/code-tunnel execution anywhere else is the finding - the account and arguments are secondary to the host role.</Item>
+    <Item>The rule is telemetry-blocked where it matters most. nim-fti-apv01 audits 0% command line and process.args, so the tunnel argument the rule keys on is invisible there; hosts that audit arguments (nim-est-apv07 ~100%) do not run Code.exe. Expect section 14.1 to return 0 for a dual reason, and lean on process.name/parent/host-role and FortiGate egress instead.</Item>
+    <Item>The connection lives in FortiGate, not Windows. No 5156/network events on logs-system.security*; confirm a live tunnel by pivoting $host's IP to *.tunnels.api.visualstudio.com in logs-fortinet_fortigate.log-*.</Item>
+    <Item>**A shell child of code* is the abuse signal.** A genuine editor spawns only more Code.exe; cmd.exe/powershell.exe under the CLI means an operator is driving the tunnel (section 17.5).</Item>
+    <Item>The developer here is privileged. IBC.MahmoudHamoud holds local 4672 on nim-fti-apv01, so even an "authorised" tunnel would expose an admin-capable shell - treat an implant on this identity as high-impact.</Item>
+    <Item>Install path is a tell. The genuine install is E:\Microsoft VS Code\Microsoft VS Code\Code.exe; a CLI executing from a user-writable/temp path is a standalone-CLI implant pattern (only the CLI is needed for a tunnel).</Item>
+    <Item>KB-worthy (persist to NBI customer scope): (1) nim-fti-apv01 = sole VS Code host, developer IBC.MahmoudHamoud, install E:\Microsoft VS Code\…\Code.exe; (2) that host audits 0% command line / process.args (detection gap for arg-based rules); (3) IBC.MahmoudHamoud holds local 4672 on that host; (4) VS Code CLI zero tunnel-argument baseline across the estate in 4h; (5) no 5156/process-network on NBI - tunnel relay confirmable only via FortiGate. All observed live on 2026-08-19.</Item>
+  </Limitations>
+</Playbook>

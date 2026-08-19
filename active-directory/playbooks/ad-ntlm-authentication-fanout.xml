@@ -1,0 +1,379 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<Playbook xmlns="https://soc.example/playbooks" id="PB-ad-ntlm-authentication-fanout" name="AD — NTLM Authentication Fan-Out - SOC Playbook" version="3.0" status="Validated" classification="TLP:AMBER">
+  <Metadata>
+    <Owner>NBI SOC / Detection Engineering</Owner>
+    <LastUpdated>2026-08-19</LastUpdated>
+    <Severity default="medium">medium</Severity>
+    <Confidence default="Medium">Medium</Confidence>
+    <Category>Lateral Movement</Category>
+    <MitreAttack>
+      <Technique id="T1550"/>
+      <Technique id="T1550.002"/>
+      <Technique id="T1021"/>
+      <Technique id="T1021.002"/>
+      <Tactic id="TA0008"/>
+    </MitreAttack>
+    <References>
+      <Reference title="MITRE ATT&amp;CK - Use Alternate Authentication Material: Pass the Hash (T1550.002)" url="https://attack.mitre.org/techniques/T1550/002/"/>
+      <Reference title="MITRE ATT&amp;CK - Remote Services: SMB/Windows Admin Shares (T1021.002)" url="https://attack.mitre.org/techniques/T1021/002/"/>
+      <Reference title="MITRE ATT&amp;CK - Lateral Movement tactic (TA0008)" url="https://attack.mitre.org/tactics/TA0008/"/>
+      <Reference title="Microsoft Learn - 4624: An account was successfully logged on (LogonType / AuthenticationPackageName)" url="https://learn.microsoft.com/en-us/previous-versions/windows/it-pro/windows-10/security/threat-protection/auditing/event-4624"/>
+      <Reference title="Microsoft Learn - 5145: A network share object was checked for access" url="https://learn.microsoft.com/en-us/previous-versions/windows/it-pro/windows-10/security/threat-protection/auditing/event-5145"/>
+      <Reference title="The Hacker Recipes - Pass the Hash" url="https://www.thehacker.recipes/ad/movement/ntlm/pth"/>
+      <Reference title="SANS - Detecting Lateral Movement with Windows Event Logs" url="https://www.sans.org/white-papers/detecting-lateral-movement-through-tracking-event-logs/"/>
+      <Reference title="Elastic Security - Lateral movement / SMB detection guidance" url="https://www.elastic.co/guide/en/security/current/prebuilt-rules.html"/>
+      <Reference title="Microsoft - Reducing NTLM usage / SMB signing hardening" url="https://learn.microsoft.com/en-us/windows-server/security/kerberos/ntlm-overview"/>
+    </References>
+  </Metadata>
+  <AlertContext>
+    <RuleName>AD — NTLM Authentication Fan-Out</RuleName>
+    <RuleId>nbi-ntlm-lateral-fanout</RuleId>
+    <RuleType>esql</RuleType>
+    <Index>logs-system.security*</Index>
+    <TriggerLogic>The deployed rule is an ES|QL aggregation that thresholds distinct-host reach per source IP. Plain English: one source IP produced successful NTLM network logons to eight or more distinct hosts. The alert carries source.ip (the fan-out origin), dest_hosts (distinct hosts reached), and supporting counts (ntlm_logons, distinct accounts).
+
+One-line Kibana KQL detection filter (for fast pivoting in Discover / Timeline):
+
+
+
+Faithful ES|QL form of the deployed logic, shown with the standard 4-hour investigation window (the live rule aggregates over its own scheduled interval; the &gt;= 8 distinct hosts threshold is the rule's anchor):
+
+
+
+The threshold is deliberately permissive so that genuinely broad lateral movement is caught; the expected recurring contributors (sanctioned aggregators/monitoring/scanners) are handled by characterising the source, not by lowering coverage.</TriggerLogic>
+    <KeyAlertFields>source.ip, host.name</KeyAlertFields>
+  </AlertContext>
+  <Inputs>
+    <Input name="$source_ip"/>
+    <Input name="$dest_hosts"/>
+    <Input name="$suspect_account"/>
+  </Inputs>
+  <ExecutiveSummary>
+    <Overview>This playbook drives triage and investigation of the AD - NTLM Authentication Fan-Out detection on NBI's Elastic Security deployment. The rule is an ES|QL analytic over logs-system.security*: it selects 4624 network logons (LogonType 3) whose AuthenticationPackageName is NTLM with a real source.ip (not ::1), groups by source.ip, and fires when a single source authenticates via NTLM to ≥ 8 distinct destination hosts in the interval.
+
+Wide NTLM fan-out from one origin is the classic Pass-the-Hash / credential-reuse lateral-movement footprint - one credential (or its hash) presented to many hosts. But it is *also* exactly what a small set of legitimate systems do by design: authentication aggregators, management/patching/monitoring servers, and vulnerability scanners. The logons in the alert have already succeeded; the analyst's job is to decide whether the fan-out is a sanctioned broad-authentication function (false_positive - authorised) or an operator reusing credentials across the estate (true_positive) - with administrative-share (ADMIN$/C$) access being the primary discriminator - and to classify the alert as true_positive, false_positive, misconfiguration, or needs_escalation with evidence attached.</Overview>
+    <BusinessImpact>An alert means: $source_ip successfully authenticated to at least eight distinct hosts using NTLM network logons in the interval. Two facts frame the investigation:
+
+- NTLM specifically. NTLM network logons present a credential/hash directly to each target. An attacker with a stolen NT hash uses NTLM (not Kerberos) precisely because it needs no TGT - so a heavy *NTLM* fan-out, where Kerberos would normally dominate, is the pass-the-hash tell. Conversely, some legitimate services still use NTLM for certain calls.
+- Fan-out breadth. Reaching many hosts from one origin is what both a monitoring server (polling the fleet) and a lateral-moving operator (spraying a credential) do. Breadth alone does not decide it.
+
+The deciding question is what the source did on the reached hosts. Pure authentication (or IPC$ named-pipe/RPC and SYSVOL policy reads) is consistent with monitoring/aggregation; ADMIN$/C$ share access, remote service installation, or remote process creation across the reached hosts is hands-on lateral movement. source.ip is populated on the NTLM type-3 slice (network logons carry it), so the origin is known; the *nature* of that origin (management tier vs workstation/foothold</BusinessImpact>
+  </ExecutiveSummary>
+  <Investigation>
+    <Goal>Decide true_positive / false_positive / misconfiguration / needs_escalation for AD — NTLM Authentication Fan-Out.</Goal>
+    <Workflow>
+      <Step order="1" name="Detection Summary">
+        <Purpose>Detection Summary</Purpose>
+        <Query platform="Elastic" language="ES|QL" id="Q-01">
+          <![CDATA[
+FROM logs-system.security*
+| WHERE @timestamp >= NOW() - 4 hours
+    AND event.code == "4624"
+    AND winlog.event_data.LogonType == "3"
+    AND winlog.event_data.AuthenticationPackageName == "NTLM"
+    AND source.ip IS NOT NULL AND source.ip != "::1"
+| STATS ntlm_logons = COUNT(*), dest_hosts = COUNT_DISTINCT(host.name), accounts = COUNT_DISTINCT(winlog.event_data.TargetUserName) BY source.ip
+| WHERE dest_hosts >= 8
+| SORT dest_hosts DESC
+| LIMIT 20
+]]>
+        </Query>
+      </Step>
+      <Step order="2" name="Reproduce the fan-out and profile the accounts (confirm the alert)">
+        <Purpose>Reproduce the fan-out and profile the accounts (confirm the alert)</Purpose>
+        <Query platform="Elastic" language="ES|QL" id="Q-02">
+          <![CDATA[
+FROM logs-system.security*
+| WHERE @timestamp >= NOW() - 4 hours
+    AND source.ip == "$source_ip"
+    AND event.code == "4624"
+    AND winlog.event_data.LogonType == "3"
+    AND winlog.event_data.AuthenticationPackageName == "NTLM"
+| STATS ntlm_logons = COUNT(*), hosts = COUNT_DISTINCT(host.name) BY winlog.event_data.TargetUserName
+| SORT hosts DESC
+| LIMIT 15
+]]>
+        </Query>
+      </Step>
+      <Step order="3" name="Confirm the reached-host set">
+        <Purpose>Confirm the reached-host set</Purpose>
+        <Query platform="Elastic" language="ES|QL" id="Q-03">
+          <![CDATA[
+FROM logs-system.security*
+| WHERE @timestamp >= NOW() - 4 hours
+    AND source.ip == "$source_ip"
+    AND event.code == "4624"
+    AND winlog.event_data.LogonType == "3"
+    AND winlog.event_data.AuthenticationPackageName == "NTLM"
+| STATS ntlm_logons = COUNT(*), accounts = COUNT_DISTINCT(winlog.event_data.TargetUserName) BY host.name
+| SORT ntlm_logons DESC
+| LIMIT 30
+]]>
+        </Query>
+      </Step>
+      <Step order="4" name="Entity pivoting">
+        <Purpose>Entity pivoting</Purpose>
+        <Query platform="Elastic" language="ES|QL" id="Q-04">
+          <![CDATA[
+FROM logs-system.security*
+| WHERE @timestamp >= NOW() - 4 hours
+    AND source.ip == "$source_ip"
+    AND event.code == "4624"
+    AND winlog.event_data.LogonType == "3"
+    AND winlog.event_data.AuthenticationPackageName == "NTLM"
+| STATS ntlm_logons = COUNT(*), hosts = COUNT_DISTINCT(host.name) BY winlog.event_data.TargetUserName
+| SORT hosts DESC
+| LIMIT 20
+]]>
+        </Query>
+      </Step>
+      <Step order="5" name="User investigation">
+        <Purpose>User investigation</Purpose>
+        <Query platform="Elastic" language="ES|QL" id="Q-05">
+          <![CDATA[
+FROM logs-system.security*
+| WHERE @timestamp >= NOW() - 4 hours
+    AND winlog.event_data.TargetUserName == "$suspect_account"
+    AND event.code == "4624"
+    AND winlog.event_data.LogonType == "3"
+| STATS logons = COUNT(*), hosts = COUNT_DISTINCT(host.name) BY source.ip, winlog.event_data.AuthenticationPackageName
+| SORT logons DESC
+| LIMIT 20
+]]>
+        </Query>
+      </Step>
+      <Step order="6" name="Host investigation">
+        <Purpose>Host investigation</Purpose>
+        <Query platform="Elastic" language="ES|QL" id="Q-06">
+          <![CDATA[
+FROM logs-system.security*
+| WHERE @timestamp >= NOW() - 4 hours
+    AND source.ip == "$source_ip"
+    AND event.code == "4624"
+    AND winlog.event_data.LogonType == "3"
+    AND winlog.event_data.AuthenticationPackageName == "NTLM"
+| STATS ntlm_logons = COUNT(*), accounts = COUNT_DISTINCT(winlog.event_data.TargetUserName) BY host.name
+| SORT accounts DESC
+| LIMIT 30
+]]>
+        </Query>
+      </Step>
+      <Step order="7" name="IP investigation">
+        <Purpose>IP investigation</Purpose>
+        <Query platform="Elastic" language="ES|QL" id="Q-07">
+          <![CDATA[
+FROM logs-system.security*
+| WHERE @timestamp >= NOW() - 4 hours
+    AND source.ip == "$source_ip"
+    AND event.code == "4624"
+    AND winlog.event_data.LogonType == "3"
+    AND winlog.event_data.AuthenticationPackageName == "NTLM"
+| STATS ntlm_logons = COUNT(*), dest_hosts = COUNT_DISTINCT(host.name), accounts = COUNT_DISTINCT(winlog.event_data.TargetUserName)
+| LIMIT 1
+]]>
+        </Query>
+      </Step>
+      <Step order="8" name="IP investigation">
+        <Purpose>IP investigation</Purpose>
+        <Query platform="Elastic" language="ES|QL" id="Q-08">
+          <![CDATA[
+FROM logs-system.security*
+| WHERE @timestamp >= NOW() - 4 hours
+    AND source.ip == "$source_ip"
+| STATS events = COUNT(*) BY event.code
+| SORT events DESC
+| LIMIT 15
+]]>
+        </Query>
+      </Step>
+      <Step order="9" name="File investigation">
+        <Purpose>File investigation</Purpose>
+        <Query platform="Elastic" language="ES|QL" id="Q-09">
+          <![CDATA[
+FROM logs-system.security*
+| WHERE @timestamp >= NOW() - 4 hours
+    AND source.ip == "$source_ip"
+    AND event.code IN ("5140", "5145")
+| STATS accesses = COUNT(*), hosts = COUNT_DISTINCT(host.name) BY winlog.event_data.ShareName, winlog.event_data.SubjectUserName
+| SORT accesses DESC
+| LIMIT 20
+]]>
+        </Query>
+      </Step>
+      <Step order="10" name="Authentication investigation">
+        <Purpose>Authentication investigation</Purpose>
+        <Query platform="Elastic" language="ES|QL" id="Q-10">
+          <![CDATA[
+FROM logs-system.security*
+| WHERE @timestamp >= NOW() - 4 hours
+    AND source.ip == "$source_ip"
+    AND event.code IN ("4624", "4625")
+| STATS events = COUNT(*), hosts = COUNT_DISTINCT(host.name) BY event.code, winlog.event_data.AuthenticationPackageName, winlog.event_data.LogonType
+| SORT events DESC
+| LIMIT 20
+]]>
+        </Query>
+      </Step>
+      <Step order="11" name="Timeline Reconstruction">
+        <Purpose>Timeline Reconstruction</Purpose>
+        <Query platform="Elastic" language="ES|QL" id="Q-11">
+          <![CDATA[
+FROM logs-system.security*
+| WHERE @timestamp >= NOW() - 4 hours
+    AND source.ip == "$source_ip"
+    AND event.code IN ("4624", "4625", "5140", "5145")
+| KEEP @timestamp, event.code, host.name, winlog.event_data.TargetUserName, winlog.event_data.SubjectUserName, winlog.event_data.AuthenticationPackageName, winlog.event_data.ShareName
+| SORT @timestamp ASC
+| LIMIT 200
+]]>
+        </Query>
+      </Step>
+      <Step order="12" name="Lateral movement validation">
+        <Purpose>Lateral movement validation</Purpose>
+        <Query platform="Elastic" language="ES|QL" id="Q-12">
+          <![CDATA[
+FROM logs-system.security*
+| WHERE @timestamp >= NOW() - 4 hours
+    AND source.ip == "$source_ip"
+    AND event.code IN ("5140", "5145")
+| STATS accesses = COUNT(*), shares = COUNT_DISTINCT(winlog.event_data.ShareName) BY host.name, winlog.event_data.SubjectUserName
+| SORT accesses DESC
+| LIMIT 30
+]]>
+        </Query>
+      </Step>
+      <Step order="13" name="Persistence validation">
+        <Purpose>Persistence validation</Purpose>
+        <Query platform="Elastic" language="ES|QL" id="Q-13">
+          <![CDATA[
+FROM logs-system.security*
+| WHERE @timestamp >= NOW() - 4 hours
+    AND winlog.event_data.SubjectUserName == "$suspect_account"
+    AND event.code IN ("7045", "4698", "4697")
+| STATS events = COUNT(*), hosts = COUNT_DISTINCT(host.name) BY event.code
+| SORT events DESC
+| LIMIT 15
+]]>
+        </Query>
+      </Step>
+      <Step order="14" name="Privilege escalation validation">
+        <Purpose>Privilege escalation validation</Purpose>
+        <Query platform="Elastic" language="ES|QL" id="Q-14">
+          <![CDATA[
+FROM logs-system.security*
+| WHERE @timestamp >= NOW() - 4 hours
+    AND event.code == "4672"
+    AND winlog.event_data.SubjectUserName == "$suspect_account"
+| STATS special_priv_logons = COUNT(*), hosts = COUNT_DISTINCT(host.name) BY winlog.event_data.SubjectUserName
+| SORT special_priv_logons DESC
+| LIMIT 15
+]]>
+        </Query>
+      </Step>
+      <Step order="15" name="Defense evasion validation">
+        <Purpose>Defense evasion validation</Purpose>
+        <Query platform="Elastic" language="ES|QL" id="Q-15">
+          <![CDATA[
+FROM logs-system.security*
+| WHERE @timestamp >= NOW() - 4 hours
+    AND source.ip == "$source_ip"
+    AND event.code == "4624"
+    AND winlog.event_data.LogonType == "3"
+| STATS logons = COUNT(*), hosts = COUNT_DISTINCT(host.name) BY winlog.event_data.AuthenticationPackageName
+| SORT logons DESC
+| LIMIT 10
+]]>
+        </Query>
+      </Step>
+      <Step order="16" name="Impact assessment">
+        <Purpose>Impact assessment</Purpose>
+        <Query platform="Elastic" language="ES|QL" id="Q-16">
+          <![CDATA[
+FROM logs-system.security*
+| WHERE @timestamp >= NOW() - 4 hours
+    AND source.ip == "$source_ip"
+    AND event.code IN ("4624", "5140", "5145")
+| STATS ntlm_or_share_events = COUNT(*),
+        reached_hosts = COUNT_DISTINCT(host.name),
+        accounts = COUNT_DISTINCT(winlog.event_data.TargetUserName),
+        shares = COUNT_DISTINCT(winlog.event_data.ShareName)
+| LIMIT 1
+]]>
+        </Query>
+      </Step>
+      <Step order="17" name="Finalize verdict">
+        <DecisionTree>
+        </DecisionTree>
+      </Step>
+    </Workflow>
+  </Investigation>
+  <ClassificationGuidance>
+    <TruePositive>
+      <Definition></Definition>
+    </TruePositive>
+    <FalsePositive>
+      <Definition></Definition>
+      <Indicators>
+        <Item>Monitoring / management servers. Systems like SolarWinds/Orion, SCOM, and inventory tools poll the fleet and legitimately authenticate to dozens of hosts, largely over Kerberos with an NTLM minority, accessing IPC$ (WMI/RPC) and SYSVOL rather than ADMIN$/C$.</Item>
+        <Item>Authentication aggregators / shared egress. A Citrix/VDI or jump-host egress IP fronts many distinct users, so one source.ip shows a broad fan-out of *many* accounts each reaching a few hosts - an aggregator signature, not one credential sprayed.</Item>
+        <Item>Patch/deployment servers (WSUS/SCCM distribution points) that reach many clients.</Item>
+        <Item>The internal vulnerability scanner (e.g. ScanWave), which authenticates broadly by function. A scanner is investigated identically to any other source and never auto-trusted on the strength of its name - but a confirmed, in-scope authenticated scan with no hands-on execution is an authorised broad-authentication function.</Item>
+        <Item>10.11.18.21 is a monitoring/management tier (the reference benign shape). It fans NTLM out to 22 hosts, but under service identities (CITRIX.NBI → 11 hosts, Solarwinds.Srv → 5, the machine account NIM-SO-APV1$ → 4) with only two human/admin accounts appearing thinly. Its authentication is Kerberos-dominated (≈74k Kerberos vs ≈6k NTLM 4624), with zero failed logons (4625 = 0), and its share access is IPC$ and SYSVOL only - no ADMIN$/C$. CITRIX.NBI installs no services (7045 = 0) and receives no special privileges (4672 = 0). This is authorised monitoring, not lateral movement.</Item>
+        <Item>10.11.102.15 is the shared VDI/jump egress (the aggregator shape). One IP fronting 31 distinct human users, each reaching only 1-4 hosts - the classic authentication-aggregator pattern. Broad fan-out here reflects many users behind one egress, not one credential sprayed.</Item>
+        <Item>A human/admin credential inside a service-tier fan-out is the thing to scrutinise. On 10.11.18.21, the presence of Ahmed.Adminnnnnn (a *.admin account) in the NTLM slice is worth a second look even though the source is a monitoring server - a privileged human credential appearing in an automated tier can indicate an operator working *through* that host, or credential misuse.</Item>
+        <Item>No blanket allow-list. Add sanctioned sources to known-infrastructure with their role, but investigate each firing on its merits; a compromised monitoring server is a high-value pivot point precisely because its broad auth is "expected".</Item>
+      </Indicators>
+    </FalsePositive>
+    <Misconfiguration>
+      <Definition></Definition>
+    </Misconfiguration>
+    <NeedsEscalation>
+      <Definition></Definition>
+    </NeedsEscalation>
+  </ClassificationGuidance>
+  <ResponseActions>
+    <Phase name="Containment">
+      <Action>Isolate $source_ip (network-contain the source host) if hands-on lateral movement is confirmed, to stop further credential reuse and remote execution. If the source is a shared VDI/monitoring tier, coordinate with IT to avoid dropping unrelated sessions, but prioritise containment when a true positive is established.</Action>
+      <Action>Isolate the reached hosts where ADMIN$/C$ access or remote execution occurred (section 15.10/section 17.1), to contain any dropped tooling or spawned payloads.</Action>
+      <Action>Reset the reused credential(s) identified in section 15.1 - especially any privileged/human account fanned out over NTLM - and any credential exposed on the reached hosts.</Action>
+      <Action>Preserve volatile evidence first on the source and key reached hosts (running processes, dropped tools, SMB sessions, cached credentials) - NBI does not capture the source-side tool.</Action>
+      <Action>Deploy/confirm changes only via the authorised human-approved DEPLOY path; investigation itself is read-only.</Action>
+    </Phase>
+    <Phase name="Eradication">
+      <Action>Remove dropped tooling and persistence - services (7045), scheduled tasks (4698), and any payloads on the reached hosts identified via section 17.2 and share access in section 15.10.</Action>
+      <Action>Reset all reused credentials and rotate any privileged/service secrets that transited the reached hosts; assume hashes exposed on any host where the operator gained admin.</Action>
+      <Action>Hunt the fan-out pattern across other sources (an attacker distributes across IPs to stay under the threshold) and confirm no secondary footholds remain.</Action>
+      <Action>Remediate the initial-access vector that yielded the first credential/hash.</Action>
+    </Phase>
+    <Phase name="Recovery">
+      <Action>Reduce NTLM exposure where feasible - move to Kerberos-only for the affected service paths, enforce SMB signing, and restrict admin-share reach so a reused hash cannot execute broadly.</Action>
+      <Action>Restore isolated hosts after eradication is validated; rebuild any host where operator tooling or persistence was extensive.</Action>
+      <Action>Baseline the sanctioned aggregators/monitoring/scanners in known-infrastructure so genuine fan-out is recognised quickly and real credential reuse stands out.</Action>
+      <Action>Return systems to service only after section 22 closing criteria are met and monitoring confirms no recurring unauthorised fan-out.</Action>
+    </Phase>
+  </ResponseActions>
+  <Escalation>
+    <Trigger>Escalate to Tier 3 / Incident Response (and notify the customer) when any of the following hold:
+
+- One or few credentials reach many hosts (section 15.1) and the source accessed ADMIN$/C$ across reached hosts (section 15.10/section 17.1) or installed remote services/tasks (section 17.2), and $source_ip is not a sanctioned broad-auth function - hands-on Pass-the-Hash; page IR.
+- A privileged/human-admin credential is being fanned out over NTLM (section 15.1/section 17.3), especially from a workstation/foothold origin.
+- Remote service/process creation on reached hosts is tied to the source's activity (section 17.2).
+- Evidence is incomplete because of NBI's telemetry gaps (source-side tool not captured; 5140/5145 not audited on some reached hosts) and the alert cannot be safely cleared - escalate as needs_escalation with the gaps named.</Trigger>
+    <To>SOC L2 / IR</To>
+  </Escalation>
+  <ClosureCriteria>
+    <Item>false_positive (authorised): $source_ip is a documented monitoring/aggregator/patch/scanner source; the account profile matches its role, authentication is Kerberos-dominated with no failures, and share access is IPC$/SYSVOL/app-share only with no ADMIN$/C$ hands-on execution. Record the role in known-infrastructure.</Item>
+    <Item>false_positive (blocked malicious attempt): the fan-out logons or share access were positively proven denied, with no successful hands-on access; documented as blocked-malicious, never "benign".</Item>
+    <Item>misconfiguration: a legitimate new/changed broad-auth source not yet baselined; add it to known-infrastructure.</Item>
+    <Item>true_positive: hands-on NTLM lateral movement confirmed (one/few credentials + admin-share/remote execution); source and reached hosts contained, reused credentials reset, dropped tooling/persistence removed, scope established, incident documented.</Item>
+    <Item>needs_escalation: source nature or admin-share impact unresolved; handed to Tier 3/IR (and the infrastructure/AD team for known-infrastructure confirmation) with the specific evidence gaps documented.</Item>
+  </ClosureCriteria>
+  <Limitations>
+    <Item>The share, not the logon, decides it. Every candidate source authenticates broadly - that is the alert. The verdict turns on ADMIN$/C$ hands-on access (section 15.10/section 17.1) vs IPC$/SYSVOL-only authentication. Read the \\*\... suffix; do not auto-classify by a LIKE "*C$" test - that also matches IPC$ (validated pitfall). Group by ShareName and read the exact value.</Item>
+    <Item>Account shape separates PtH from aggregator. One/few credentials → many hosts is Pass-the-Hash; many distinct users → few hosts each is an aggregator (validated: 10.11.102.15 = 31 users behind a VDI egress). section 15.1 answers this in one query.</Item>
+    <Item>Kerberos ratio and failures fingerprint the source. The validated monitoring server 10.11.18.21 is ~74k Kerberos vs ~6k NTLM with zero 4625 failures - a clean automated profile. An operator tends to force NTLM and may leave failed-logon spray. section 17.4/section 15.12 compute this.</Item>
+    <Item>A privileged human credential in a service-tier fan-out is a flag. Ahmed.Adminnnnnn appearing in 10.11.18.21's NTLM slice is worth a look even on a monitoring server - it can mean an operator working through that host.</Item>
+    <Item>source.ip is on type 3, not type 2. The rule scopes to network logons because interactive (type 2) logons carry no source.ip; do not expect this signal for console/RDP-interactive activity.</Item>
+    <Item>KB-worthy (persist to NBI customer scope): (1) 10.11.18.21 = SolarWinds/Citrix monitoring tier (NIM-SO-APV1$, Solarwinds.Srv, CITRIX.NBI), Kerberos-dominated, IPC$/SYSVOL only, no ADMIN$/C$, 0 failures - authorised broad-auth; (2) 10.11.102.15 = shared VDI/jump egress, ~31 relayed human users - aggregator FP; (3) ShareName normalised as \\*\IPC$/\\*\C$/\\*\ADMIN$/\\*\SYSVOL; *C$ LIKE also matches IPC$ - classify by exact suffix. All observed live on 2026-08-17.</Item>
+  </Limitations>
+</Playbook>

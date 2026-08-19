@@ -1,0 +1,435 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<Playbook xmlns="https://soc.example/playbooks" id="PB-windows-sandbox-sensitive-configuration" name="Windows Sandbox with Sensitive Configuration [NBI-4688] - SOC Playbook" version="3.0" status="Validated" classification="TLP:AMBER">
+  <Metadata>
+    <Owner>NBI SOC / Detection Engineering</Owner>
+    <LastUpdated>2026-08-19</LastUpdated>
+    <Severity default="medium">medium</Severity>
+    <Confidence default="Medium">Medium</Confidence>
+    <Category>Defense Evasion</Category>
+    <MitreAttack>
+      <Technique id="T1564"/>
+      <Technique id="T1564.006"/>
+      <Tactic id="TA0005"/>
+    </MitreAttack>
+    <References>
+      <Reference title="MITRE ATT&amp;CK - Hide Artifacts: Run Virtual Instance (T1564.006)" url="https://attack.mitre.org/techniques/T1564/006/"/>
+      <Reference title="MITRE ATT&amp;CK - Defense Evasion tactic (TA0005)" url="https://attack.mitre.org/tactics/TA0005/"/>
+      <Reference title="Microsoft Learn - Windows Sandbox configuration (.wsb: Networking, MappedFolder/HostFolder/ReadOnly, LogonCommand)" url="https://learn.microsoft.com/en-us/windows/security/application-security/application-isolation/windows-sandbox/windows-sandbox-configure-using-wsb-file"/>
+      <Reference title="Microsoft Learn - Windows Sandbox overview" url="https://learn.microsoft.com/en-us/windows/security/application-security/application-isolation/windows-sandbox/windows-sandbox-overview"/>
+      <Reference title='Elastic - Prebuilt rule "Windows Sandbox with Sensitive Configuration"' url="https://www.elastic.co/docs/reference/security/prebuilt-rules/rules/windows/defense_evasion_windows_sandbox_with_sensitive_configuration"/>
+      <Reference title="Microsoft Learn - Command line process auditing (Event 4688 command-line GPO)" url="https://learn.microsoft.com/en-us/windows-server/identity/ad-ds/manage/component-updates/command-line-process-auditing"/>
+    </References>
+  </Metadata>
+  <AlertContext>
+    <RuleName>Windows Sandbox with Sensitive Configuration [NBI-4688]</RuleName>
+    <RuleId>nbi-b2-windows-sandbox-with-sensitive-configuration</RuleId>
+    <RuleType>eql</RuleType>
+    <Index>logs-system.security*</Index>
+    <TriggerLogic>The deployed rule is an EQL rule. Reconstructed from the deployed trigger logic, the detection is:
+
+
+
+Plain English: a Windows Sandbox launch (wsb.exe/WindowsSandboxClient.exe) whose command line carries at least one isolation-weakening .wsb element - networking on, a writable host-folder mapping, or an auto-run LogonCommand. Each of these individually reduces the sandbox's containment; combined, they form an EDR-blind execution environment with host and network reach.
+
+One-line Kibana KQL detection filter (for fast pivoting in Discover / Timeline):
+
+
+
+The .wsb file's full element set may not be expanded on the command line - if only the .wsb path is present in the arguments, retrieve the .wsb file to read its elements (section 7, section 15.10).</TriggerLogic>
+    <KeyAlertFields>process.name, process.executable, wsb.exe, process.parent.name, process.parent.executable, process.pid, process.parent.pid, process.entity_id, user.name, user.domain, process.command_line, process.args</KeyAlertFields>
+  </AlertContext>
+  <Inputs>
+    <Input name="$host"/>
+    <Input name="$user"/>
+    <Input name="$source_ip"/>
+  </Inputs>
+  <ExecutiveSummary>
+    <Overview>This playbook drives triage and investigation of the Windows Sandbox with Sensitive Configuration detection on NBI's Elastic Security deployment. The rule fires when wsb.exe or WindowsSandboxClient.exe is created with a sensitive .wsb configuration element in its command line: Networking Enable / NetworkingEnabled true (network access), a HostFolder on C:\ with ReadOnly false (a writable mapping to the host filesystem), or a LogonCommand (a command that auto-runs when the sandbox starts). Those options turn Windows Sandbox from an isolated, throwaway VM into a bridge to the host and network.
+
+Attackers use Windows Sandbox to run tooling inside a lightweight VM that most endpoint agents do not inspect, while a writable host-folder mapping and networking let them reach back to the real host and out to the internet. The analyst decides whether this is sanctioned developer/testing use on a dev host (false_positive - authorised), an evasion sandbox configured to bridge to the host/network for malicious execution (true_positive), a legitimate-but-unbaselined testing workflow or a feature enabled where policy did not intend (misconfiguration), or an event whose .wsb config and host context cannot be resolved (needs_escalation). Which sensitive options are set, what host folder is exposed, and whether the host is a sanctioned sandbox user are the discriminators.</Overview>
+    <BusinessImpact>An alert means: on $host, $user started Windows Sandbox with at least one sensitive, isolation-weakening .wsb option. It does not, by itself, prove malicious use - developers legitimately relax sandbox isolation for testing. The consequential questions:
+
+1. Which options are set, and in what combination? A LogonCommand (auto-runs code on start - a loader), plus Networking enabled (internet/host-network reach), plus a writable HostFolder on C:\ (bridges the sandbox to the real filesystem) is the full evasion-bridge configuration and strongly supports true_positive. A single benign option (e.g. a read-only host mapping for file testing) on a dev host is weaker.
+2. What host folder is exposed, and is it writable? A writable mapping of a sensitive host path is the mechanism by which sandbox activity reaches - and persists to - the real host.
+3. Is sandbox use sanctioned here? The parent that launched the sandbox (a script/automation vs explorer.exe) and whether $user/$host is a known dev/test context decide whether this is expected or anomalous.
+
+Because process.command_line is ~50% populated on NBI (section 8) and the full config may live only in the .wsb file, an empty config in tele</BusinessImpact>
+  </ExecutiveSummary>
+  <Investigation>
+    <Goal>Decide true_positive / false_positive / misconfiguration / needs_escalation for Windows Sandbox with Sensitive Configuration [NBI-4688].</Goal>
+    <Workflow>
+      <Step order="1" name="Reproduce the rule estate-wide (confirm the detection logic)">
+        <Purpose>Reproduce the rule estate-wide (confirm the detection logic)</Purpose>
+        <Query platform="Elastic" language="ES|QL" id="Q-01">
+          <![CDATA[
+FROM logs-system.security*
+| WHERE @timestamp >= NOW() - 4 hours
+    AND event.code == "4688"
+    AND TO_LOWER(process.name) IN ("wsb.exe", "windowssandboxclient.exe")
+| EVAL cl = TO_LOWER(CONCAT(COALESCE(process.command_line, ""), " ", COALESCE(MV_CONCAT(process.args, " "), "")))
+| WHERE cl LIKE "*networking*" OR cl LIKE "*hostfolder*" OR cl LIKE "*logoncommand*" OR cl LIKE "*readonly*" OR cl LIKE "*.wsb*"
+| KEEP @timestamp, host.name, user.name, process.parent.name, process.command_line
+| SORT @timestamp DESC
+| LIMIT 100
+]]>
+        </Query>
+      </Step>
+      <Step order="2" name="Confirm the launch and read the configuration on the alert host - reused from the deployed playbook">
+        <Purpose>Confirm the launch and read the configuration on the alert host - reused from the deployed playbook</Purpose>
+        <Query platform="Elastic" language="ES|QL" id="Q-02">
+          <![CDATA[
+FROM logs-system.security*
+| WHERE event.code == "4688" AND host.name == "$host"
+    AND TO_LOWER(process.name) IN ("wsb.exe", "windowssandboxclient.exe")
+    AND @timestamp >= NOW() - 4 hours
+| EVAL cl = TO_LOWER(CONCAT(COALESCE(process.command_line, ""), " ", COALESCE(MV_CONCAT(process.args, " "), "")))
+| WHERE cl LIKE "*networking*" OR cl LIKE "*hostfolder*" OR cl LIKE "*logoncommand*" OR cl LIKE "*readonly*" OR cl LIKE "*.wsb*"
+| KEEP @timestamp, host.name, user.name, process.parent.name, process.command_line, process.args
+| SORT @timestamp DESC
+| LIMIT 20
+]]>
+        </Query>
+      </Step>
+      <Step order="3" name="Entity pivoting">
+        <Purpose>Entity pivoting</Purpose>
+        <Query platform="Elastic" language="ES|QL" id="Q-03">
+          <![CDATA[
+FROM logs-system.security*
+| WHERE @timestamp >= NOW() - 4 hours
+    AND event.code == "4688"
+    AND host.name == "$host"
+    AND TO_LOWER(process.name) IN ("wsb.exe", "windowssandboxclient.exe")
+| KEEP @timestamp, host.name, user.name, user.domain, process.command_line, process.parent.name, process.pid, process.parent.pid
+| SORT @timestamp DESC
+| LIMIT 50
+]]>
+        </Query>
+      </Step>
+      <Step order="4" name="Process investigation">
+        <Purpose>Process investigation</Purpose>
+        <Query platform="Elastic" language="ES|QL" id="Q-04">
+          <![CDATA[
+FROM logs-system.security*
+| WHERE event.code == "4688" AND host.name == "$host"
+    AND TO_LOWER(process.name) IN ("wsb.exe", "windowssandboxclient.exe")
+    AND @timestamp >= NOW() - 4 hours
+| EVAL cl = TO_LOWER(CONCAT(COALESCE(process.command_line, ""), " ", COALESCE(MV_CONCAT(process.args, " "), "")))
+| WHERE cl LIKE "*networking*" OR cl LIKE "*hostfolder*" OR cl LIKE "*logoncommand*" OR cl LIKE "*readonly*"
+| EVAL risk = CASE(
+    cl LIKE "*logoncommand*", "auto-run-logoncommand",
+    cl LIKE "*hostfolder*" AND cl LIKE "*readonly*false*", "writable-host-folder",
+    cl LIKE "*networking*enable*" OR cl LIKE "*networkingenabled*true*" OR cl LIKE "*networking*true*", "networking-enabled",
+    cl LIKE "*hostfolder*", "host-folder-mapped",
+    "other-sensitive")
+| STATS execs = COUNT(*) BY risk, process.parent.name, user.name
+| SORT execs DESC
+| LIMIT 20
+]]>
+        </Query>
+      </Step>
+      <Step order="5" name="Process investigation">
+        <Purpose>Process investigation</Purpose>
+        <Query platform="Elastic" language="ES|QL" id="Q-05">
+          <![CDATA[
+FROM logs-system.security*
+| WHERE @timestamp >= NOW() - 4 hours
+    AND event.code == "4688"
+    AND TO_LOWER(process.name) IN ("wsb.exe", "windowssandboxclient.exe")
+| STATS execs = COUNT(*), hosts = COUNT_DISTINCT(host.name), users = COUNT_DISTINCT(user.name) BY process.parent.name
+| SORT execs DESC
+| LIMIT 25
+]]>
+        </Query>
+      </Step>
+      <Step order="6" name="Parent-Child process analysis">
+        <Purpose>Parent-Child process analysis</Purpose>
+        <Query platform="Elastic" language="ES|QL" id="Q-06">
+          <![CDATA[
+FROM logs-system.security*
+| WHERE event.code == "4688" AND host.name == "$host" AND user.name == "$user"
+    AND TO_LOWER(process.name) IN ("wsb.exe", "windowssandboxclient.exe", "windowssandbox.exe")
+    AND @timestamp >= NOW() - 4 hours
+| STATS launches = COUNT(*), first_seen = MIN(@timestamp), last_seen = MAX(@timestamp) BY process.name, process.parent.name
+| SORT launches DESC
+| LIMIT 20
+]]>
+        </Query>
+      </Step>
+      <Step order="7" name="Parent-Child process analysis">
+        <Purpose>Parent-Child process analysis</Purpose>
+        <Query platform="Elastic" language="ES|QL" id="Q-07">
+          <![CDATA[
+FROM logs-system.security*
+| WHERE @timestamp >= NOW() - 4 hours
+    AND event.code == "4688"
+    AND host.name == "$host"
+    AND TO_LOWER(process.name) IN ("wsb.exe", "windowssandboxclient.exe")
+| STATS launches = COUNT(*), users = COUNT_DISTINCT(user.name) BY process.parent.name, process.parent.executable
+| SORT launches DESC
+| LIMIT 20
+]]>
+        </Query>
+      </Step>
+      <Step order="8" name="User investigation">
+        <Purpose>User investigation</Purpose>
+        <Query platform="Elastic" language="ES|QL" id="Q-08">
+          <![CDATA[
+FROM logs-system.security*
+| WHERE @timestamp >= NOW() - 4 hours
+    AND event.code == "4688"
+    AND user.name == "$user"
+| STATS executions = COUNT(*), distinct_procs = COUNT_DISTINCT(process.name) BY host.name
+| SORT executions DESC
+| LIMIT 20
+]]>
+        </Query>
+      </Step>
+      <Step order="9" name="Host investigation">
+        <Purpose>Host investigation</Purpose>
+        <Query platform="Elastic" language="ES|QL" id="Q-09">
+          <![CDATA[
+FROM logs-system.security*
+| WHERE @timestamp >= NOW() - 4 hours
+    AND event.code == "4688"
+    AND host.name == "$host"
+| STATS executions = COUNT(*), users = COUNT_DISTINCT(user.name) BY process.name, process.parent.name
+| SORT executions ASC
+| LIMIT 40
+]]>
+        </Query>
+      </Step>
+      <Step order="10" name="IP investigation">
+        <Purpose>IP investigation</Purpose>
+        <Query platform="Elastic" language="ES|QL" id="Q-10">
+          <![CDATA[
+FROM logs-system.security*
+| WHERE @timestamp >= NOW() - 4 hours
+    AND event.code == "4624"
+    AND host.name == "$host" AND user.name == "$user"
+    AND source.ip IS NOT NULL
+| STATS logons = COUNT(*) BY source.ip, winlog.event_data.LogonType
+| SORT logons DESC
+| LIMIT 20
+]]>
+        </Query>
+      </Step>
+      <Step order="11" name="IP investigation">
+        <Purpose>IP investigation</Purpose>
+        <Query platform="Elastic" language="ES|QL" id="Q-11">
+          <![CDATA[
+FROM logs-system.security*
+| WHERE @timestamp >= NOW() - 4 hours
+    AND event.code == "4624"
+    AND source.ip == "$source_ip"
+| STATS logons = COUNT(*) BY user.name, host.name, winlog.event_data.LogonType
+| SORT logons DESC
+| LIMIT 25
+]]>
+        </Query>
+      </Step>
+      <Step order="12" name="File investigation">
+        <Purpose>File investigation</Purpose>
+        <Query platform="Elastic" language="ES|QL" id="Q-12">
+          <![CDATA[
+FROM logs-system.security*
+| WHERE @timestamp >= NOW() - 4 hours
+    AND event.code == "4688"
+    AND host.name == "$host"
+    AND user.name == "$user"
+| EVAL exe = TO_LOWER(process.executable)
+| WHERE NOT exe LIKE "*system32*" AND NOT exe LIKE "*syswow64*" AND NOT exe LIKE "*program files*" AND NOT exe LIKE "*windows*"
+| STATS execs = COUNT(*), first_seen = MIN(@timestamp), last_seen = MAX(@timestamp) BY process.executable, process.parent.name
+| SORT execs DESC
+| LIMIT 30
+]]>
+        </Query>
+      </Step>
+      <Step order="13" name="Authentication investigation">
+        <Purpose>Authentication investigation</Purpose>
+        <Query platform="Elastic" language="ES|QL" id="Q-13">
+          <![CDATA[
+FROM logs-system.security*
+| WHERE @timestamp >= NOW() - 4 hours
+    AND event.code IN ("4624", "4625", "4634", "4647")
+    AND host.name == "$host" AND user.name == "$user"
+| STATS events = COUNT(*), first_seen = MIN(@timestamp), last_seen = MAX(@timestamp) BY event.code, winlog.event_data.LogonType, source.ip
+| SORT events DESC
+| LIMIT 30
+]]>
+        </Query>
+      </Step>
+      <Step order="14" name="Timeline Reconstruction">
+        <Purpose>Timeline Reconstruction</Purpose>
+        <Query platform="Elastic" language="ES|QL" id="Q-14">
+          <![CDATA[
+FROM logs-system.security*
+| WHERE @timestamp >= NOW() - 4 hours
+    AND event.code == "4688"
+    AND host.name == "$host"
+    AND user.name == "$user"
+| KEEP @timestamp, process.parent.name, process.parent.pid, process.name, process.pid, process.executable, process.command_line
+| SORT @timestamp ASC
+| LIMIT 200
+]]>
+        </Query>
+      </Step>
+      <Step order="15" name="Lateral movement validation">
+        <Purpose>Lateral movement validation</Purpose>
+        <Query platform="Elastic" language="ES|QL" id="Q-15">
+          <![CDATA[
+FROM logs-system.security*
+| WHERE @timestamp >= NOW() - 4 hours
+    AND event.code IN ("4624", "4648", "4768", "4769", "5140")
+    AND user.name == "$user"
+    AND host.name != "$host"
+| STATS events = COUNT(*) BY host.name, event.code, winlog.event_data.LogonType
+| SORT events DESC
+| LIMIT 30
+]]>
+        </Query>
+      </Step>
+      <Step order="16" name="Persistence validation">
+        <Purpose>Persistence validation</Purpose>
+        <Query platform="Elastic" language="ES|QL" id="Q-16">
+          <![CDATA[
+FROM logs-system.security*
+| WHERE @timestamp >= NOW() - 4 hours
+    AND host.name == "$host"
+    AND (
+        (event.code == "4688" AND TO_LOWER(process.name) IN ("schtasks.exe", "reg.exe", "sc.exe", "at.exe", "powershell.exe", "wscript.exe", "cscript.exe", "rundll32.exe", "mshta.exe"))
+        OR event.code == "7045"
+        OR event.code == "4720"
+        OR event.code == "4698"
+    )
+| STATS events = COUNT(*) BY event.code, process.name, user.name
+| SORT events DESC
+| LIMIT 40
+]]>
+        </Query>
+      </Step>
+      <Step order="17" name="Privilege escalation validation">
+        <Purpose>Privilege escalation validation</Purpose>
+        <Query platform="Elastic" language="ES|QL" id="Q-17">
+          <![CDATA[
+FROM logs-system.security*
+| WHERE @timestamp >= NOW() - 4 hours
+    AND event.code == "4672"
+    AND host.name == "$host"
+| STATS special_priv_logons = COUNT(*) BY user.name
+| SORT special_priv_logons DESC
+| LIMIT 25
+]]>
+        </Query>
+      </Step>
+      <Step order="18" name="Defense evasion validation">
+        <Purpose>Defense evasion validation</Purpose>
+        <Query platform="Elastic" language="ES|QL" id="Q-18">
+          <![CDATA[
+FROM logs-system.security*
+| WHERE @timestamp >= NOW() - 4 hours
+    AND host.name == "$host"
+    AND (
+        (event.code == "4688" AND TO_LOWER(process.name) IN ("wevtutil.exe", "fsutil.exe", "vssadmin.exe", "wmic.exe", "cipher.exe", "sdelete.exe", "sdelete64.exe"))
+        OR event.code == "1102"
+        OR event.code == "4719"
+    )
+| STATS events = COUNT(*) BY event.code, process.name, user.name
+| SORT events DESC
+| LIMIT 30
+]]>
+        </Query>
+      </Step>
+      <Step order="19" name="Impact assessment">
+        <Purpose>Impact assessment</Purpose>
+        <Query platform="Elastic" language="ES|QL" id="Q-19">
+          <![CDATA[
+FROM logs-system.security*
+| WHERE @timestamp >= NOW() - 4 hours
+    AND user.name == "$user"
+    AND (
+        event.code IN ("5140", "5145")
+        OR (event.code == "4688" AND NOT TO_LOWER(process.executable) LIKE "*windows*" AND NOT TO_LOWER(process.executable) LIKE "*program files*")
+    )
+| STATS events = COUNT(*), first_seen = MIN(@timestamp), last_seen = MAX(@timestamp) BY event.code, host.name, process.name
+| SORT events DESC
+| LIMIT 40
+]]>
+        </Query>
+      </Step>
+      <Step order="20" name="Finalize verdict">
+        <DecisionTree>
+        </DecisionTree>
+      </Step>
+    </Workflow>
+  </Investigation>
+  <ClassificationGuidance>
+    <TruePositive>
+      <Definition></Definition>
+    </TruePositive>
+    <FalsePositive>
+      <Definition></Definition>
+      <Indicators>
+        <Item>Developer / QA testing on sanctioned dev hosts - the largest benign source. Developers run Windows Sandbox with a host-folder mapping (often read-only) and networking to test software safely.</Item>
+        <Item>Malware-analysis or IT-tooling workflows that use a sensitive .wsb deliberately for isolation testing.</Item>
+        <Item>A single benign option - e.g. a read-only HostFolder for file testing, or networking alone - without the full evasion-bridge combination.</Item>
+        <Item>Failed/blocked launches - the Windows Sandbox feature disabled or the launch failed to start - recorded as a proven-blocked attempt, never "benign".</Item>
+        <Item>Windows Sandbox is uncommon on a bank estate. wsb.exe/WindowsSandboxClient.exe were absent from the validated 4-hour window. There is no in-window baseline of legitimate sandbox use to tune out - a launch with a sensitive config is a notable, per-host-verified event.</Item>
+        <Item>Confirm whether Sandbox is even sanctioned on the host class. On the jump/VDI and server tiers, Windows Sandbox is generally not an expected feature. A launch on a non-dev host, or via a scripted parent rather than explorer.exe, is the intrusion shape.</Item>
+        <Item>In-sandbox activity is invisible on-cluster. Host 4688 records only the wsb.exe/WindowsSandboxClient.exe launch - not what runs inside. The mapped-host-folder writes and any in-sandbox process are not collectable in logs-system.security* (section 8); retrieve the .wsb and use host/EDR/network data for sandbox behaviour.</Item>
+        <Item>Command-line capture is bimodal (section 8). The sensitive config may be present only in process.args, or absent (config in the .wsb file only), on the command-line-less tier - fold command_line + MV_CONCAT(process.args," ") and retrieve the .wsb where both are null.</Item>
+      </Indicators>
+    </FalsePositive>
+    <Misconfiguration>
+      <Definition></Definition>
+    </Misconfiguration>
+    <NeedsEscalation>
+      <Definition></Definition>
+    </NeedsEscalation>
+  </ClassificationGuidance>
+  <ResponseActions>
+    <Phase name="Containment">
+      <Action>Isolate $host (network-contain / quarantine) if a true_positive is confirmed, to cut the sandbox's network and stop host-side effects. On a shared jump/VDI host, coordinate with IT but prioritise containment.</Action>
+      <Action>Terminate the sandbox (wsb.exe/WindowsSandboxClient.exe and the sandbox host process) if the host cannot yet be isolated - the running instance is discarded on close, so capture evidence first.</Action>
+      <Action>Suspend or force-logoff $user's session and disable the account if implicated; reset its credentials (section 20).</Action>
+      <Action>Preserve volatile evidence first - the .wsb config, the contents of the mapped host folder, and any host-side dropped binary - since the sandbox VM is ephemeral and its internals are not logged.</Action>
+      <Action>Deploy/confirm changes only via the authorised human-approved DEPLOY path; investigation itself is read-only.</Action>
+    </Phase>
+    <Phase name="Eradication">
+      <Action>Remove any host-side payload and persistence written via the mapped folder (section 17.2, section 15.10) and any dropped binary identified from non-standard paths.</Action>
+      <Action>Delete the malicious .wsb and disable the Windows Sandbox feature on $host if it is not sanctioned there.</Action>
+      <Action>Run a full anti-malware / EDR scan on $host and hunt for the same .wsb/tooling across peers, especially any host $user touched (section 15.4, section 17.1).</Action>
+      <Action>Remediate the initial-access vector that provided the foothold from which the sandbox was launched.</Action>
+    </Phase>
+    <Phase name="Recovery">
+      <Action>Reset $user's password and any credentials accessible from $host during the launch window; if privileged accounts logged on there (section 17.3), rotate those too.</Action>
+      <Action>Restore $host from a known-good image if a host-side payload executed or data in the mapped folder was tampered with; otherwise validate eradication holds after reboot.</Action>
+      <Action>Return the host/account to service only after section 22 closing criteria are met and monitoring confirms no further sensitive-config sandbox launches.</Action>
+      <Action>Recommend hardening (section 23): disable the Windows Sandbox feature on host classes that do not need it, block outbound access from sandbox networking, and baseline any sanctioned dev/test sandbox use.</Action>
+    </Phase>
+  </ResponseActions>
+  <Escalation>
+    <Trigger>Escalate to Tier 3 / Incident Response (and notify the customer) when any of the following hold:
+
+- The config is the full evasion bridge - LogonCommand and/or Networking enabled with a writable HostFolder (section 15.2).
+- The launch is on a non-dev host (server, standard workstation) or via a scripted parent (section 15.3).
+- Host-side artifacts show a payload executed or data staged via the mapped folder (section 15.10, section 17.5), or persistence was installed (section 17.2).
+- A privileged account is the actor (section 17.3), lateral movement follows (section 17.1), or defence-tampering appears (section 17.4).
+- The .wsb config cannot be recovered and the host/account sandbox context is unclear - escalate as needs_escalation, retrieve the .wsb, and confirm whether Sandbox is sanctioned on the host class.</Trigger>
+    <To>SOC L2 / IR</To>
+  </Escalation>
+  <ClosureCriteria>
+    <Item>false_positive (authorised): the launch is verified sanctioned dev/test use on a known dev host - recognised user/parent, options consistent with that use - owner and host documented; scope any exception narrowly.</Item>
+    <Item>false_positive (proven-blocked): the launch was positively proven blocked/failed (feature disabled, did not start) - recorded as a blocked attempt, never "benign"; preserve the .wsb and investigate the account.</Item>
+    <Item>misconfiguration: a legitimate testing workflow uses a sensitive config unbaselined, or Windows Sandbox is enabled where policy did not intend; baseline the workflow and disable the feature where inappropriate.</Item>
+    <Item>true_positive: an evasion sandbox was configured to bridge to the host/network for malicious execution; containment/eradication/recovery completed, host-side impact scoped, no residual payload or recurrence.</Item>
+    <Item>needs_escalation: handed to Tier 3/IR with the .wsb/context gaps documented.</Item>
+  </ClosureCriteria>
+  <Limitations>
+    <Item>The option combination is the story. A single read-only host mapping is weak; LogonCommand + Networking + a writable HostFolder on C:\ is the full EDR-blind bridge and strongly supports TP. Grade with section 15.2.</Item>
+    <Item>In-sandbox activity is invisible on-cluster. Host 4688 records only the wsb.exe/WindowsSandboxClient.exe launch - not the in-sandbox processes, the mapped-folder writes, or the sandbox's network. Retrieve the .wsb, inspect the mapped host folder, and use host/EDR/network data for what actually ran.</Item>
+    <Item>Confirm the feature is even sanctioned here. Windows Sandbox was absent from the validated window and is uncommon on a bank estate; a launch on a non-dev host or via a scripted parent is anomalous by default.</Item>
+    <Item>Command-line capture is bimodal. The sensitive config may be in process.args only, or absent (in the .wsb file only), on the command-line-less tier - fold command_line + MV_CONCAT(process.args," ") and retrieve the .wsb where both are null.</Item>
+    <Item>source.ip is shared infrastructure. A single VDI/jump egress IP (validated example: 10.11.102.15) fronts many users; it shows the operator's inbound origin, not the sandbox's network. Correlate IP + user + host.</Item>
+    <Item>KB-worthy (persist to NBI customer scope): (1) no wsb.exe/WindowsSandboxClient.exe executions on 4688 in-window over 4h (Windows Sandbox uncommon/absent in this estate); (2) in-sandbox activity not host-visible (only the launch is logged); (3) command-line host-bimodality; (4) process.hash.* absent on 4688; (5) 10.11.102.15 = shared VDI/admin egress fronting nim-jump-apv02. Observed live 2026-08-19.</Item>
+  </Limitations>
+</Playbook>

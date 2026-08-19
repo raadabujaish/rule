@@ -1,0 +1,89 @@
+{
+  "name": "MS SQL — OLE Automation Procedure Execution",
+  "tags": [
+    "NBI-Database",
+    "Phase3",
+    "MS-SQL-Server"
+  ],
+  "interval": "5m",
+  "enabled": true,
+  "description": "Fires when a SQL Server audit record contains an OLE Automation procedure — sp_OACreate, sp_OAMethod, or sp_OAGetProperty — which instantiate COM objects from inside the database engine to achieve OS-level code execution. This is the standard xp_cmdshell alternative used after SQL injection or DB compromise when xp_cmdshell is disabled. The rule matches the audited statement text. Maps to ATT&CK Execution T1059 (Command and Scripting Interpreter).",
+  "risk_score": 75,
+  "severity": "high",
+  "note": "### Investigation\n1. Read the statement to see which COM object/method is instantiated and infer intent (file write, shell, network).\n2. Identify the principal (server_principal_name) and origin (client_ip) — app account from an app server, or unexpected login?\n3. Confirm whether OLE Automation Procedures are supposed to be enabled on this instance (should be disabled in a bank).\n4. Correlate with FortiWeb SQLi alerts or app errors against the same database (post-SQLi pivot) and any xp_cmdshell activity.\n5. Escalate on any unexpected principal/source or non-legacy usage.\n\n### False positives / benign\nRare legacy applications may use OLE Automation legitimately. Distinguish by whether the calling principal, client_ip, and procedure sequence are a known sanctioned app running its normal workload versus ad-hoc calls from an interactive or unexpected login. Confirm the feature should be enabled at all — disabling OLE Automation Procedures is the correct control, not allowlisting.",
+  "output_index": "",
+  "investigation_fields": {
+    "field_names": [
+      "sqlserver.audit.session_server_principal_name",
+      "sqlserver.audit.statement",
+      "sqlserver.audit.client_ip",
+      "sqlserver.audit.database_name",
+      "host.name"
+    ]
+  },
+  "author": [
+    "raadabujaish"
+  ],
+  "false_positives": [],
+  "from": "now-9m",
+  "rule_id": "nbi-sql-ole-automation",
+  "max_signals": 100,
+  "risk_score_mapping": [],
+  "severity_mapping": [],
+  "threat": [
+    {
+      "framework": "MITRE ATT&CK",
+      "tactic": {
+        "id": "TA0002",
+        "name": "Execution",
+        "reference": "https://attack.mitre.org/tactics/TA0002/"
+      },
+      "technique": [
+        {
+          "id": "T1059",
+          "name": "Command and Scripting Interpreter",
+          "reference": "https://attack.mitre.org/techniques/T1059/"
+        }
+      ]
+    },
+    {
+      "framework": "MITRE ATT&CK",
+      "tactic": {
+        "id": "TA0003",
+        "name": "Persistence",
+        "reference": "https://attack.mitre.org/tactics/TA0003/"
+      },
+      "technique": [
+        {
+          "id": "T1505",
+          "name": "Server Software Component",
+          "reference": "https://attack.mitre.org/techniques/T1505/",
+          "subtechnique": [
+            {
+              "id": "T1505.001",
+              "name": "SQL Stored Procedures",
+              "reference": "https://attack.mitre.org/techniques/T1505/001/"
+            }
+          ]
+        }
+      ]
+    }
+  ],
+  "to": "now",
+  "references": [
+    "https://attack.mitre.org/",
+    "https://learn.microsoft.com/en-us/sql/relational-databases/security/auditing/"
+  ],
+  "version": 1,
+  "exceptions_list": [],
+  "related_integrations": [],
+  "required_fields": [],
+  "setup": "",
+  "type": "query",
+  "language": "kuery",
+  "index": [
+    "logs-microsoft_sqlserver.audit-*"
+  ],
+  "query": "sqlserver.audit.statement:(\"sp_oacreate\" or \"sp_oamethod\" or \"sp_oagetproperty\")",
+  "actions": []
+}

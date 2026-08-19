@@ -1,0 +1,393 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<Playbook xmlns="https://soc.example/playbooks" id="PB-windows-new-rdp-user-host-pair" name="Initial Access — New RDP User→Host Pair (Remote Interactive Logon) - SOC Playbook" version="3.0" status="Validated" classification="TLP:AMBER">
+  <Metadata>
+    <Owner>NBI SOC / Detection Engineering</Owner>
+    <LastUpdated>2026-08-19</LastUpdated>
+    <Severity default="Low">Low</Severity>
+    <Confidence default="Medium">Medium</Confidence>
+    <Category>Lateral Movement</Category>
+    <MitreAttack>
+      <Technique id="T1021"/>
+      <Technique id="T1021.001"/>
+      <Technique id="T1078"/>
+      <Tactic id="TA0008"/>
+      <Tactic id="TA0001"/>
+    </MitreAttack>
+    <References>
+      <Reference title="MITRE ATT&amp;CK - Remote Services (T1021)" url="https://attack.mitre.org/techniques/T1021/"/>
+      <Reference title="MITRE ATT&amp;CK - Remote Services: Remote Desktop Protocol (T1021.001)" url="https://attack.mitre.org/techniques/T1021/001/"/>
+      <Reference title="MITRE ATT&amp;CK - Valid Accounts (T1078)" url="https://attack.mitre.org/techniques/T1078/"/>
+      <Reference title="MITRE ATT&amp;CK - Lateral Movement tactic (TA0008)" url="https://attack.mitre.org/tactics/TA0008/"/>
+      <Reference title="MITRE ATT&amp;CK - Initial Access tactic (TA0001)" url="https://attack.mitre.org/tactics/TA0001/"/>
+      <Reference title="Elastic - New Terms rule type reference" url="https://www.elastic.co/guide/en/security/current/rules-ui-create.html#create-new-terms-rule"/>
+      <Reference title="Microsoft Learn - Event 4624 (An account was successfully logged on) and Logon Types" url="https://learn.microsoft.com/en-us/windows/security/threat-protection/auditing/event-4624"/>
+      <Reference title="Microsoft Learn - Event 4778/4779 (RDP session reconnect/disconnect)" url="https://learn.microsoft.com/en-us/windows/security/threat-protection/auditing/event-4778"/>
+    </References>
+  </Metadata>
+  <AlertContext>
+    <RuleName>Initial Access — New RDP User→Host Pair (Remote Interactive Logon)</RuleName>
+    <RuleId>nbi-rdp-new-user-host</RuleId>
+    <RuleType>new_terms</RuleType>
+    <Index>logs-system.security-*</Index>
+    <TriggerLogic>The deployed rule is a New Terms analytic over logs-system.security-*. Its base filter (kuery) selects successful RDP logons with a real remote origin:
+
+
+
+with New Terms fields winlog.event_data.TargetUserName + host.name and a 14-day history window. The rule fires the first time a given (RDP user, destination host) pair appears within that base filter - i.e. a brand-new remote-interactive relationship.
+
+Plain English: someone logged on to $host over RDP as $target_user, from $source_ip, and that user had not logged on to that host over RDP in the previous 14 days. LogonType 10 is RemoteInteractive (RDP); source.ip is reliably populated on this slice (unlike local interactive type 2), and ::1 is excluded to drop loopback. The one-line Kibana KQL pivot filter to see the slice in Discover is:
+
+
+
+Novelty of the pair was established by the rule over its 14-day term window; this playbook does not re-derive novelty - it characterises the origin and the post-logon behaviour to classify the (already successful) session.</TriggerLogic>
+    <KeyAlertFields>host.name, source.ip</KeyAlertFields>
+  </AlertContext>
+  <Inputs>
+    <Input name="$target_user"/>
+    <Input name="$host"/>
+    <Input name="$source_ip"/>
+  </Inputs>
+  <ExecutiveSummary>
+    <Overview>This playbook drives triage and investigation of the New RDP User→Host Pair detection on NBI's Elastic Security deployment. The rule is a New Terms analytic that fires when a (winlog.event_data.TargetUserName, host.name) pair is seen for the first time in 14 days on a successful RemoteInteractive (RDP) logon - Event 4624 with LogonType 10, a populated source.ip that is not the loopback ::1. It establishes the novelty of a user-to-host RDP relationship; it does not assert the logon is malicious.
+
+New RDP relationships are the ordinary footprint of administration - an admin reaching a server for the first time - but they are also exactly what an attacker produces after stealing a credential and pivoting by RDP into a new system. The logon has already succeeded; the analyst's job is to decide whether the new pair is authorised administration (false_positive), a stale-baseline artifact for a legitimately-changed role (misconfiguration), hands-on lateral movement / intrusion (true_positive), or unproven (needs_escalation). The origin's nature (a sanctioned jump/PAM hub vs a workstation or unknown host) and what the user did after landing are the discriminators.</Overview>
+    <BusinessImpact>An alert means: an account opened a RemoteInteractive (RDP) session on $host that is new for that (user, host) pair in 14 days. The session succeeded - the credential was valid and the logon completed. What the alert does *not* tell you is intent: a first-time admin RDP into a server and an attacker's first RDP pivot with a stolen credential produce the identical event.
+
+The investigative questions are therefore: what is $source_ip (a sanctioned RDP hub / jump / PAM tier that relays many admins, or a single workstation / unknown IP suddenly driving RDP into a server), is $target_user an authorised administrator for $host, how sensitive is $host (a Domain Controller, database, or Tier-0 host is materially more serious than a general application server), and - the decisive one - what did $target_user do after landing (a bare sign-in, or special-privilege use, admin tooling, admin-share access, and onward logons that indicate hands-on operation).</BusinessImpact>
+  </ExecutiveSummary>
+  <Investigation>
+    <Goal>Decide true_positive / false_positive / misconfiguration / needs_escalation for Initial Access — New RDP User→Host Pair (Remote Interactive Logon).</Goal>
+    <Workflow>
+      <Step order="1" name="Confirm the remote-interactive logon and its origin(s)">
+        <Purpose>Confirm the remote-interactive logon and its origin(s)</Purpose>
+        <Query platform="Elastic" language="ES|QL" id="Q-01">
+          <![CDATA[
+FROM logs-system.security-*
+| WHERE event.code == "4624" AND winlog.event_data.LogonType == "10"
+    AND winlog.event_data.TargetUserName == "$target_user" AND host.name == "$host"
+    AND source.ip IS NOT NULL AND source.ip != "::1"
+    AND @timestamp >= NOW() - 4 hours
+| STATS logons = COUNT(*), first_seen = MIN(@timestamp), last_seen = MAX(@timestamp),
+        sources = COUNT_DISTINCT(source.ip), origins = VALUES(source.ip)
+| LIMIT 10
+]]>
+        </Query>
+      </Step>
+      <Step order="2" name="Failed-logon check (the blocked-attempt case)">
+        <Purpose>Failed-logon check (the blocked-attempt case)</Purpose>
+        <Query platform="Elastic" language="ES|QL" id="Q-02">
+          <![CDATA[
+FROM logs-system.security-*
+| WHERE @timestamp >= NOW() - 4 hours
+    AND event.code == "4625" AND winlog.event_data.LogonType == "10"
+    AND winlog.event_data.TargetUserName == "$target_user" AND host.name == "$host"
+| STATS failures = COUNT(*), first_seen = MIN(@timestamp), last_seen = MAX(@timestamp) BY source.ip
+| SORT failures DESC
+| LIMIT 20
+]]>
+        </Query>
+      </Step>
+      <Step order="3" name="Entity pivoting">
+        <Purpose>Entity pivoting</Purpose>
+        <Query platform="Elastic" language="ES|QL" id="Q-03">
+          <![CDATA[
+FROM logs-system.security-*
+| WHERE @timestamp >= NOW() - 4 hours
+    AND event.code == "4624" AND winlog.event_data.LogonType == "10"
+    AND winlog.event_data.TargetUserName == "$target_user" AND host.name == "$host"
+    AND source.ip IS NOT NULL AND source.ip != "::1"
+| KEEP @timestamp, host.name, winlog.event_data.TargetUserName, source.ip, winlog.event_data.LogonType
+| SORT @timestamp DESC
+| LIMIT 50
+]]>
+        </Query>
+      </Step>
+      <Step order="4" name="Process investigation">
+        <Purpose>Process investigation</Purpose>
+        <Query platform="Elastic" language="ES|QL" id="Q-04">
+          <![CDATA[
+FROM logs-system.security-*
+| WHERE @timestamp >= NOW() - 4 hours
+    AND event.code == "4688"
+    AND host.name == "$host"
+    AND winlog.event_data.SubjectUserName == "$target_user"
+| STATS executions = COUNT(*), first_seen = MIN(@timestamp), last_seen = MAX(@timestamp) BY process.name
+| SORT executions DESC
+| LIMIT 40
+]]>
+        </Query>
+      </Step>
+      <Step order="5" name="Parent-Child process analysis">
+        <Purpose>Parent-Child process analysis</Purpose>
+        <Query platform="Elastic" language="ES|QL" id="Q-05">
+          <![CDATA[
+FROM logs-system.security-*
+| WHERE @timestamp >= NOW() - 4 hours
+    AND event.code == "4688"
+    AND host.name == "$host"
+    AND winlog.event_data.SubjectUserName == "$target_user"
+| STATS executions = COUNT(*) BY process.parent.name, process.name
+| SORT executions DESC
+| LIMIT 40
+]]>
+        </Query>
+      </Step>
+      <Step order="6" name="User investigation">
+        <Purpose>User investigation</Purpose>
+        <Query platform="Elastic" language="ES|QL" id="Q-06">
+          <![CDATA[
+FROM logs-system.security-*
+| WHERE @timestamp >= NOW() - 4 hours
+    AND event.code == "4624" AND winlog.event_data.LogonType == "10"
+    AND winlog.event_data.TargetUserName == "$target_user"
+    AND source.ip IS NOT NULL AND source.ip != "::1"
+| STATS logons = COUNT(*), origins = COUNT_DISTINCT(source.ip) BY host.name
+| SORT logons DESC
+| LIMIT 25
+]]>
+        </Query>
+      </Step>
+      <Step order="7" name="Host investigation">
+        <Purpose>Host investigation</Purpose>
+        <Query platform="Elastic" language="ES|QL" id="Q-07">
+          <![CDATA[
+FROM logs-system.security-*
+| WHERE @timestamp >= NOW() - 4 hours
+    AND event.code == "4624" AND winlog.event_data.LogonType == "10"
+    AND host.name == "$host"
+    AND source.ip IS NOT NULL AND source.ip != "::1"
+| STATS logons = COUNT(*), origins = COUNT_DISTINCT(source.ip) BY winlog.event_data.TargetUserName
+| SORT logons DESC
+| LIMIT 25
+]]>
+        </Query>
+      </Step>
+      <Step order="8" name="IP investigation">
+        <Purpose>IP investigation</Purpose>
+        <Query platform="Elastic" language="ES|QL" id="Q-08">
+          <![CDATA[
+FROM logs-system.security-*
+| WHERE source.ip == "$source_ip" AND @timestamp >= NOW() - 4 hours
+| STATS events = COUNT(*), users = COUNT_DISTINCT(winlog.event_data.TargetUserName),
+        hosts = COUNT_DISTINCT(host.name) BY event.code
+| SORT events DESC
+| LIMIT 12
+]]>
+        </Query>
+      </Step>
+      <Step order="9" name="IP investigation">
+        <Purpose>IP investigation</Purpose>
+        <Query platform="Elastic" language="ES|QL" id="Q-09">
+          <![CDATA[
+FROM logs-system.security-*
+| WHERE @timestamp >= NOW() - 4 hours
+    AND event.code == "4624" AND winlog.event_data.LogonType == "10"
+    AND source.ip == "$source_ip"
+| STATS logons = COUNT(*) BY winlog.event_data.TargetUserName, host.name
+| SORT logons DESC
+| LIMIT 25
+]]>
+        </Query>
+      </Step>
+      <Step order="10" name="File investigation">
+        <Purpose>File investigation</Purpose>
+        <Query platform="Elastic" language="ES|QL" id="Q-10">
+          <![CDATA[
+FROM logs-system.security-*
+| WHERE @timestamp >= NOW() - 4 hours
+    AND event.code == "4688"
+    AND host.name == "$host"
+    AND winlog.event_data.SubjectUserName == "$target_user"
+| STATS executions = COUNT(*), first_seen = MIN(@timestamp), last_seen = MAX(@timestamp) BY process.executable
+| SORT executions DESC
+| LIMIT 30
+]]>
+        </Query>
+      </Step>
+      <Step order="11" name="Authentication investigation">
+        <Purpose>Authentication investigation</Purpose>
+        <Query platform="Elastic" language="ES|QL" id="Q-11">
+          <![CDATA[
+FROM logs-system.security-*
+| WHERE @timestamp >= NOW() - 4 hours
+    AND host.name == "$host"
+    AND winlog.event_data.TargetUserName == "$target_user"
+    AND event.code IN ("4624", "4625", "4634", "4647", "4778", "4779")
+| STATS events = COUNT(*), first_seen = MIN(@timestamp), last_seen = MAX(@timestamp) BY event.code, winlog.event_data.LogonType, source.ip
+| SORT events DESC
+| LIMIT 30
+]]>
+        </Query>
+      </Step>
+      <Step order="12" name="Timeline Reconstruction">
+        <Purpose>Timeline Reconstruction</Purpose>
+        <Query platform="Elastic" language="ES|QL" id="Q-12">
+          <![CDATA[
+FROM logs-system.security-*
+| WHERE @timestamp >= NOW() - 4 hours
+    AND host.name == "$host"
+    AND (winlog.event_data.TargetUserName == "$target_user" OR winlog.event_data.SubjectUserName == "$target_user")
+    AND event.code IN ("4624", "4634", "4647", "4672", "4688", "4648", "5140", "5145", "4778", "4779")
+| KEEP @timestamp, event.code, winlog.event_data.LogonType, source.ip, process.name, process.parent.name
+| SORT @timestamp ASC
+| LIMIT 200
+]]>
+        </Query>
+      </Step>
+      <Step order="13" name="Lateral movement validation">
+        <Purpose>Lateral movement validation</Purpose>
+        <Query platform="Elastic" language="ES|QL" id="Q-13">
+          <![CDATA[
+FROM logs-system.security-*
+| WHERE @timestamp >= NOW() - 4 hours
+    AND event.code IN ("4624", "4648", "4768", "4769", "5140")
+    AND user.name == "$target_user"
+    AND host.name != "$host"
+| STATS events = COUNT(*) BY host.name, event.code, winlog.event_data.LogonType
+| SORT events DESC
+| LIMIT 30
+]]>
+        </Query>
+      </Step>
+      <Step order="14" name="Persistence validation">
+        <Purpose>Persistence validation</Purpose>
+        <Query platform="Elastic" language="ES|QL" id="Q-14">
+          <![CDATA[
+FROM logs-system.security-*
+| WHERE @timestamp >= NOW() - 4 hours
+    AND host.name == "$host"
+    AND (
+        (event.code == "4688" AND TO_LOWER(process.name) IN ("schtasks.exe", "reg.exe", "sc.exe", "at.exe", "net.exe", "net1.exe", "powershell.exe"))
+        OR event.code == "7045"
+        OR event.code == "4720"
+        OR event.code == "4698"
+    )
+| STATS events = COUNT(*) BY event.code, process.name, winlog.event_data.SubjectUserName
+| SORT events DESC
+| LIMIT 40
+]]>
+        </Query>
+      </Step>
+      <Step order="15" name="Privilege escalation validation">
+        <Purpose>Privilege escalation validation</Purpose>
+        <Query platform="Elastic" language="ES|QL" id="Q-15">
+          <![CDATA[
+FROM logs-system.security-*
+| WHERE @timestamp >= NOW() - 4 hours
+    AND event.code == "4672"
+    AND host.name == "$host"
+| STATS special_priv_logons = COUNT(*) BY winlog.event_data.SubjectUserName
+| SORT special_priv_logons DESC
+| LIMIT 25
+]]>
+        </Query>
+      </Step>
+      <Step order="16" name="Defense evasion validation">
+        <Purpose>Defense evasion validation</Purpose>
+        <Query platform="Elastic" language="ES|QL" id="Q-16">
+          <![CDATA[
+FROM logs-system.security-*
+| WHERE @timestamp >= NOW() - 4 hours
+    AND host.name == "$host"
+    AND (
+        (event.code == "4688" AND TO_LOWER(process.name) IN ("wevtutil.exe", "fsutil.exe", "vssadmin.exe", "wmic.exe", "cipher.exe", "sdelete.exe", "sdelete64.exe"))
+        OR event.code == "1102"
+        OR event.code == "4719"
+    )
+| STATS events = COUNT(*) BY event.code, process.name, winlog.event_data.SubjectUserName
+| SORT events DESC
+| LIMIT 30
+]]>
+        </Query>
+      </Step>
+      <Step order="17" name="Impact assessment">
+        <Purpose>Impact assessment</Purpose>
+        <Query platform="Elastic" language="ES|QL" id="Q-17">
+          <![CDATA[
+FROM logs-system.security-*
+| WHERE host.name == "$host" AND winlog.event_data.SubjectUserName == "$target_user"
+    AND event.code IN ("4672","4688","5140","5145","4648","4624")
+    AND @timestamp >= NOW() - 4 hours
+| STATS events = COUNT(*), last_seen = MAX(@timestamp) BY event.code
+| SORT events DESC
+| LIMIT 12
+]]>
+        </Query>
+      </Step>
+      <Step order="18" name="Finalize verdict">
+        <DecisionTree>
+        </DecisionTree>
+      </Step>
+    </Workflow>
+  </Investigation>
+  <ClassificationGuidance>
+    <TruePositive>
+      <Definition></Definition>
+    </TruePositive>
+    <FalsePositive>
+      <Definition></Definition>
+      <Indicators>
+        <Item>Authorised first-time administration. An admin reaching $host for the first time in 14 days from a sanctioned jump/PAM/RDP-hub origin is the dominant benign case - the relationship is simply *new*. Confirmed by the origin's role and the user's admin entitlement for $host, not assumed.</Item>
+        <Item>Recently-changed but legitimate roles - a new admin assignment, a rebuilt/renamed host, or a migrated service that has not yet re-entered the 14-day baseline (a misconfiguration/stale-baseline case, not an attack).</Item>
+        <Item>Break-glass / maintenance windows where an operator legitimately reaches a new server.</Item>
+        <Item>An RDP intrusion attempt positively proven to have failed (only 4625 failures for the pair, no successful type-10 session) is recorded as blocked-malicious, never "benign".</Item>
+        <Item>10.11.102.15 is NBI's sanctioned RDP hub. In the live window it is the source.ip for RemoteInteractive logons by many distinct users into many hosts (jump/PAM relay). A new pair whose origin is this hub is very likely authorised administration - but the role is context to verify against known_infrastructure, never an automatic pass, and the hub is investigated on its merits (an attacker abusing the jump host would also egress from it).</Item>
+        <Item>source.ip is shared infrastructure. Because one hub IP fronts many admins reaching many servers, source.ip is a weak individual identifier; always correlate IP + user + host. A different origin - e.g. 10.111.1.33 for nim-jump-apv03, or a workstation IP reaching a server it never served - is the pattern that should draw attention.</Item>
+        <Item>The alerting unit is genuinely new pairs. Low severity by design; volume tracks new admin-to-host RDP relationships, so any given alert is expected to be mostly benign administration - but a new pair terminating on a DC/database/Tier-0 host, or with hands-on post-logon activity, is the exception that matters.</Item>
+        <Item>No blanket source exclusion is encoded in the rule, and none should be. Keep the inventory of sanctioned hubs current so authorised origins are recognised while still being investigated; scope any future allowance to the exact user + host + origin, by identity.</Item>
+      </Indicators>
+    </FalsePositive>
+    <Misconfiguration>
+      <Definition></Definition>
+    </Misconfiguration>
+    <NeedsEscalation>
+      <Definition></Definition>
+    </NeedsEscalation>
+  </ClassificationGuidance>
+  <ResponseActions>
+    <Phase name="Containment">
+      <Action>Isolate $host (network-contain / quarantine) if a true_positive is confirmed - especially a DC/database/Tier-0 host - to stop hands-on operation and onward movement. Coordinate with IT to avoid dropping unrelated sessions on a shared server, but prioritise containment.</Action>
+      <Action>Terminate the RDP session and disable $target_user pending investigation; reset its credentials (section 20).</Action>
+      <Action>Isolate the origin $source_ip if it is a foothold (a workstation/unknown host, not the sanctioned hub). If the origin *is* the sanctioned jump host, do not drop it wholesale - instead scope to the attacker's session and coordinate with IT.</Action>
+      <Action>Preserve volatile evidence first where feasible: active sessions (quser/qwinsta), the process list, and memory on $host, before terminating.</Action>
+      <Action>Deploy/confirm changes only via the authorised human-approved DEPLOY path; investigation itself is read-only.</Action>
+    </Phase>
+    <Phase name="Eradication">
+      <Action>Remove any persistence established during the session (section 17.2 - services, scheduled tasks, Run keys, new accounts) and any dropped tooling identified via section 15.10.</Action>
+      <Action>Revoke onward access. For every host $target_user reached from $host (section 17.1), review and contain as needed; assume credential compromise and hunt reuse.</Action>
+      <Action>Reset $target_user's credentials and any privileged credentials exposed on $host during the session (section 17.3); review for Kerberos/NTLM secret exposure if a DC/Tier-0 was involved.</Action>
+      <Action>Remediate the initial-access vector - how the credential was obtained (phishing, spray, reuse) and how the foothold origin was compromised.</Action>
+    </Phase>
+    <Phase name="Recovery">
+      <Action>Reset $target_user's password and rotate any credentials that were usable from $host during the session; if the host is a DC/Tier-0, treat exposed privileged secrets as compromised.</Action>
+      <Action>Restore $host from a known-good image if persistence/tampering was extensive; otherwise validate that eradication holds after reboot.</Action>
+      <Action>Return the host/account to service only after section 22 closing criteria are met and monitoring confirms no unexpected RDP recurs for the pair.</Action>
+      <Action>Harden. Enforce RDP only via the sanctioned jump/PAM tier (restrict direct RDP to servers), require MFA on administrative RDP, and monitor the sanctioned hubs so genuinely new pairs stand out - the highest-value hardening from this rule.</Action>
+    </Phase>
+  </ResponseActions>
+  <Escalation>
+    <Trigger>Escalate to Tier 3 / Incident Response (and notify the customer) when any of the following hold:
+
+- $source_ip is a workstation / unknown IP (not a sanctioned hub - section 15.6), or the pair is otherwise unexplained on a DC / database / Tier-0 host.
+- $target_user performed hands-on / onward actions on $host (special privileges, admin tooling, admin-share access, outbound logons - section 17.1/section 17.3/section 17.5).
+- Persistence (section 17.2) or log clearing / audit-policy tampering (section 17.4) appears on $host.
+- The acting account is a service or privileged identity used interactively over RDP where that is not expected.
+- The origin's role or the user's authorisation for $host cannot be established, or post-logon activity is ambiguous - escalate as needs_escalation to the AD/infrastructure team and Tier 3/IR with the gaps named.</Trigger>
+    <To>SOC L2 / IR</To>
+  </Escalation>
+  <ClosureCriteria>
+    <Item>false_positive (authorised): $source_ip is confirmed a sanctioned jump/PAM/RDP-hub origin and $target_user is confirmed an authorised administrator for $host (documented), with post-logon activity consistent with a sanctioned task - the pair is simply new. Record the references; do not encode a source exclusion in the detection.</Item>
+    <Item>false_positive (blocked-malicious): an RDP intrusion attempt positively proven to have failed (only 4625 failures for the pair, no successful type-10 - section 14.2); documented as blocked, never "benign", and the origin investigated.</Item>
+    <Item>misconfiguration: a legitimate, recently-changed relationship (new admin assignment, host rebuild/rename, migrated service) not yet in the 14-day baseline; record the new legitimate relationship (new_terms will re-learn the pair - no rule change required).</Item>
+    <Item>true_positive: RDP lateral movement / intrusion confirmed (workstation/unknown origin and/or hands-on onward activity); $host (and any foothold origin) contained, $target_user credentials reset, onward movement and dropped tooling hunted, no residual persistence or recurrence.</Item>
+    <Item>needs_escalation: handed to AD/infra + Tier 3/IR with the specific evidence gaps documented.</Item>
+  </ClosureCriteria>
+  <Limitations>
+    <Item>New != malicious. This is a New Terms rule; it flags a first-in-14-days RDP relationship, most of which are administration. The verdict comes from the origin's nature and the post-logon behaviour, not from novelty.</Item>
+    <Item>10.11.102.15 is the sanctioned RDP hub. It fronts many admins reaching many servers, so source.ip is a weak individual identifier - always correlate IP + user + host, and never auto-clear a hub origin (an attacker abusing the jump host egresses from it too). Other origins seen live include 10.111.1.33 fronting nim-jump-apv03.</Item>
+    <Item>The post-logon test is your best discriminator. section 17.5 (RDPNT-INV-03) - special privileges, admin tooling, admin-share access, onward logons - separates a hands-on pivot from a bare sign-in faster than anything else available on NBI.</Item>
+    <Item>Mind the casing gap. The 4624 TargetUserName and the 4688/4672 SubjectUserName can differ in case; an empty post-logon result is not proof of no activity - corroborate case-tolerantly (the section 16 timeline predicate matches both fields).</Item>
+    <Item>Empty != safe (window). The alerting logon may predate the 4-hour window; re-run anchored to the alert time before concluding absence.</Item>
+    <Item>KB-worthy (persist to NBI customer scope): (1) 10.11.102.15 = sanctioned RDP/jump hub (many users→many hosts on type 10); (2) source.ip reliably populated on the type-10 slice, null on type 2; (3) TargetUserName vs SubjectUserName casing gap on this estate; (4) LogonType is a string. All observed live on 2026-08-19.</Item>
+  </Limitations>
+</Playbook>

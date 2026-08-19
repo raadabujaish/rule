@@ -1,0 +1,90 @@
+{
+  "name": "Remote Desktop File Opened from Suspicious Path [NBI-4688]",
+  "tags": [
+    "Domain: Endpoint",
+    "OS: Windows",
+    "Use Case: Threat Detection",
+    "Tactic: Initial Access",
+    "Tactic: Command and Control",
+    "Data Source: Elastic Endgame",
+    "Data Source: Elastic Defend",
+    "Data Source: Windows Security Event Logs",
+    "Data Source: Microsoft Defender for Endpoint",
+    "Data Source: Sysmon",
+    "Data Source: SentinelOne",
+    "Data Source: Crowdstrike",
+    "Resources: Investigation Guide",
+    "NBI-Recovered",
+    "Phase2-Batch2",
+    "Windows-4688",
+    "coverage:partial-29pct"
+  ],
+  "interval": "5m",
+  "enabled": true,
+  "description": "Identifies attempts to open a remote desktop file from suspicious paths. Adversaries may abuse RDP files for initial access.",
+  "risk_score": 47,
+  "severity": "medium",
+  "note": "## Coverage\nThis rule runs on Windows Security 4688 process-creation events. Command-line-dependent conditions currently apply to hosts where command-line auditing is enabled.\n\n## Detection guidance\n## Triage and analysis\n\n> **Disclaimer**:\n> This investigation guide was created using generative AI technology and has been reviewed to improve its accuracy and relevance. While every effort has been made to ensure its quality, we recommend validating the content and adapting it to suit your specific environment and operational needs.\n\n### Investigating Remote Desktop File Opened from Suspicious Path\n\nRemote Desktop Protocol (RDP) allows users to connect to and control a computer remotely, facilitating remote work and administration. However, adversaries can exploit RDP files, which store connection settings, to gain unauthorized access. They may distribute malicious RDP files via phishing, placing them in suspicious directories. The detection rule identifies when RDP files are opened from unusual paths, signaling potential misuse and enabling analysts to investigate further.\n\n### Possible investigation steps\n\n- Review the process execution details to confirm the presence of \"mstsc.exe\" and verify the suspicious path from which the RDP file was opened, as specified in the query.\n- Check the user account associated with the process to determine if the activity aligns with their typ",
+  "output_index": "",
+  "investigation_fields": {
+    "field_names": [
+      "user.name",
+      "process.name",
+      "process.parent.name",
+      "process.command_line",
+      "host.name"
+    ]
+  },
+  "author": [
+    "raadabujaish"
+  ],
+  "false_positives": [],
+  "from": "now-9m",
+  "rule_id": "nbi-b2-remote-desktop-file-opened-from-suspicious-path",
+  "max_signals": 100,
+  "risk_score_mapping": [],
+  "severity_mapping": [],
+  "threat": [
+    {
+      "framework": "MITRE ATT&CK",
+      "tactic": {
+        "id": "TA0001",
+        "name": "Initial Access",
+        "reference": "https://attack.mitre.org/tactics/TA0001/"
+      },
+      "technique": [
+        {
+          "id": "T1566",
+          "name": "Phishing",
+          "reference": "https://attack.mitre.org/techniques/T1566/",
+          "subtechnique": [
+            {
+              "id": "T1566.001",
+              "name": "Spearphishing Attachment",
+              "reference": "https://attack.mitre.org/techniques/T1566/001/"
+            }
+          ]
+        }
+      ]
+    }
+  ],
+  "to": "now",
+  "references": [
+    "https://www.microsoft.com/en-us/security/blog/2024/10/29/midnight-blizzard-conducts-large-scale-spear-phishing-campaign-using-rdp-files/",
+    "https://www.blackhillsinfosec.com/rogue-rdp-revisiting-initial-access-methods/",
+    "https://shorsec.io/blog/malrdp-implementing-rouge-rdp-manually/",
+    "https://www.elastic.co/guide/en/security/current/prebuilt-rules.html"
+  ],
+  "version": 1,
+  "exceptions_list": [],
+  "related_integrations": [],
+  "required_fields": [],
+  "setup": "",
+  "type": "eql",
+  "language": "eql",
+  "index": [
+    "logs-system.security-*"
+  ],
+  "query": "process where host.os.type == \"windows\" and event.type == \"start\" and\n process.name : \"mstsc.exe\" and\n process.args : (\"?:\\\\Users\\\\*\\\\Downloads\\\\*.rdp\",\n                 \"?:\\\\Users\\\\*\\\\AppData\\\\Local\\\\Temp\\\\Temp?_*.rdp\",\n                 \"?:\\\\Users\\\\*\\\\AppData\\\\Local\\\\Temp\\\\7z*.rdp\",\n                 \"?:\\\\Users\\\\*\\\\AppData\\\\Local\\\\Temp\\\\Rar$*\\\\*.rdp\",\n                 \"?:\\\\Users\\\\*\\\\AppData\\\\Local\\\\Temp\\\\BNZ.*.rdp\",\n                 \"?:\\\\Users\\\\*\\\\AppData\\\\Local\\\\Microsoft\\\\Windows\\\\INetCache\\\\Content.Outlook\\\\*.rdp\")\n",
+  "actions": []
+}

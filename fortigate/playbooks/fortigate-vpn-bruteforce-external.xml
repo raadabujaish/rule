@@ -1,0 +1,257 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<Playbook xmlns="https://soc.example/playbooks" id="PB-fortigate-vpn-bruteforce-external" name="FortiGate — VPN Brute Force From External Source - SOC Playbook" version="3.0" status="Validated" classification="TLP:AMBER">
+  <Metadata>
+    <Owner>NBI SOC / Detection Engineering</Owner>
+    <LastUpdated>2026-08-19</LastUpdated>
+    <Severity default="Medium">Medium</Severity>
+    <Confidence default="Medium">Medium</Confidence>
+    <Category>Credential Access</Category>
+    <MitreAttack>
+      <Technique id="T1110"/>
+      <Technique id="T1133"/>
+      <Tactic id="TA0006"/>
+      <Tactic id="TA0001"/>
+    </MitreAttack>
+    <References>
+      <Reference title="MITRE ATT&amp;CK - Brute Force (T1110)" url="https://attack.mitre.org/techniques/T1110/"/>
+      <Reference title="MITRE ATT&amp;CK - External Remote Services (T1133)" url="https://attack.mitre.org/techniques/T1133/"/>
+      <Reference title="MITRE ATT&amp;CK - Credential Access tactic (TA0006)" url="https://attack.mitre.org/tactics/TA0006/"/>
+      <Reference title="MITRE ATT&amp;CK - Initial Access tactic (TA0001)" url="https://attack.mitre.org/tactics/TA0001/"/>
+      <Reference title="Elastic - Fortinet FortiGate integration (fields and subtypes)" url="https://docs.elastic.co/integrations/fortinet_fortigate"/>
+      <Reference title="Fortinet - FortiGate VPN event log reference (IKE/SSL-VPN log fields)" url="https://docs.fortinet.com/document/fortigate/7.4.0/fortios-log-message-reference"/>
+      <Reference title="Fortinet PSIRT - SSL-VPN credential/brute-force advisories (FortiOS)" url="https://www.fortiguard.com/psirt"/>
+      <Reference title="CISA - Detecting and mitigating VPN brute-force and credential attacks" url="https://www.cisa.gov/news-events/cybersecurity-advisories"/>
+    </References>
+  </Metadata>
+  <AlertContext>
+    <RuleName>FortiGate — VPN Brute Force From External Source</RuleName>
+    <RuleId>nbi-fgt-vpn-bruteforce-external</RuleId>
+    <RuleType>threshold</RuleType>
+    <Index>logs-fortinet_fortigate.log-*</Index>
+    <TriggerLogic>The deployed rule is an Elastic threshold rule counting FortiGate VPN failures per external source. The behavioural core, expressed as the one-line Kibana-KQL detection filter used for fast pivoting in Discover / Timeline:
+
+
+
+Threshold: group by source.ip, fire when the count of matching events ≥ 500 within a 6-hour window (the deployed rule runs on a now-370m / 6h cadence).
+
+Plain English: one external IP produced at least 500 failed FortiGate VPN events in 6 hours. On NBI's live telemetry the vpn subtype mixes IPsec IKE negotiation events (fortinet.firewall.action: "negotiate", with fortinet.firewall.status of success / failure / negotiate_error) and SSL-VPN events (ssl-login-fail, ssl-alert, ssl-exit-error, tunnel-*). The threshold's event.outcome: "failure" captures the failed IKE (failure / negotiate_error) and failed SSL-VPN logins. Critical semantic: a fortinet.firewall.status: "success" means an IKE phase negotiated, *not* that a user authenticated - so the rule firing (and even a "success" status) is not proof of compromise, and its absence of a user is not proof of safety.</TriggerLogic>
+    <KeyAlertFields>fortinet.firewall.status, fortinet.firewall.action, event.outcome, fortinet.firewall.xauthuser, source.ip, destination.ip, destination.port, source.bytes, destination.bytes</KeyAlertFields>
+  </AlertContext>
+  <Inputs>
+    <Input name="$source_ip"/>
+  </Inputs>
+  <ExecutiveSummary>
+    <Overview>This playbook drives triage and investigation of the FortiGate - VPN Brute Force From External Source detection on NBI's Elastic Security deployment. The rule fires when a single external source.ip (RFC1918 ranges 10.0.0.0/8, 172.16.0.0/12, 192.168.0.0/16 excluded) accumulates 500 or more FortiGate VPN-subtype events with event.outcome: "failure" inside the rule's 6-hour window - the signature of an external actor grinding credentials or IKE proposals against NBI's remote-access VPN surface.
+
+The analyst's job is to decide, quickly and defensibly, whether that brute force established authenticated access or a working tunnel (true_positive), was a real malicious attempt that never got in (false_positive - blocked/unsuccessful, never "benign"), is a misconfigured external site-to-site peer failing IKE (misconfiguration), or cannot be resolved from telemetry (needs_escalation). The decision hinges on forward traffic to internal hosts and authenticated user identity, not on the IKE status string.</Overview>
+    <BusinessImpact>An alert means: a single external IP crossed 500 failed VPN events in 6 hours against NBI's FortiGate remote-access surface. That is a genuine, high-volume brute force / negotiation-flood by definition of the count - the open question is *outcome*, not *whether it happened*.
+
+Because NBI's FortiGate VPN telemetry carries no user identity on the brute-force path (fortinet.firewall.xauthuser is effectively null on IKE negotiations), you cannot read success from the VPN-subtype events alone. Two independent, positive proofs of access exist in the same index and must be checked separately:
+
+1. Forward traffic (fortinet.firewall.subtype: "forward") from $source_ip to internal destinations - a real, usable tunnel carrying packets, not just negotiation.
+2. An authenticated remote-access user (fortinet.firewall.xauthuser) tied to $source_ip - an actual authenticated session.
+
+If either is present, the external actor got in. If both are absent, the brute force was loud but unsuccessful - a malicious attempt that was blocked/failed, documented as such and never as benign.</BusinessImpact>
+  </ExecutiveSummary>
+  <Investigation>
+    <Goal>Decide true_positive / false_positive / misconfiguration / needs_escalation for FortiGate — VPN Brute Force From External Source.</Goal>
+    <Workflow>
+      <Step order="1" name="Profile the VPN brute force and IKE enforcement (confirm the alert)">
+        <Purpose>Profile the VPN brute force and IKE enforcement (confirm the alert)</Purpose>
+        <Query platform="Elastic" language="ES|QL" id="Q-01">
+          <![CDATA[
+FROM logs-fortinet_fortigate.log-*
+| WHERE source.ip == "$source_ip" AND fortinet.firewall.subtype == "vpn"
+    AND @timestamp >= NOW() - 4 hours
+| STATS events = COUNT(*)
+    BY fortinet.firewall.status, fortinet.firewall.action
+| SORT events DESC
+| LIMIT 15
+]]>
+        </Query>
+      </Step>
+      <Step order="2" name="Entity pivoting">
+        <Purpose>Entity pivoting</Purpose>
+        <Query platform="Elastic" language="ES|QL" id="Q-02">
+          <![CDATA[
+FROM logs-fortinet_fortigate.log-*
+| WHERE source.ip == "$source_ip"
+    AND @timestamp >= NOW() - 4 hours
+| STATS events = COUNT(*), outcomes = VALUES(event.outcome), dst_ports = COUNT_DISTINCT(destination.port)
+    BY fortinet.firewall.subtype
+| SORT events DESC
+| LIMIT 20
+]]>
+        </Query>
+      </Step>
+      <Step order="3" name="Host investigation">
+        <Purpose>Host investigation</Purpose>
+        <Query platform="Elastic" language="ES|QL" id="Q-03">
+          <![CDATA[
+FROM logs-fortinet_fortigate.log-*
+| WHERE source.ip == "$source_ip" AND fortinet.firewall.subtype == "forward"
+    AND @timestamp >= NOW() - 4 hours
+| STATS flows = COUNT(*), bytes = SUM(source.bytes), ports = COUNT_DISTINCT(destination.port)
+    BY destination.ip
+| SORT flows DESC
+| LIMIT 20
+]]>
+        </Query>
+      </Step>
+      <Step order="4" name="IP investigation">
+        <Purpose>IP investigation</Purpose>
+        <Query platform="Elastic" language="ES|QL" id="Q-04">
+          <![CDATA[
+FROM logs-fortinet_fortigate.log-*
+| WHERE source.ip == "$source_ip" AND fortinet.firewall.subtype == "forward"
+    AND @timestamp >= NOW() - 4 hours
+| STATS flows = COUNT(*), bytes = SUM(source.bytes)
+    BY destination.ip
+| SORT flows DESC
+| LIMIT 20
+]]>
+        </Query>
+      </Step>
+      <Step order="5" name="Authentication investigation">
+        <Purpose>Authentication investigation</Purpose>
+        <Query platform="Elastic" language="ES|QL" id="Q-05">
+          <![CDATA[
+FROM logs-fortinet_fortigate.log-*
+| WHERE source.ip == "$source_ip" AND fortinet.firewall.subtype == "vpn"
+    AND @timestamp >= NOW() - 4 hours
+| STATS events = COUNT(*) BY fortinet.firewall.xauthuser
+| SORT events DESC
+| LIMIT 10
+]]>
+        </Query>
+      </Step>
+      <Step order="6" name="Timeline Reconstruction">
+        <Purpose>Timeline Reconstruction</Purpose>
+        <Query platform="Elastic" language="ES|QL" id="Q-06">
+          <![CDATA[
+FROM logs-fortinet_fortigate.log-*
+| WHERE source.ip == "$source_ip" AND fortinet.firewall.subtype == "vpn"
+    AND @timestamp >= NOW() - 4 hours
+| KEEP @timestamp, fortinet.firewall.status, fortinet.firewall.action, event.outcome, fortinet.firewall.xauthuser, destination.port
+| SORT @timestamp ASC
+| LIMIT 200
+]]>
+        </Query>
+      </Step>
+      <Step order="7" name="Lateral movement validation">
+        <Purpose>Lateral movement validation</Purpose>
+        <Query platform="Elastic" language="ES|QL" id="Q-07">
+          <![CDATA[
+FROM logs-fortinet_fortigate.log-*
+| WHERE source.ip == "$source_ip" AND fortinet.firewall.subtype == "forward"
+    AND @timestamp >= NOW() - 4 hours
+| STATS flows = COUNT(*), bytes = SUM(source.bytes)
+    BY destination.ip, destination.port
+| SORT flows DESC
+| LIMIT 30
+]]>
+        </Query>
+      </Step>
+      <Step order="8" name="Defense evasion validation">
+        <Purpose>Defense evasion validation</Purpose>
+        <Query platform="Elastic" language="ES|QL" id="Q-08">
+          <![CDATA[
+FROM logs-fortinet_fortigate.log-*
+| WHERE source.ip == "$source_ip" AND fortinet.firewall.subtype == "vpn"
+    AND @timestamp >= NOW() - 4 hours
+| STATS events = COUNT(*), outcomes = VALUES(event.outcome)
+    BY fortinet.firewall.action, fortinet.firewall.status
+| SORT events DESC
+| LIMIT 25
+]]>
+        </Query>
+      </Step>
+      <Step order="9" name="Impact assessment">
+        <Purpose>Impact assessment</Purpose>
+        <Query platform="Elastic" language="ES|QL" id="Q-09">
+          <![CDATA[
+FROM logs-fortinet_fortigate.log-*
+| WHERE source.ip == "$source_ip" AND fortinet.firewall.subtype == "forward"
+    AND @timestamp >= NOW() - 4 hours
+| STATS total_flows = COUNT(*), total_bytes = SUM(source.bytes),
+        internal_dests = COUNT_DISTINCT(destination.ip), ports = COUNT_DISTINCT(destination.port)
+| LIMIT 1
+]]>
+        </Query>
+      </Step>
+      <Step order="10" name="Finalize verdict">
+        <DecisionTree>
+        </DecisionTree>
+      </Step>
+    </Workflow>
+  </Investigation>
+  <ClassificationGuidance>
+    <TruePositive>
+      <Definition></Definition>
+    </TruePositive>
+    <FalsePositive>
+      <Definition></Definition>
+      <Indicators>
+        <Item>Genuine brute force that never succeeds. The most common outcome: a real external attack that the FortiGate rejects (all IKE failure/negotiate_error, no forward traffic, no authenticated user). This is false_positive in the incident sense only - a malicious attempt observed and blocked/unsuccessful. It is documented as a blocked attack, the source is denied at the perimeter, and it is never recorded as benign.</Item>
+        <Item>Misconfigured site-to-site VPN peer. A partner/branch FortiGate or third-party gateway whose IKE is broken (rekey failure, PSK or proposal/DH-group mismatch) can emit hundreds of negotiate_error events from one peer IP - volume without an attack. This is a misconfiguration, not a brute force (see section 6/section 13).</Item>
+        <Item>Broken remote-access client or automation. A misconfigured legitimate VPN client or a monitoring probe retrying a bad credential can generate repeated failures from a single external egress IP.</Item>
+        <Item>NAT/CGNAT aggregation. Many real users behind one carrier-grade-NAT egress IP can inflate failure counts for that IP; correlate with SSL-VPN portal logs and the diversity of usernames before treating it as a single actor.</Item>
+        <Item>The VPN-subtype stream genuinely mixes IPsec IKE and SSL-VPN. In a 4-hour sample the vpn subtype showed negotiate events with status success (~7,900), failure (~2,965) and negotiate_error (~2,512), alongside SSL-VPN ssl-login-fail (~1,032), ssl-alert, ssl-exit-error and tunnel-* phase events. So an IKE status: success is routine background negotiation, not a login - do not read it as compromise.</Item>
+        <Item>Multiple concurrent external brute-force sources are the norm, not the exception. In the same window, several external IPs each exceeded the threshold band - e.g. 185.217.76.86 (~2,200 failures), 193.122.51.47 (~1,592), 185.112.188.197 (~1,116), 130.193.131.98 (~452). NBI's IKE responder is under continuous internet-background brute force. That means: (a) a firing is expected and by itself low-surprise; (b) the discriminator that matters is whether this specific source produced forward traffic or an authenticated user, not the raw failure count.</Item>
+        <Item>xauthuser is ~0 on the brute-force (IKE) path. Absence of a VPN username is the *expected* state for IKE negotiations at NBI and is not evidence the attack failed - you must prove/disprove access via forward traffic (INV-02) rather than infer it from a null user.</Item>
+        <Item>No environment-specific allow-list applies. Do not whitelist a "noisy" external source; a source that is loud today can be the one that lands a valid credential tomorrow. Block confirmed brute-force sources at the perimeter (which also stops the recurring alert) rather than excepting them in the rule.</Item>
+      </Indicators>
+    </FalsePositive>
+    <Misconfiguration>
+      <Definition></Definition>
+    </Misconfiguration>
+    <NeedsEscalation>
+      <Definition></Definition>
+    </NeedsEscalation>
+  </ClassificationGuidance>
+  <ResponseActions>
+    <Phase name="Containment">
+      <Action>True_positive (tunnel or authenticated user confirmed): block $source_ip at the perimeter, force-disconnect the VPN session (FortiGate diagnose vpn / SSL-VPN session kill), and disable/reset the implicated remote-access account pending investigation. Then treat every internal destination from section 15.6/section 17.1 as in-scope and isolate/hunt those hosts.</Action>
+      <Action>False_positive (blocked/unsuccessful brute force): block/deny $source_ip at the perimeter - this both stops the attack and silences the recurring alert. Document it as a blocked malicious attempt, not benign.</Action>
+      <Action>Preserve evidence first: attach the INV-01 (IKE profile), section 15.6 (forward traffic) and section 15.12 (xauthuser) outputs and the list of internal destinations reached to the case before changing perimeter state.</Action>
+      <Action>Investigation here is read-only; perimeter blocks, session kills and account changes run only via the authorised, human-approved change path.</Action>
+    </Phase>
+    <Phase name="Eradication">
+      <Action>Rotate any credential that may have been guessed. If INV-03 showed a populated xauthuser, reset that account and review it for reuse elsewhere; if a shared IPsec PSK is implicated, rotate it and re-key affected tunnels.</Action>
+      <Action>Remove the attacker's foothold on any internal host reached through the tunnel (section 17.1) - kill live sessions, remove dropped tooling/persistence, and close the account used.</Action>
+      <Action>Purge the access path: confirm no residual established tunnels or SSL-VPN sessions remain from $source_ip or the implicated account.</Action>
+      <Action>Review the remote-access user store for other weak/compromised credentials the same campaign may have tried (correlate usernames from SSL-VPN portal logs).</Action>
+    </Phase>
+    <Phase name="Recovery">
+      <Action>Restore service for any account/tunnel disabled during containment once credentials are rotated and the source is blocked.</Action>
+      <Action>Confirm the brute-force condition does not recur on monitoring: the source stays blocked, failures cease, and no new tunnel appears.</Action>
+      <Action>Harden the remote-access surface: enforce MFA on SSL-VPN/IPsec XAuth, apply geo/IP-reputation blocking and rate-limiting/lockout on the VPN portal, prefer certificate-based IPsec over PSK, and restrict the exposed remote-access services to required geographies.</Action>
+      <Action>Recommend enabling forward-subtype logging for VPN-sourced traffic if it is incomplete - it is the single highest-value data improvement for confirming or clearing this exact alert (section 8 caveat).</Action>
+    </Phase>
+  </ResponseActions>
+  <Escalation>
+    <Trigger>Escalate to SOC L2 / Incident Response and notify the network/VPN team when any of the following hold:
+
+- Forward traffic from $source_ip to internal destinations (section 15.6 / section 17.1) - a working tunnel; this alone is an incident.
+- A populated xauthuser for this external source (section 15.12) - an authenticated remote-access session.
+- A fail→success inflection in the timeline (section 16) with the failure stream dropping off afterward - likely-successful access even before forward traffic is confirmed.
+- Inability to disprove access because forward logging is incomplete for VPN clients (an IKE status: success with missing/ambiguous forward + xauthuser) - escalate as needs_escalation with the gap named; do not close as false_positive while access cannot be ruled out.
+
+Hand off with the INV-01/section 15.6/section 15.12 outputs and the list of internal destinations reached.</Trigger>
+    <To>SOC L2 / IR</To>
+  </Escalation>
+  <ClosureCriteria>
+    <Item>false_positive (blocked/unsuccessful): section 15.6 empty (no forward traffic) and section 15.12 shows no authenticated user, documented as "malicious VPN brute-force attempt, blocked/unsuccessful, no authenticated access"; $source_ip blocked at the perimeter. Never recorded as benign.</Item>
+    <Item>misconfiguration: $source_ip is a documented site-to-site peer whose IKE is failing (repeated negotiate_error from one peer); network team/partner engaged to fix the config.</Item>
+    <Item>true_positive: VPN session terminated, $source_ip blocked, implicated account reset, internal destinations reached investigated for compromise, containment documented.</Item>
+    <Item>needs_escalation: handed to network/VPN team + SOC L2 with the specific evidence gaps (forward-logging coverage, ambiguous xauthuser) documented.</Item>
+  </ClosureCriteria>
+  <Limitations>
+    <Item>An IKE status: success is NOT a login. It is a negotiated phase. On NBI the vpn subtype is mostly background IKE negotiation and SSL-VPN churn; read success/compromise only from forward traffic (section 15.6) or a populated xauthuser (section 15.12), never from the VPN status. This is the single most important framing for the rule.</Item>
+    <Item>xauthuser is null on the brute-force path, so absence of a user is *expected* and proves nothing. Do not clear the alert on a null user.</Item>
+    <Item>Concurrent external brute-force sources are normal background at NBI. Validated live: several external IPs simultaneously exceeded the threshold band (e.g. 185.217.76.86 ~2,200 failures, 193.122.51.47 ~1,592, 185.112.188.197 ~1,116 in 4h). The firing itself is low-surprise; the outcome per source is what matters.</Item>
+    <Item>The forward-subtype is the discriminator, and it can be empty for a real attack. Validated: 185.217.76.86 produced no forward traffic - a genuine high-volume brute force with no tunnel (blocked/unsuccessful). Treat an empty forward result as "no tunnel observed," and weigh the logging-gap caveat before declaring it impossible.</Item>
+    <Item>Evasion - low-and-slow and distribution. A patient attacker stays under 500-in-6h by slowing or spreading guessing across many source IPs, switches between IKE and the SSL-VPN portal (section 17.4), or skips brute force entirely with a valid/leaked credential. Complement this volume threshold with (a) a "first successful forward tunnel from a new external source" analytic and (b) a low-and-slow VPN-failure correlation by destination over longer windows.</Item>
+    <Item>KB-worthy (persist to NBI customer scope): (1) logs-fortinet_fortigate.log-* vpn subtype mixes IPsec IKE (action: negotiate) and SSL-VPN (ssl-login-fail, ssl-*); (2) fortinet.firewall.xauthuser ~null on the IKE path; (3) continuous multi-source external VPN brute force is baseline; (4) 185.217.76.86 observed ~2,200 failures / 4h with no forward traffic on 2026-08-19; (5) forward-subtype logging coverage is the gating factor for confirming VPN access. All observed live on 2026-08-19.</Item>
+  </Limitations>
+</Playbook>

@@ -1,0 +1,309 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<Playbook xmlns="https://soc.example/playbooks" id="PB-cisco-ios-login-brute-force" name="Cisco IOS — Login Brute Force Against Device - SOC Playbook" version="3.0" status="Validated" classification="TLP:AMBER">
+  <Metadata>
+    <Owner>NBI SOC / Detection Engineering</Owner>
+    <LastUpdated>2026-08-19</LastUpdated>
+    <Severity default="high">high</Severity>
+    <Confidence default="Medium">Medium</Confidence>
+    <Category>Credential Access</Category>
+    <MitreAttack>
+      <Technique id="T1110"/>
+      <Technique id="T1078"/>
+      <Technique id="T1602"/>
+      <Technique id="T1601"/>
+      <Tactic id="TA0006"/>
+    </MitreAttack>
+    <References>
+      <Reference title="MITRE ATT&amp;CK - Brute Force (T1110)" url="https://attack.mitre.org/techniques/T1110/"/>
+      <Reference title="MITRE ATT&amp;CK - Credential Access tactic (TA0006)" url="https://attack.mitre.org/tactics/TA0006/"/>
+      <Reference title="MITRE ATT&amp;CK - Valid Accounts (T1078)" url="https://attack.mitre.org/techniques/T1078/"/>
+      <Reference title="MITRE ATT&amp;CK - Network Device CLI (T1059.008)" url="https://attack.mitre.org/techniques/T1059/008/"/>
+      <Reference title="MITRE ATT&amp;CK - Modify System Image (T1601)" url="https://attack.mitre.org/techniques/T1601/"/>
+      <Reference title="Cisco - IOS/IOS XE Login Enhancements (login block / quiet mode / logging)" url="https://www.cisco.com/c/en/us/td/docs/ios-xml/ios/sec_usr_cfg/configuration/xe-16/sec-usr-cfg-xe-16-book/sec-login-enhancements.html"/>
+      <Reference title="Cisco - Hardening Cisco IOS Devices (management-plane protection)" url="https://www.cisco.com/c/en/us/support/docs/ip/access-lists/13608-21.html"/>
+      <Reference title="Cisco - TACACS+ Command Accounting" url="https://www.cisco.com/c/en/us/td/docs/ios-xml/ios/sec_usr_tacacs/configuration/xe-16/sec-usr-tacacs-xe-16-book/sec-cfg-tacacs.html"/>
+      <Reference title="Elastic - Cisco IOS integration (fields and datasets)" url="https://docs.elastic.co/integrations/cisco_ios"/>
+      <Reference title="Elastic - ES|QL language reference" url="https://www.elastic.co/guide/en/elasticsearch/reference/current/esql.html"/>
+    </References>
+  </Metadata>
+  <AlertContext>
+    <RuleName>Cisco IOS — Login Brute Force Against Device</RuleName>
+    <RuleId>nbi-cisco-login-bruteforce</RuleId>
+    <RuleType>threshold</RuleType>
+    <Index>logs-cisco_ios.log-*</Index>
+    <TriggerLogic>The deployed rule is a KQL threshold rule (verbatim from the rule definition):
+
+
+
+Threshold: value: 30 grouped by field: ["log.syslog.hostname"]; interval 1h, lookback from: now-65m. Plain English: one device (log.syslog.hostname) that emits at least 30 Login failed syslog messages within an hour trips the rule. The count is raw failure volume per device - not distinct-source or distinct-user cardinality - so a single relentless source and a distributed set of sources both contribute to the same per-device counter.
+
+One-line Kibana KQL filter for fast pivoting in Discover / Timeline:
+
+
+
+The Login failed string is emitted by the device's authentication subsystem. On NBI the full message carries the attacker context inline, e.g. Login failed [user: solarwind] [Source: 10.11.18.21] [localport: 22] [Reason: Login Authentication Failed] at 02:12:03 BGH Tue Aug 18 2026 - the user, source IP, and port live inside the message string, not in dedicated ECS fields (see section 8). That single fact shapes the entire investigation: attribution is done by reading/matching the message, not by pivoting source.ip/user.name.</TriggerLogic>
+    <KeyAlertFields>log.syslog.hostname, log.source.address, cisco.ios.facility, event.severity, source.ip, source.user.name, related.ip, event.action</KeyAlertFields>
+  </AlertContext>
+  <Inputs>
+    <Input name="$device"/>
+    <Input name="$source_ip"/>
+    <Input name="$user"/>
+  </Inputs>
+  <ExecutiveSummary>
+    <Overview>This playbook drives triage and investigation of the Cisco IOS - Login Brute Force Against Device detection on NBI's Elastic Security deployment. The rule is a threshold analytic that fires when a single Cisco network device logs 30 or more Login failed messages in the rule's 1-hour interval. That is the management-plane signature of a login brute force against a router or switch: an attacker (or a misconfigured automation client) repeatedly presenting bad credentials to the device's SSH/VTY management interface.
+
+Compromise of a network device is a severe outcome - it enables traffic interception and rerouting, ACL/AAA weakening, a durable foothold in the core, and pivoting deep into the bank network. The analyst's job is to determine, quickly and defensibly, whether the failure burst represents a successful device compromise, an unsuccessful (blocked) attempt, a stale-credential automation loop hammering the device, or an unprovable case - and to classify the alert as true_positive, false_positive, misconfiguration, or needs_escalation with evidence attached.</Overview>
+    <BusinessImpact>An alert means: on $device, at least 30 authentication attempts failed within an hour. The device's management plane (SSH on port 22 in the observed data) rejected 30+ credential presentations. It does not by itself tell you whether any attempt then *succeeded* - that requires the companion Login Success check (section 14.2, section 15.12). Nor does it tell you whether the failures came from one source or many - the threshold is on raw volume per device.
+
+Three very different realities produce this same alert on NBI, and separating them is the whole investigation:
+
+1. A real brute force - a hostile source guessing credentials against the device, possibly succeeding.
+2. A stale-credential automation loop - a monitoring/NMS/TACACS client (the live data shows the solarwind SolarWinds account from 10.11.18.21) retrying an old or rotated password on a fixed cadence across many devices. This is the dominant benign cause in NBI and maps to the misconfiguration branch.
+3. A distributed credential attack - the same source, or several sources, hammering many devices, where the per-device counter on $device is just one facet.</BusinessImpact>
+  </ExecutiveSummary>
+  <Investigation>
+    <Goal>Decide true_positive / false_positive / misconfiguration / needs_escalation for Cisco IOS — Login Brute Force Against Device.</Goal>
+    <Workflow>
+      <Step order="1" name="Reproduce the rule estate-wide (confirm the detection logic)">
+        <Purpose>Reproduce the rule estate-wide (confirm the detection logic)</Purpose>
+        <Query platform="Elastic" language="ES|QL" id="Q-01">
+          <![CDATA[
+FROM logs-cisco_ios.log-*
+| WHERE @timestamp >= NOW() - 4 hours
+    AND event.dataset == "cisco_ios.log"
+    AND message LIKE "*Login failed*"
+| STATS failures = COUNT(*), first_seen = MIN(@timestamp), last_seen = MAX(@timestamp) BY log.syslog.hostname
+| SORT failures DESC
+| LIMIT 25
+]]>
+        </Query>
+      </Step>
+      <Step order="2" name="Confirm on the alert device - failures and any success">
+        <Purpose>Confirm on the alert device - failures and any success</Purpose>
+        <Query platform="Elastic" language="ES|QL" id="Q-02">
+          <![CDATA[
+FROM logs-cisco_ios.log-*
+| WHERE @timestamp >= NOW() - 4 hours
+    AND log.syslog.hostname == "$device"
+    AND (message LIKE "*Login failed*" OR message LIKE "*Login Success*" OR message LIKE "*Login succeeded*")
+| EVAL outcome = CASE(message LIKE "*failed*", "failed", "success")
+| STATS events = COUNT(*), first_seen = MIN(@timestamp), last_seen = MAX(@timestamp) BY outcome, log.source.address
+| SORT events DESC
+| LIMIT 20
+]]>
+        </Query>
+      </Step>
+      <Step order="3" name="Entity pivoting">
+        <Purpose>Entity pivoting</Purpose>
+        <Query platform="Elastic" language="ES|QL" id="Q-03">
+          <![CDATA[
+FROM logs-cisco_ios.log-*
+| WHERE @timestamp >= NOW() - 4 hours
+    AND log.syslog.hostname == "$device"
+    AND message LIKE "*Login failed*"
+| KEEP @timestamp, log.syslog.hostname, log.source.address, cisco.ios.facility, event.severity, message
+| SORT @timestamp DESC
+| LIMIT 50
+]]>
+        </Query>
+      </Step>
+      <Step order="4" name="User investigation">
+        <Purpose>User investigation</Purpose>
+        <Query platform="Elastic" language="ES|QL" id="Q-04">
+          <![CDATA[
+FROM logs-cisco_ios.log-*
+| WHERE @timestamp >= NOW() - 4 hours
+    AND message LIKE "*$user*"
+    AND (message LIKE "*Login failed*" OR message LIKE "*Login Success*")
+| STATS attempts = COUNT(*), devices = COUNT_DISTINCT(log.syslog.hostname), first_seen = MIN(@timestamp), last_seen = MAX(@timestamp)
+| LIMIT 5
+]]>
+        </Query>
+      </Step>
+      <Step order="5" name="Host investigation">
+        <Purpose>Host investigation</Purpose>
+        <Query platform="Elastic" language="ES|QL" id="Q-05">
+          <![CDATA[
+FROM logs-cisco_ios.log-*
+| WHERE @timestamp >= NOW() - 4 hours
+    AND log.syslog.hostname == "$device"
+| STATS events = COUNT(*), distinct_messages = COUNT_DISTINCT(message), last_seen = MAX(@timestamp) BY cisco.ios.facility
+| SORT events DESC
+| LIMIT 20
+]]>
+        </Query>
+      </Step>
+      <Step order="6" name="IP investigation">
+        <Purpose>IP investigation</Purpose>
+        <Query platform="Elastic" language="ES|QL" id="Q-06">
+          <![CDATA[
+FROM logs-cisco_ios.log-*
+| WHERE @timestamp >= NOW() - 4 hours
+    AND message LIKE "*$source_ip*"
+    AND (message LIKE "*Login failed*" OR message LIKE "*Login Success*")
+| STATS attempts = COUNT(*), devices = COUNT_DISTINCT(log.syslog.hostname), last_seen = MAX(@timestamp) BY log.syslog.hostname
+| SORT attempts DESC
+| LIMIT 30
+]]>
+        </Query>
+      </Step>
+      <Step order="7" name="Authentication investigation">
+        <Purpose>Authentication investigation</Purpose>
+        <Query platform="Elastic" language="ES|QL" id="Q-07">
+          <![CDATA[
+FROM logs-cisco_ios.log-*
+| WHERE @timestamp >= NOW() - 4 hours
+    AND log.syslog.hostname == "$device"
+    AND (message LIKE "*Login failed*" OR message LIKE "*Login Success*" OR message LIKE "*Login succeeded*")
+| EVAL outcome = CASE(message LIKE "*failed*", "failed", "success")
+| KEEP @timestamp, outcome, log.source.address, cisco.ios.facility, message
+| SORT @timestamp ASC
+| LIMIT 200
+]]>
+        </Query>
+      </Step>
+      <Step order="8" name="Timeline Reconstruction">
+        <Purpose>Timeline Reconstruction</Purpose>
+        <Query platform="Elastic" language="ES|QL" id="Q-08">
+          <![CDATA[
+FROM logs-cisco_ios.log-*
+| WHERE @timestamp >= NOW() - 4 hours
+    AND log.syslog.hostname == "$device"
+    AND (message LIKE "*Login failed*" OR message LIKE "*Login Success*" OR message LIKE "*CONFIG_I*")
+| KEEP @timestamp, log.source.address, cisco.ios.facility, message
+| SORT @timestamp ASC
+| LIMIT 300
+]]>
+        </Query>
+      </Step>
+      <Step order="9" name="Lateral movement validation">
+        <Purpose>Lateral movement validation</Purpose>
+        <Query platform="Elastic" language="ES|QL" id="Q-09">
+          <![CDATA[
+FROM logs-cisco_ios.log-*
+| WHERE @timestamp >= NOW() - 4 hours
+    AND message LIKE "*$source_ip*"
+    AND message LIKE "*Login failed*"
+| STATS failures = COUNT(*), first_seen = MIN(@timestamp), last_seen = MAX(@timestamp) BY log.syslog.hostname
+| SORT failures DESC
+| LIMIT 40
+]]>
+        </Query>
+      </Step>
+      <Step order="10" name="Persistence validation">
+        <Purpose>Persistence validation</Purpose>
+        <Query platform="Elastic" language="ES|QL" id="Q-10">
+          <![CDATA[
+FROM logs-cisco_ios.log-*
+| WHERE @timestamp >= NOW() - 4 hours
+    AND log.syslog.hostname == "$device"
+    AND message LIKE "*CONFIG_I*"
+| KEEP @timestamp, log.source.address, cisco.ios.facility, message
+| SORT @timestamp DESC
+| LIMIT 30
+]]>
+        </Query>
+      </Step>
+      <Step order="11" name="Defense evasion validation">
+        <Purpose>Defense evasion validation</Purpose>
+        <Query platform="Elastic" language="ES|QL" id="Q-11">
+          <![CDATA[
+FROM logs-cisco_ios.log-*
+| WHERE @timestamp >= NOW() - 4 hours
+    AND log.syslog.hostname == "$device"
+    AND (message LIKE "*CONFIG_I*" OR message LIKE "*logging*" OR message LIKE "*SYS-5-*" OR message LIKE "*SshutDown*" OR message LIKE "*shutdown*")
+| STATS events = COUNT(*), last_seen = MAX(@timestamp) BY cisco.ios.facility
+| SORT events DESC
+| LIMIT 20
+]]>
+        </Query>
+      </Step>
+      <Step order="12" name="Impact assessment">
+        <Purpose>Impact assessment</Purpose>
+        <Query platform="Elastic" language="ES|QL" id="Q-12">
+          <![CDATA[
+FROM logs-cisco_ios.log-*
+| WHERE @timestamp >= NOW() - 4 hours
+    AND log.syslog.hostname == "$device"
+    AND message LIKE "*CONFIG_I*"
+| STATS changes = COUNT(*), first_seen = MIN(@timestamp), last_seen = MAX(@timestamp) BY log.source.address
+| SORT changes DESC
+| LIMIT 20
+]]>
+        </Query>
+      </Step>
+      <Step order="13" name="Finalize verdict">
+        <DecisionTree>
+        </DecisionTree>
+      </Step>
+    </Workflow>
+  </Investigation>
+  <ClassificationGuidance>
+    <TruePositive>
+      <Definition></Definition>
+    </TruePositive>
+    <FalsePositive>
+      <Definition></Definition>
+      <Indicators>
+        <Item>Stale or rotated credentials in automation/monitoring - the single most common benign cause. An NMS, backup/config-archive poller, or TACACS client still holding an old password retries on a fixed schedule and racks up failures. In NBI this is visibly the solarwind SolarWinds account from 10.11.18.21. This is not benign-by-assumption: it is a misconfiguration to be *proven* (steady cadence, known management source, no success from an unexpected origin) and then fixed, never dismissed on sight.</Item>
+        <Item>A locked-out or mistyped admin repeatedly retrying - a small, human-paced burst that rarely reaches 30/hour on its own.</Item>
+        <Item>Post-maintenance credential drift - after a password change or AAA server swap, clients configured with the old secret fail until reconfigured.</Item>
+        <Item>Health-check / reachability probes that attempt a login to verify the management plane is up.</Item>
+        <Item>solarwind / 10.11.18.21 is the dominant benign failure generator. Over the validation window this account failed logins across a broad set of devices (BR-BAG-Corporate-*, BR-BAG-IT-Building-Core-SW1, BR-BAG-Mansour-RW2, branch and ATM switches). One account failing on *many* devices from *one* management source at a steady cadence is the fingerprint of a stale SolarWinds monitoring credential - the misconfiguration pattern. It must still be confirmed (no Login Success from an unexpected source; no config change) before closing, and the credential fixed.</Item>
+        <Item>AAA login logging is sparse and device-dependent. Failed/successful login lines are emitted by a subset of devices (notably the core/distribution switches such as BR-BAG-IT-Building-Core-SW1, BR-BAG-Corporate-F1-SW1); many branch/ATM routers in the estate emit operational syslog but little or no AAA login telemetry. An empty Login failed/Login Success result for a given $device can therefore be a visibility gap, not proof the device was not attacked.</Item>
+        <Item>The message-body clock differs from @timestamp. Failure lines carry a device-local time (… at 02:12:03 BGH Tue Aug 18 2026) that can be future-dated and in a different timezone (BGH) than the ingest @timestamp the queries key on. Always reason about ordering using @timestamp, and treat the in-message time as a device-clock artifact.</Item>
+        <Item>No environment-specific allow-list is applied. Do not create a blanket exception for $device or a source off a single alert; if a stale-credential source is confirmed, fix the credential and record the source in known_infrastructure, scoped to that exact management host.</Item>
+      </Indicators>
+    </FalsePositive>
+    <Misconfiguration>
+      <Definition></Definition>
+    </Misconfiguration>
+    <NeedsEscalation>
+      <Definition></Definition>
+    </NeedsEscalation>
+  </ClassificationGuidance>
+  <ResponseActions>
+    <Phase name="Containment">
+      <Action>If a success (compromise) is confirmed: restrict the device's management plane immediately - apply/verify management ACLs limiting VTY to the bastion/PAW, and coordinate with the network team to lock the device down without dropping production traffic paths unnecessarily.</Action>
+      <Action>Block/limit the attacking source $source_ip at the management boundary and on the device's VTY access-class; if it is a shared NMS/management host, coordinate rather than blanket-block.</Action>
+      <Action>Preserve evidence first: capture the running-config, the device's local logs, and the syslog around the window before any change, so the config diff and the operator attribution survive.</Action>
+      <Action>Do not disable/modify the device configuration outside the authorised, human-approved DEPLOY path; investigation itself is read-only.</Action>
+    </Phase>
+    <Phase name="Eradication">
+      <Action>Revert unauthorised configuration identified via section 17.2/section 17.5 and the config-archive diff - remove rogue accounts, SNMP communities, static routes/PBR, ACL relaxations, and any traffic-mirroring the attacker added, under change control.</Action>
+      <Action>Rotate device credentials and AAA secrets - local passwords, enable secret, and the TACACS+/RADIUS shared keys the device uses; assume anything reachable from the compromised device is exposed.</Action>
+      <Action>Fix the stale-credential source if the burst was the SolarWinds/NMS loop - update the credential in the monitoring system so it stops failing, then record the source in known_infrastructure.</Action>
+      <Action>Hunt for the same source and credential across the estate (section 17.1) - other devices the source touched, and any that show a success.</Action>
+    </Phase>
+    <Phase name="Recovery">
+      <Action>Restore a known-good configuration to $device from the archive if the change was extensive, and validate it after reboot.</Action>
+      <Action>Re-enable and verify AAA login logging (success and failure) and forward it to the SIEM so this detection has full visibility on the device class going forward; enable TACACS+ command accounting for attribution.</Action>
+      <Action>Return the device/account to service only after section 22 closing criteria are met and monitoring confirms the failure burst does not recur and no unexpected success appears.</Action>
+      <Action>Recommend hardening (section 23): management-plane ACLs (VTY access-class to a bastion), AAA lockout/backoff, SSH-only with strong auth, and disabling unused management protocols.</Action>
+    </Phase>
+  </ResponseActions>
+  <Escalation>
+    <Trigger>Escalate to Tier 3 / Incident Response (and notify the customer + network team) when any of the following hold:
+
+- A Login Success from a failing/attacking source is present on $device (section 14.2/section 15.12) - treat the device as compromised.
+- A configuration change (VSHD_SYSLOG_CONFIG_I) follows the burst (section 17.2/section 17.5), especially one that weakens ACL/AAA or adds routes/accounts.
+- The attacking source is sweeping many devices (section 17.1), particularly data-centre core/ToR switches.
+- Logging-disable or config-clear evasion appears (section 17.4), or the burst targets a Tier-0-adjacent management path.
+- Success/impact cannot be determined because AAA success logging is absent for $device (telemetry gap) and the alert cannot be safely cleared - escalate as needs_escalation with the gap named and the config-archive/TACACS+ request raised.</Trigger>
+    <To>SOC L2 / IR</To>
+  </Escalation>
+  <ClosureCriteria>
+    <Item>true_positive: device compromise confirmed (success and/or config change); unauthorised config reverted, device and AAA credentials rotated, source contained, estate-wide hunt completed, incident documented.</Item>
+    <Item>false_positive (blocked): failure burst confirmed with no proven success from the attacking source and no config change - a blocked malicious attempt, documented as such (never "benign"); source blocked/monitored.</Item>
+    <Item>misconfiguration: failures resolve to a documented stale-credential automation/NMS source (e.g. solarwind/10.11.18.21) at steady cadence with no unexpected success - credential fixed, source recorded in known_infrastructure.</Item>
+    <Item>needs_escalation: handed to the network team + Tier 3 with the specific gaps documented (missing AAA success logging, no config diff yet, ambiguous message attribution).</Item>
+  </ClosureCriteria>
+  <Limitations>
+    <Item>Attribution lives in the message, not in fields. source.ip/source.user.name are null on Cisco login events; log.source.address is the syslog relay. Always read [Source: …]/[user: …] out of message (or match it with LIKE) to attribute the burst. KB-worthy (NBI): login-event attacker source/user are message-embedded; cisco.ios.facility/event.severity populated on login events.</Item>
+    <Item>The dominant benign cause is a stale SolarWinds credential. solarwind from 10.11.18.21 fails logins across many devices - a monitoring loop, not a human attacker. Confirm (steady cadence, no success from an unexpected origin, no config change) and fix the credential; don't just close it. KB-worthy (NBI): 10.11.18.21 = SolarWinds NMS management source generating estate-wide Cisco login failures.</Item>
+    <Item>Success is the whole ballgame. The threshold only proves *failures*. The Login Success check (section 14.2/section 15.12) is what separates a blocked attempt from a device compromise - run it every time.</Item>
+    <Item>Config changes are VSHD_SYSLOG_CONFIG_I, not %SYS-5-CONFIG_I. These NX-OS/IOS devices emit VSHD-5-VSHD_SYSLOG_CONFIG_I: Configured from vty by &lt;user&gt; on &lt;ip&gt;@&lt;tty&gt; - a fully-attributed change line. Match *CONFIG_I* (the classic SYS-5-CONFIG_I literal returns nothing here). KB-worthy (NBI): config-change facility is VSHD_SYSLOG_CONFIG_I with inline user/source/tty attribution.</Item>
+    <Item>Coverage is device-dependent and clocks drift. Not every device logs AAA; an empty result can be a gap. The in-message time (… BGH … 2026) can be future-dated and off-timezone - reason with @timestamp. KB-worthy (NBI): Cisco AAA login logging is sparse/device-dependent; message-body clock diverges from @timestamp.</Item>
+    <Item>The authoritative post-access record is off-syslog. For *what changed* and *who*, the running-config diff and TACACS+ command accounting beat syslog - request them whenever a success or config change is in play. All observations live on 2026-08-17.</Item>
+  </Limitations>
+</Playbook>

@@ -1,0 +1,277 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<Playbook xmlns="https://soc.example/playbooks" id="PB-fortigate-dns-bruteforce-subdomain-enum" name="FortiGate — DNS Brute-Force / Subdomain Enumeration - SOC Playbook" version="3.0" status="Validated" classification="TLP:AMBER">
+  <Metadata>
+    <Owner>NBI SOC / Detection Engineering</Owner>
+    <LastUpdated>2026-08-19</LastUpdated>
+    <Severity default="medium">medium</Severity>
+    <Confidence default="Medium">Medium</Confidence>
+    <Category>Reconnaissance</Category>
+    <MitreAttack>
+      <Technique id="T1590.002"/>
+      <Technique id="T1590"/>
+      <Technique id="T1071.004"/>
+      <Technique id="T1071"/>
+      <Tactic id="TA0043"/>
+    </MitreAttack>
+    <References>
+      <Reference title="MITRE ATT&amp;CK - Gather Victim Network Information: DNS (T1590.002)" url="https://attack.mitre.org/techniques/T1590/002/"/>
+      <Reference title="MITRE ATT&amp;CK - Application Layer Protocol: DNS (T1071.004)" url="https://attack.mitre.org/techniques/T1071/004/"/>
+      <Reference title="MITRE ATT&amp;CK - Reconnaissance tactic (TA0043)" url="https://attack.mitre.org/tactics/TA0043/"/>
+      <Reference title="Fortinet - DNS Filter / DNS inspection (FortiOS Administration Guide)" url="https://docs.fortinet.com/document/fortigate/7.4.0/administration-guide/697301/dns-filter"/>
+      <Reference title="SANS ISC - Detecting DNS tunnelling" url="https://www.sans.org/white-papers/detecting-dns-tunneling/"/>
+      <Reference title="OWASP - Subdomain enumeration (Amass) methodology" url="https://owasp.org/www-project-amass/"/>
+      <Reference title="Elastic - ES|QL reference (STATS / COUNT_DISTINCT / date math)" url="https://www.elastic.co/guide/en/elasticsearch/reference/current/esql.html"/>
+    </References>
+  </Metadata>
+  <AlertContext>
+    <RuleName>FortiGate — DNS Brute-Force / Subdomain Enumeration</RuleName>
+    <RuleId>raad-02-dns-bruteforce</RuleId>
+    <RuleType>esql</RuleType>
+    <Index>logs-fortinet_fortigate.log-default</Index>
+    <TriggerLogic>The deployed rule is an ES|QL analytic. Plain-English of the deployed logic: filter to external source.ip with DNS protocol and a non-null dns.question.name; per source.ip compute unique_subdomains = COUNT_DISTINCT(dns.question.name), total queries, and unique_zones (distinct trailing-20-character slices); fire when unique_subdomains &gt;= 30.
+
+One-line Kibana KQL detection filter (scopes to the same DNS flows for pivoting - note it cannot reproduce the name-count on NBI, see section 8):
+
+
+
+Critical NBI reality: the perimeter records the DNS flows (network.protocol == "dns", destination.port == 53) but does not parse the queried names - dns.question.name is unpopulated (no FortiGate DNS UTM / dnsfilter inspection is collected). Therefore the distinct-name signal the rule counts cannot be reconstructed from this index, and the investigation must recover names from the DNS servers' own query logs. The flow footprint, however, is fully visible and is where this playbook does its provable work.</TriggerLogic>
+    <KeyAlertFields>source.ip, destination.ip, destination.port, network.protocol, event.action, fortinet.firewall.subtype, dns.question.name, source.user.name, url.full, url.domain</KeyAlertFields>
+  </AlertContext>
+  <Inputs>
+    <Input name="$source_ip"/>
+  </Inputs>
+  <ExecutiveSummary>
+    <Overview>This playbook drives triage and investigation of the DNS Brute-Force / Subdomain Enumeration detection on NBI's Elastic Security deployment. The rule is an ES|QL aggregation over FortiGate/CEF DNS logs: an external (non-RFC1918/loopback/link-local/CGNAT) source.ip with network.protocol == "dns" (or a DNS-like dataset) and a populated dns.question.name, grouped by source.ip, firing when one source resolves ≥ 30 distinct query names in a short window; it also reports total queries and the count of distinct trailing zone slices. Many distinct names from one source is the footprint of subdomain brute-forcing (guessing labels under a zone to map attack surface) or of DNS tunnelling (many high-entropy labels under one parent domain used as a covert channel).
+
+The analyst's job is to decide whether this is hostile enumeration/tunnelling of NBI's namespace (true_positive), a known/authorised resolver or partner doing legitimate bulk lookups (false_positive), a misconfigured external forwarder hammering NBI DNS (misconfiguration), or unprovable from current telemetry (needs_escalation) - and to classify with evidence. The classification set is true_positive / false_positive / misconfiguration / needs_escalation.</Overview>
+    <BusinessImpact>An alert asserts: one external $source_ip resolved a large number of distinct DNS names through the FortiGate in a short window. That pattern has three very different readings - hostile subdomain enumeration of an NBI zone, DNS tunnelling (covert channel), or a legitimate resolver/forwarder doing bulk lookups - and the raw alert alone cannot separate them, precisely because the names that would disambiguate are the field NBI does not collect at the perimeter.
+
+What the flow record *does* prove: that $source_ip sent DNS-port traffic to specific NBI resolvers, in what volume, and whether those flows were accepted or refused. In the validation window 109.224.14.2 reached resolvers 38.199.252.90 and 185.27.117.106 with all flows accepted - i.e. its lookups were being answered. Enumeration only "works" when answered, so an answered flow from an unrecognised source is the shape that warrants name recovery; a refused/reset flow is a blocked attempt.</BusinessImpact>
+  </ExecutiveSummary>
+  <Investigation>
+    <Goal>Decide true_positive / false_positive / misconfiguration / needs_escalation for FortiGate — DNS Brute-Force / Subdomain Enumeration.</Goal>
+    <Workflow>
+      <Step order="1" name="Confirm the visible DNS flows for the source (reproduce what telemetry allows)">
+        <Purpose>Confirm the visible DNS flows for the source (reproduce what telemetry allows)</Purpose>
+        <Query platform="Elastic" language="ES|QL" id="Q-01">
+          <![CDATA[
+FROM logs-fortinet_fortigate.log-default,logs-cef.log-default
+| WHERE source.ip == "$source_ip"
+    AND (network.protocol == "dns" OR destination.port == 53)
+    AND @timestamp >= NOW() - 2 hours
+| STATS flows = COUNT(*), resolvers = COUNT_DISTINCT(destination.ip),
+        accepted = COUNT(CASE(event.action == "accept", 1, null)),
+        denied = COUNT(CASE(event.action IN ("deny","drop","client-rst","server-rst"), 1, null))
+    BY destination.ip
+| SORT flows DESC
+| LIMIT 20
+]]>
+        </Query>
+      </Step>
+      <Step order="2" name="Attempt to recover the queried names (honest live demonstration of the gap)">
+        <Purpose>Attempt to recover the queried names (honest live demonstration of the gap)</Purpose>
+        <Query platform="Elastic" language="ES|QL" id="Q-02">
+          <![CDATA[
+FROM logs-fortinet_fortigate.log-default,logs-cef.log-default
+| WHERE source.ip == "$source_ip"
+    AND dns.question.name IS NOT NULL
+    AND @timestamp >= NOW() - 2 hours
+| STATS queries = COUNT(*), unique_names = COUNT_DISTINCT(dns.question.name),
+        names = VALUES(dns.question.name)
+    BY network.protocol
+| SORT queries DESC
+| LIMIT 20
+]]>
+        </Query>
+      </Step>
+      <Step order="3" name="Entity pivoting">
+        <Purpose>Entity pivoting</Purpose>
+        <Query platform="Elastic" language="ES|QL" id="Q-03">
+          <![CDATA[
+FROM logs-fortinet_fortigate.log-default,logs-cef.log-default
+| WHERE source.ip == "$source_ip"
+    AND (network.protocol == "dns" OR destination.port == 53)
+    AND @timestamp >= NOW() - 2 hours
+| STATS flows = COUNT(*), resolvers = COUNT_DISTINCT(destination.ip),
+        accepted = COUNT(CASE(event.action == "accept", 1, null)),
+        denied = COUNT(CASE(event.action IN ("deny","drop","client-rst","server-rst"), 1, null))
+    BY destination.ip
+| SORT flows DESC
+| LIMIT 20
+]]>
+        </Query>
+      </Step>
+      <Step order="4" name="Host investigation">
+        <Purpose>Host investigation</Purpose>
+        <Query platform="Elastic" language="ES|QL" id="Q-04">
+          <![CDATA[
+FROM logs-fortinet_fortigate.log-default,logs-cef.log-default
+| WHERE source.ip == "$source_ip" AND @timestamp >= NOW() - 4 hours
+| STATS flows = COUNT(*), dst_ports = COUNT_DISTINCT(destination.port),
+        dst_hosts = COUNT_DISTINCT(destination.ip)
+    BY fortinet.firewall.subtype
+| SORT flows DESC
+| LIMIT 15
+]]>
+        </Query>
+      </Step>
+      <Step order="5" name="IP investigation">
+        <Purpose>IP investigation</Purpose>
+        <Query platform="Elastic" language="ES|QL" id="Q-05">
+          <![CDATA[
+FROM logs-fortinet_fortigate.log-default,logs-cef.log-default
+| WHERE source.ip == "$source_ip" AND (network.protocol == "dns" OR destination.port == 53)
+    AND @timestamp >= NOW() - 2 hours
+| STATS flows = COUNT(*), accepts = COUNT(*) WHERE event.action == "accept",
+        last_seen = MAX(@timestamp)
+    BY destination.ip
+| SORT flows DESC
+| LIMIT 15
+]]>
+        </Query>
+      </Step>
+      <Step order="6" name="IP investigation">
+        <Purpose>IP investigation</Purpose>
+        <Query platform="Elastic" language="ES|QL" id="Q-06">
+          <![CDATA[
+FROM logs-fortinet_fortigate.log-default,logs-cef.log-default
+| WHERE destination.ip == "38.199.252.90" AND (network.protocol == "dns" OR destination.port == 53)
+    AND @timestamp >= NOW() - 2 hours
+| STATS flows = COUNT(*), accepts = COUNT(*) WHERE event.action == "accept"
+    BY source.ip
+| SORT flows DESC
+| LIMIT 20
+]]>
+        </Query>
+      </Step>
+      <Step order="7" name="Timeline Reconstruction">
+        <Purpose>Timeline Reconstruction</Purpose>
+        <Query platform="Elastic" language="ES|QL" id="Q-07">
+          <![CDATA[
+FROM logs-fortinet_fortigate.log-default,logs-cef.log-default
+| WHERE source.ip == "$source_ip" AND (network.protocol == "dns" OR destination.port == 53)
+    AND @timestamp >= NOW() - 4 hours
+| STATS flows = COUNT(*), resolvers = COUNT_DISTINCT(destination.ip)
+    BY bucket = DATE_TRUNC(15 minutes, @timestamp)
+| SORT bucket ASC
+| LIMIT 40
+]]>
+        </Query>
+      </Step>
+      <Step order="8" name="Lateral movement validation">
+        <Purpose>Lateral movement validation</Purpose>
+        <Query platform="Elastic" language="ES|QL" id="Q-08">
+          <![CDATA[
+FROM logs-fortinet_fortigate.log-default,logs-cef.log-default
+| WHERE source.ip == "$source_ip" AND @timestamp >= NOW() - 4 hours
+    AND destination.port != 53
+| STATS flows = COUNT(*), dst_ports = COUNT_DISTINCT(destination.port),
+        dst_hosts = COUNT_DISTINCT(destination.ip),
+        accepts = COUNT(*) WHERE event.action == "accept"
+    BY fortinet.firewall.subtype
+| SORT flows DESC
+| LIMIT 15
+]]>
+        </Query>
+      </Step>
+      <Step order="9" name="Defense evasion validation">
+        <Purpose>Defense evasion validation</Purpose>
+        <Query platform="Elastic" language="ES|QL" id="Q-09">
+          <![CDATA[
+FROM logs-fortinet_fortigate.log-default,logs-cef.log-default
+| WHERE source.ip == "$source_ip" AND (network.protocol == "dns" OR destination.port == 53)
+    AND @timestamp >= NOW() - 4 hours
+| STATS flows = COUNT(*), first_seen = MIN(@timestamp), last_seen = MAX(@timestamp)
+    BY destination.ip
+| SORT flows DESC
+| LIMIT 15
+]]>
+        </Query>
+      </Step>
+      <Step order="10" name="Impact assessment">
+        <Purpose>Impact assessment</Purpose>
+        <Query platform="Elastic" language="ES|QL" id="Q-10">
+          <![CDATA[
+FROM logs-fortinet_fortigate.log-default,logs-cef.log-default
+| WHERE source.ip == "$source_ip" AND (network.protocol == "dns" OR destination.port == 53)
+    AND event.action == "accept" AND @timestamp >= NOW() - 4 hours
+| STATS answered_flows = COUNT(*), resolvers = COUNT_DISTINCT(destination.ip), last_seen = MAX(@timestamp)
+| LIMIT 5
+]]>
+        </Query>
+      </Step>
+      <Step order="11" name="Finalize verdict">
+        <DecisionTree>
+        </DecisionTree>
+      </Step>
+    </Workflow>
+  </Investigation>
+  <ClassificationGuidance>
+    <TruePositive>
+      <Definition></Definition>
+    </TruePositive>
+    <FalsePositive>
+      <Definition></Definition>
+      <Indicators>
+        <Item>Authorised upstream resolvers / forwarders / partners. A legitimate recursive resolver or a partner integration can issue large volumes of distinct lookups against NBI DNS. Role must be confirmed - a known resolver is investigated exactly like any other source, never auto-cleared.</Item>
+        <Item>Security/monitoring scanners performing authorised external DNS assessment. Authorised, but never whitelisted on sight.</Item>
+        <Item>Answered-negative / refused enumeration. If the guessed names all returned NXDOMAIN or were refused with no sensitive record resolved, a hostile attempt was positively ineffective - recorded as false_positive (blocked/negative), never "benign".</Item>
+        <Item>CDN/anycast churn. Some legitimate services generate many distinct names; distinguish by whether the names map to an NBI zone (recon) or a spread of unrelated public domains (ordinary resolver traffic) - which, on NBI, requires the server-side names.</Item>
+        <Item>The name-count signal is not reproducible at the perimeter. dns.question.name is mapped on logs-fortinet_fortigate.log-* but 0 of ~11 million DNS-bearing events in the validation window populate it; on logs-cef.log-* the field does not exist at all. So an empty name result is the *expected* NBI state and is a telemetry gap, not a clearance.</Item>
+        <Item>Legitimate high-volume DNS sources exist in the ISP-facing space. In the validation window the top external DNS sources were 109.224.14.2 (~500 flows) and 109.224.14.3 (~200 flows), talking to a small set of internal resolvers - a resolver/forwarder-like footprint. Confirm the role before treating volume as hostile.</Item>
+        <Item>Known-scanner noise appears too. Internet background DNS probing (e.g. research scanners) shows up as low-volume, many-resolver flows; these are still investigated, never auto-trusted.</Item>
+        <Item>network.protocol == "dns" is a first-class value here (~950k events/2h estate-wide), and destination.port == 53 is the reliable flow selector - so the *flow* investigation (INV/section 15.1, section 15.5, section 15.6) is fully live even though the *names* are not.</Item>
+      </Indicators>
+    </FalsePositive>
+    <Misconfiguration>
+      <Definition></Definition>
+    </Misconfiguration>
+    <NeedsEscalation>
+      <Definition></Definition>
+    </NeedsEscalation>
+  </ClassificationGuidance>
+  <ResponseActions>
+    <Phase name="Containment">
+      <Action>Block $source_ip at the perimeter and add it to the threat-intel deny list if hostile enumeration/tunnelling is confirmed (or strongly indicated pending names, per escalation judgement).</Action>
+      <Action>For tunnelling: identify and isolate the internal endpoint behind the parent domain and treat it as possible active C2/exfiltration; capture host evidence before remediation.</Action>
+      <Action>Preserve evidence - the flow records (section 14/section 15), and request/preserve the DNS servers' query logs for the source and window.</Action>
+      <Action>Deploy/confirm changes only via the authorised human-approved DEPLOY path; investigation itself is read-only.</Action>
+    </Phase>
+    <Phase name="Eradication">
+      <Action>Remove the tunnelling foothold on any identified internal endpoint; block the attacker's parent domain(s) at the resolver and perimeter.</Action>
+      <Action>Review what the enumeration exposed: which NBI zones/hosts were discoverable; reduce external namespace exposure (split-horizon DNS, remove stale/internal records from external zones).</Action>
+      <Action>Rate-limit and reputation-filter external DNS to NBI resolvers; restrict which sources may query internal zones.</Action>
+      <Action>Hunt for the same source across analytics (port scan, IPS) and for other sources exhibiting the tunnelling cadence.</Action>
+    </Phase>
+    <Phase name="Recovery">
+      <Action>Restore normal DNS service and confirm no residual tunnelling cadence from the endpoint or the source.</Action>
+      <Action>Close the telemetry gap - this is the highest-value hardening ask from this rule: enable FortiGate DNS UTM or forward the DNS servers' query logs into Elastic so dns.question.name, NXDOMAIN ratio, and label entropy become provable in future investigations.</Action>
+      <Action>Return to service only after section 22 closing criteria are met and the queried-name evidence has been reviewed (or the source is blocked pending it).</Action>
+    </Phase>
+  </ResponseActions>
+  <Escalation>
+    <Trigger>Escalate to SOC L2 / IR and the DNS/infrastructure team when any of the following hold:
+
+- Recovered names (server-side) show enumeration of an NBI zone or tunnelling entropy from an unauthorised source.
+- The names cannot be obtained while the source keeps querying NBI DNS (needs_escalation) - request server-side logs / DNS UTM.
+- $source_ip also probes other services/hosts (section 17.1), linking DNS recon to a broader campaign.
+- A tunnelling internal endpoint is suspected (sustained single-zone cadence) - page for host isolation.
+
+Escalate with section 14.1/section 15.1/section 15.5/section 17.1 outputs, the resolvers reached, and a request for the server-side DNS query logs and the source's resolver/partner status.</Trigger>
+    <To>SOC L2 / IR</To>
+  </Escalation>
+  <ClosureCriteria>
+    <Item>false_positive (authorised): $source_ip confirmed as a documented upstream resolver/forwarder/partner (role recorded), steady DNS-only pattern; no sensitive records exposed.</Item>
+    <Item>false_positive (blocked/negative): the enumeration was proven answered-NXDOMAIN / refused with no successful resolution of sensitive records; documented as a blocked attempt, never "benign"; source blocked/monitored.</Item>
+    <Item>misconfiguration: a benign but misconfigured external forwarder was hammering NBI DNS; owner engaged to fix, source baselined.</Item>
+    <Item>true_positive: hostile subdomain enumeration or DNS tunnelling confirmed (from server-side names); source blocked, exposed zones/hosts reviewed, any tunnelling endpoint isolated, DNS logging improved, incident documented.</Item>
+    <Item>needs_escalation: handed to SOC L2 / DNS team with the specific gap (names not yet recoverable / role unknown) documented.</Item>
+  </ClosureCriteria>
+  <Limitations>
+    <Item>The empty name result is expected, not exculpatory. dns.question.name is 0% populated on NBI's FortiGate index; section 14.2 running clean-but-empty is the honest demonstration. Never close on it - recover names from the DNS servers.</Item>
+    <Item>The flow investigation is fully live. Volume, resolvers reached, answered-vs-refused, and cross-service breadth (section 14.1/section 15.1/section 15.5/section 15.6/section 17.1) are all provable on NBI and carry most of the triage weight until names arrive.</Item>
+    <Item>Answered != benign; refused != nothing happened. Enumeration only works when answered - an answered flow from an unknown source is the priority; a refused flow is a blocked attempt to document, not to ignore.</Item>
+    <Item>The rule's blind spots are structural. It excludes RFC1918 sources (misses internal→external tunnelling egress) and is defeated by pacing under 30 names or spreading across IPs - so complement it with server-side name-entropy/NXDOMAIN analytics and correlate with the port-scan/IPS analytics.</Item>
+    <Item>KB-worthy (persist to NBI customer scope): (1) dns.question.name 0% populated on logs-fortinet_fortigate.log-*, absent on logs-cef.log-* - perimeter DNS name signal is telemetry-blocked; (2) network.protocol == "dns" is a live first-class value and destination.port == 53 is the reliable flow selector; (3) example external DNS sources 109.224.14.2 / 109.224.14.3 reaching resolvers 38.199.252.90 / 185.27.117.106; (4) hardening ask = enable DNS UTM / forward DNS-server query logs. All observed live on 2026-08-17.</Item>
+  </Limitations>
+</Playbook>

@@ -1,0 +1,432 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<Playbook xmlns="https://soc.example/playbooks" id="PB-windows-recon-tools-spawned-by-powershell" name="Cmdline Tool Not Executed In CMD Shell - SOC Playbook" version="3.0" status="Validated" classification="TLP:AMBER">
+  <Metadata>
+    <Owner>NBI SOC / Detection Engineering</Owner>
+    <LastUpdated>2026-08-19</LastUpdated>
+    <Severity default="high">high</Severity>
+    <Confidence default="Medium">Medium</Confidence>
+    <Category>Discovery</Category>
+    <MitreAttack>
+      <Technique id="T1059"/>
+      <Technique id="T1059.001"/>
+      <Technique id="T1082"/>
+      <Technique id="T1033"/>
+      <Technique id="T1057"/>
+      <Tactic id="TA0007"/>
+      <Tactic id="TA0002"/>
+    </MitreAttack>
+    <References>
+      <Reference title="MITRE ATT&amp;CK - Command and Scripting Interpreter: PowerShell (T1059.001)" url="https://attack.mitre.org/techniques/T1059/001/"/>
+      <Reference title="MITRE ATT&amp;CK - System Information Discovery (T1082)" url="https://attack.mitre.org/techniques/T1082/"/>
+      <Reference title="MITRE ATT&amp;CK - System Owner/User Discovery (T1033)" url="https://attack.mitre.org/techniques/T1033/"/>
+      <Reference title="MITRE ATT&amp;CK - Process Discovery (T1057)" url="https://attack.mitre.org/techniques/T1057/"/>
+      <Reference title="MITRE ATT&amp;CK - Discovery tactic (TA0007)" url="https://attack.mitre.org/tactics/TA0007/"/>
+      <Reference title='Elastic - Prebuilt rule "Cmdline Tool Not Executed In CMD Shell"' url="https://www.elastic.co/docs/reference/security/prebuilt-rules/rules/windows/defense_evasion_cmdline_tool_not_executed_in_cmd_shell"/>
+      <Reference title="Microsoft Learn - PowerShell script-block logging" url="https://learn.microsoft.com/en-us/powershell/scripting/security/security-features#script-block-logging"/>
+      <Reference title="Microsoft Learn - Command line process auditing (Event 4688 command-line GPO)" url="https://learn.microsoft.com/en-us/windows-server/identity/ad-ds/manage/component-updates/command-line-process-auditing"/>
+    </References>
+  </Metadata>
+  <AlertContext>
+    <RuleName>Cmdline Tool Not Executed In CMD Shell</RuleName>
+    <RuleId>4171aa2f-c46f-49cf-b279-f615cf354559</RuleId>
+    <RuleType>query</RuleType>
+    <Index>logs-system.security*</Index>
+    <TriggerLogic>The deployed rule is an Elastic query (KQL) rule. Reconstructed from the deployed trigger logic, the detection is:
+
+
+
+Plain English: a process creation where the parent image is powershell.exe and the child is one of the four discovery utilities. The behaviour - a native recon tool spawned by PowerShell - is characteristic of scripted or hands-on-keyboard reconnaissance and of C2 agents that run discovery through a PowerShell host.
+
+Live-fidelity note (important): the deployed rule matches process.name without the .exe suffix. On NBI's 4688 stream, process.name carries the .exe suffix (whoami.exe, ipconfig.exe, …), so the rule can under-match on this telemetry. Every investigation query below therefore keys on the .exe forms so it works against live data:</TriggerLogic>
+    <KeyAlertFields>process.name, process.executable, process.parent.name, process.parent.executable, powershell.exe, process.pid, process.parent.pid, process.entity_id, user.name, user.domain, process.command_line, process.args</KeyAlertFields>
+  </AlertContext>
+  <Inputs>
+    <Input name="$host"/>
+    <Input name="$user"/>
+    <Input name="$source_ip"/>
+  </Inputs>
+  <ExecutiveSummary>
+    <Overview>This playbook drives triage and investigation of the Cmdline Tool Not Executed In CMD Shell detection on NBI's Elastic Security deployment. The rule fires when a built-in discovery utility (whoami, ipconfig, tasklist, or systeminfo) is created with process.parent.name = powershell.exe - i.e. the recon tool is launched directly by a PowerShell process rather than by an interactive cmd.exe shell. Each utility is benign in isolation and used constantly by administrators; what the rule flags is the parentage - a recon utility fired from *inside* a PowerShell session, which is the footprint of a script, a remote-management job, or an operator/agent (including many C2 frameworks that shell out via PowerShell) enumerating the host.
+
+The analyst's job is to decide whether this is legitimate automation/administration (false_positive), the discovery phase of an intrusion run through PowerShell (true_positive), a benign but unbaselined management job (misconfiguration), or an event whose parent chain and intent cannot be resolved (needs_escalation). The discriminators are which account ran it, whether it is a single tool or a burst of enumeration commands, and what the PowerShell parent itself is (a login script versus an unknown/encoded session).</Overview>
+    <BusinessImpact>An alert means: on $host, $user ran one of whoami/ipconfig/tasklist/systeminfo and its parent process was powershell.exe. It does not, by itself, mean an intrusion - administrators legitimately drive these tools from scripts. The consequential questions:
+
+1. Is it one tool or a burst? A single ipconfig from a known admin script is weak signal; whoami + systeminfo + tasklist (+ net/nltest) fired within seconds is the classic *situational-awareness* set an operator or agent runs on a fresh foothold.
+2. What is the PowerShell parent doing? A parent that only ever spawns one or two expected utilities is a login/monitoring script; a parent that also fans out into download/execution tooling (certutil, curl, bitsadmin, rundll32) or is an encoded/unknown session is hands-on or agent-driven recon.
+3. Who is the account, and how broadly does it act? An admin/service account doing this on its own management host via known scripts is expected; an account touching many hosts with the same discovery set, especially from an unusual PowerShell parent, is credential-driven reconnaissance.
+
+Because process.command_line is ~50% populated on NBI (section 8), the exact arguments may be null - but proce</BusinessImpact>
+  </ExecutiveSummary>
+  <Investigation>
+    <Goal>Decide true_positive / false_positive / misconfiguration / needs_escalation for Cmdline Tool Not Executed In CMD Shell.</Goal>
+    <Workflow>
+      <Step order="1" name="Reproduce the rule estate-wide (confirm the detection logic)">
+        <Purpose>Reproduce the rule estate-wide (confirm the detection logic)</Purpose>
+        <Query platform="Elastic" language="ES|QL" id="Q-01">
+          <![CDATA[
+FROM logs-system.security*
+| WHERE @timestamp >= NOW() - 4 hours
+    AND event.code == "4688"
+    AND TO_LOWER(process.parent.name) == "powershell.exe"
+    AND process.name IN ("whoami.exe", "ipconfig.exe", "tasklist.exe", "systeminfo.exe")
+| KEEP @timestamp, host.name, user.name, process.name, process.command_line
+| SORT @timestamp DESC
+| LIMIT 100
+]]>
+        </Query>
+      </Step>
+      <Step order="2" name="Confirm on the alert host (tool set, command line, owner) - reused from the deployed playbook">
+        <Purpose>Confirm on the alert host (tool set, command line, owner) - reused from the deployed playbook</Purpose>
+        <Query platform="Elastic" language="ES|QL" id="Q-02">
+          <![CDATA[
+FROM logs-system.security*
+| WHERE event.code == "4688" AND host.name == "$host"
+    AND process.parent.name == "powershell.exe"
+    AND process.name IN ("whoami.exe","ipconfig.exe","tasklist.exe","systeminfo.exe")
+    AND @timestamp >= NOW() - 4 hours
+| STATS execs = COUNT(*), cmds = VALUES(process.command_line), last_seen = MAX(@timestamp)
+    BY process.name, user.name
+| SORT execs DESC
+| LIMIT 20
+]]>
+        </Query>
+      </Step>
+      <Step order="3" name="Entity pivoting">
+        <Purpose>Entity pivoting</Purpose>
+        <Query platform="Elastic" language="ES|QL" id="Q-03">
+          <![CDATA[
+FROM logs-system.security*
+| WHERE @timestamp >= NOW() - 4 hours
+    AND event.code == "4688"
+    AND host.name == "$host"
+    AND user.name == "$user"
+    AND TO_LOWER(process.parent.name) == "powershell.exe"
+    AND process.name IN ("whoami.exe", "ipconfig.exe", "tasklist.exe", "systeminfo.exe")
+| KEEP @timestamp, host.name, user.name, user.domain, process.name, process.command_line, process.parent.name, process.pid, process.parent.pid
+| SORT @timestamp DESC
+| LIMIT 50
+]]>
+        </Query>
+      </Step>
+      <Step order="4" name="Process investigation">
+        <Purpose>Process investigation</Purpose>
+        <Query platform="Elastic" language="ES|QL" id="Q-04">
+          <![CDATA[
+FROM logs-system.security*
+| WHERE event.code == "4688" AND host.name == "$host"
+    AND process.parent.name == "powershell.exe"
+    AND @timestamp >= NOW() - 4 hours
+| STATS execs = COUNT(*), users = VALUES(user.name) BY process.name
+| SORT execs DESC
+| LIMIT 25
+]]>
+        </Query>
+      </Step>
+      <Step order="5" name="Process investigation">
+        <Purpose>Process investigation</Purpose>
+        <Query platform="Elastic" language="ES|QL" id="Q-05">
+          <![CDATA[
+FROM logs-system.security*
+| WHERE @timestamp >= NOW() - 4 hours
+    AND event.code == "4688"
+    AND host.name == "$host"
+    AND process.name IN ("whoami.exe", "ipconfig.exe", "tasklist.exe", "systeminfo.exe")
+    AND process.args IS NOT NULL
+| EVAL arguments = MV_CONCAT(process.args, " ")
+| KEEP @timestamp, user.name, process.name, process.parent.name, arguments
+| SORT @timestamp DESC
+| LIMIT 50
+]]>
+        </Query>
+      </Step>
+      <Step order="6" name="Parent-Child process analysis">
+        <Purpose>Parent-Child process analysis</Purpose>
+        <Query platform="Elastic" language="ES|QL" id="Q-06">
+          <![CDATA[
+FROM logs-system.security*
+| WHERE @timestamp >= NOW() - 4 hours
+    AND event.code == "4688"
+    AND host.name == "$host"
+    AND process.name IN ("whoami.exe", "ipconfig.exe", "tasklist.exe", "systeminfo.exe", "net.exe", "net1.exe", "nltest.exe", "arp.exe", "route.exe", "netstat.exe", "nslookup.exe")
+| STATS execs = COUNT(*) BY process.parent.name, process.name, user.name
+| SORT execs DESC
+| LIMIT 30
+]]>
+        </Query>
+      </Step>
+      <Step order="7" name="Parent-Child process analysis">
+        <Purpose>Parent-Child process analysis</Purpose>
+        <Query platform="Elastic" language="ES|QL" id="Q-07">
+          <![CDATA[
+FROM logs-system.security*
+| WHERE @timestamp >= NOW() - 4 hours
+    AND event.code == "4688"
+    AND host.name == "$host"
+    AND TO_LOWER(process.name) == "powershell.exe"
+| STATS execs = COUNT(*), users = COUNT_DISTINCT(user.name) BY process.parent.name, process.parent.executable
+| SORT execs DESC
+| LIMIT 25
+]]>
+        </Query>
+      </Step>
+      <Step order="8" name="User investigation">
+        <Purpose>User investigation</Purpose>
+        <Query platform="Elastic" language="ES|QL" id="Q-08">
+          <![CDATA[
+FROM logs-system.security*
+| WHERE event.code == "4688" AND user.name == "$user"
+    AND process.name IN ("whoami.exe","ipconfig.exe","tasklist.exe","systeminfo.exe","nltest.exe","net.exe","net1.exe","arp.exe","route.exe","netstat.exe","nslookup.exe")
+    AND @timestamp >= NOW() - 4 hours
+| STATS execs = COUNT(*), hosts = COUNT_DISTINCT(host.name), parents = VALUES(process.parent.name)
+    BY process.name
+| SORT execs DESC
+| LIMIT 20
+]]>
+        </Query>
+      </Step>
+      <Step order="9" name="Host investigation">
+        <Purpose>Host investigation</Purpose>
+        <Query platform="Elastic" language="ES|QL" id="Q-09">
+          <![CDATA[
+FROM logs-system.security*
+| WHERE @timestamp >= NOW() - 4 hours
+    AND event.code == "4688"
+    AND host.name == "$host"
+| STATS executions = COUNT(*), users = COUNT_DISTINCT(user.name) BY process.name, process.parent.name
+| SORT executions ASC
+| LIMIT 40
+]]>
+        </Query>
+      </Step>
+      <Step order="10" name="IP investigation">
+        <Purpose>IP investigation</Purpose>
+        <Query platform="Elastic" language="ES|QL" id="Q-10">
+          <![CDATA[
+FROM logs-system.security*
+| WHERE @timestamp >= NOW() - 4 hours
+    AND event.code == "4624"
+    AND host.name == "$host" AND user.name == "$user"
+    AND source.ip IS NOT NULL
+| STATS logons = COUNT(*) BY source.ip, winlog.event_data.LogonType
+| SORT logons DESC
+| LIMIT 20
+]]>
+        </Query>
+      </Step>
+      <Step order="11" name="IP investigation">
+        <Purpose>IP investigation</Purpose>
+        <Query platform="Elastic" language="ES|QL" id="Q-11">
+          <![CDATA[
+FROM logs-system.security*
+| WHERE @timestamp >= NOW() - 4 hours
+    AND event.code == "4624"
+    AND source.ip == "$source_ip"
+| STATS logons = COUNT(*) BY user.name, host.name, winlog.event_data.LogonType
+| SORT logons DESC
+| LIMIT 25
+]]>
+        </Query>
+      </Step>
+      <Step order="12" name="File investigation">
+        <Purpose>File investigation</Purpose>
+        <Query platform="Elastic" language="ES|QL" id="Q-12">
+          <![CDATA[
+FROM logs-system.security*
+| WHERE @timestamp >= NOW() - 4 hours
+    AND event.code == "4688"
+    AND host.name == "$host"
+    AND TO_LOWER(process.parent.name) == "powershell.exe"
+| STATS execs = COUNT(*), first_seen = MIN(@timestamp), last_seen = MAX(@timestamp) BY process.name, process.executable
+| SORT execs DESC
+| LIMIT 30
+]]>
+        </Query>
+      </Step>
+      <Step order="13" name="Authentication investigation">
+        <Purpose>Authentication investigation</Purpose>
+        <Query platform="Elastic" language="ES|QL" id="Q-13">
+          <![CDATA[
+FROM logs-system.security*
+| WHERE @timestamp >= NOW() - 4 hours
+    AND event.code IN ("4624", "4625", "4634", "4647")
+    AND host.name == "$host" AND user.name == "$user"
+| STATS events = COUNT(*), first_seen = MIN(@timestamp), last_seen = MAX(@timestamp) BY event.code, winlog.event_data.LogonType, source.ip
+| SORT events DESC
+| LIMIT 30
+]]>
+        </Query>
+      </Step>
+      <Step order="14" name="Timeline Reconstruction">
+        <Purpose>Timeline Reconstruction</Purpose>
+        <Query platform="Elastic" language="ES|QL" id="Q-14">
+          <![CDATA[
+FROM logs-system.security*
+| WHERE @timestamp >= NOW() - 4 hours
+    AND event.code == "4688"
+    AND host.name == "$host"
+    AND user.name == "$user"
+| KEEP @timestamp, process.parent.name, process.parent.pid, process.name, process.pid, process.command_line
+| SORT @timestamp ASC
+| LIMIT 200
+]]>
+        </Query>
+      </Step>
+      <Step order="15" name="Lateral movement validation">
+        <Purpose>Lateral movement validation</Purpose>
+        <Query platform="Elastic" language="ES|QL" id="Q-15">
+          <![CDATA[
+FROM logs-system.security*
+| WHERE @timestamp >= NOW() - 4 hours
+    AND event.code IN ("4624", "4648", "4768", "4769", "5140")
+    AND user.name == "$user"
+    AND host.name != "$host"
+| STATS events = COUNT(*) BY host.name, event.code, winlog.event_data.LogonType
+| SORT events DESC
+| LIMIT 30
+]]>
+        </Query>
+      </Step>
+      <Step order="16" name="Persistence validation">
+        <Purpose>Persistence validation</Purpose>
+        <Query platform="Elastic" language="ES|QL" id="Q-16">
+          <![CDATA[
+FROM logs-system.security*
+| WHERE @timestamp >= NOW() - 4 hours
+    AND host.name == "$host"
+    AND (
+        (event.code == "4688" AND TO_LOWER(process.name) IN ("schtasks.exe", "reg.exe", "sc.exe", "at.exe", "wscript.exe", "cscript.exe", "rundll32.exe", "mshta.exe", "certutil.exe", "bitsadmin.exe"))
+        OR event.code == "7045"
+        OR event.code == "4720"
+        OR event.code == "4698"
+    )
+| STATS events = COUNT(*) BY event.code, process.name, user.name
+| SORT events DESC
+| LIMIT 40
+]]>
+        </Query>
+      </Step>
+      <Step order="17" name="Privilege escalation validation">
+        <Purpose>Privilege escalation validation</Purpose>
+        <Query platform="Elastic" language="ES|QL" id="Q-17">
+          <![CDATA[
+FROM logs-system.security*
+| WHERE @timestamp >= NOW() - 4 hours
+    AND event.code == "4672"
+    AND host.name == "$host"
+| STATS special_priv_logons = COUNT(*) BY user.name
+| SORT special_priv_logons DESC
+| LIMIT 25
+]]>
+        </Query>
+      </Step>
+      <Step order="18" name="Defense evasion validation">
+        <Purpose>Defense evasion validation</Purpose>
+        <Query platform="Elastic" language="ES|QL" id="Q-18">
+          <![CDATA[
+FROM logs-system.security*
+| WHERE @timestamp >= NOW() - 4 hours
+    AND host.name == "$host"
+    AND (
+        (event.code == "4688" AND TO_LOWER(process.name) IN ("wevtutil.exe", "fsutil.exe", "vssadmin.exe", "wmic.exe", "cipher.exe", "sdelete.exe", "sdelete64.exe"))
+        OR event.code == "1102"
+        OR event.code == "4719"
+    )
+| STATS events = COUNT(*) BY event.code, process.name, user.name
+| SORT events DESC
+| LIMIT 30
+]]>
+        </Query>
+      </Step>
+      <Step order="19" name="Impact assessment">
+        <Purpose>Impact assessment</Purpose>
+        <Query platform="Elastic" language="ES|QL" id="Q-19">
+          <![CDATA[
+FROM logs-system.security*
+| WHERE @timestamp >= NOW() - 4 hours
+    AND host.name == "$host"
+    AND event.code == "4688"
+    AND TO_LOWER(process.parent.name) == "powershell.exe"
+    AND NOT process.name IN ("whoami.exe", "ipconfig.exe", "tasklist.exe", "systeminfo.exe", "conhost.exe", "tzutil.exe")
+| STATS execs = COUNT(*), distinct_children = COUNT_DISTINCT(process.name) BY process.name, process.executable, user.name
+| SORT execs DESC
+| LIMIT 30
+]]>
+        </Query>
+      </Step>
+      <Step order="20" name="Finalize verdict">
+        <DecisionTree>
+        </DecisionTree>
+      </Step>
+    </Workflow>
+  </Investigation>
+  <ClassificationGuidance>
+    <TruePositive>
+      <Definition></Definition>
+    </TruePositive>
+    <FalsePositive>
+      <Definition></Definition>
+      <Indicators>
+        <Item>Login / monitoring / inventory scripts that call ipconfig, whoami, or systeminfo from PowerShell as part of a documented, recurring task.</Item>
+        <Item>Software-deployment and management agents (SCCM/Intune, monitoring tools) that gather host facts via PowerShell, often identically across many similarly-imaged hosts.</Item>
+        <Item>Administrator one-offs - a known admin running a quick whoami/ipconfig from a PowerShell prompt during legitimate troubleshooting.</Item>
+        <Item>Health-check / build automation on service-tier hosts where PowerShell scripting is routine.</Item>
+        <Item>PowerShell-parented child processes concentrate on service-tier hosts. On nim-st-apv10/-apv11, powershell.exe (running under the machine account) spawns high volumes of benign helpers such as tzutil.exe and conhost.exe - routine scripted maintenance, not recon. The four *discovery* utilities in scope did not appear under a PowerShell parent in the validated 4-hour window, so a real hit is a notable, per-host-baselined event.</Item>
+        <Item>Admin accounts on server hosts are the realistic locus. On hosts like nim-kc-apv07, named admin accounts (e.g. *.admin) run PowerShell-parented activity via remote management. A discovery burst by such an account - especially fanning out across hosts - is the intrusion shape; a single tool from a known job is expected.</Item>
+        <Item>Command-line capture is bimodal (section 8). On hosts without the command-line GPO the arguments (whoami /all, ipconfig /all) are null; rely on the parent-child shape and the burst pattern, not the arguments.</Item>
+        <Item>No standing allow-list. There is no recorded NBI benign-true-positive baseline. Do not create a blanket host/user exception off one alert; scope any exception to the exact parent script + account + tool set after it is documented.</Item>
+      </Indicators>
+    </FalsePositive>
+    <Misconfiguration>
+      <Definition></Definition>
+    </Misconfiguration>
+    <NeedsEscalation>
+      <Definition></Definition>
+    </NeedsEscalation>
+  </ClassificationGuidance>
+  <ResponseActions>
+    <Phase name="Containment">
+      <Action>Isolate $host (network-contain / quarantine) if a true_positive is confirmed, to stop the operator/agent progressing from discovery to action. On a shared server, coordinate with IT but prioritise containment.</Action>
+      <Action>Terminate the PowerShell session and its child tree (the parent from section 15.2/section 15.3, its descendants from section 17.5) if the host cannot yet be isolated.</Action>
+      <Action>Suspend or force-logoff $user's session on $host and disable the account pending investigation if the user context is implicated; reset its credentials (section 20).</Action>
+      <Action>Preserve volatile evidence first - running process list, and the PowerShell console history / script-block logs (logs-windows.powershell*) for the parent session - since NBI's 4688 will not retain the session content.</Action>
+      <Action>Deploy/confirm changes only via the authorised human-approved DEPLOY path; investigation itself is read-only.</Action>
+    </Phase>
+    <Phase name="Eradication">
+      <Action>Remove any persistence discovered in section 17.2 (services, scheduled tasks, Run keys, rogue accounts) and any dropped tooling identified via section 15.10/section 17.5 (process.executable path).</Action>
+      <Action>Remove the delivery mechanism - the script, task, or agent that spawned the PowerShell session - and any staged payload downloaded after recon.</Action>
+      <Action>Run a full anti-malware / EDR scan on $host and hunt for the same discovery set and parent across peers, especially every host $user touched (section 15.4, section 17.1).</Action>
+      <Action>Remediate the initial-access vector that gave the attacker the PowerShell foothold.</Action>
+    </Phase>
+    <Phase name="Recovery">
+      <Action>Reset $user's password and any credentials accessible from $host during the session; if privileged accounts logged on there (section 17.3), rotate those too and review for Kerberos/NTLM secret exposure.</Action>
+      <Action>Restore $host from a known-good image if a payload executed or persistence was installed; otherwise validate eradication holds after reboot.</Action>
+      <Action>Return the host/account to service only after section 22 closing criteria are met and monitoring confirms the recon-under-PowerShell pattern does not recur.</Action>
+      <Action>Recommend hardening (section 23): enable PowerShell script-block + module logging and command-line auditing on the host class; baseline sanctioned scripts so genuine recon stands out; consider Constrained Language Mode where feasible.</Action>
+    </Phase>
+  </ResponseActions>
+  <Escalation>
+    <Trigger>Escalate to Tier 3 / Incident Response (and notify the customer) when any of the following hold:
+
+- A burst of situational-awareness commands is confirmed under one PowerShell parent, or recon is combined with download/execution tooling (section 15.2, section 17.5).
+- The account enumerates multiple hosts with the same discovery set (section 15.4), or acts from an encoded/unknown PowerShell session (section 15.3b).
+- The actor is a Tier-0/privileged identity, or a preceding authentication anomaly is found (section 15.12).
+- Persistence (section 17.2), privilege escalation (section 17.3), defence evasion (section 17.4), or lateral movement (section 17.1) follows the discovery.
+- The PowerShell parent chain / command line cannot be established and the alert cannot be safely cleared - escalate as needs_escalation requesting script-block logging and endpoint triage.</Trigger>
+    <To>SOC L2 / IR</To>
+  </Escalation>
+  <ClosureCriteria>
+    <Item>false_positive (authorised): the PowerShell parent is a documented login/monitoring/deployment script or a known admin one-off; the tool set is narrow and consistent; single host; no download/execution or multi-host fan-out. Record the script/owner; scope any exception to the exact parent + account + tool set.</Item>
+    <Item>false_positive (proven-blocked): a hostile session was shown but every spawned tool was positively blocked/failed - recorded as a blocked attempt, never "benign"; preserve the session and hunt the source.</Item>
+    <Item>misconfiguration: a legitimate, previously unbaselined management/monitoring job launches these utilities via PowerShell; baseline the job and its host/parent.</Item>
+    <Item>true_positive: reconnaissance run through PowerShell as the discovery phase of an intrusion; containment/eradication/recovery completed, account/host/peer scope established, no residual persistence or recurrence.</Item>
+    <Item>needs_escalation: handed to Tier 3/IR with the specific evidence gaps documented.</Item>
+  </ClosureCriteria>
+  <Limitations>
+    <Item>The parent is the signal; the command line is a bonus. process.parent.name is ~99.7% populated and reliable - the parent-child shape (recon tool ← powershell.exe) holds even when process.command_line is null (~50%). Do not discount an alert because the arguments are missing.</Item>
+    <Item>Mind the .exe suffix. The deployed rule matches process.name without .exe, but NBI 4688 carries the suffix - so the rule can under-match. All investigation queries here key on the .exe forms; when hunting broadly, remember the deployed logic may miss events this playbook's queries catch.</Item>
+    <Item>Single vs burst is the fastest discriminator. One ipconfig from a known admin != whoami+systeminfo+tasklist(+net/nltest) in seconds. Use section 14.2/section 15.2 to judge, and section 15.4 to see if the account repeats the set across hosts.</Item>
+    <Item>Pull script-block logs for the parent. logs-windows.powershell* (~103k/24h) is where the PowerShell session's actual content lives - the durable source when the command line is null and the place to confirm an encoded/hostile session.</Item>
+    <Item>source.ip is shared infrastructure. A single VDI/admin egress IP (validated example: 10.11.102.15) fronts many admin users reaching many servers; correlate IP + user + host, never treat it as an individual identifier.</Item>
+    <Item>KB-worthy (persist to NBI customer scope): (1) PowerShell-parented children concentrate as benign machine-account maintenance (tzutil.exe/conhost.exe) on nim-st-apv10/-apv11; no in-scope discovery tool under a PowerShell parent in-window over 4h; (2) deployed-rule suffix mismatch (name without .exe vs 4688's .exe) → under-match risk; (3) command-line host-bimodality; (4) logs-windows.powershell* present as the session-content source; (5) 10.11.102.15 = shared VDI/admin egress fronting nim-kc-apv07 logons. Observed live 2026-08-19.</Item>
+  </Limitations>
+</Playbook>

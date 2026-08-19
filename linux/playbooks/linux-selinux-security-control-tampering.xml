@@ -1,0 +1,394 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<Playbook xmlns="https://soc.example/playbooks" id="PB-linux-selinux-security-control-tampering" name="Linux — SELinux / Security Control Tampering (setenforce/semanage) - SOC Playbook" version="3.0" status="Validated" classification="TLP:AMBER">
+  <Metadata>
+    <Owner>NBI SOC / Detection Engineering</Owner>
+    <LastUpdated>2026-08-19</LastUpdated>
+    <Severity default="high">high</Severity>
+    <Confidence default="Medium">Medium</Confidence>
+    <Category>Defense Evasion</Category>
+    <MitreAttack>
+      <Technique id="T1562.001"/>
+      <Technique id="T1562"/>
+      <Tactic id="TA0005"/>
+    </MitreAttack>
+    <References>
+      <Reference title="MITRE ATT&amp;CK - Impair Defenses: Disable or Modify Tools (T1562.001)" url="https://attack.mitre.org/techniques/T1562/001/"/>
+      <Reference title="MITRE ATT&amp;CK - Impair Defenses (T1562)" url="https://attack.mitre.org/techniques/T1562/"/>
+      <Reference title="MITRE ATT&amp;CK - Defense Evasion tactic (TA0005)" url="https://attack.mitre.org/tactics/TA0005/"/>
+      <Reference title="Elastic Security - Linux auditd integration (process telemetry fields)" url="https://www.elastic.co/docs/reference/integrations/auditd_manager"/>
+      <Reference title="Red Hat - Changing SELinux states and modes (setenforce, getenforce, /etc/selinux/config)" url="https://access.redhat.com/documentation/en-us/red_hat_enterprise_linux/9/html/using_selinux/changing-selinux-states-and-modes_using-selinux"/>
+      <Reference title="man7.org - setenforce(8) manual" url="https://man7.org/linux/man-pages/man8/setenforce.8.html"/>
+      <Reference title="man7.org - semanage(8) manual" url="https://man7.org/linux/man-pages/man8/semanage.8.html"/>
+    </References>
+  </Metadata>
+  <AlertContext>
+    <RuleName>Linux — SELinux / Security Control Tampering (setenforce/semanage)</RuleName>
+    <RuleId>nbi-lnx-defense-evasion-selinux</RuleId>
+    <RuleType>query</RuleType>
+    <Index>logs-auditd_manager.auditd-*</Index>
+    <TriggerLogic>The deployed rule is an Elastic query-type rule (KQL) over Linux auditd process telemetry. Its behavioural core is a name match on the process-execution event against the two SELinux control binaries:
+
+One-line Kibana KQL detection filter (for fast pivoting in Discover / Timeline):
+
+
+
+Plain English: any process execution on a Linux host where the executed image is setenforce or semanage. The rule matches on the binary name alone; the direction - the difference between weakening and restoring the MAC layer - lives in the arguments, and the intent lives in the surrounding activity, both of which this playbook resolves.
+
+Two shapes to hold in mind while reading the telemetry:
+
+- Malicious tamper: setenforce 0 / setenforce Permissive (or a policy-loosening semanage - flipping a permissive boolean, adding a port label, relabelling a path), successful, left unrestored, by an unexpected actor, often alongside stops/flushes of the host firewall or auditing.
+- Authorised administration: setenforce 1 / Enforcing (a restoration), or an approved semanage policy edit for app onboarding, by a recognised admin during a change window, with no other security service touched.</TriggerLogic>
+    <KeyAlertFields>event.action, source.ip, event.outcome, process.name, process.executable, process.args, process.pid, process.parent.pid, user.id, user.effective.id, process.working_directory, user.name</KeyAlertFields>
+  </AlertContext>
+  <Inputs>
+    <Input name="$host"/>
+    <Input name="$user"/>
+    <Input name="$source_ip"/>
+    <Input name="$pid"/>
+  </Inputs>
+  <ExecutiveSummary>
+    <Overview>This playbook drives triage and investigation of the Linux - SELinux / Security Control Tampering (setenforce/semanage) detection on NBI's Elastic Security deployment. The rule fires when an execve recorded by Linux auditd (event.category == "process") has a process.name of setenforce or semanage. setenforce switches SELinux between Enforcing and Permissive at runtime (setenforce 0 stops SELinux from blocking anything until reboot); semanage changes the persistent SELinux policy (booleans, port labels, file contexts, modules). Both operate the host's mandatory-access-control (MAC) layer - turning enforcement off or loosening policy is a common precursor to running something the policy would otherwise block.
+
+The analyst's job is to decide whether a given setenforce/semanage action on $host is defense evasion clearing the way for an attack, an authorised administrative/troubleshooting change, a legitimate configuration change not yet baselined, or unprovable with the available telemetry - and to classify the alert as true_positive, false_positive, misconfiguration, or needs_escalation with evidence attached. The decision rests on the direction of the change (disable/loosen vs. enable/tighten), whether it sits inside a wider defense-impairment sweep, and what ran on the host after enforcement dropped.</Overview>
+    <BusinessImpact>SELinux is a mandatory-access-control layer: even root is constrained by policy when it is Enforcing. setenforce 0 drops the whole host to Permissive - the policy still *logs* denials but no longer *blocks* them - until the next reboot. That is a standard move to clear the way for a payload, a webshell, or a privilege-escalation step that Enforcing mode would deny. semanage changes are quieter but can permanently weaken policy in a way that outlives the incident.
+
+An alert therefore means: on $host, an SELinux control tool executed. Both are also entirely legitimate admin actions during troubleshooting or application onboarding, so the event is a starting point, not a verdict. The investigative questions are answerable from auditd: *which direction was the change* (section 14.2/section 15.1 - read the argument line), *did it succeed and stick* (section 15.2b - outcome, and whether a restoring setenforce 1 followed), *was it part of a coordinated sweep* (section 17.4 - firewall/audit stops in the same window), and *what ran while enforcement was down* (section 17.5). A successful, unrestored disable by an unexpected account - especially inside a defense-impairment sweep - is the ful</BusinessImpact>
+  </ExecutiveSummary>
+  <Investigation>
+    <Goal>Decide true_positive / false_positive / misconfiguration / needs_escalation for Linux — SELinux / Security Control Tampering (setenforce/semanage).</Goal>
+    <Workflow>
+      <Step order="1" name="Reproduce the rule estate-wide (confirm the detection logic)">
+        <Purpose>Reproduce the rule estate-wide (confirm the detection logic)</Purpose>
+        <Query platform="Elastic" language="ES|QL" id="Q-01">
+          <![CDATA[
+FROM logs-auditd.log-*,logs-auditd_manager.auditd-*
+| WHERE @timestamp >= NOW() - 4 hours
+    AND event.category == "process" AND process.name IN ("setenforce", "semanage")
+| EVAL argline = MV_CONCAT(process.args, " ")
+| KEEP @timestamp, host.name, user.name, user.id, process.name, process.executable, argline
+| SORT @timestamp DESC
+| LIMIT 100
+]]>
+        </Query>
+      </Step>
+      <Step order="2" name="Confirm on the alert host (direction and outcome)">
+        <Purpose>Confirm on the alert host (direction and outcome)</Purpose>
+        <Query platform="Elastic" language="ES|QL" id="Q-02">
+          <![CDATA[
+FROM logs-auditd.log-*,logs-auditd_manager.auditd-*
+| WHERE @timestamp >= NOW() - 4 hours
+    AND event.category == "process" AND host.name == "$host" AND process.name IN ("setenforce", "semanage")
+| STATS executions = COUNT(*), outcomes = VALUES(event.outcome) BY process.name, user.name, user.id
+| SORT executions DESC
+| LIMIT 20
+]]>
+        </Query>
+      </Step>
+      <Step order="3" name="Entity pivoting">
+        <Purpose>Entity pivoting</Purpose>
+        <Query platform="Elastic" language="ES|QL" id="Q-03">
+          <![CDATA[
+FROM logs-auditd.log-*,logs-auditd_manager.auditd-*
+| WHERE event.category=="process" AND host.name=="$host"
+    AND process.name IN ("setenforce","semanage")
+    AND @timestamp >= NOW() - 4 hours
+| EVAL argline = MV_CONCAT(process.args, " ")
+| KEEP @timestamp, host.name, user.name, user.id, process.name, process.executable, argline
+| SORT @timestamp DESC
+| LIMIT 50
+]]>
+        </Query>
+      </Step>
+      <Step order="4" name="Process investigation">
+        <Purpose>Process investigation</Purpose>
+        <Query platform="Elastic" language="ES|QL" id="Q-04">
+          <![CDATA[
+FROM logs-auditd.log-*,logs-auditd_manager.auditd-*
+| WHERE @timestamp >= NOW() - 4 hours
+    AND event.category == "process" AND process.name IN ("setenforce", "semanage")
+| STATS executions = COUNT(*), hosts = COUNT_DISTINCT(host.name) BY process.name, process.executable, user.id
+| SORT executions DESC
+| LIMIT 50
+]]>
+        </Query>
+      </Step>
+      <Step order="5" name="Process investigation">
+        <Purpose>Process investigation</Purpose>
+        <Query platform="Elastic" language="ES|QL" id="Q-05">
+          <![CDATA[
+FROM logs-auditd.log-*,logs-auditd_manager.auditd-*
+| WHERE event.category=="process" AND host.name=="$host" AND user.name=="$user"
+    AND process.name IN ("setenforce","semanage","setsebool","selinuxenabled","getenforce","setroubleshootd")
+    AND @timestamp >= NOW() - 4 hours
+| STATS actions=COUNT(*), outcomes=VALUES(event.outcome), first_seen=MIN(@timestamp), last_seen=MAX(@timestamp) BY process.name, user.id
+| SORT actions DESC
+| LIMIT 20
+]]>
+        </Query>
+      </Step>
+      <Step order="6" name="Parent-Child process analysis">
+        <Purpose>Parent-Child process analysis</Purpose>
+        <Query platform="Elastic" language="ES|QL" id="Q-06">
+          <![CDATA[
+FROM logs-auditd.log-*,logs-auditd_manager.auditd-*
+| WHERE @timestamp >= NOW() - 4 hours
+    AND event.category == "process" AND host.name == "$host" AND process.name IN ("setenforce", "semanage")
+| KEEP @timestamp, user.id, process.pid, process.parent.pid, process.name, process.executable, process.working_directory
+| SORT @timestamp DESC
+| LIMIT 50
+]]>
+        </Query>
+      </Step>
+      <Step order="7" name="Parent-Child process analysis">
+        <Purpose>Parent-Child process analysis</Purpose>
+        <Query platform="Elastic" language="ES|QL" id="Q-07">
+          <![CDATA[
+FROM logs-auditd.log-*,logs-auditd_manager.auditd-*
+| WHERE @timestamp >= NOW() - 4 hours
+    AND event.category == "process" AND host.name == "$host"
+    AND process.parent.pid == $pid
+| KEEP @timestamp, user.id, user.effective.id, process.parent.pid, process.pid, process.name, process.executable, process.working_directory
+| SORT @timestamp ASC
+| LIMIT 100
+]]>
+        </Query>
+      </Step>
+      <Step order="8" name="User investigation">
+        <Purpose>User investigation</Purpose>
+        <Query platform="Elastic" language="ES|QL" id="Q-08">
+          <![CDATA[
+FROM logs-auditd.log-*,logs-auditd_manager.auditd-*
+| WHERE @timestamp >= NOW() - 4 hours
+    AND event.category == "process" AND user.name == "$user"
+| STATS executions = COUNT(*), distinct_procs = COUNT_DISTINCT(process.name) BY host.name
+| SORT executions DESC
+| LIMIT 20
+]]>
+        </Query>
+      </Step>
+      <Step order="9" name="Host investigation">
+        <Purpose>Host investigation</Purpose>
+        <Query platform="Elastic" language="ES|QL" id="Q-09">
+          <![CDATA[
+FROM logs-auditd.log-*,logs-auditd_manager.auditd-*
+| WHERE @timestamp >= NOW() - 4 hours
+    AND event.category == "process" AND host.name == "$host"
+| STATS executions = COUNT(*), users = COUNT_DISTINCT(user.id) BY process.name
+| SORT executions ASC
+| LIMIT 40
+]]>
+        </Query>
+      </Step>
+      <Step order="10" name="IP investigation">
+        <Purpose>IP investigation</Purpose>
+        <Query platform="Elastic" language="ES|QL" id="Q-10">
+          <![CDATA[
+FROM logs-system.auth-*
+| WHERE @timestamp >= NOW() - 4 hours
+    AND host.name == "$host" AND user.name == "$user" AND source.ip IS NOT NULL
+| STATS logins = COUNT(*) BY source.ip, event.action, event.outcome
+| SORT logins DESC
+| LIMIT 20
+]]>
+        </Query>
+      </Step>
+      <Step order="11" name="IP investigation">
+        <Purpose>IP investigation</Purpose>
+        <Query platform="Elastic" language="ES|QL" id="Q-11">
+          <![CDATA[
+FROM logs-system.auth-*
+| WHERE @timestamp >= NOW() - 4 hours
+    AND source.ip == "$source_ip"
+| STATS logins = COUNT(*) BY user.name, host.name, event.action
+| SORT logins DESC
+| LIMIT 25
+]]>
+        </Query>
+      </Step>
+      <Step order="12" name="File investigation">
+        <Purpose>File investigation</Purpose>
+        <Query platform="Elastic" language="ES|QL" id="Q-12">
+          <![CDATA[
+FROM logs-auditd.log-*,logs-auditd_manager.auditd-*
+| WHERE @timestamp >= NOW() - 4 hours
+    AND event.category == "process" AND host.name == "$host" AND process.name IN ("setenforce", "semanage")
+| STATS executions = COUNT(*), first_seen = MIN(@timestamp), last_seen = MAX(@timestamp) BY process.name, process.executable, process.working_directory
+| SORT executions DESC
+| LIMIT 30
+]]>
+        </Query>
+      </Step>
+      <Step order="13" name="Authentication investigation">
+        <Purpose>Authentication investigation</Purpose>
+        <Query platform="Elastic" language="ES|QL" id="Q-13">
+          <![CDATA[
+FROM logs-system.auth-*
+| WHERE @timestamp >= NOW() - 4 hours
+    AND host.name == "$host" AND user.name == "$user"
+| STATS events = COUNT(*), first_seen = MIN(@timestamp), last_seen = MAX(@timestamp) BY event.action, event.outcome, source.ip
+| SORT events DESC
+| LIMIT 30
+]]>
+        </Query>
+      </Step>
+      <Step order="14" name="Timeline Reconstruction">
+        <Purpose>Timeline Reconstruction</Purpose>
+        <Query platform="Elastic" language="ES|QL" id="Q-14">
+          <![CDATA[
+FROM logs-auditd.log-*,logs-auditd_manager.auditd-*
+| WHERE @timestamp >= NOW() - 4 hours
+    AND event.category == "process" AND host.name == "$host" AND user.name == "$user"
+| KEEP @timestamp, user.id, user.effective.id, process.parent.pid, process.pid, process.name, process.executable, process.working_directory
+| SORT @timestamp ASC
+| LIMIT 200
+]]>
+        </Query>
+      </Step>
+      <Step order="15" name="Lateral movement validation">
+        <Purpose>Lateral movement validation</Purpose>
+        <Query platform="Elastic" language="ES|QL" id="Q-15">
+          <![CDATA[
+FROM logs-system.auth-*
+| WHERE @timestamp >= NOW() - 4 hours
+    AND user.name == "$user" AND event.action == "ssh_login"
+| STATS logins = COUNT(*) BY host.name, source.ip, event.outcome
+| SORT logins DESC
+| LIMIT 30
+]]>
+        </Query>
+      </Step>
+      <Step order="16" name="Persistence validation">
+        <Purpose>Persistence validation</Purpose>
+        <Query platform="Elastic" language="ES|QL" id="Q-16">
+          <![CDATA[
+FROM logs-auditd.log-*,logs-auditd_manager.auditd-*
+| WHERE @timestamp >= NOW() - 4 hours
+    AND event.category == "process" AND host.name == "$host"
+    AND process.name IN ("useradd", "usermod", "crontab", "at", "systemctl", "systemd-run", "chkconfig")
+| STATS executions = COUNT(*), euids = VALUES(user.effective.id) BY process.name, user.id
+| SORT executions DESC
+| LIMIT 40
+]]>
+        </Query>
+      </Step>
+      <Step order="17" name="Privilege escalation validation">
+        <Purpose>Privilege escalation validation</Purpose>
+        <Query platform="Elastic" language="ES|QL" id="Q-17">
+          <![CDATA[
+FROM logs-auditd.log-*,logs-auditd_manager.auditd-*
+| WHERE @timestamp >= NOW() - 4 hours
+    AND event.category == "process" AND host.name == "$host"
+    AND user.id != "0" AND user.effective.id == "0"
+| STATS transitions = COUNT(*), procs = VALUES(process.name) BY user.name, user.id, user.effective.id
+| SORT transitions DESC
+| LIMIT 25
+]]>
+        </Query>
+      </Step>
+      <Step order="18" name="Defense evasion validation">
+        <Purpose>Defense evasion validation</Purpose>
+        <Query platform="Elastic" language="ES|QL" id="Q-18">
+          <![CDATA[
+FROM logs-auditd.log-*,logs-auditd_manager.auditd-*
+| WHERE event.category=="process" AND host.name=="$host"
+    AND process.name IN ("systemctl","service","iptables","nft","firewall-cmd","auditctl")
+    AND @timestamp >= NOW() - 4 hours
+| EVAL argline = MV_CONCAT(process.args, " ")
+| WHERE argline LIKE "*stop*" OR argline LIKE "*disable*" OR argline LIKE "*mask*" OR argline LIKE "*flush*" OR process.name IN ("iptables","nft","auditctl")
+| KEEP @timestamp, process.name, argline, user.name, user.id
+| SORT @timestamp DESC
+| LIMIT 30
+]]>
+        </Query>
+      </Step>
+      <Step order="19" name="Impact assessment">
+        <Purpose>Impact assessment</Purpose>
+        <Query platform="Elastic" language="ES|QL" id="Q-19">
+          <![CDATA[
+FROM logs-auditd.log-*,logs-auditd_manager.auditd-*
+| WHERE event.category=="process" AND host.name=="$host" AND user.name=="$user"
+    AND @timestamp >= NOW() - 4 hours
+| STATS execs=COUNT(*) BY process.name, user.id, user.effective.id
+| SORT execs DESC
+| LIMIT 25
+]]>
+        </Query>
+      </Step>
+      <Step order="20" name="Finalize verdict">
+        <DecisionTree>
+        </DecisionTree>
+      </Step>
+    </Workflow>
+  </Investigation>
+  <ClassificationGuidance>
+    <TruePositive>
+      <Definition></Definition>
+    </TruePositive>
+    <FalsePositive>
+      <Definition></Definition>
+      <Indicators>
+        <Item>Troubleshooting. Admins drop to Permissive (setenforce 0) to test whether SELinux is the cause of an application failure, then restore Enforcing. Legitimate, but should be under change control and restored.</Item>
+        <Item>Application onboarding. A new app needs a policy boolean or a port label, so an admin runs semanage/setsebool. Legitimate policy loosening - should be a scoped module and ticketed.</Item>
+        <Item>Configuration management. ansible/puppet/chef applying an SELinux policy state as part of a managed play. Attributable to an automation identity.</Item>
+        <Item>Restoration actions. setenforce 1 / Enforcing is a *tightening* and is benign in itself, though it may be worth asking *why* enforcement was off in the first place.</Item>
+        <Item>setenforce/semanage have a zero baseline on NBI. Over a 4-hour window across every Linux host reporting to logs-auditd_manager.auditd-* / logs-auditd.log-*, neither control executed - consistent with the deployed rule's 30-day zero baseline. Any firing is notable.</Item>
+        <Item>The fleet is genuinely SELinux-managed. The setroubleshoot stack is active on the PAM/database host class (nim-pam-dbv06, nim-pam-dbv07), which run continuous credential-verification and monitoring loops under root. So SELinux is real and in-path here - a setenforce 0 on this class actually removes a live containment layer, it is not a no-op on an unconfigured host.</Item>
+        <Item>No historical NBI benign-true-positive is on record for this rule. There is no environment-specific allow-list to apply. Do not create a blanket exception for a host or account off a single alert; scope any exception to an exact admin identity + change window + control action, and only after a documented authorised change and confirmation that enforcement was restored.</Item>
+      </Indicators>
+    </FalsePositive>
+    <Misconfiguration>
+      <Definition></Definition>
+    </Misconfiguration>
+    <NeedsEscalation>
+      <Definition></Definition>
+    </NeedsEscalation>
+  </ClassificationGuidance>
+  <ResponseActions>
+    <Phase name="Containment">
+      <Action>Restore SELinux enforcement (setenforce 1) and revert any loosened policy as the first containment act - close the Permissive window. Confirm with getenforce/sestatus and check /etc/selinux/config for a persistent Permissive setting (section 15.10).</Action>
+      <Action>Isolate $host (network-contain / quarantine) if a true_positive is confirmed, to stop any payload that ran while enforcement was down.</Action>
+      <Action>Treat everything that executed during the Permissive window as suspect (section 17.5) and preserve it for review before rebuilding.</Action>
+      <Action>Suspend the acting session and disable the account if implicated pending investigation.</Action>
+      <Action>Preserve volatile evidence first where feasible - running process list, current SELinux state, /etc/selinux/config, shell history, and the auditd records. Deploy/confirm changes only via the authorised human-approved DEPLOY path; investigation itself is read-only.</Action>
+    </Phase>
+    <Phase name="Eradication">
+      <Action>Hunt for the payload the change enabled - a webshell, a memory-executing loader, an outbound connection, or a privilege-escalation step that Enforcing mode would have blocked - using the Permissive-window profile (section 17.5) and the lineage walk (section 15.3b).</Action>
+      <Action>Remove persistence discovered in section 17.2 (rogue accounts, cron/at jobs, services/timers) and any dropped tooling.</Action>
+      <Action>Reverse the whole sweep found in section 17.4 - restart and re-enable firewalld/auditd, restore packet-filter rules, and re-enable audit rules - not just SELinux.</Action>
+      <Action>Hunt for the root-cause access (how the actor reached root - correlate section 17.3) and for the same pattern across peer hosts, especially the other PAM/database systems and anything $user/$source_ip touched (section 15.4, section 17.1).</Action>
+    </Phase>
+    <Phase name="Recovery">
+      <Action>Confirm enforcement and policy are fully restored on $host (getenforce Enforcing, /etc/selinux/config set to enforcing, booleans back to baseline) and that firewall/audit services are running before returning the host to service.</Action>
+      <Action>Restore $host from a known-good image if activity during the Permissive window was extensive or a payload was confirmed; otherwise validate that all eradication actions hold after reboot (a reboot also clears a runtime-only Permissive, but not a config-file one).</Action>
+      <Action>Rotate any credentials/secrets that could have been accessed on $host while containment was reduced.</Action>
+      <Action>Return the host to service only after section 22 closing criteria are met and monitoring confirms enforcement stays on.</Action>
+      <Action>Recommend hardening (section 23): real-time alerting on any transition to Permissive and on semanage policy edits, restricting who may change SELinux state, and shipping the host audit stream off-box so a Permissive window is still fully recorded.</Action>
+    </Phase>
+  </ResponseActions>
+  <Escalation>
+    <Trigger>Escalate to Tier 3 / Incident Response (and notify the customer) when any of the following hold:
+
+- section 15.1/section 15.2b show enforcement disabled/loosened successfully and left unrestored by an unexpected actor.
+- section 17.4 shows a coordinated defense-impairment sweep (SELinux + firewall + auditing) in the same window.
+- section 17.5 shows suspect activity during the Permissive window (downloader, interpreter, webshell-adjacent, persistence), or section 17.2 shows persistence installed.
+- The change session is downstream of a fresh non-root→root escalation (section 17.3), or lateral movement from $host/$user is observed (section 17.1).
+- Change direction, actor authorisation, or Permissive-window activity cannot be established because of NBI's telemetry gaps (persistent config edits off-telemetry, effective state not in the event) and the alert cannot be safely cleared - escala</Trigger>
+    <To>SOC L2 / IR</To>
+  </Escalation>
+  <ClosureCriteria>
+    <Item>false_positive (authorised): a recognised admin under change control (during a maintenance window, restoring Enforcing afterward, or making an approved policy edit) is positively matched to the exact action. Record the admin and change reference, and confirm enforcement was restored. Scope any exception narrowly; never blanket-except a host.</Item>
+    <Item>false_positive (blocked): a disable/loosen attempt positively proven to have failed - a failure/denied outcome, enforcement unchanged. Documented as a blocked attempt, never "benign"; still investigate the source account/host.</Item>
+    <Item>misconfiguration: a legitimate policy change made outside the baseline/change process, no attack context, no sweep. Route it through change control; prefer a scoped policy module over disabling enforcement.</Item>
+    <Item>true_positive: enforcement/policy tampering confirmed; enforcement and policy restored, $host isolated and reviewed, the enabled payload and persistence hunted, scope established, incident documented.</Item>
+    <Item>needs_escalation: handed to Tier 3/IR and the Linux platform team with the specific evidence gaps documented and the effective on-host state to confirm.</Item>
+  </ClosureCriteria>
+  <Limitations>
+    <Item>Zero baseline = notable. setenforce/semanage do not appear in NBI's 4-hour Linux process telemetry (0 executions estate-wide, matching the 30-day baseline). Every firing warrants reading the direction and the surrounding activity.</Item>
+    <Item>Direction is everything, and it's in the args. setenforce 0/Permissive (disable) is the high-risk case; setenforce 1/Enforcing (restore) is benign in itself. Read argline via MV_CONCAT - process.command_line does not exist on NBI auditd.</Item>
+    <Item>This rule sees runtime, not persistent, changes. A /etc/selinux/config edit (or a kernel selinux=0) is a file write / boot option, not an execve, and is invisible here. Always confirm effective state on-host; do not assume Enforcing from an empty query.</Item>
+    <Item>The sweep is the strongest signal. SELinux tampering alongside systemctl stop/disable/mask of firewalld/auditd, iptables/nft flushes, or auditctl disables (section 17.4) is coordinated defense impairment and is strongly malicious; a lone toggle by a known admin is more consistent with troubleshooting.</Item>
+    <Item>Parent is PID-only; user.name ~32%. Reconstruct lineage via process.parent.pid (section 15.3) and lead with user.id (expect 0); do not clear on a null user.name.</Item>
+    <Item>The fleet really is SELinux-managed. The setroubleshoot stack is active on the PAM/database hosts, so a setenforce 0 there removes a live containment layer around stored secrets - not a no-op.</Item>
+    <Item>KB-worthy (persist to NBI customer scope): (1) setenforce/semanage zero-baseline over 4h on the combined auditd streams; (2) auditd parent fields absent → parent-by-PID only, process.command_line absent, /etc/selinux/config edits off-telemetry; (3) user.name ~32% / user.effective.id ~60% population on process events; (4) setroubleshoot active on nim-pam-dbv06/07 → SELinux is genuinely in-path on this host class. All observed live on 2026-08-17.</Item>
+  </Limitations>
+</Playbook>

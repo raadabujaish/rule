@@ -1,0 +1,88 @@
+{
+  "name": "AD — Service/Privileged Account Logon from Novel Source",
+  "tags": [
+    "Tactic: Lateral Movement",
+    "Technique: T1078",
+    "Data Source: Windows Security",
+    "raadabujaish"
+  ],
+  "interval": "1h",
+  "enabled": true,
+  "description": "A privileged or service account authenticated over the network (logon type 3) or via RDP (type 10) from a source IP it has never used in the last 30 days. Attackers who steal service-account credentials or hashes replay them from their own foothold, so a novel source for a high-value identity is an early lateral-movement signal. The rule uses a New Terms detection on the (TargetUserName, source.ip) pair, scoped to accounts matching NBI's service/privileged naming patterns. Maps to ATT&CK Lateral Movement T1078.002 (Valid Accounts: Domain Accounts).",
+  "risk_score": 73,
+  "severity": "high",
+  "note": "### Investigation\n1. Confirm the account is genuinely privileged/service and identify its normal source hosts from prior 4624 history.\n2. Pivot on source.ip — a known admin jump host, PAM node, or patch server, or an unrecognized/user-subnet address?\n3. Correlate host.name for follow-on 5140/5145 share access or 4672 special privileges, and any type-3 fan-out from the same source.\n4. Check for preceding 4776/NTLM or 4769 activity for this account suggesting credential theft or replay.\n5. Escalate if the source is unrecognized AND the account touches a sensitive asset (resolve host via known_infrastructure, not a name guess).\n\n### False positives / benign\nA service account brought online on a new application, patch, or migration host legitimately produces a novel (account, source.ip) pair. Distinguish by whether the new source is an inventoried server in a change window and whether the account keeps authenticating from it (sustained, single-purpose) versus a one-off logon from a workstation/user subnet followed by fan-out. The 30-day New Terms window suppresses recurring sources but new infrastructure still fires, so correlate to change tickets rather than allowlisting the IP.",
+  "output_index": "",
+  "investigation_fields": {
+    "field_names": [
+      "winlog.event_data.TargetUserName",
+      "source.ip",
+      "host.name",
+      "winlog.event_data.LogonType"
+    ]
+  },
+  "author": [
+    "raadabujaish"
+  ],
+  "false_positives": [],
+  "from": "now-1h",
+  "rule_id": "nbi-corr-svc-account-new-source",
+  "max_signals": 100,
+  "risk_score_mapping": [],
+  "severity_mapping": [],
+  "threat": [
+    {
+      "framework": "MITRE ATT&CK",
+      "tactic": {
+        "id": "TA0008",
+        "name": "Lateral Movement",
+        "reference": "https://attack.mitre.org/tactics/TA0008/"
+      },
+      "technique": [
+        {
+          "id": "T1078",
+          "name": "Valid Accounts",
+          "reference": "https://attack.mitre.org/techniques/T1078/",
+          "subtechnique": [
+            {
+              "id": "T1078.002",
+              "name": "Domain Accounts",
+              "reference": "https://attack.mitre.org/techniques/T1078/002/"
+            }
+          ]
+        },
+        {
+          "id": "T1550",
+          "name": "Use Alternate Authentication Material",
+          "reference": "https://attack.mitre.org/techniques/T1550/",
+          "subtechnique": [
+            {
+              "id": "T1550.002",
+              "name": "Pass the Hash",
+              "reference": "https://attack.mitre.org/techniques/T1550/002/"
+            }
+          ]
+        }
+      ]
+    }
+  ],
+  "to": "now",
+  "references": [],
+  "version": 1,
+  "exceptions_list": [],
+  "related_integrations": [],
+  "required_fields": [],
+  "setup": "",
+  "type": "new_terms",
+  "query": "event.code:\"4624\" and (winlog.event_data.LogonType:\"3\" or winlog.event_data.LogonType:\"10\") and source.ip:* and not source.ip:\"::1\" and winlog.event_data.TargetUserName:(*Srv or *.admin or *sys_user or ICBS* or SIGCAP* or Sigcap* or *.servacc or *.prod or Docsafe or CITRIX* or Forti* or custody* or Solarwinds* or Veeam* or SCCM* or SP.admin)",
+  "new_terms_fields": [
+    "winlog.event_data.TargetUserName",
+    "source.ip"
+  ],
+  "history_window_start": "now-30d",
+  "index": [
+    "logs-system.security-*"
+  ],
+  "language": "kuery",
+  "actions": []
+}

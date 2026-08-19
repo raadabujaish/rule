@@ -1,0 +1,67 @@
+{
+  "name": "AD — SPN Added by Non-Computer Principal (Kerberoast setup)",
+  "tags": [
+    "NBI-ActiveDirectory",
+    "Phase3",
+    "AD-5136",
+    "QA-remediation"
+  ],
+  "interval": "5m",
+  "enabled": true,
+  "description": "Detects a servicePrincipalName being set on an account by a non-computer (human/service) principal. Computer accounts self-register SPNs routinely (excluded here); a human adding an SPN — especially to a user account — is a classic Kerberoasting setup, making the account's password hash requestable and crackable offline.",
+  "risk_score": 68,
+  "severity": "high",
+  "note": "## Investigation\n1. `SubjectUserName` = who added the SPN; `ObjectDN` = the account that received it.\n2. An SPN added to a *user* account is high-risk. Confirm against change control.\n## Response\nIf unauthorised, remove the SPN and rotate the target account's password (long/complex to resist offline cracking).",
+  "output_index": "",
+  "investigation_fields": {
+    "field_names": [
+      "winlog.event_data.SubjectUserName",
+      "winlog.event_data.ObjectDN",
+      "winlog.event_data.AttributeLDAPDisplayName",
+      "winlog.event_data.AttributeValue",
+      "host.name"
+    ]
+  },
+  "author": [
+    "raadabujaish"
+  ],
+  "false_positives": [],
+  "from": "now-9m",
+  "rule_id": "nbi-ad-spn-added-to-account",
+  "max_signals": 100,
+  "risk_score_mapping": [],
+  "severity_mapping": [],
+  "threat": [
+    {
+      "framework": "MITRE ATT&CK",
+      "tactic": {
+        "id": "TA0006",
+        "name": "Credential Access",
+        "reference": "https://attack.mitre.org/tactics/TA0006/"
+      },
+      "technique": [
+        {
+          "id": "T1558.003",
+          "name": "Kerberoasting",
+          "reference": "https://attack.mitre.org/techniques/T1558/003/"
+        }
+      ]
+    }
+  ],
+  "to": "now",
+  "references": [
+    "https://attack.mitre.org/techniques/T1558/003/"
+  ],
+  "version": 1,
+  "exceptions_list": [],
+  "related_integrations": [],
+  "required_fields": [],
+  "setup": "",
+  "type": "query",
+  "language": "kuery",
+  "index": [
+    "logs-system.security-*"
+  ],
+  "query": "event.code:\"5136\" and winlog.event_data.AttributeLDAPDisplayName:\"servicePrincipalName\" and not winlog.event_data.SubjectUserName:*$ and not winlog.event_data.SubjectUserName:\"SYSTEM\" and not winlog.event_data.ObjectDN:*CN=Computers* and not winlog.event_data.ObjectDN:*Domain Controllers*",
+  "actions": []
+}

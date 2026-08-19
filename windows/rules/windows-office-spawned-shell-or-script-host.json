@@ -1,0 +1,70 @@
+{
+  "name": "Windows — Office Application Spawned a Command Shell or Script Host",
+  "tags": [
+    "NBI-Endpoint",
+    "Phase3",
+    "Windows-Security"
+  ],
+  "interval": "5m",
+  "enabled": true,
+  "description": "Detects a Microsoft Office application spawning a command shell or scripting host (cmd, PowerShell, wscript/cscript, mshta, rundll32, regsvr32). This parent-child relationship is a hallmark of malicious-macro / phishing-document execution.",
+  "risk_score": 73,
+  "severity": "high",
+  "note": "## Investigation\n1. `process.parent.name` (Office app) spawned `process.name`.\n2. Review `process.command_line` for the downloaded/executed payload.\n3. Correlate with the source document and the user's recent email; check for follow-on network or PowerShell activity.\n## Response\nIsolate the host, capture the document, and reset the user's credentials if execution succeeded.",
+  "output_index": "",
+  "investigation_fields": {
+    "field_names": [
+      "process.name",
+      "process.parent.name",
+      "process.command_line",
+      "process.executable",
+      "winlog.event_data.ServiceName",
+      "winlog.event_data.ServiceFileName",
+      "winlog.event_data.SubjectUserName",
+      "user.name",
+      "host.name"
+    ]
+  },
+  "author": [
+    "raadabujaish"
+  ],
+  "false_positives": [],
+  "from": "now-9m",
+  "rule_id": "nbi-win-office-spawns-shell",
+  "max_signals": 100,
+  "risk_score_mapping": [],
+  "severity_mapping": [],
+  "threat": [
+    {
+      "framework": "MITRE ATT&CK",
+      "tactic": {
+        "id": "TA0002",
+        "name": "Execution",
+        "reference": "https://attack.mitre.org/tactics/TA0002/"
+      },
+      "technique": [
+        {
+          "id": "T1059",
+          "name": "Command and Scripting Interpreter",
+          "reference": "https://attack.mitre.org/techniques/T1059/"
+        }
+      ]
+    }
+  ],
+  "to": "now",
+  "references": [
+    "https://attack.mitre.org/"
+  ],
+  "version": 1,
+  "exceptions_list": [],
+  "related_integrations": [],
+  "required_fields": [],
+  "setup": "",
+  "type": "query",
+  "language": "kuery",
+  "index": [
+    "logs-system.security-*"
+  ],
+  "query": "event.code:\"4688\" and process.parent.name:(\"winword.exe\" or \"excel.exe\" or \"powerpnt.exe\" or \"outlook.exe\" or \"onenote.exe\" or \"msaccess.exe\") and process.name:(\"cmd.exe\" or \"powershell.exe\" or \"pwsh.exe\" or \"wscript.exe\" or \"cscript.exe\" or \"mshta.exe\" or \"rundll32.exe\" or \"regsvr32.exe\" or \"bitsadmin.exe\" or \"certutil.exe\")",
+  "actions": []
+}

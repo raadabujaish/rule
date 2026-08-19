@@ -1,0 +1,94 @@
+{
+  "name": "AD — Directory Sync Account Sign-In From New Source",
+  "tags": [
+    "NBI",
+    "Identity",
+    "Active Directory",
+    "DCSync",
+    "T1003.006",
+    "Credential Access",
+    "class:companion",
+    "PROPOSED"
+  ],
+  "interval": "1h",
+  "enabled": true,
+  "description": "Companion to the DCSync detections. The Azure AD Connect sync account (MSOL_cb8d5eb8df87) is the one identity legitimately permitted to replicate directory secrets (Get-Changes-ALL). Over 90 days it authenticates from exactly one host — the AAD Connect server 10.11.18.16 (source.ip 100% populated). This rule (New Terms on source.ip, scoped to that account, 4624/4768) fires when the sync account authenticates from any OTHER source — i.e. its credentials/token were stolen and reused elsewhere. It closes the residual left by the Get-Changes-ALL rule, which allowlists the sync account: if the sync account itself is abused from a different host, this fires. Residual blind spot: abuse of the sync account FROM 10.11.18.16 itself (e.g. mimikatz on that server) produces no source novelty and requires host-level EDR on 10.11.18.16, which is not currently proven in NBI telemetry (recorded as a NO_TELEMETRY gap).",
+  "risk_score": 73,
+  "severity": "high",
+  "note": "### Triage — Azure AD Connect sync account from a new source\n1. **WHO / to WHAT** `winlog.event_data.TargetUserName` = `MSOL_cb8d5eb8df87` (the directory-secret-capable sync account).\n2. **FROM WHERE (discriminator)** `source.ip` — any value other than the canonical AAD Connect server `10.11.18.16`. This should never happen in normal operation.\n3. **WHAT** 4624/4768 authentication (`event.code`, `winlog.logon.type`).\n4. **Escalate:** treat as potential theft of the AAD Connect account. Correlate with the Get-Changes-ALL rule — if this account also replicated secrets from the new host, it is an active DCSync. First rule out a legitimate AAD Connect server migration/failover that changed the IP.",
+  "output_index": "",
+  "meta": {
+    "standard": {
+      "lifecycle": "PROPOSED",
+      "analytic_class": "companion",
+      "technique": "T1003.006",
+      "logic_explanation": "New Terms on source.ip for the AAD Connect account's 4624/4768; fires on a source IP other than 10.11.18.16.",
+      "evidence": {
+        "msol_source_ips_90d": [
+          "10.11.18.16"
+        ],
+        "backtest_novel_source_30d": 0,
+        "source_ip_population": "100%"
+      },
+      "residual_gap": "abuse from 10.11.18.16 itself needs host EDR (NO_TELEMETRY)"
+    }
+  },
+  "investigation_fields": {
+    "field_names": [
+      "winlog.event_data.TargetUserName",
+      "source.ip",
+      "host.name",
+      "winlog.logon.type",
+      "event.code"
+    ]
+  },
+  "author": [],
+  "false_positives": [],
+  "from": "now-70m",
+  "rule_id": "nbi-ad-t1003_006-sync-account-origin-novelty",
+  "max_signals": 100,
+  "risk_score_mapping": [],
+  "severity_mapping": [],
+  "threat": [
+    {
+      "framework": "MITRE ATT&CK",
+      "tactic": {
+        "id": "TA0006",
+        "name": "Credential Access",
+        "reference": "https://attack.mitre.org/tactics/TA0006/"
+      },
+      "technique": [
+        {
+          "id": "T1003",
+          "name": "OS Credential Dumping",
+          "reference": "https://attack.mitre.org/techniques/T1003/",
+          "subtechnique": [
+            {
+              "id": "T1003.006",
+              "name": "DCSync",
+              "reference": "https://attack.mitre.org/techniques/T1003/006/"
+            }
+          ]
+        }
+      ]
+    }
+  ],
+  "to": "now",
+  "references": [],
+  "version": 1,
+  "exceptions_list": [],
+  "related_integrations": [],
+  "required_fields": [],
+  "setup": "",
+  "type": "new_terms",
+  "query": "event.code:(\"4624\" or \"4768\") and winlog.event_data.TargetUserName:\"MSOL_cb8d5eb8df87\" and source.ip:*",
+  "new_terms_fields": [
+    "source.ip"
+  ],
+  "history_window_start": "now-90d",
+  "index": [
+    "logs-system.security-*"
+  ],
+  "language": "kuery",
+  "actions": []
+}

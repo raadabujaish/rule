@@ -1,0 +1,311 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<Playbook xmlns="https://soc.example/playbooks" id="PB-vsphere-virtual-machine-powered-off" name="VMware vSphere — Virtual Machine Powered Off - SOC Playbook" version="3.0" status="Validated" classification="TLP:AMBER">
+  <Metadata>
+    <Owner>NBI SOC / Detection Engineering</Owner>
+    <LastUpdated>2026-08-19</LastUpdated>
+    <Severity default="Medium">Medium</Severity>
+    <Confidence default="Medium">Medium</Confidence>
+    <Category>Impact</Category>
+    <MitreAttack>
+      <Technique id="T1529"/>
+      <Technique id="T1489"/>
+      <Technique id="T1078"/>
+      <Tactic id="TA0040"/>
+    </MitreAttack>
+    <References>
+      <Reference title="MITRE ATT&amp;CK - System Shutdown/Reboot (T1529)" url="https://attack.mitre.org/techniques/T1529/"/>
+      <Reference title="MITRE ATT&amp;CK - Service Stop (T1489)" url="https://attack.mitre.org/techniques/T1489/"/>
+      <Reference title="MITRE ATT&amp;CK - Valid Accounts (T1078)" url="https://attack.mitre.org/techniques/T1078/"/>
+      <Reference title="MITRE ATT&amp;CK - Impact tactic (TA0040)" url="https://attack.mitre.org/tactics/TA0040/"/>
+      <Reference title="Elastic - VMware vSphere integration (vpxd log fields)" url="https://docs.elastic.co/integrations/vsphere"/>
+      <Reference title="VMware - vCenter Server events and vpxd logging reference" url="https://techdocs.broadcom.com/us/en/vmware-cis/vsphere/vsphere/8-0/vsphere-monitoring-and-performance.html"/>
+      <Reference title="CISA / FBI - Ransomware targeting VMware ESXi (power-off + encryption precursor)" url="https://www.cisa.gov/news-events/cybersecurity-advisories/aa23-039a"/>
+      <Reference title="MITRE ATT&amp;CK - Data Destruction (context for mass power-off / destruction precursor, T1485)" url="https://attack.mitre.org/techniques/T1485/"/>
+    </References>
+  </Metadata>
+  <AlertContext>
+    <RuleName>VMware vSphere — Virtual Machine Powered Off</RuleName>
+    <RuleId>nbi-vsphere-vm-powered-off</RuleId>
+    <RuleType>query</RuleType>
+    <Index>logs-vsphere.log-*</Index>
+    <TriggerLogic>The deployed rule is an Elastic query rule over vCenter logs. The one-line Kibana-KQL detection filter:
+
+
+
+Plain English: a vCenter vpxd log line reported a VM powered off in NBI-Datacenter. The message is free text of the form:
+
+
+
+so the actor, VM, ESXi host and task id are all recovered by dissecting the message ([%{actor}] [%{datacenter}] [%{taskid}] [%{detail}]), not from dedicated ECS fields. The key discriminators are: whether the power-off was transient (the VM was powered back on - maintenance) or the VM was left off; whether it is a single VM or a mass shutdown; and whether it hit a production/database or security system, inside or outside a maintenance window.</TriggerLogic>
+    <KeyAlertFields>log.source.address, user.name, host.name</KeyAlertFields>
+  </AlertContext>
+  <Inputs>
+    <Input name="$vm"/>
+    <Input name="$actor"/>
+  </Inputs>
+  <ExecutiveSummary>
+    <Overview>This playbook drives triage and investigation of the VMware vSphere - Virtual Machine Powered Off detection on NBI's Elastic Security deployment. The rule fires on a vCenter (vpxd) log line (event.dataset: "vsphere.log") whose message contains "Powered Off" and "NBI-Datacenter" - a virtual machine was powered off in the datacenter. The message embeds the actor (DOMAIN\user), the VM name, the ESXi host, and the task id.
+
+Powering a VM off is routine during patching, maintenance and decommissioning - but it is also a direct availability-impact and defense-evasion action: an attacker with vCenter access can shut down a production banking system to cause an outage, or power off a security/logging/monitoring VM to blind the SOC before acting - all from the control plane, without touching the guest. The analyst's job is to decide whether the power-off is an authorised/scheduled shutdown (false_positive), an unauthorised availability attack or security-VM takedown (true_positive), a legitimate automation not yet baselined (misconfiguration), or unproven (needs_escalation).</Overview>
+    <BusinessImpact>An alert means: a VM was powered off in NBI-Datacenter, reported by vCenter, by the actor named in the message. The emitting host.name is the vCenter appliance (e.g. nx-vcsa01), not the VM; user.name is generally null, so identity comes from the dissected actor token.
+
+The consequence depends entirely on what was powered off and whether it stayed off:
+
+- A transient power-cycle (is stopping → is powered off → is starting → has powered on) is a reboot/maintenance pattern - low concern.
+- A VM left off - especially a production/DB or a security/logging VM - is a sustained outage: a service is down, or the SOC has lost visibility on that system.
+- A mass power-off (several VMs in quick succession) is an availability attack / ransomware-destruction precursor.
+
+Because the actor may be a legitimate administrator, the alert is not inherently malicious - but no admin account is automatically authorised; a power-off of a critical or security VM is treated as high-priority until a maintenance window / change ticket is positively matched.</BusinessImpact>
+  </ExecutiveSummary>
+  <Investigation>
+    <Goal>Decide true_positive / false_positive / misconfiguration / needs_escalation for VMware vSphere — Virtual Machine Powered Off.</Goal>
+    <Workflow>
+      <Step order="1" name="Confirm the power-off - actor, VM and criticality (verbatim VSPHVMPO-INV-01)">
+        <Purpose>Confirm the power-off - actor, VM and criticality (verbatim VSPHVMPO-INV-01)</Purpose>
+        <Query platform="Elastic" language="ES|QL" id="Q-01">
+          <![CDATA[
+FROM logs-vsphere.log-*
+| WHERE event.dataset == "vsphere.log"
+    AND message LIKE "*$vm*"
+    AND TO_LOWER(message) LIKE "*powered off*"
+    AND @timestamp >= NOW() - 2 hours
+| DISSECT message "[%{actor}] [%{datacenter}] [%{taskid}] [%{detail}]"
+| WHERE detail IS NOT NULL
+| KEEP @timestamp, actor, taskid, detail, log.source.address
+| SORT @timestamp DESC
+| LIMIT 15
+]]>
+        </Query>
+      </Step>
+      <Step order="2" name="Entity pivoting">
+        <Purpose>Entity pivoting</Purpose>
+        <Query platform="Elastic" language="ES|QL" id="Q-02">
+          <![CDATA[
+FROM logs-vsphere.log-*
+| WHERE event.dataset == "vsphere.log"
+    AND message LIKE "*$vm*"
+    AND @timestamp >= NOW() - 2 hours
+| DISSECT message "[%{actor}] [%{datacenter}] [%{taskid}] [%{detail}]"
+| WHERE detail IS NOT NULL
+| KEEP @timestamp, actor, taskid, detail
+| SORT @timestamp DESC
+| LIMIT 40
+]]>
+        </Query>
+      </Step>
+      <Step order="3" name="User investigation">
+        <Purpose>User investigation</Purpose>
+        <Query platform="Elastic" language="ES|QL" id="Q-03">
+          <![CDATA[
+FROM logs-vsphere.log-*
+| WHERE event.dataset == "vsphere.log"
+    AND message LIKE "*$actor*"
+    AND (TO_LOWER(message) LIKE "*is powered off*" OR TO_LOWER(message) LIKE "*has powered on*"
+         OR TO_LOWER(message) LIKE "*successful login*" OR TO_LOWER(message) LIKE "*logged in*")
+    AND @timestamp >= NOW() - 2 hours
+| DISSECT message "[%{actor}] [%{datacenter}] [%{taskid}] [%{detail}]"
+| WHERE detail IS NOT NULL
+| KEEP @timestamp, actor, detail
+| SORT @timestamp ASC
+| LIMIT 40
+]]>
+        </Query>
+      </Step>
+      <Step order="4" name="Host investigation">
+        <Purpose>Host investigation</Purpose>
+        <Query platform="Elastic" language="ES|QL" id="Q-04">
+          <![CDATA[
+FROM logs-vsphere.log-*
+| WHERE event.dataset == "vsphere.log"
+    AND message LIKE "*$vm*"
+    AND (TO_LOWER(message) LIKE "*is powered off*" OR TO_LOWER(message) LIKE "*has powered on*"
+         OR TO_LOWER(message) LIKE "*is starting*" OR TO_LOWER(message) LIKE "*is stopping*")
+    AND @timestamp >= NOW() - 2 hours
+| DISSECT message "[%{actor}] [%{datacenter}] [%{taskid}] [%{detail}]"
+| WHERE detail IS NOT NULL
+| KEEP @timestamp, actor, detail
+| SORT @timestamp ASC
+| LIMIT 20
+]]>
+        </Query>
+      </Step>
+      <Step order="5" name="IP investigation">
+        <Purpose>IP investigation</Purpose>
+        <Query platform="Elastic" language="ES|QL" id="Q-05">
+          <![CDATA[
+FROM logs-vsphere.log-*
+| WHERE event.dataset == "vsphere.log"
+    AND message LIKE "*$actor*"
+    AND (TO_LOWER(message) LIKE "*successful login*" OR TO_LOWER(message) LIKE "*logged in*")
+    AND @timestamp >= NOW() - 2 hours
+| DISSECT message "[%{actor}] [%{datacenter}] [%{taskid}] [%{detail}]"
+| WHERE detail IS NOT NULL
+| KEEP @timestamp, actor, detail
+| SORT @timestamp DESC
+| LIMIT 30
+]]>
+        </Query>
+      </Step>
+      <Step order="6" name="Authentication investigation">
+        <Purpose>Authentication investigation</Purpose>
+        <Query platform="Elastic" language="ES|QL" id="Q-06">
+          <![CDATA[
+FROM logs-vsphere.log-*
+| WHERE event.dataset == "vsphere.log"
+    AND message LIKE "*$actor*"
+    AND (TO_LOWER(message) LIKE "*logged in*" OR TO_LOWER(message) LIKE "*logged out*"
+         OR TO_LOWER(message) LIKE "*successful login*")
+    AND @timestamp >= NOW() - 2 hours
+| DISSECT message "[%{actor}] [%{datacenter}] [%{taskid}] [%{detail}]"
+| WHERE detail IS NOT NULL
+| KEEP @timestamp, actor, detail
+| SORT @timestamp ASC
+| LIMIT 40
+]]>
+        </Query>
+      </Step>
+      <Step order="7" name="Timeline Reconstruction">
+        <Purpose>Timeline Reconstruction</Purpose>
+        <Query platform="Elastic" language="ES|QL" id="Q-07">
+          <![CDATA[
+FROM logs-vsphere.log-*
+| WHERE event.dataset == "vsphere.log"
+    AND message LIKE "*$vm*"
+    AND @timestamp >= NOW() - 2 hours
+| DISSECT message "[%{actor}] [%{datacenter}] [%{taskid}] [%{detail}]"
+| WHERE detail IS NOT NULL
+| KEEP @timestamp, actor, taskid, detail
+| SORT @timestamp ASC
+| LIMIT 200
+]]>
+        </Query>
+      </Step>
+      <Step order="8" name="Lateral movement validation">
+        <Purpose>Lateral movement validation</Purpose>
+        <Query platform="Elastic" language="ES|QL" id="Q-08">
+          <![CDATA[
+FROM logs-vsphere.log-*
+| WHERE event.dataset == "vsphere.log"
+    AND message LIKE "*$actor*"
+    AND @timestamp >= NOW() - 2 hours
+| DISSECT message "[%{actor}] [%{datacenter}] [%{taskid}] [%{detail}]"
+| WHERE detail IS NOT NULL
+| KEEP @timestamp, actor, taskid, detail
+| SORT @timestamp DESC
+| LIMIT 60
+]]>
+        </Query>
+      </Step>
+      <Step order="9" name="Defense evasion validation">
+        <Purpose>Defense evasion validation</Purpose>
+        <Query platform="Elastic" language="ES|QL" id="Q-09">
+          <![CDATA[
+FROM logs-vsphere.log-*
+| WHERE event.dataset == "vsphere.log"
+    AND message LIKE "*$actor*"
+    AND TO_LOWER(message) LIKE "*is powered off*"
+    AND @timestamp >= NOW() - 2 hours
+| DISSECT message "[%{actor}] [%{datacenter}] [%{taskid}] [%{detail}]"
+| WHERE detail IS NOT NULL
+| KEEP @timestamp, actor, detail
+| SORT @timestamp DESC
+| LIMIT 40
+]]>
+        </Query>
+      </Step>
+      <Step order="10" name="Impact assessment">
+        <Purpose>Impact assessment</Purpose>
+        <Query platform="Elastic" language="ES|QL" id="Q-10">
+          <![CDATA[
+FROM logs-vsphere.log-*
+| WHERE event.dataset == "vsphere.log"
+    AND message LIKE "*$actor*"
+    AND TO_LOWER(message) LIKE "*is powered off*"
+    AND @timestamp >= NOW() - 2 hours
+| DISSECT message "[%{actor}] [%{datacenter}] [%{taskid}] [%{detail}]"
+| WHERE detail IS NOT NULL
+| STATS power_offs = COUNT(*) BY actor
+| SORT power_offs DESC
+| LIMIT 10
+]]>
+        </Query>
+      </Step>
+      <Step order="11" name="Finalize verdict">
+        <DecisionTree>
+        </DecisionTree>
+      </Step>
+    </Workflow>
+  </Investigation>
+  <ClassificationGuidance>
+    <TruePositive>
+      <Definition></Definition>
+    </TruePositive>
+    <FalsePositive>
+      <Definition></Definition>
+      <Indicators>
+        <Item>Scheduled maintenance / patching. The overwhelmingly common benign cause - an admin (or an orchestration tool) powers a VM off within a change window and powers it back on, or leaves it off as a planned step. This is a false_positive (authorised) *only* when a change ticket / maintenance window is positively matched to the exact VM, actor and time.</Item>
+        <Item>Decommissioning. A VM intentionally left off as part of a documented decommission.</Item>
+        <Item>Transient reboots. A power-cycle (stopping→off→starting→on) surfacing the powered off line mid-sequence.</Item>
+        <Item>Guest-initiated OS shutdown. A patching reboot inside the guest can surface as is powered off; it differs from a vCenter admin power-off by the actor and surrounding tasks - read the actor before assuming an admin action.</Item>
+        <Item>Legitimate automation (DRS/maintenance-mode workflows, patch orchestration, decommission tooling) whose identity simply isn't baselined yet - a misconfiguration (section 6/section 13), not an attack. Do not auto-trust an automation by name.</Item>
+        <Item>Power-offs are low and bursty. A 4-hour and even a 12-hour window over the live index showed no powered off events - they cluster in maintenance/decommission batches. So 0 rows in a short window is normal, and the queries here (&lt;=2h) will often be empty. Re-anchor to the alert time before concluding "nothing happened," and confirm current power state in vCenter directly.</Item>
+        <Item>All actionable entities are in the free-text message. host.name is the vCenter appliance, and user.name is generally null - the actor, VM, ESXi host and task id are recovered only by dissecting message. A parser change to the vCenter log format would break the dissect and must be watched.</Item>
+        <Item>The dominant vpxd actor is root; named admins appear as DOMAIN\user. Live, root accounted for the large majority of task lines (routine service activity), with a small number of named administrators such as NBIRQ\Wahab.Admin. A power-off attributed to a named admin from an expected workstation within a window is likely maintenance; the same identity from an unexpected source, or a mass power-off, is the concern. root/service-driven power-offs still require an authorised cause - do not auto-trust root.</Item>
+      </Indicators>
+    </FalsePositive>
+    <Misconfiguration>
+      <Definition></Definition>
+    </Misconfiguration>
+    <NeedsEscalation>
+      <Definition></Definition>
+    </NeedsEscalation>
+  </ClassificationGuidance>
+  <ResponseActions>
+    <Phase name="Containment">
+      <Action>True_positive (unauthorised power-off / takedown): power the VM(s) back on if safe and business-approved to restore availability (prioritise security/logging VMs to restore visibility, and production/DB to restore service); disable and investigate the $actor account (vCenter/SSO); and hunt for concurrent destructive/evasion actions - other security-VM takedowns, VM/snapshot deletion, datastore tampering.</Action>
+      <Action>Coordinate on shared infrastructure: powering VMs back on and disabling an admin identity can affect legitimate operations - act via the authorised change path with the virtualization team, but prioritise restoring a downed security/logging VM.</Action>
+      <Action>Preserve evidence: attach INV-01 (power-off), INV-02 (power-cycle), INV-03 (scope+origin), the task ids, and the actor's login origin to the case before changing state.</Action>
+      <Action>Investigation here is read-only; power-on, account disablement and permission changes run only via the authorised, human-approved change path.</Action>
+    </Phase>
+    <Phase name="Eradication">
+      <Action>Revoke the attacker's control-plane access: rotate the compromised vCenter/SSO credentials, remove any rogue accounts the actor created, and revert unauthorised role/permission grants (section 17.3).</Action>
+      <Action>Close the access path that reached vCenter (exposed management interface, pivot host, phished admin) so the power-off cannot recur.</Action>
+      <Action>Remediate concurrent damage: restore any deleted VMs/snapshots from backup and re-secure datastores if tampering accompanied the power-off.</Action>
+      <Action>Verify the security/logging VMs that were taken down are healthy and shipping again after power-on - confirm no gap remains in coverage.</Action>
+    </Phase>
+    <Phase name="Recovery">
+      <Action>Confirm availability is restored for every affected VM (powered on and services healthy) and that security/logging VMs are back in monitoring.</Action>
+      <Action>Re-enable the actor account only after credential reset and confirmation it was misused vs compromised.</Action>
+      <Action>Harden the control plane: restrict vCenter power privileges to least privilege, require change tickets / maintenance windows for shutdowns, enforce MFA on vCenter/SSO admin logins, and restrict management-interface exposure.</Action>
+      <Action>Add/keep monitoring for mass power-offs and for any power-off of a security/logging VM, and track Tier-0 VMs' power state - the two highest-value detections coming out of this rule.</Action>
+    </Phase>
+  </ResponseActions>
+  <Escalation>
+    <Trigger>Escalate to SOC L2 / Incident Response and the virtualization/infrastructure team when any of the following hold:
+
+- A production/DB or security/logging VM is left powered off (section 15.5) with no matching maintenance window.
+- A mass power-off (several VMs in quick succession - section 17.5) occurred.
+- The power-off is backed by an SSO login from an unexpected source IP/client (section 15.6) or by an anomalous session (section 15.12).
+- Concurrent control-plane abuse (password changes, VM/snapshot deletion, permission grants) correlates to $actor (section 17.2/section 17.3).
+- The VM's current power state or the actor's authorisation cannot be established - escalate as needs_escalation with the gap named; treat a powered-off production/security VM as an outage until reconciled.
+
+Hand off with INV-01/02/03, the actor's origin, and the list of affected VMs; restore availability and con</Trigger>
+    <To>SOC L2 / IR</To>
+  </Escalation>
+  <ClosureCriteria>
+    <Item>false_positive (authorised/scheduled shutdown): a change ticket / maintenance window is positively matched to the exact $vm + $actor + time, or the power-off is shown transient (VM powered back on). Recorded with the reference; no broad exception created.</Item>
+    <Item>false_positive (proven-failed power-off): the power-off task errored and the VM remained running - a blocked action, documented as such (investigate the actor/source); never recorded as benign.</Item>
+    <Item>misconfiguration: a recognised automation (patch/DRS/maintenance-mode/decommission) powered the VM off and was not yet baselined; the automation identity is tagged so its power-offs are distinguishable from human-admin shutdowns.</Item>
+    <Item>true_positive: availability restored (VMs powered back on), the $actor account contained, concurrent evasion/destruction and the access path investigated; incident documented.</Item>
+    <Item>needs_escalation: handed to virtualization/infra + SOC L2 with the current-power-state / authorisation gaps documented.</Item>
+  </ClosureCriteria>
+  <Limitations>
+    <Item>All entities live in the free-text message. host.name is the vCenter appliance (not the VM) and user.name is generally null - always dissect message ([%{actor}] [%{datacenter}] [%{taskid}] [%{detail}]) for actor/VM/ESXi/task. A vСenter log-format change would break this dissect; watch for it.</Item>
+    <Item>Power-offs are bursty - 0 rows in a short window is normal. Validated: no powered off events in a 4h or 12h live window. Re-anchor to the alert time and confirm current power state in vCenter before declaring a sustained outage; a power-on after the query window will be missed.</Item>
+    <Item>root is the dominant vpxd actor (routine service activity, e.g. root@127.0.0.1 API sessions); named admins like NBIRQ\Wahab.Admin appear for interactive changes. Neither is auto-authorised - a power-off of a critical/security VM needs a matched change ticket regardless of actor.</Item>
+    <Item>The security/logging-VM takedown is the stealth case (section 17.4): a single quiet power-off of a Tier-0 visibility VM is high-severity defense evasion, easy to miss among routine churn. Watch for it explicitly.</Item>
+    <Item>Guest-OS shutdown vs vCenter admin power-off can both read as is powered off - disambiguate by the actor and surrounding tasks (section 16).</Item>
+    <Item>Complementary signals / evasion: an attacker can power off one high-value VM quietly (no mass burst) or act inside a real maintenance window. Correlate $actor with the vCenter/ESXi password-change and VM create/delete detections, watch specifically for security/logging-VM power-offs, and reconcile against the change-management maintenance calendar.</Item>
+    <Item>KB-worthy (persist to NBI customer scope): (1) logs-vsphere.log-* carries actor/VM/ESXi/task only in free-text message; user.name null, host.name = vCenter appliance; (2) power-offs are bursty (0 in 4h/12h live); (3) root = dominant vpxd actor, NBIRQ\Wahab.Admin a real named admin; (4) source IP/client is embedded in the SSO logged in text, no source.ip field. All observed live on 2026-08-19.</Item>
+  </Limitations>
+</Playbook>

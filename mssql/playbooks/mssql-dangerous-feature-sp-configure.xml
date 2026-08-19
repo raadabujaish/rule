@@ -1,0 +1,354 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<Playbook xmlns="https://soc.example/playbooks" id="PB-mssql-dangerous-feature-sp-configure" name="MS SQL — Dangerous Feature Enabled via sp_configure - SOC Playbook" version="3.0" status="Validated" classification="TLP:AMBER">
+  <Metadata>
+    <Owner>NBI SOC / Detection Engineering</Owner>
+    <LastUpdated>2026-08-19</LastUpdated>
+    <Severity default="High">High</Severity>
+    <Confidence default="Medium">Medium</Confidence>
+    <Category>Execution</Category>
+    <MitreAttack>
+      <Technique id="T1505.001"/>
+      <Technique id="T1505"/>
+      <Technique id="T1059.003"/>
+      <Technique id="T1059"/>
+      <Technique id="T1562.001"/>
+      <Technique id="T1562"/>
+      <Tactic id="TA0002"/>
+    </MitreAttack>
+    <References>
+      <Reference title="MITRE ATT&amp;CK - Server Software Component: SQL Stored Procedures (T1505.001)" url="https://attack.mitre.org/techniques/T1505/001/"/>
+      <Reference title="MITRE ATT&amp;CK - Command and Scripting Interpreter: Windows Command Shell (T1059.003)" url="https://attack.mitre.org/techniques/T1059/003/"/>
+      <Reference title="MITRE ATT&amp;CK - Impair Defenses: Disable or Modify Tools (T1562.001)" url="https://attack.mitre.org/techniques/T1562/001/"/>
+      <Reference title="MITRE ATT&amp;CK - Execution tactic (TA0002)" url="https://attack.mitre.org/tactics/TA0002/"/>
+      <Reference title="Microsoft Learn - sp_configure (Transact-SQL)" url="https://learn.microsoft.com/en-us/sql/relational-databases/system-stored-procedures/sp-configure-transact-sql"/>
+      <Reference title="Microsoft Learn - xp_cmdshell server configuration option" url="https://learn.microsoft.com/en-us/sql/database-engine/configure-windows/xp-cmdshell-server-configuration-option"/>
+      <Reference title="Microsoft Learn - Ole Automation Procedures server configuration option" url="https://learn.microsoft.com/en-us/sql/database-engine/configure-windows/ole-automation-procedures-server-configuration-option"/>
+      <Reference title="Microsoft Learn - sys.configurations (Transact-SQL)" url="https://learn.microsoft.com/en-us/sql/relational-databases/system-catalog-views/sys-configurations-transact-sql"/>
+      <Reference title="NetSPI / PowerUpSQL - xp_cmdshell and SQL Server attack surface" url="https://www.netspi.com/blog/technical-blog/network-penetration-testing/establishing-registry-persistence-via-sql-server-powerupsql/"/>
+      <Reference title="Elastic - Microsoft SQL Server integration (audit logs)" url="https://docs.elastic.co/integrations/microsoft_sqlserver"/>
+    </References>
+  </Metadata>
+  <AlertContext>
+    <RuleName>MS SQL — Dangerous Feature Enabled via sp_configure</RuleName>
+    <RuleId>nbi-sql-configure-dangerous</RuleId>
+    <RuleType>query (custom NBI rule)</RuleType>
+    <Index>logs-microsoft_sqlserver.audit-*</Index>
+    <TriggerLogic>The deployed rule is an Elastic query-type rule over the SQL Server audit stream. Its detection logic as a one-line Kibana KQL filter (use it for fast pivoting in Discover / Timeline):
+
+
+
+Plain English: an audited statement that both calls sp_configure and names one of the five dangerous options. Each option, once enabled and committed with RECONFIGURE, opens a distinct high-risk surface:
+
+- xp_cmdshell - runs arbitrary OS shell commands as the SQL Server service account. The most direct database-to-OS pivot.
+- Ole Automation Procedures (sp_OACreate/sp_OAMethod) - instantiate COM objects in-engine (file, shell, network).
+- clr enabled - allows loading .NET CLR assemblies (managed/OS code) - see the companion CLR-assembly playbook.
+- external scripts enabled - runs R/Python via sp_execute_external_script.
+- Ad Hoc Distributed Queries - enables OPENROWSET/OPENDATASOURCE ad-hoc file/remote access - see the companion OPENROWSET/BULK playbook.
+
+Because these are server options that require ALTER SETTINGS/CONTROL SERVER, an application login enabling one is intrinsically anomalous.</TriggerLogic>
+    <KeyAlertFields>sqlserver.audit.session_server_principal_name, sqlserver.audit.server_principal_name, sqlserver.audit.statement, sqlserver.audit.client_ip, sqlserver.audit.database_name, sqlserver.audit.application_name, sqlserver.audit.host_name, host.name, sqlserver.audit.action_id, sqlserver.audit.class_type, event.action, sys.configurations</KeyAlertFields>
+  </AlertContext>
+  <Inputs>
+    <Input name="$principal"/>
+    <Input name="$client_ip"/>
+  </Inputs>
+  <ExecutiveSummary>
+    <Overview>This playbook drives triage and investigation of the MS SQL - Dangerous Feature Enabled via sp_configure detection on NBI's Elastic Security deployment. The rule fires when an audited statement contains sp_configure together with one of the high-risk server options - xp_cmdshell, Ole Automation, clr enabled, external scripts, or Ad Hoc Distributed Queries. sp_configure changes a *server-level* option; each of these is off by default and, once on, unlocks a powerful capability that is rarely part of normal operations.
+
+Enabling one of these options is the setup half of an attack - the payoff is *using* the feature immediately afterward. The analyst's job is to decide whether the enablement is an authorised administrative change (false_positive) or attacker attack-surface enablement (true_positive), and to classify as true_positive, false_positive (authorised change OR positively-proven-blocked attempt), misconfiguration, or needs_escalation. The decision is driven by which feature was turned on, which principal did it, from which client, and - decisively - whether the feature was then used.</Overview>
+    <BusinessImpact>An alert means that on a SQL Server audited into logs-microsoft_sqlserver.audit-*, a session under $principal from $client_ip used sp_configure to turn on one of the dangerous options. That converts a database server into a code-execution or data-egress platform. On banking infrastructure this is a direct pre-cursor to OS compromise, data theft, and lateral movement from the database tier.
+
+Enablement alone is meaningful (the surface is now open), but the incident severity turns on use: sp_configure 'xp_cmdshell', 1; RECONFIGURE; followed by an actual xp_cmdshell '...' invocation is the enable-then-run pattern and a strong true_positive. Conversely, an enable that is reverted in the same maintenance window and never used is more consistent with a controlled change - but never assumed benign. The investigative question is: which surface, by whom, from where, and was it then exercised.</BusinessImpact>
+  </ExecutiveSummary>
+  <Investigation>
+    <Goal>Decide true_positive / false_positive / misconfiguration / needs_escalation for MS SQL — Dangerous Feature Enabled via sp_configure.</Goal>
+    <Workflow>
+      <Step order="1" name="Recover which feature was enabled and how">
+        <Purpose>Recover which feature was enabled and how</Purpose>
+        <Query platform="Elastic" language="ES|QL" id="Q-01">
+          <![CDATA[
+FROM logs-microsoft_sqlserver.audit-*
+| WHERE sqlserver.audit.session_server_principal_name == "$principal"
+    AND sqlserver.audit.statement LIKE "*sp_configure*"
+    AND (sqlserver.audit.statement LIKE "*xp_cmdshell*" OR sqlserver.audit.statement LIKE "*Ole Automation*" OR sqlserver.audit.statement LIKE "*clr enabled*" OR sqlserver.audit.statement LIKE "*external scripts*" OR sqlserver.audit.statement LIKE "*Ad Hoc Distributed Queries*")
+    AND @timestamp >= NOW() - 2 hours
+| STATS execs = COUNT(*), statements = VALUES(sqlserver.audit.statement)
+    BY sqlserver.audit.client_ip, sqlserver.audit.database_name, host.name
+| SORT execs DESC
+| LIMIT 10
+]]>
+        </Query>
+      </Step>
+      <Step order="2" name="Check whether the enabled feature was then used">
+        <Purpose>Check whether the enabled feature was then used</Purpose>
+        <Query platform="Elastic" language="ES|QL" id="Q-02">
+          <![CDATA[
+FROM logs-microsoft_sqlserver.audit-*
+| WHERE sqlserver.audit.session_server_principal_name == "$principal"
+    AND @timestamp >= NOW() - 2 hours
+| EVAL used = CASE((sqlserver.audit.statement LIKE "*xp_cmdshell*" OR sqlserver.audit.statement LIKE "*sp_OACreate*" OR sqlserver.audit.statement LIKE "*sp_oacreate*" OR sqlserver.audit.statement LIKE "*OPENROWSET*" OR sqlserver.audit.statement LIKE "*CREATE ASSEMBLY*" OR sqlserver.audit.statement LIKE "*sp_execute_external_script*") AND NOT sqlserver.audit.statement LIKE "*sp_configure*", 1, 0),
+       reconfigure = CASE(sqlserver.audit.statement LIKE "*RECONFIGURE*", 1, 0)
+| STATS total = COUNT(*), feature_used = SUM(used), reconfigures = SUM(reconfigure), clients = COUNT_DISTINCT(sqlserver.audit.client_ip)
+    BY sqlserver.audit.database_name
+| SORT feature_used DESC
+| LIMIT 10
+]]>
+        </Query>
+      </Step>
+      <Step order="3" name="Entity pivoting">
+        <Purpose>Entity pivoting</Purpose>
+        <Query platform="Elastic" language="ES|QL" id="Q-03">
+          <![CDATA[
+FROM logs-microsoft_sqlserver.audit-*
+| WHERE sqlserver.audit.session_server_principal_name == "$principal"
+    AND @timestamp >= NOW() - 2 hours
+| STATS events = COUNT(*), dbs = COUNT_DISTINCT(sqlserver.audit.database_name)
+    BY sqlserver.audit.client_ip, sqlserver.audit.host_name, host.name, sqlserver.audit.application_name
+| SORT events DESC
+| LIMIT 20
+]]>
+        </Query>
+      </Step>
+      <Step order="4" name="Process investigation">
+        <Purpose>Process investigation</Purpose>
+        <Query platform="Elastic" language="ES|QL" id="Q-04">
+          <![CDATA[
+FROM logs-microsoft_sqlserver.audit-*
+| WHERE sqlserver.audit.session_server_principal_name == "$principal"
+    AND @timestamp >= NOW() - 2 hours
+| STATS events = COUNT(*), clients = COUNT_DISTINCT(sqlserver.audit.client_ip)
+    BY sqlserver.audit.application_name
+| SORT events DESC
+| LIMIT 15
+]]>
+        </Query>
+      </Step>
+      <Step order="5" name="User investigation">
+        <Purpose>User investigation</Purpose>
+        <Query platform="Elastic" language="ES|QL" id="Q-05">
+          <![CDATA[
+FROM logs-microsoft_sqlserver.audit-*
+| WHERE sqlserver.audit.session_server_principal_name == "$principal"
+    AND @timestamp >= NOW() - 2 hours
+| STATS events = COUNT(*), clients = COUNT_DISTINCT(sqlserver.audit.client_ip)
+    BY host.name, sqlserver.audit.database_name
+| SORT events DESC
+| LIMIT 20
+]]>
+        </Query>
+      </Step>
+      <Step order="6" name="Host investigation">
+        <Purpose>Host investigation</Purpose>
+        <Query platform="Elastic" language="ES|QL" id="Q-06">
+          <![CDATA[
+FROM logs-microsoft_sqlserver.audit-*
+| WHERE host.name == "nim-kta-dbv01"
+    AND @timestamp >= NOW() - 1 hours
+| STATS events = COUNT(*), clients = COUNT_DISTINCT(sqlserver.audit.client_ip)
+    BY sqlserver.audit.session_server_principal_name, sqlserver.audit.database_name
+| SORT events DESC
+| LIMIT 20
+]]>
+        </Query>
+      </Step>
+      <Step order="7" name="IP investigation">
+        <Purpose>IP investigation</Purpose>
+        <Query platform="Elastic" language="ES|QL" id="Q-07">
+          <![CDATA[
+FROM logs-microsoft_sqlserver.audit-*
+| WHERE sqlserver.audit.client_ip == "$client_ip"
+    AND @timestamp >= NOW() - 2 hours
+| STATS statements = COUNT(*), principals = COUNT_DISTINCT(sqlserver.audit.session_server_principal_name),
+        dbs = COUNT_DISTINCT(sqlserver.audit.database_name), apps = VALUES(sqlserver.audit.application_name)
+    BY sqlserver.audit.host_name, host.name
+| SORT statements DESC
+| LIMIT 10
+]]>
+        </Query>
+      </Step>
+      <Step order="8" name="Authentication investigation">
+        <Purpose>Authentication investigation</Purpose>
+        <Query platform="Elastic" language="ES|QL" id="Q-08">
+          <![CDATA[
+FROM logs-microsoft_sqlserver.audit-*
+| WHERE sqlserver.audit.session_server_principal_name == "$principal"
+    AND sqlserver.audit.class_type == "LOGIN"
+    AND @timestamp >= NOW() - 2 hours
+| STATS events = COUNT(*) BY sqlserver.audit.action_id, sqlserver.audit.client_ip, host.name
+| SORT events DESC
+| LIMIT 20
+]]>
+        </Query>
+      </Step>
+      <Step order="9" name="Timeline Reconstruction">
+        <Purpose>Timeline Reconstruction</Purpose>
+        <Query platform="Elastic" language="ES|QL" id="Q-09">
+          <![CDATA[
+FROM logs-microsoft_sqlserver.audit-*
+| WHERE sqlserver.audit.session_server_principal_name == "$principal"
+    AND sqlserver.audit.client_ip == "$client_ip"
+    AND @timestamp >= NOW() - 2 hours
+| KEEP @timestamp, sqlserver.audit.action_id, sqlserver.audit.database_name, sqlserver.audit.statement
+| SORT @timestamp ASC
+| LIMIT 200
+]]>
+        </Query>
+      </Step>
+      <Step order="10" name="Lateral movement validation">
+        <Purpose>Lateral movement validation</Purpose>
+        <Query platform="Elastic" language="ES|QL" id="Q-10">
+          <![CDATA[
+FROM logs-microsoft_sqlserver.audit-*
+| WHERE sqlserver.audit.session_server_principal_name == "$principal"
+    AND host.name != "nim-kta-dbv01"
+    AND @timestamp >= NOW() - 2 hours
+| STATS events = COUNT(*) BY host.name, sqlserver.audit.client_ip
+| SORT events DESC
+| LIMIT 20
+]]>
+        </Query>
+      </Step>
+      <Step order="11" name="Persistence validation">
+        <Purpose>Persistence validation</Purpose>
+        <Query platform="Elastic" language="ES|QL" id="Q-11">
+          <![CDATA[
+FROM logs-microsoft_sqlserver.audit-*
+| WHERE sqlserver.audit.session_server_principal_name == "$principal"
+    AND @timestamp >= NOW() - 2 hours
+| EVAL persist = CASE(
+    sqlserver.audit.statement LIKE "*sp_addlinkedserver*" OR sqlserver.audit.statement LIKE "*CREATE LOGIN*"
+    OR sqlserver.audit.statement LIKE "*ALTER SERVER ROLE*" OR sqlserver.audit.statement LIKE "*sp_addsrvrolemember*"
+    OR sqlserver.audit.statement LIKE "*EXTERNAL NAME*" OR sqlserver.audit.statement LIKE "*sp_add_trusted_assembly*", 1, 0)
+| STATS total = COUNT(*), persistence_ops = SUM(persist) BY sqlserver.audit.database_name
+| SORT persistence_ops DESC
+| LIMIT 15
+]]>
+        </Query>
+      </Step>
+      <Step order="12" name="Privilege escalation validation">
+        <Purpose>Privilege escalation validation</Purpose>
+        <Query platform="Elastic" language="ES|QL" id="Q-12">
+          <![CDATA[
+FROM logs-microsoft_sqlserver.audit-*
+| WHERE sqlserver.audit.session_server_principal_name == "$principal"
+    AND sqlserver.audit.statement LIKE "*sp_configure*"
+    AND @timestamp >= NOW() - 2 hours
+| STATS execs = COUNT(*), statements = VALUES(sqlserver.audit.statement)
+    BY sqlserver.audit.client_ip, host.name
+| SORT execs DESC
+| LIMIT 10
+]]>
+        </Query>
+      </Step>
+      <Step order="13" name="Defense evasion validation">
+        <Purpose>Defense evasion validation</Purpose>
+        <Query platform="Elastic" language="ES|QL" id="Q-13">
+          <![CDATA[
+FROM logs-microsoft_sqlserver.audit-*
+| WHERE sqlserver.audit.session_server_principal_name == "$principal"
+    AND @timestamp >= NOW() - 2 hours
+| EVAL tamper = CASE(
+    sqlserver.audit.statement LIKE "*ALTER SERVER AUDIT*" OR sqlserver.audit.statement LIKE "*DROP SERVER AUDIT*"
+    OR sqlserver.audit.statement LIKE "*sp_audit*" OR sqlserver.audit.statement LIKE "*ALTER DATABASE AUDIT*", 1, 0),
+       revert = CASE(sqlserver.audit.statement LIKE "*sp_configure*" AND (sqlserver.audit.statement LIKE "*, 0*" OR sqlserver.audit.statement LIKE "*',0*"), 1, 0)
+| STATS total = COUNT(*), tamper_ops = SUM(tamper), revert_ops = SUM(revert) BY sqlserver.audit.database_name
+| SORT tamper_ops DESC
+| LIMIT 15
+]]>
+        </Query>
+      </Step>
+      <Step order="14" name="Impact assessment">
+        <Purpose>Impact assessment</Purpose>
+        <Query platform="Elastic" language="ES|QL" id="Q-14">
+          <![CDATA[
+FROM logs-microsoft_sqlserver.audit-*
+| WHERE sqlserver.audit.session_server_principal_name == "$principal"
+    AND (sqlserver.audit.statement LIKE "*xp_cmdshell*" OR sqlserver.audit.statement LIKE "*sp_OACreate*" OR sqlserver.audit.statement LIKE "*OPENROWSET*" OR sqlserver.audit.statement LIKE "*CREATE ASSEMBLY*" OR sqlserver.audit.statement LIKE "*sp_execute_external_script*")
+    AND NOT sqlserver.audit.statement LIKE "*sp_configure*"
+    AND @timestamp >= NOW() - 2 hours
+| KEEP @timestamp, sqlserver.audit.client_ip, sqlserver.audit.database_name, sqlserver.audit.statement
+| SORT @timestamp DESC
+| LIMIT 25
+]]>
+        </Query>
+      </Step>
+      <Step order="15" name="Finalize verdict">
+        <DecisionTree>
+        </DecisionTree>
+      </Step>
+    </Workflow>
+  </Investigation>
+  <ClassificationGuidance>
+    <TruePositive>
+      <Definition></Definition>
+    </TruePositive>
+    <FalsePositive>
+      <Definition></Definition>
+      <Indicators>
+        <Item>Authorised DBA administration under change control - a legacy application or maintenance task genuinely requires xp_cmdshell or OLE Automation, and a DBA enables it from an admin host during an approved window. This is the primary benign cause; it must be matched to a change record, not assumed, and ideally the option is enabled-then-disabled around the task.</Item>
+        <Item>Vendor installers / product features that toggle clr enabled or another option during setup on a known deployment host.</Item>
+        <Item>Automated jobs/integrations that toggle an option as part of a recognised process (a baseline gap, not an attack - see misconfiguration).</Item>
+        <Item>Positively-blocked attempts - the sp_configure/RECONFIGURE was refused (permission denied, not committed). Recorded as a blocked attempt (documented, principal/client investigated), never "benign".</Item>
+        <Item>Enabling a dangerous surface is off-baseline. In the validation windows, feature_used = 0 and reconfigures = 0 for the sampled principals - the estate's SQL workload is application ORM/stored-procedure traffic (SELECT/UPDATE/EXECUTE via .Net SqlClient Data Provider and EntityFrameworkMUE), not server-option management. Any firing is therefore off-baseline and warrants review; there is no legitimate sp_configure-of-dangerous-options noise to tune out at the estate level.</Item>
+        <Item>The busiest SQL host is a banking-onboarding platform. nim-kta-dbv01 hosts the Kofax TotalAgility databases plus KYC/onboarding databases (KYC_Individual, Individual_Customer_Onboarding, OnboardingLookups, iLOP, CB_BPM_Business_Data). Turning on an OS-execution surface here is maximally dangerous; verify any "legacy feature needs it" claim against an actual configuration/change record and the current sys.configurations state.</Item>
+        <Item>app_admin is a shared application identity, in three case-variants (app_admin/App_admin/APP_ADMIN, same login, case-preserved in the audit). An application account running sp_configure at all is a strong anomaly - application ORMs do not change server options - and points toward injection driving configuration change. Do not treat the app account as trusted.</Item>
+        <Item>No historical NBI benign-true-positive is on record for this rule. There is no environment-specific allow-list. If a genuine authorised enablement is confirmed, scope any exception to the exact option + principal + client + database, never a blanket host/principal exception.</Item>
+      </Indicators>
+    </FalsePositive>
+    <Misconfiguration>
+      <Definition></Definition>
+    </Misconfiguration>
+    <NeedsEscalation>
+      <Definition></Definition>
+    </NeedsEscalation>
+  </ClassificationGuidance>
+  <ResponseActions>
+    <Phase name="Containment">
+      <Action>Revert the option (sp_configure '&lt;option&gt;', 0; RECONFIGURE;) via the authorised DEPLOY path to close the surface - but preserve the statements first.</Action>
+      <Action>If the feature was used, isolate the SQL host and treat the SQL Server service account as exposed - enabled xp_cmdshell/OLE/CLR ran with the service account's reach.</Action>
+      <Action>Disable the implicated login ($principal) or its source path; if it is the shared application account, coordinate with the app owner but prioritise closing active code execution.</Action>
+      <Action>Block egress from the SQL host if OS-execution surfaces were used (possible outbound download/C2).</Action>
+      <Action>Contain the origin. If section 15.6 shows an application-server origin, isolate that app server too - the injection point lives there.</Action>
+      <Action>All containment changes go through the authorised, human-approved DEPLOY path; investigation itself is read-only.</Action>
+    </Phase>
+    <Phase name="Eradication">
+      <Action>Confirm the option is reverted in sys.configurations and keep it disabled; remove any related surfaces the principal flipped (section 17.3).</Action>
+      <Action>Remove downstream persistence found in section 17.2 (linked servers, new logins/roles, CLR entry points, jobs).</Action>
+      <Action>Remove server-configuration rights from application logins - application principals should never hold ALTER SETTINGS/CONTROL SERVER; strip the excess permission.</Action>
+      <Action>Hunt for what the enabled capability did - OS commands, files, network from section 17.5 - and for the same behaviour across peer SQL hosts (section 15.4, section 17.1).</Action>
+      <Action>Fix the injection point if the origin is an application server (parameterise queries; remediate the SQL-injection vulnerability).</Action>
+    </Phase>
+    <Phase name="Recovery">
+      <Action>Rotate the SQL Server service account and the implicated login's credentials; rotate any secrets readable from the SQL host during the exposure window.</Action>
+      <Action>Restore from a known-good state if an OS-execution surface was used and host integrity is in doubt - validate affected databases (especially TotalAgility*/KYC) against backups.</Action>
+      <Action>Return the login/host to service only after section 22 closing criteria are met and monitoring confirms no new sp_configure of dangerous options.</Action>
+      <Action>Harden: keep xp_cmdshell/OLE/CLR/external-scripts/Ad-Hoc disabled, restrict ALTER SETTINGS/CONTROL SERVER, alert on sys.configurations changes, and least-privilege the SQL service account.</Action>
+    </Phase>
+  </ResponseActions>
+  <Escalation>
+    <Trigger>Escalate to SOC L2 / IR (and notify the customer / DBA + application owner) when any of the following hold:
+
+- The enabled feature was then used (feature_used &gt; 0, section 14.2 / section 17.5) - enable-then-run.
+- xp_cmdshell or Ole Automation was enabled on a production banking instance (direct OS execution surface).
+- The sp_configure change originates from an internet- or partner-facing application server (section 15.6, injection-shaped), or the principal is seen on additional SQL hosts (section 17.1).
+- Multiple dangerous options were flipped in one burst (section 17.3), or audit tampering / rapid revert appears (section 17.4).
+- The statement is truncated/unrecoverable and the committed state cannot be confirmed - escalate as needs_escalation with the gap named; empty != safe.</Trigger>
+    <To>SOC L2 / IR</To>
+  </Escalation>
+  <ClosureCriteria>
+    <Item>false_positive (authorised change): a change record positively matches a DBA principal from an admin host under change control to the exact $principal + $client_ip + option, and the feature was not abused (often enabled-then-disabled). Record the reference; scope any exception narrowly (option + principal + client + database), never a blanket host/principal exception.</Item>
+    <Item>false_positive (blocked attempt): the sp_configure/RECONFIGURE is positively proven to have failed (permission denied / not committed, confirmed in sys.configurations). Documented as a blocked attempt, principal/client still investigated - never "benign".</Item>
+    <Item>misconfiguration: a legitimate automated job/integration toggles the option as a recognised process with no downstream abuse, simply not yet baselined. Baseline the job; redesign to avoid enabling the surface, or scope and time-box the change.</Item>
+    <Item>true_positive: attack-surface enablement (typically followed by use) confirmed; option reverted, SQL host contained if the feature ran, service account rotated, downstream activity hunted, incident documented.</Item>
+    <Item>needs_escalation: handed to Tier 3 / DBA with the specific evidence gaps (truncated statement, unclear value, unconfirmed commit state, unattributable principal/client) documented.</Item>
+  </ClosureCriteria>
+  <Limitations>
+    <Item>Use is the verdict-maker. Enablement opens the surface; use (feature_used &gt; 0, section 14.2/section 17.5) is what turns this into an active incident. Always run the use-check, and read the actual payoff statements - but never treat feature_used = 0 as safe for an unexplained change; enable and use can be split across windows/sessions.</Item>
+    <Item>The audit shows intent, not committed state. sp_configure without RECONFIGURE, or reverted afterward, may not be live - confirm the effective run_value from sys.configurations on the host. Conversely, a reverted option after use is an evasion tell, not exoneration.</Item>
+    <Item>Keyed queries only - the index will circuit-break otherwise. logs-microsoft_sqlserver.audit-* runs at ~3M events/hour; every LIKE "*...*" here is safe only because a $principal/$client_ip/single-host.name filter precedes it. Never run an unkeyed estate-wide leading-wildcard scan.</Item>
+    <Item>server_principal_name is dead here - use session_server_principal_name. On this estate the former is null; the latter is authoritative (and case-preserves app_admin/App_admin/APP_ADMIN, one shared application identity).</Item>
+    <Item>Downstream OS activity is invisible to NBI. An enabled xp_cmdshell's resulting OS process runs on the SQL host, where NBI has no Sysmon/EDR - you see the xp_cmdshell *statement*, not the spawned process. Recover the command text from the audit (section 17.5) and pursue host-side artifacts during response.</Item>
+    <Item>This rule is the hub of a family; correlate the siblings. The enabled option maps directly to a companion NBI SQL analytic: xp_cmdshell execution, OLE Automation use, CLR assembly load, and OPENROWSET/BULK access. An alert here plus a sibling alert on the same host/principal is a near-certain true_positive; use them together.</Item>
+    <Item>KB-worthy (persist to NBI customer scope): (1) logs-microsoft_sqlserver.audit-* ~3.1M docs/hr - unkeyed leading-wildcard LIKE circuit-breaks; (2) audit shows sp_configure intent, not committed run_value - corroborate with sys.configurations; (3) sqlserver.audit.server_principal_name null estate-wide, session_server_principal_name authoritative; (4) nim-kta-dbv01 = Kofax TotalAgility onboarding/KYC platform; (5) feature_used/reconfigures = 0 in sampled windows (dangerous-surface enablement off-baseline). Observed live 2026-08-17.</Item>
+  </Limitations>
+</Playbook>

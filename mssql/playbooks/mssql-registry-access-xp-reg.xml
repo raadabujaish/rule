@@ -1,0 +1,365 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<Playbook xmlns="https://soc.example/playbooks" id="PB-mssql-registry-access-xp-reg" name="MS SQL — Windows Registry Access via xp_regread/xp_regwrite - SOC Playbook" version="3.0" status="Validated" classification="TLP:AMBER">
+  <Metadata>
+    <Owner>NBI SOC / Detection Engineering</Owner>
+    <LastUpdated>2026-08-19</LastUpdated>
+    <Severity default="Medium">Medium</Severity>
+    <Confidence default="Medium">Medium</Confidence>
+    <Category>Discovery</Category>
+    <MitreAttack>
+      <Technique id="T1012"/>
+      <Technique id="T1112"/>
+      <Technique id="T1552.002"/>
+      <Technique id="T1552"/>
+      <Tactic id="TA0007"/>
+    </MitreAttack>
+    <References>
+      <Reference title="MITRE ATT&amp;CK - Query Registry (T1012)" url="https://attack.mitre.org/techniques/T1012/"/>
+      <Reference title="MITRE ATT&amp;CK - Modify Registry (T1112)" url="https://attack.mitre.org/techniques/T1112/"/>
+      <Reference title="MITRE ATT&amp;CK - Unsecured Credentials: Credentials in Registry (T1552.002)" url="https://attack.mitre.org/techniques/T1552/002/"/>
+      <Reference title="MITRE ATT&amp;CK - Discovery tactic (TA0007)" url="https://attack.mitre.org/tactics/TA0007/"/>
+      <Reference title="Microsoft Learn - xp_regread / registry extended procedures (undocumented; behaviour reference)" url="https://learn.microsoft.com/en-us/sql/relational-databases/system-stored-procedures/system-stored-procedures-transact-sql"/>
+      <Reference title="Microsoft Learn - SQL Server Audit (Database Engine)" url="https://learn.microsoft.com/en-us/sql/relational-databases/security/auditing/sql-server-audit-database-engine"/>
+      <Reference title="MITRE ATT&amp;CK - Data Sources (Windows Registry / Command)" url="https://attack.mitre.org/datasources/"/>
+      <Reference title="NetSPI - SQL Server registry access via xp_regread (host recon through the database)" url="https://www.netspi.com/blog/technical-blog/network-penetration-testing/hunting-sql-server-with-powerupsql/"/>
+      <Reference title="Elastic Security - SQL Server audit integration (fields reference)" url="https://www.elastic.co/docs/reference/integrations/microsoft_sqlserver"/>
+    </References>
+  </Metadata>
+  <AlertContext>
+    <RuleName>MS SQL — Windows Registry Access via xp_regread/xp_regwrite</RuleName>
+    <RuleId>nbi-sql-registry-access</RuleId>
+    <RuleType>query</RuleType>
+    <Index>logs-microsoft_sqlserver.audit-*</Index>
+    <TriggerLogic>The deployed rule is an Elastic query rule over the SQL Server audit data stream. It fires when sqlserver.audit.statement names any registry extended procedure. One-line Kibana KQL detection filter (for fast pivoting in Discover / Timeline):
+
+
+
+Plain English: any audited SQL statement that names a registry extended procedure. The *regread* pattern matches both xp_regread and xp_instance_regread; *regwrite* matches xp_regwrite and xp_instance_regwrite; *regdeletevalue* matches the delete. The xp_instance_* variants automatically rewrite the key path to the running instance's hive - an evasion-relevant detail (section 17.4) because it obscures the literal target hive.
+
+Not all registry access is equal, and the rule deliberately fires on all of it so the analyst can separate the two populations:
+- Reads of standard SQL configuration keys (e.g. Setup\SQLPath, MSSQLServer\AuditLevel, BackupDirectory, service ObjectName, TCP/Named-Pipes Enabled, FileStream) = the normal monitoring/management footprint.
+- Writes/deletes, or reads of OS-security/secret keys (SNMP community strings, Lsa, Winlogon, VNC/credential keys) = the anomaly to hunt.</TriggerLogic>
+    <KeyAlertFields>sqlserver.audit.session_server_principal_name, sqlserver.audit.server_principal_name, sqlserver.audit.statement, sqlserver.audit.client_ip, sqlserver.audit.application_name, sqlserver.audit.host_name, sqlserver.audit.succeeded, sqlserver.audit.database_name, host.name</KeyAlertFields>
+  </AlertContext>
+  <Inputs>
+    <Input name="$principal"/>
+    <Input name="$client_ip"/>
+    <Input name="$host"/>
+  </Inputs>
+  <ExecutiveSummary>
+    <Overview>This playbook drives triage and investigation of the MS SQL - Windows Registry Access via xp_regread/xp_regwrite detection on NBI's Elastic Security deployment. The rule fires when an audited SQL statement calls one of the registry extended procedures - xp_regread, xp_regwrite, xp_instance_regread, xp_instance_regwrite, or xp_regdeletevalue. These reach the Windows registry of the database host from inside SQL Server: reads (regread) enumerate configuration and can harvest secrets; writes and deletes (regwrite / regdeletevalue) change host state - a route to persistence or host weakening - all executing with the SQL Server service account's privileges on a sensitive banking server.
+
+The analyst's job is to decide whether the access is benign monitoring/management reading standard SQL configuration keys (the dominant, documented pattern on this estate), or registry-based discovery, credential access, or tampering driven through the database - and to classify the alert as true_positive, false_positive, misconfiguration, or needs_escalation with evidence attached. The decision is driven by read-versus-write, which key was touched, and which principal/source did it.</Overview>
+    <BusinessImpact>An alert means: **on $host, principal $principal (from client $client_ip) executed a statement that read from or wrote to the Windows registry through an xp_reg* procedure. The registry operation happened; what remains to be established is (a) read vs write/delete - a write never occurs in normal monitoring and is a strong abuse signal; (b) which key - a standard configuration key vs an OS-security/secret key; and (c) whether the principal/source is a recognised monitoring/management context or an application/anomalous origin.
+
+On NBI, session_server_principal_name is the authoritative acting identity (server_principal_name is null estate-wide - section 8). The single most important field is sqlserver.audit.statement, which carries the procedure and the key path** - read it directly rather than relying only on keyword heuristics. sqlserver.audit.application_name and sqlserver.audit.host_name help attribute the source (a monitoring agent vs a data-provider app).</BusinessImpact>
+  </ExecutiveSummary>
+  <Investigation>
+    <Goal>Decide true_positive / false_positive / misconfiguration / needs_escalation for MS SQL — Windows Registry Access via xp_regread/xp_regwrite.</Goal>
+    <Workflow>
+      <Step order="1" name="Recover the registry operations and keys for this principal (confirm the alert)">
+        <Purpose>Recover the registry operations and keys for this principal (confirm the alert)</Purpose>
+        <Query platform="Elastic" language="ES|QL" id="Q-01">
+          <![CDATA[
+FROM logs-microsoft_sqlserver.audit-*
+| WHERE sqlserver.audit.session_server_principal_name == "$principal"
+    AND (sqlserver.audit.statement LIKE "*regread*" OR sqlserver.audit.statement LIKE "*regwrite*" OR sqlserver.audit.statement LIKE "*regdeletevalue*")
+    AND @timestamp >= NOW() - 2 hours
+| STATS execs = COUNT(*), statements = VALUES(sqlserver.audit.statement)
+    BY sqlserver.audit.client_ip, host.name
+| SORT execs DESC
+| LIMIT 10
+]]>
+        </Query>
+      </Step>
+      <Step order="2" name="Classify read-versus-write and key sensitivity (R8-INV-02)">
+        <Purpose>Classify read-versus-write and key sensitivity (R8-INV-02)</Purpose>
+        <Query platform="Elastic" language="ES|QL" id="Q-02">
+          <![CDATA[
+FROM logs-microsoft_sqlserver.audit-*
+| WHERE sqlserver.audit.session_server_principal_name == "$principal"
+    AND (sqlserver.audit.statement LIKE "*regread*" OR sqlserver.audit.statement LIKE "*regwrite*" OR sqlserver.audit.statement LIKE "*regdeletevalue*")
+    AND @timestamp >= NOW() - 2 hours
+| EVAL write_or_delete = CASE(sqlserver.audit.statement LIKE "*regwrite*" OR sqlserver.audit.statement LIKE "*regdeletevalue*", 1, 0),
+       sensitive_key = CASE(sqlserver.audit.statement LIKE "*SNMP*" OR sqlserver.audit.statement LIKE "*Lsa*" OR sqlserver.audit.statement LIKE "*Winlogon*" OR sqlserver.audit.statement LIKE "*VNC*", 1, 0)
+| STATS total = COUNT(*), write_delete_ops = SUM(write_or_delete), sensitive_key_ops = SUM(sensitive_key), clients = COUNT_DISTINCT(sqlserver.audit.client_ip)
+    BY host.name
+| SORT write_delete_ops DESC
+| LIMIT 10
+]]>
+        </Query>
+      </Step>
+      <Step order="3" name="Confirm on the alert host (all principals doing registry access)">
+        <Purpose>Confirm on the alert host (all principals doing registry access)</Purpose>
+        <Query platform="Elastic" language="ES|QL" id="Q-03">
+          <![CDATA[
+FROM logs-microsoft_sqlserver.audit-*
+| WHERE host.name == "$host" AND event.action == "execute-stored-proc-or-function"
+    AND (sqlserver.audit.statement LIKE "*regread*" OR sqlserver.audit.statement LIKE "*regwrite*" OR sqlserver.audit.statement LIKE "*regdeletevalue*")
+    AND @timestamp >= NOW() - 4 hours
+| STATS execs = COUNT(*), statements = VALUES(sqlserver.audit.statement)
+    BY sqlserver.audit.session_server_principal_name, sqlserver.audit.client_ip, sqlserver.audit.application_name
+| SORT execs DESC
+| LIMIT 20
+]]>
+        </Query>
+      </Step>
+      <Step order="4" name="Entity pivoting">
+        <Purpose>Entity pivoting</Purpose>
+        <Query platform="Elastic" language="ES|QL" id="Q-04">
+          <![CDATA[
+FROM logs-microsoft_sqlserver.audit-*
+| WHERE sqlserver.audit.session_server_principal_name == "$principal"
+    AND @timestamp >= NOW() - 4 hours
+| STATS statements = COUNT(*), first_seen = MIN(@timestamp), last_seen = MAX(@timestamp)
+    BY sqlserver.audit.client_ip, host.name, sqlserver.audit.application_name, event.action
+| SORT statements DESC
+| LIMIT 30
+]]>
+        </Query>
+      </Step>
+      <Step order="5" name="Process investigation">
+        <Purpose>Process investigation</Purpose>
+        <Query platform="Elastic" language="ES|QL" id="Q-05">
+          <![CDATA[
+FROM logs-microsoft_sqlserver.audit-*
+| WHERE sqlserver.audit.session_server_principal_name == "$principal"
+    AND @timestamp >= NOW() - 4 hours
+| STATS statements = COUNT(*), hosts = COUNT_DISTINCT(host.name)
+    BY sqlserver.audit.application_name, event.action
+| SORT statements DESC
+| LIMIT 20
+]]>
+        </Query>
+      </Step>
+      <Step order="6" name="User investigation">
+        <Purpose>User investigation</Purpose>
+        <Query platform="Elastic" language="ES|QL" id="Q-06">
+          <![CDATA[
+FROM logs-microsoft_sqlserver.audit-*
+| WHERE sqlserver.audit.session_server_principal_name == "$principal"
+    AND @timestamp >= NOW() - 4 hours
+| STATS statements = COUNT(*), hosts = COUNT_DISTINCT(host.name), clients = COUNT_DISTINCT(sqlserver.audit.client_ip)
+    BY sqlserver.audit.database_name
+| SORT statements DESC
+| LIMIT 25
+]]>
+        </Query>
+      </Step>
+      <Step order="7" name="Host investigation">
+        <Purpose>Host investigation</Purpose>
+        <Query platform="Elastic" language="ES|QL" id="Q-07">
+          <![CDATA[
+FROM logs-microsoft_sqlserver.audit-*
+| WHERE host.name == "$host"
+    AND @timestamp >= NOW() - 2 hours
+| STATS statements = COUNT(*), principals = COUNT_DISTINCT(sqlserver.audit.session_server_principal_name), clients = COUNT_DISTINCT(sqlserver.audit.client_ip)
+    BY event.action
+| SORT statements DESC
+| LIMIT 15
+]]>
+        </Query>
+      </Step>
+      <Step order="8" name="IP investigation">
+        <Purpose>IP investigation</Purpose>
+        <Query platform="Elastic" language="ES|QL" id="Q-08">
+          <![CDATA[
+FROM logs-microsoft_sqlserver.audit-*
+| WHERE sqlserver.audit.client_ip == "$client_ip"
+    AND @timestamp >= NOW() - 2 hours
+| STATS statements = COUNT(*), principals = COUNT_DISTINCT(sqlserver.audit.session_server_principal_name),
+        dbs = COUNT_DISTINCT(sqlserver.audit.database_name), apps = VALUES(sqlserver.audit.application_name)
+    BY sqlserver.audit.host_name, host.name
+| SORT statements DESC
+| LIMIT 10
+]]>
+        </Query>
+      </Step>
+      <Step order="9" name="Authentication investigation">
+        <Purpose>Authentication investigation</Purpose>
+        <Query platform="Elastic" language="ES|QL" id="Q-09">
+          <![CDATA[
+FROM logs-microsoft_sqlserver.audit-*
+| WHERE sqlserver.audit.client_ip == "$client_ip"
+    AND event.action IN ("login-succeeded", "login-failed")
+    AND @timestamp >= NOW() - 4 hours
+| STATS logins = COUNT(*), first_seen = MIN(@timestamp), last_seen = MAX(@timestamp)
+    BY event.action, sqlserver.audit.session_server_principal_name, user.name, host.name
+| SORT logins DESC
+| LIMIT 20
+]]>
+        </Query>
+      </Step>
+      <Step order="10" name="Timeline Reconstruction">
+        <Purpose>Timeline Reconstruction</Purpose>
+        <Query platform="Elastic" language="ES|QL" id="Q-10">
+          <![CDATA[
+FROM logs-microsoft_sqlserver.audit-*
+| WHERE sqlserver.audit.session_server_principal_name == "$principal"
+    AND host.name == "$host"
+    AND @timestamp >= NOW() - 4 hours
+| KEEP @timestamp, sqlserver.audit.client_ip, sqlserver.audit.database_name, event.action, sqlserver.audit.succeeded, sqlserver.audit.statement
+| SORT @timestamp ASC
+| LIMIT 200
+]]>
+        </Query>
+      </Step>
+      <Step order="11" name="Lateral movement validation">
+        <Purpose>Lateral movement validation</Purpose>
+        <Query platform="Elastic" language="ES|QL" id="Q-11">
+          <![CDATA[
+FROM logs-microsoft_sqlserver.audit-*
+| WHERE sqlserver.audit.session_server_principal_name == "$principal"
+    AND @timestamp >= NOW() - 4 hours
+    AND (host.name != "$host"
+         OR sqlserver.audit.statement LIKE "*addlinkedserver*"
+         OR sqlserver.audit.statement LIKE "*openquery*")
+| STATS statements = COUNT(*), actions = VALUES(event.action) BY host.name, sqlserver.audit.database_name
+| SORT statements DESC
+| LIMIT 25
+]]>
+        </Query>
+      </Step>
+      <Step order="12" name="Persistence validation">
+        <Purpose>Persistence validation</Purpose>
+        <Query platform="Elastic" language="ES|QL" id="Q-12">
+          <![CDATA[
+FROM logs-microsoft_sqlserver.audit-*
+| WHERE sqlserver.audit.session_server_principal_name == "$principal"
+    AND @timestamp >= NOW() - 4 hours
+    AND (sqlserver.audit.statement LIKE "*regwrite*" OR sqlserver.audit.statement LIKE "*regdeletevalue*"
+         OR sqlserver.audit.statement LIKE "*create login*" OR sqlserver.audit.statement LIKE "*sp_add_job*"
+         OR sqlserver.audit.statement LIKE "*create assembly*" OR sqlserver.audit.statement LIKE "*sp_addlinkedserver*")
+| STATS hits = COUNT(*), statements = VALUES(sqlserver.audit.statement) BY sqlserver.audit.database_name, event.action
+| SORT hits DESC
+| LIMIT 25
+]]>
+        </Query>
+      </Step>
+      <Step order="13" name="Privilege escalation validation">
+        <Purpose>Privilege escalation validation</Purpose>
+        <Query platform="Elastic" language="ES|QL" id="Q-13">
+          <![CDATA[
+FROM logs-microsoft_sqlserver.audit-*
+| WHERE sqlserver.audit.session_server_principal_name == "$principal"
+    AND @timestamp >= NOW() - 4 hours
+    AND (sqlserver.audit.statement LIKE "*ObjectName*" OR sqlserver.audit.statement LIKE "*Lsa*"
+         OR sqlserver.audit.statement LIKE "*sp_configure*" OR sqlserver.audit.statement LIKE "*sysadmin*"
+         OR sqlserver.audit.statement LIKE "*add member*")
+| STATS hits = COUNT(*), statements = VALUES(sqlserver.audit.statement) BY sqlserver.audit.database_name, sqlserver.audit.succeeded
+| SORT hits DESC
+| LIMIT 25
+]]>
+        </Query>
+      </Step>
+      <Step order="14" name="Defense evasion validation">
+        <Purpose>Defense evasion validation</Purpose>
+        <Query platform="Elastic" language="ES|QL" id="Q-14">
+          <![CDATA[
+FROM logs-microsoft_sqlserver.audit-*
+| WHERE sqlserver.audit.session_server_principal_name == "$principal"
+    AND @timestamp >= NOW() - 4 hours
+    AND (sqlserver.audit.statement LIKE "*instance_regread*" OR sqlserver.audit.statement LIKE "*server audit*"
+         OR sqlserver.audit.statement LIKE "*state = off*" OR sqlserver.audit.statement LIKE "*state=off*"
+         OR sqlserver.audit.statement LIKE "*regwrite*")
+| STATS hits = COUNT(*), statements = VALUES(sqlserver.audit.statement) BY event.action, sqlserver.audit.succeeded
+| SORT hits DESC
+| LIMIT 25
+]]>
+        </Query>
+      </Step>
+      <Step order="15" name="Impact assessment">
+        <Purpose>Impact assessment</Purpose>
+        <Query platform="Elastic" language="ES|QL" id="Q-15">
+          <![CDATA[
+FROM logs-microsoft_sqlserver.audit-*
+| WHERE sqlserver.audit.session_server_principal_name == "$principal"
+    AND @timestamp >= NOW() - 4 hours
+    AND (sqlserver.audit.statement LIKE "*regread*" OR sqlserver.audit.statement LIKE "*regwrite*"
+         OR sqlserver.audit.statement LIKE "*xp_dirtree*" OR sqlserver.audit.statement LIKE "*xp_cmdshell*"
+         OR sqlserver.audit.statement LIKE "*xp_fileexist*")
+| STATS operations = COUNT(*), hosts = COUNT_DISTINCT(host.name), dbs = COUNT_DISTINCT(sqlserver.audit.database_name)
+    BY event.action
+| SORT operations DESC
+| LIMIT 20
+]]>
+        </Query>
+      </Step>
+      <Step order="16" name="Finalize verdict">
+        <DecisionTree>
+        </DecisionTree>
+      </Step>
+    </Workflow>
+  </Investigation>
+  <ClassificationGuidance>
+    <TruePositive>
+      <Definition></Definition>
+    </TruePositive>
+    <FalsePositive>
+      <Definition></Definition>
+      <Indicators>
+        <Item>Monitoring tooling reading standard SQL configuration keys. On this estate a monitoring service login (a Zabbix-style monitoring account) periodically calls xp_instance_regread for standard keys. This is authorised, not benign-by-default: confirm the principal, the read-only nature, and the standard key set before classifying as false_positive.</Item>
+        <Item>SQL Server Management Objects (SMO) / SSMS. Management consoles and SMO-based automation read configuration keys (audit level, backup directory, service state) during normal administration - a recognised management workstation is the expected source.</Item>
+        <Item>A proven-blocked attempt. If xp_reg* is disabled or the call errored (permission denied; sqlserver.audit.succeeded = "False") with no access performed, that is a blocked attempt - documented as such, never "benign".</Item>
+        <Item>The benign registry pattern here is periodic monitoring/management, not continuous. Standard-config xp_instance_regread calls from monitoring/SMO are the documented legitimate footprint, but they did not appear in the current 4-hour window - the SQL audit right now is dominated by the App_admin/TotalAgility application workload, which does not call xp_reg*. So an xp_reg* call by that application principal would itself be off-baseline and anomalous.</Item>
+        <Item>Do not auto-trust the monitoring identity by name. Even the recognised monitoring principal must be confirmed to be read-only on standard keys on each alert; a compromised or spoofed monitoring login reading secret keys or writing is exactly the abuse this rule exists to catch. Scanner/monitoring identities are investigated identically to any other - never whitelisted.</Item>
+        <Item>Writes/deletes and secret-key reads have no NBI baseline. None were observed. There is no environment-specific allow-list for them; a single such hit is a strong signal. Scope any exception (for a proven-benign monitoring read pattern) to the exact principal + client + key set, never a blanket allow.</Item>
+      </Indicators>
+    </FalsePositive>
+    <Misconfiguration>
+      <Definition></Definition>
+    </Misconfiguration>
+    <NeedsEscalation>
+      <Definition></Definition>
+    </NeedsEscalation>
+  </ClassificationGuidance>
+  <ResponseActions>
+    <Phase name="Containment">
+      <Action>Treat any secret key read as exposed and prioritise rotation (section 20) - SQL Audit records the key path, not the value, so you cannot tell from Elastic whether the secret was captured; assume it was. This is the most time-sensitive action for a read-based true positive.</Action>
+      <Action>Revert registry writes/deletes discovered in section 14.2/section 17.2 and isolate $host from egress if a write occurred or a secret was read and onward use is plausible. Coordinate with the DBA/platform team on a business-critical banking instance.</Action>
+      <Action>Suspend/disable $principal pending investigation if it is implicated, and block $client_ip at the app/network tier if it is an injection pivot. If the implicated identity is a monitoring account, coordinate with the monitoring team (a compromised monitoring login is a real scenario).</Action>
+      <Action>Preserve host-side evidence first: the exact registry values and any written state, the SQL error log, and the current xp_reg* permission configuration - none of which is in Elastic. Capture before you revert.</Action>
+      <Action>Deploy/confirm changes only via the authorised human-approved DEPLOY path; investigation itself is read-only.</Action>
+    </Phase>
+    <Phase name="Eradication">
+      <Action>Rotate every secret whose key was read (SNMP community strings, VNC/credential material, service-account passwords stored in the registry), and treat those secrets as burned across the estate.</Action>
+      <Action>Undo registry modifications (Run-keys, service definitions, disabled-control values) and remove any persistence surfaced in section 17.2 (new logins, Agent jobs, CLR, linked servers).</Action>
+      <Action>Restrict xp_reg* to the minimum required principals (ideally only the monitoring/management identity that legitimately needs it), and least-privilege the SQL service account's host reach.</Action>
+      <Action>Remediate the initial-access vector if $client_ip is an application server - parameterise/patch the injection point and remove excess privilege from the application login.</Action>
+      <Action>Hunt the same pattern across peers - other DB hosts $principal touched (section 17.1) and hosts sharing the service account - for registry writes and secret-key reads.</Action>
+    </Phase>
+    <Phase name="Recovery">
+      <Action>Complete secret rotation for all exposed material and any credentials reachable from $host; if the SQL service account was referenced (ObjectName) or its secrets read, rotate it and review Kerberos/NTLM exposure.</Action>
+      <Action>Reset $principal's credentials and re-scope its permissions; remove xp_reg* rights from application logins.</Action>
+      <Action>Restore $host from known-good backup if registry tampering was extensive or persistence was planted; otherwise validate that reverts hold after reboot.</Action>
+      <Action>Return to service only after section 22 closing criteria are met and monitoring confirms no unexpected xp_reg* writes or secret-key reads recur.</Action>
+      <Action>Recommend hardening (section 23): baseline the legitimate monitoring/management registry-read pattern so only deviations (writes, secret keys, new principals) alert.</Action>
+    </Phase>
+  </ResponseActions>
+  <Escalation>
+    <Trigger>Escalate to Tier 3 / Incident Response (and notify the customer) when any of the following hold:
+
+- Any registry write/delete via xp_regwrite/xp_regdeletevalue (section 14.2/section 17.2) - monitoring never writes.
+- A read of an OS-security/secret key (SNMP/Lsa/Winlogon/credential/VNC) - registry-based credential access; rotate immediately.
+- xp_reg* access originating from an internet-facing application server with an application principal (section 15.6) - injection reaching registry access.
+- Registry access co-located with other host-reaching discovery/execution (xp_cmdshell, xp_dirtree, OLE) by the same principal (section 17.5).
+- Evidence is incomplete because the registry value / OS effect is not collected on NBI and the alert cannot be safely cleared - escalate as needs_escalation with the gap named.</Trigger>
+    <To>SOC L2 / IR</To>
+  </Escalation>
+  <ClosureCriteria>
+    <Item>false_positive (authorised monitoring/management): a recognised monitoring/management principal is positively confirmed reading only standard SQL configuration keys read-only, matched to this client + source + time. Record the identity and key set. Scope any exception narrowly; never a blanket allow, and never auto-trust the identity by name.</Item>
+    <Item>false_positive (blocked attempt): the audit proves the xp_reg* call was denied/disabled with no access; documented as a blocked attempt (never "benign"), with the source still investigated.</Item>
+    <Item>misconfiguration: a recognised legitimate tool uses xp_reg* read-only on standard keys and was simply not baselined; baseline it and raise the hardening action to restrict xp_reg*.</Item>
+    <Item>true_positive: a write/delete, a secret-key read, or anomalous-origin registry access confirmed; secrets rotated, writes reverted, host contained, scope established, and no residual persistence or recurrence.</Item>
+    <Item>needs_escalation: handed to Tier 3/IR with the specific gaps (unreadable key, unverifiable value, unattributable source) documented.</Item>
+  </ClosureCriteria>
+  <Limitations>
+    <Item>Read the key, not just the keyword. The section 14.2 write/sensitivity classification is a keyword heuristic; the real decision is the actual key path from section 14.1. A benign-looking read of Setup\SQLPath and a credential read differ only in the path.</Item>
+    <Item>Writes are the bright line. Monitoring and SMO read; they do not write. Any xp_regwrite/xp_regdeletevalue is a strong abuse signal regardless of which key - treat it as real until proven otherwise.</Item>
+    <Item>xp_instance_regread is an evasion aid. It rewrites the path to the running instance's hive, obscuring the literal target - do not assume the surface key is the whole story; read the resolved path host-side.</Item>
+    <Item>Key every statement LIKE on the principal (or narrow by event.action). On this ~2.5M-doc/hour index a host-only or client-only leading-wildcard LIKE circuit-breaks (verified live); session_server_principal_name == "$principal" narrows to a small set (section 14.3 shows the event.action == "execute-stored-proc-or-function" narrowing for host-scoped searches).</Item>
+    <Item>session_server_principal_name is authoritative; server_principal_name is null estate-wide. On login-failed, the attempted login is in user.name.</Item>
+    <Item>Elastic sees the operation, not the value. SQL Audit records that a key was read/written and which key, never the value returned or the OS-side result of a write - so a secret key touched must be treated as exposed and recovered host-side.</Item>
+    <Item>KB-worthy (persist to NBI customer scope): (1) benign xp_reg* = periodic monitoring/SMO reads of standard config keys - live-observed 2026-08-16, absent from the 2026-08-19 4h window (periodic); (2) writes/deletes and secret-key reads have no NBI baseline; (3) app principal App_admin never calls xp_reg* - so xp_reg* by an application principal is off-baseline; (4) same SQL-audit telemetry limits as the estate (no OS/process/file/value visibility). Observed live 2026-08-19.</Item>
+  </Limitations>
+</Playbook>

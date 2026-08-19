@@ -1,0 +1,53 @@
+{
+  "name": "Default Scanner User-Agent on External Surface",
+  "tags": [
+    "raad",
+    "redteam-2026-05",
+    "phase-1",
+    "recon",
+    "signature"
+  ],
+  "interval": "10m",
+  "enabled": true,
+  "description": "HTTP request hits NBI's external surface carrying a default\nuser-agent fingerprint of a well-known active-scanner tool — Nmap,\nMasscan, Amass, Nuclei, sqlmap, dirb, gobuster, ffuf, Burp Suite\ndefault. ScanWave's Variant A (Loud) uses these exact UAs by design;\nthis rule is the baseline-detection canary.",
+  "risk_score": 30,
+  "severity": "low",
+  "license": "",
+  "output_index": "",
+  "meta": {
+    "kibana_siem_app_url": ""
+  },
+  "investigation_fields": {
+    "field_names": [
+      "data.original_src",
+      "data.http_host",
+      "data.http_url",
+      "data.http_retcode"
+    ]
+  },
+  "author": [],
+  "false_positives": [
+    "Internal pentest team running a scan from inside-out (excluded by",
+    "Authorised continuous-attack-surface-management vendors —",
+    "Trusted Agent (ScanWave) executing Variant A — TP-Verified, no"
+  ],
+  "from": "now-15m",
+  "rule_id": "raad-03-scanner-user-agent",
+  "max_signals": 100,
+  "risk_score_mapping": [],
+  "severity_mapping": [],
+  "threat": [],
+  "to": "now",
+  "references": [],
+  "version": 1,
+  "exceptions_list": [],
+  "related_integrations": [],
+  "required_fields": [],
+  "setup": "",
+  "type": "query",
+  "language": "kuery",
+  "data_view_id": "logs-*",
+  "query": "@timestamp >= \"now-15m\" and\ndata.http_agent: (\n    *Nmap Scripting Engine* or\n    *sqlmap* or\n    *Nuclei* or\n    *ffuf* or\n    *gobuster* or\n    *dirb* or\n    *Masscan* or\n    *amass* or\n    *nikto* or\n    *Acunetix* or\n    \"*ZAP*\" or\n    *XSStrike* or\n    *Burp Suite* or\n    *Hydra* or\n    *Kerbrute* or\n    *MSOLSpray* or\n    *WPScan* \n) and not source.ip: (\"10.0.0.0/8\" or \"192.168.0.0/16\" or \"172.16.0.0/12\")",
+  "filters": [],
+  "actions": []
+}

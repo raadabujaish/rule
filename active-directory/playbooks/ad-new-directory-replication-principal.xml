@@ -1,0 +1,390 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<Playbook xmlns="https://soc.example/playbooks" id="PB-ad-new-directory-replication-principal" name="AD — New Directory Replication Principal - SOC Playbook" version="3.0" status="Validated" classification="TLP:AMBER">
+  <Metadata>
+    <Owner>NBI SOC / Detection Engineering</Owner>
+    <LastUpdated>2026-08-19</LastUpdated>
+    <Severity default="high">high</Severity>
+    <Confidence default="Medium">Medium</Confidence>
+    <Category>Credential Access</Category>
+    <MitreAttack>
+      <Technique id="T1003"/>
+      <Technique id="T1003.006"/>
+      <Tactic id="TA0006"/>
+    </MitreAttack>
+    <References>
+      <Reference title="MITRE ATT&amp;CK - OS Credential Dumping (T1003)" url="https://attack.mitre.org/techniques/T1003/"/>
+      <Reference title="MITRE ATT&amp;CK - OS Credential Dumping: DCSync (T1003.006)" url="https://attack.mitre.org/techniques/T1003/006/"/>
+      <Reference title="MITRE ATT&amp;CK - Credential Access tactic (TA0006)" url="https://attack.mitre.org/tactics/TA0006/"/>
+      <Reference title="Microsoft Learn - 4662: An operation was performed on an object" url="https://learn.microsoft.com/en-us/previous-versions/windows/it-pro/windows-10/security/threat-protection/auditing/event-4662"/>
+      <Reference title="Microsoft Learn - Control access rights (DS-Replication-Get-Changes / -All)" url="https://learn.microsoft.com/en-us/windows/win32/adschema/control-access-rights"/>
+      <Reference title="The Hacker Recipes - DCSync" url="https://www.thehacker.recipes/ad/movement/credentials/dumping/dcsync"/>
+      <Reference title='SpecterOps - "Mimikatz DCSync" (Sean Metcalf, ADSecurity)' url="https://adsecurity.org/?p=1729"/>
+      <Reference title="Elastic - Directory Services / DCSync detection guidance" url="https://www.elastic.co/guide/en/security/current/prebuilt-rules.html"/>
+      <Reference title="Microsoft - Azure AD Connect: accounts and permissions (MSOL_ account replication)" url="https://learn.microsoft.com/en-us/entra/identity/hybrid/connect/reference-connect-accounts-permissions"/>
+    </References>
+  </Metadata>
+  <AlertContext>
+    <RuleName>AD — New Directory Replication Principal</RuleName>
+    <RuleId>nbi-ad-t1003_006-new-replicator-identity</RuleId>
+    <RuleType>new_terms</RuleType>
+    <Index>logs-system.security*</Index>
+    <TriggerLogic>The deployed rule is a New Terms rule (novelty-gated) over 4662 replication events. Plain English: a directory principal whose SID has not previously been seen replicating performed an AD replication on a domain controller. The alert carries the new replicator (winlog.event_data.SubjectUserName + winlog.event_data.SubjectUserSid), the DC (host.name), and the specific right in winlog.event_data.Properties.
+
+One-line Kibana KQL detection filter (for fast pivoting in Discover / Timeline):
+
+
+
+Faithful ES|QL form of the deployed logic, shown with the standard 4-hour investigation window (the live rule applies New Terms novelty over its own history window; the predicate below is the behavioural anchor):
+
+
+
+Because the rule is novelty-gated on the SID, it is quiet by design: it will not re-fire for an established replicator (the two DCs and the Azure AD Connect sync account). When it fires, a *new* identity has begun replicating - the event that matters.</TriggerLogic>
+    <KeyAlertFields>host.name, source.ip, process.name</KeyAlertFields>
+  </AlertContext>
+  <Inputs>
+    <Input name="$subject_user"/>
+    <Input name="$subject_sid"/>
+    <Input name="$dc_host"/>
+    <Input name="$source_ip"/>
+  </Inputs>
+  <ExecutiveSummary>
+    <Overview>This playbook drives triage and investigation of the AD - New Directory Replication Principal detection on NBI's Elastic Security deployment. The rule is a New Terms analytic keyed on winlog.event_data.SubjectUserSid over Windows Security Event 4662 (*an operation was performed on a directory-service object*) whose Properties contain a DS-Replication control-access GUID:
+
+- 1131f6aa - DS-Replication-Get-Changes (metadata replication).
+- 1131f6ad - DS-Replication-Get-Changes-All (the secret right - reads password hashes; the DCSync right).
+- 89e95b76 - DS-Replication-Get-Changes-In-Filtered-Set.
+
+It fires the first time a given SID is seen replicating within the New Terms history window. A brand-new replication principal is the classic DCSync setup step: an attacker who has obtained sufficient rights grants replication to a controlled account (or uses a freshly privileged one) and then pulls directory secrets. The analyst decides which right was used (Get-Changes-All reads secrets; Get-Changes/Filtered are metadata) and whether the principal is a positively-authorised new sync/backup service or an unauthorised identity - classifying the alert as true_positive, false_positive, misconfiguration, or needs_escalation with evidence attached.</Overview>
+    <BusinessImpact>An alert means: on $dc_host, the principal $subject_user (SID $subject_sid) performed a directory replication for the first time (per the rule's history), using one of the DS-Replication control-access rights. The severity of that fact depends entirely on which right and who the principal is:
+
+- Get-Changes-All (1131f6ad) is the right that reads secret attributes (unicodePwd, ntPwdHistory, supplementalCredentials, Kerberos keys). A new principal exercising it is, functionally, DCSync in progress - every domain password hash is exposed to it.
+- Get-Changes (1131f6aa) / Get-Changes-In-Filtered-Set (89e95b76) are metadata rights. A new principal holding them has been *granted replication* but has not (yet) read secrets - a strong pre-compromise indicator that often precedes escalation to Get-Changes-All.
+
+The 4662 event is DC-side and carries no source.ip - it records the directory operation, not the operator's network origin or the tool used. The operator host must be recovered by correlating the principal's authentication (4624/4768) around the replication time (section 15.6). Legitimate replication principals are few and well-known: the domain controllers themselves (machine accoun</BusinessImpact>
+  </ExecutiveSummary>
+  <Investigation>
+    <Goal>Decide true_positive / false_positive / misconfiguration / needs_escalation for AD — New Directory Replication Principal.</Goal>
+    <Workflow>
+      <Step order="1" name="Detection Summary">
+        <Purpose>Detection Summary</Purpose>
+        <Query platform="Elastic" language="ES|QL" id="Q-01">
+          <![CDATA[
+FROM logs-system.security*
+| WHERE @timestamp >= NOW() - 4 hours
+    AND event.code == "4662"
+    AND (winlog.event_data.Properties LIKE "*1131f6aa*"
+         OR winlog.event_data.Properties LIKE "*1131f6ad*"
+         OR winlog.event_data.Properties LIKE "*89e95b76*")
+| KEEP @timestamp, host.name, winlog.event_data.SubjectUserName, winlog.event_data.SubjectUserSid, winlog.event_data.Properties
+| SORT @timestamp DESC
+| LIMIT 100
+]]>
+        </Query>
+      </Step>
+      <Step order="2" name="Reproduce the rule and read the right used (confirm on the DC)">
+        <Purpose>Reproduce the rule and read the right used (confirm on the DC)</Purpose>
+        <Query platform="Elastic" language="ES|QL" id="Q-02">
+          <![CDATA[
+FROM logs-system.security*
+| WHERE @timestamp >= NOW() - 4 hours
+    AND event.code == "4662"
+    AND winlog.event_data.SubjectUserName == "$subject_user"
+    AND (winlog.event_data.Properties LIKE "*1131f6aa*"
+         OR winlog.event_data.Properties LIKE "*1131f6ad*"
+         OR winlog.event_data.Properties LIKE "*89e95b76*")
+| STATS events = COUNT(*), secret_right = COUNT(CASE(winlog.event_data.Properties LIKE "*1131f6ad*", 1, null)) BY host.name
+| SORT events DESC
+| LIMIT 10
+]]>
+        </Query>
+      </Step>
+      <Step order="3" name="Confirm by SID (the rule's New Terms key)">
+        <Purpose>Confirm by SID (the rule's New Terms key)</Purpose>
+        <Query platform="Elastic" language="ES|QL" id="Q-03">
+          <![CDATA[
+FROM logs-system.security*
+| WHERE @timestamp >= NOW() - 4 hours
+    AND event.code == "4662"
+    AND winlog.event_data.SubjectUserSid == "$subject_sid"
+    AND (winlog.event_data.Properties LIKE "*1131f6ad*" OR winlog.event_data.Properties LIKE "*1131f6aa*")
+| KEEP @timestamp, host.name, winlog.event_data.SubjectUserName, winlog.event_data.ObjectName, winlog.event_data.AccessMask
+| SORT @timestamp DESC
+| LIMIT 50
+]]>
+        </Query>
+      </Step>
+      <Step order="4" name="Entity pivoting">
+        <Purpose>Entity pivoting</Purpose>
+        <Query platform="Elastic" language="ES|QL" id="Q-04">
+          <![CDATA[
+FROM logs-system.security*
+| WHERE @timestamp >= NOW() - 4 hours
+    AND event.code == "4662"
+    AND winlog.event_data.SubjectUserSid == "$subject_sid"
+| STATS events = COUNT(*),
+        get_changes = COUNT(CASE(winlog.event_data.Properties LIKE "*1131f6aa*", 1, null)),
+        get_changes_all = COUNT(CASE(winlog.event_data.Properties LIKE "*1131f6ad*", 1, null)),
+        filtered = COUNT(CASE(winlog.event_data.Properties LIKE "*89e95b76*", 1, null))
+    BY winlog.event_data.SubjectUserName, host.name
+| SORT events DESC
+| LIMIT 10
+]]>
+        </Query>
+      </Step>
+      <Step order="5" name="User investigation">
+        <Purpose>User investigation</Purpose>
+        <Query platform="Elastic" language="ES|QL" id="Q-05">
+          <![CDATA[
+FROM logs-system.security*
+| WHERE @timestamp >= NOW() - 4 hours
+    AND winlog.event_data.SubjectUserName == "$subject_user"
+| STATS events = COUNT(*) BY event.code
+| SORT events DESC
+| LIMIT 15
+]]>
+        </Query>
+      </Step>
+      <Step order="6" name="Host investigation">
+        <Purpose>Host investigation</Purpose>
+        <Query platform="Elastic" language="ES|QL" id="Q-06">
+          <![CDATA[
+FROM logs-system.security*
+| WHERE @timestamp >= NOW() - 4 hours
+    AND event.code == "4662"
+    AND host.name == "$dc_host"
+    AND (winlog.event_data.Properties LIKE "*1131f6aa*"
+         OR winlog.event_data.Properties LIKE "*1131f6ad*"
+         OR winlog.event_data.Properties LIKE "*89e95b76*")
+| STATS events = COUNT(*), secret_right = COUNT(CASE(winlog.event_data.Properties LIKE "*1131f6ad*", 1, null)) BY winlog.event_data.SubjectUserName, winlog.event_data.SubjectUserSid
+| SORT events DESC
+| LIMIT 25
+]]>
+        </Query>
+      </Step>
+      <Step order="7" name="IP investigation">
+        <Purpose>IP investigation</Purpose>
+        <Query platform="Elastic" language="ES|QL" id="Q-07">
+          <![CDATA[
+FROM logs-system.security*
+| WHERE @timestamp >= NOW() - 4 hours
+    AND event.code IN ("4624", "4768")
+    AND winlog.event_data.TargetUserName == "$subject_user"
+| STATS logons = COUNT(*) BY source.ip, host.name, winlog.event_data.LogonType, event.code
+| SORT logons DESC
+| LIMIT 20
+]]>
+        </Query>
+      </Step>
+      <Step order="8" name="IP investigation">
+        <Purpose>IP investigation</Purpose>
+        <Query platform="Elastic" language="ES|QL" id="Q-08">
+          <![CDATA[
+FROM logs-system.security*
+| WHERE @timestamp >= NOW() - 4 hours
+    AND event.code == "4624"
+    AND source.ip == "$source_ip"
+| STATS logons = COUNT(*) BY winlog.event_data.TargetUserName, host.name, winlog.event_data.LogonType
+| SORT logons DESC
+| LIMIT 25
+]]>
+        </Query>
+      </Step>
+      <Step order="9" name="File investigation">
+        <Purpose>File investigation</Purpose>
+        <Query platform="Elastic" language="ES|QL" id="Q-09">
+          <![CDATA[
+FROM logs-system.security*
+| WHERE @timestamp >= NOW() - 4 hours
+    AND event.code == "4662"
+    AND winlog.event_data.SubjectUserSid == "$subject_sid"
+    AND winlog.event_data.Properties LIKE "*1131f6ad*"
+| STATS reads = COUNT(*), first_seen = MIN(@timestamp), last_seen = MAX(@timestamp) BY winlog.event_data.ObjectName, winlog.event_data.AccessMask
+| SORT reads DESC
+| LIMIT 25
+]]>
+        </Query>
+      </Step>
+      <Step order="10" name="Authentication investigation">
+        <Purpose>Authentication investigation</Purpose>
+        <Query platform="Elastic" language="ES|QL" id="Q-10">
+          <![CDATA[
+FROM logs-system.security*
+| WHERE @timestamp >= NOW() - 4 hours
+    AND event.code IN ("4624", "4625", "4634", "4768", "4769")
+    AND winlog.event_data.TargetUserName == "$subject_user"
+| STATS events = COUNT(*), first_seen = MIN(@timestamp), last_seen = MAX(@timestamp) BY event.code, winlog.event_data.LogonType, source.ip
+| SORT events DESC
+| LIMIT 30
+]]>
+        </Query>
+      </Step>
+      <Step order="11" name="Timeline Reconstruction">
+        <Purpose>Timeline Reconstruction</Purpose>
+        <Query platform="Elastic" language="ES|QL" id="Q-11">
+          <![CDATA[
+FROM logs-system.security*
+| WHERE @timestamp >= NOW() - 4 hours
+    AND host.name == "$dc_host"
+    AND winlog.event_data.SubjectUserName == "$subject_user"
+    AND event.code IN ("4662", "5136", "4624", "4768", "4769")
+| KEEP @timestamp, event.code, winlog.event_data.SubjectUserName, winlog.event_data.ObjectName, winlog.event_data.Properties, winlog.event_data.AttributeLDAPDisplayName
+| SORT @timestamp ASC
+| LIMIT 200
+]]>
+        </Query>
+      </Step>
+      <Step order="12" name="Lateral movement validation">
+        <Purpose>Lateral movement validation</Purpose>
+        <Query platform="Elastic" language="ES|QL" id="Q-12">
+          <![CDATA[
+FROM logs-system.security*
+| WHERE @timestamp >= NOW() - 4 hours
+    AND event.code IN ("4624", "4648", "4769", "5140", "5145")
+    AND winlog.event_data.SubjectUserName == "$subject_user"
+    AND host.name != "$dc_host"
+| STATS events = COUNT(*) BY host.name, event.code
+| SORT events DESC
+| LIMIT 30
+]]>
+        </Query>
+      </Step>
+      <Step order="13" name="Persistence validation">
+        <Purpose>Persistence validation</Purpose>
+        <Query platform="Elastic" language="ES|QL" id="Q-13">
+          <![CDATA[
+FROM logs-system.security*
+| WHERE @timestamp >= NOW() - 4 hours
+    AND host.name == "$dc_host"
+    AND event.code == "5136"
+    AND winlog.event_data.AttributeLDAPDisplayName IN ("nTSecurityDescriptor", "member", "servicePrincipalName")
+| STATS writes = COUNT(*) BY winlog.event_data.AttributeLDAPDisplayName, winlog.event_data.SubjectUserName, winlog.event_data.ObjectDN
+| SORT writes DESC
+| LIMIT 30
+]]>
+        </Query>
+      </Step>
+      <Step order="14" name="Privilege escalation validation">
+        <Purpose>Privilege escalation validation</Purpose>
+        <Query platform="Elastic" language="ES|QL" id="Q-14">
+          <![CDATA[
+FROM logs-system.security*
+| WHERE @timestamp >= NOW() - 4 hours
+    AND event.code == "4672"
+    AND host.name == "$dc_host"
+| STATS special_priv_logons = COUNT(*) BY winlog.event_data.SubjectUserName
+| SORT special_priv_logons DESC
+| LIMIT 25
+]]>
+        </Query>
+      </Step>
+      <Step order="15" name="Defense evasion validation">
+        <Purpose>Defense evasion validation</Purpose>
+        <Query platform="Elastic" language="ES|QL" id="Q-15">
+          <![CDATA[
+FROM logs-system.security*
+| WHERE @timestamp >= NOW() - 4 hours
+    AND host.name == "$dc_host"
+    AND (
+        event.code == "1102"
+        OR event.code == "4739"
+        OR (event.code == "5136" AND winlog.event_data.AttributeLDAPDisplayName == "nTSecurityDescriptor")
+    )
+| STATS events = COUNT(*) BY event.code, winlog.event_data.SubjectUserName, winlog.event_data.AttributeLDAPDisplayName
+| SORT events DESC
+| LIMIT 25
+]]>
+        </Query>
+      </Step>
+      <Step order="16" name="Impact assessment">
+        <Purpose>Impact assessment</Purpose>
+        <Query platform="Elastic" language="ES|QL" id="Q-16">
+          <![CDATA[
+FROM logs-system.security*
+| WHERE @timestamp >= NOW() - 4 hours
+    AND event.code == "4662"
+    AND winlog.event_data.SubjectUserSid == "$subject_sid"
+| STATS total = COUNT(*),
+        secret_reads = COUNT(CASE(winlog.event_data.Properties LIKE "*1131f6ad*", 1, null)),
+        metadata_reads = COUNT(CASE(winlog.event_data.Properties LIKE "*1131f6aa*", 1, null)),
+        first_seen = MIN(@timestamp), last_seen = MAX(@timestamp) BY host.name
+| SORT secret_reads DESC
+| LIMIT 10
+]]>
+        </Query>
+      </Step>
+      <Step order="17" name="Finalize verdict">
+        <DecisionTree>
+        </DecisionTree>
+      </Step>
+    </Workflow>
+  </Investigation>
+  <ClassificationGuidance>
+    <TruePositive>
+      <Definition></Definition>
+    </TruePositive>
+    <FalsePositive>
+      <Definition></Definition>
+      <Indicators>
+        <Item>Azure AD Connect / MSOL sync. By design, Azure AD Connect's MSOL_* account replicates with Get-Changes-All to synchronise password hashes to Entra ID. This is the single most common benign source of secret-right replication and, if the account is newly deployed or re-provisioned, will legitimately trip a first-seen SID.</Item>
+        <Item>Newly deployed backup / DR / monitoring products that use directory replication (some backup and identity-monitoring suites request Get-Changes/Get-Changes-All). A new deployment introduces a new replicator SID.</Item>
+        <Item>A promoted or rebuilt Domain Controller whose machine account begins replicating under a SID not yet in the history window (DC-to-DC replication is legitimate and continuous).</Item>
+        <Item>A sanctioned service moved to a new account (credential rotation, MSA migration) - the *same product*, new SID.</Item>
+        <Item>MSOL_cb8d5eb8df87 is the authorised Azure AD Connect replicator. In the validation window it exercised Get-Changes-All 248 times on nim-dc-dbap01, authenticating consistently from 10.11.18.16 (LogonType 3) - the Azure AD Connect server - across both DCs. Its footprint is narrow (only 4662 + a trivial 5136), the textbook automated-sync profile. Secret-right replication *from this SID, from this origin* is the environment's expected benign pattern; the same right from any *other* new SID is the anomaly.</Item>
+        <Item>The two DCs replicate as machine accounts. NIM-DC2-DBAP$ / S-1-5-18 performing replication is normal DC-to-DC traffic. DC machine-account replication is not the target of this investigation.</Item>
+        <Item>A human admin performing metadata replication is the case to scrutinise. In the window, Mohammadd.admin (SID …-14461) performed 135 metadata replications (no secret right). A named human/admin account replicating - even metadata-only - does not fit the "sync service" profile and must be reconciled against tooling/change activity, and watched for escalation to Get-Changes-All.</Item>
+        <Item>source.ip is not on the 4662. Origin (validated 10.11.18.16 for the MSOL account) is recovered from the principal's 4624/4768. Treat origin as corroboration and always pair it with the SID.</Item>
+      </Indicators>
+    </FalsePositive>
+    <Misconfiguration>
+      <Definition></Definition>
+    </Misconfiguration>
+    <NeedsEscalation>
+      <Definition></Definition>
+    </NeedsEscalation>
+  </ClassificationGuidance>
+  <ResponseActions>
+    <Phase name="Containment">
+      <Action>Remove the unauthorised replication right from $subject_user / $subject_sid - strip DS-Replication-Get-Changes and DS-Replication-Get-Changes-All from the principal's grant on the domain object - to stop further secret extraction. Preserve the ACL state (section 17.2 output) as evidence first.</Action>
+      <Action>Disable / investigate the principal if it is not a sanctioned sync service, and isolate the operator host ($source_ip) if the origin is a workstation/jump host (section 15.6).</Action>
+      <Action>Treat confirmed Get-Changes-All by an unauthorised principal as domain-credential compromise - begin the DCSync response (section 19/section 20): plan krbtgt double-rotation and privileged-credential resets.</Action>
+      <Action>Preserve volatile evidence on the operator host (the DCSync tool, tickets/hashes in memory) - NBI does not capture the tool DC-side.</Action>
+      <Action>Deploy/confirm changes only via the authorised human-approved DEPLOY path; investigation itself is read-only.</Action>
+    </Phase>
+    <Phase name="Eradication">
+      <Action>Rotate krbtgt twice if Get-Changes-All was exercised by an unauthorised principal (secret reads confirmed in section 17.5) - every domain hash, including krbtgt, must be assumed exposed, invalidating any forged Golden Ticket.</Action>
+      <Action>Reset exposed credentials - Domain Admins, service accounts, and any account whose secrets were replicated; prioritise Tier-0.</Action>
+      <Action>Remove the replication grant and audit the domain object ACL for any other unauthorised DS-Replication-* ACEs; revert AdminSDHolder tampering if the grant path used it.</Action>
+      <Action>Remediate the initial-access / ACL-write vector that let the attacker grant replication in the first place, and hunt for the same setup on the other DC and across privileged accounts.</Action>
+    </Phase>
+    <Phase name="Recovery">
+      <Action>Complete the krbtgt double-rotation (two resets separated by the replication interval) and confirm replication health afterwards.</Action>
+      <Action>Convert sanctioned sync accounts to managed identities (gMSA) and pin them to their approved origin servers; add authorised replicator SIDs to the approved list with their origin.</Action>
+      <Action>Validate directory integrity - confirm no residual unauthorised replication ACEs remain and no new replicator SIDs appear.</Action>
+      <Action>Return accounts/services to production only after section 22 closing criteria are met and monitoring confirms no new-replicator recurrence.</Action>
+    </Phase>
+  </ResponseActions>
+  <Escalation>
+    <Trigger>Escalate to Tier 3 / Incident Response (and notify the customer) when any of the following hold:
+
+- The new principal exercised Get-Changes-All (1131f6ad, secret right - section 14.1/section 17.5) and is not a positively-authorised sync service - declare a DCSync / domain-credential-compromise incident and page IR immediately.
+- A 5136 nTSecurityDescriptor grant on the domain object is tied to the same actor (section 17.2), or the origin is a workstation/jump host (section 15.6), or the principal shows a broad privileged session (section 15.4/section 17.3).
+- Metadata-only replication by a new principal that cannot be tied to an approved change - escalate to the AD team for authorisation confirmation and watch for escalation to the secret right.
+- Evidence is incomplete because of NBI's telemetry gaps (the DCSync tool is not captured DC-side) and the alert cannot be safely cleared - esca</Trigger>
+    <To>SOC L2 / IR</To>
+  </Escalation>
+  <ClosureCriteria>
+    <Item>false_positive (authorised): the new replicator is a documented sync/backup/monitoring service operating within an approved change, authenticating from its sanctioned server (origin confirmed), with a narrow profile; its SID + origin are added to the approved-replicator list. Record the reference.</Item>
+    <Item>false_positive (blocked malicious attempt): an unauthorised grant/replication positively proven removed before secrets were read; documented as blocked-malicious, never "benign".</Item>
+    <Item>misconfiguration: a recognised sanctioned product reconfigured to run under a new/unexpected account without attacker involvement; run under the approved account and update the list.</Item>
+    <Item>true_positive: unauthorised Get-Changes-All confirmed; krbtgt rotated (twice), exposed credentials reset, the replication right removed, the operator host contained, scope established, incident documented.</Item>
+    <Item>needs_escalation: metadata-only or unconfirmed grant handed to Tier 3 / the AD team with the specific evidence gaps documented, under monitoring for escalation to the secret right.</Item>
+  </ClosureCriteria>
+  <Limitations>
+    <Item>The right decides everything. 1131f6ad (Get-Changes-All) = secrets read = DCSync = critical; 1131f6aa/89e95b76 = metadata only = suspicious grant not yet weaponised. section 14.1/section 15.1 split this in one query - read secret_right/get_changes_all first.</Item>
+    <Item>Novelty is on the SID, and that is the evasion. New Terms keys on winlog.event_data.SubjectUserSid, so an attacker reusing an already-seen replicator SID (e.g. compromising the MSOL account itself, or a DC machine account) will not trip this rule. Complement with an analytic on the Get-Changes-All right regardless of SID novelty, and one on the sanctioned sync SID authenticating from a new source.</Item>
+    <Item>Know your legitimate replicators cold. Validated on NBI: the authorised set is the two DC machine accounts (S-1-5-18 / NIM-DC2-DBAP$) and the Azure AD Connect account MSOL_cb8d5eb8df87 (SID …-18109) from 10.11.18.16 with a narrow 4662-only profile. Get-Changes-All from that SID/origin is expected; the same right from any other new SID is the alert that matters.</Item>
+    <Item>source.ip is on the logon, not the 4662. Recover origin via 4624/4768 (section 15.6); a fixed server supports authorised, a workstation/jump host supports operator-driven DCSync. Pair origin with the SID - never trust either alone.</Item>
+    <Item>No tool visibility DC-side. mimikatz/secretsdump/DSInternals run on the operator host, which NBI does not instrument - build the case on the DC-side rights + volume + the ACL grant, and recover the tool host-side. Empty != safe.</Item>
+    <Item>KB-worthy (persist to NBI customer scope): (1) authorised replicators on logs-system.security* = DC machine accounts + MSOL_cb8d5eb8df87 (…-18109) from 10.11.18.16, narrow 4662-only, ~248 Get-Changes-All/4h; (2) Mohammadd.admin (…-14461) seen doing metadata-only replication - reconcile as tooling; (3) 4662 carries Properties (control-access GUIDs), ObjectName, AccessMask but no source.ip/process.name. All observed live on 2026-08-17.</Item>
+  </Limitations>
+</Playbook>

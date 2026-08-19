@@ -1,0 +1,356 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<Playbook xmlns="https://soc.example/playbooks" id="PB-fortiweb-high-rate-vuln-scan" name="FortiWeb — High-Rate Web Vulnerability Scan / Fuzzing - SOC Playbook" version="3.0" status="Validated" classification="TLP:AMBER">
+  <Metadata>
+    <Owner>NBI SOC / Detection Engineering</Owner>
+    <LastUpdated>2026-08-19</LastUpdated>
+    <Severity default="Medium">Medium</Severity>
+    <Confidence default="Medium">Medium</Confidence>
+    <Category>Reconnaissance</Category>
+    <MitreAttack>
+      <Technique id="T1595.002"/>
+      <Technique id="T1595"/>
+      <Technique id="T1190"/>
+      <Tactic id="TA0043"/>
+      <Tactic id="TA0001"/>
+    </MitreAttack>
+    <References>
+      <Reference title="MITRE ATT&amp;CK - Active Scanning: Vulnerability Scanning (T1595.002)" url="https://attack.mitre.org/techniques/T1595/002/"/>
+      <Reference title="MITRE ATT&amp;CK - Exploit Public-Facing Application (T1190)" url="https://attack.mitre.org/techniques/T1190/"/>
+      <Reference title="MITRE ATT&amp;CK - Reconnaissance tactic (TA0043)" url="https://attack.mitre.org/tactics/TA0043/"/>
+      <Reference title="OWASP - Web Security Testing Guide, Fingerprinting &amp; Enumeration" url="https://owasp.org/www-project-web-security-testing-guide/"/>
+      <Reference title="OWASP Automated Threats - OAT-011 Scraping / OAT-014 Vulnerability Scanning" url="https://owasp.org/www-project-automated-threats-to-web-applications/"/>
+      <Reference title="Fortinet FortiWeb - Attack &amp; Traffic Log reference" url="https://docs.fortinet.com/document/fortiweb/latest/administration-guide"/>
+      <Reference title="Elastic - ES|QL reference (STATS, COUNT_DISTINCT, CASE, SPLIT, MV_FIRST)" url="https://www.elastic.co/guide/en/elasticsearch/reference/current/esql.html"/>
+      <Reference title="Elastic Security - detection rules and investigation guides overview" url="https://www.elastic.co/guide/en/security/current/es-overview.html"/>
+    </References>
+  </Metadata>
+  <AlertContext>
+    <RuleName>FortiWeb — High-Rate Web Vulnerability Scan / Fuzzing</RuleName>
+    <RuleId>raad-04-loud-web-vuln-scan</RuleId>
+    <RuleType>esql</RuleType>
+    <Index>logs-tcp.generic-*</Index>
+    <TriggerLogic>The deployed rule is an ES|QL analytic over a ~10-minute slice. In plain English it:
+
+1. Derives the real client IP - the first x-forwarded-for hop if present, else data.src - and drops RFC1918 / loopback / link-local addresses so NBI's own proxies are not mistaken for the scanner.
+2. Aggregates per client and requires a loud baseline: 300+ requests to 20+ distinct URLs with 100+ error responses in the window.
+3. Excludes pure bank-app clients (bank_app_ratio &gt;= 0.9 - a source that only touches the legitimate application surface).
+4. Fires when the source shows at least one scan signal: client-error ratio &gt;= 0.4, &gt;= 5 suspicious paths, a suspicious path that returned 2xx, &gt;= 10 distinct user-agents, &gt;= 3 HTTP methods, or &gt;= 60 requests/minute.
+
+One-line Kibana KQL pivot filter (Discover / Timeline; not the analytic itself):
+
+
+
+Live adaptation (NBI): FortiWeb data lives in logs-tcp.generic-* (not the deployed rule's broad logs-*); every query below is scoped there for safety and speed. The real-client derivation is genuine on this estate: x_forwarded_for is a queryable ES|QL column, 99.3% populated on traffic logs, and carries the true client behind the shared CDN/SNAT edge (see sec</TriggerLogic>
+    <KeyAlertFields>data.type, data.src, data.original_src, data.http_host, data.http_url, data.http_method, data.http_retcode, data.http_agent, data.http_refer, data.srccountry, data.attack_type, data.main_type</KeyAlertFields>
+  </AlertContext>
+  <Inputs>
+  </Inputs>
+  <ExecutiveSummary>
+    <Overview>This playbook drives triage and investigation of the FortiWeb - High-Rate Web Vulnerability Scan / Fuzzing detection on NBI's Elastic Security deployment. The rule fires when a single client produces the footprint of automated web scanning/fuzzing against an NBI banking application behind FortiWeb: a high request rate spread across many distinct URLs with a high error ratio, plus at least one corroborating scan signal.
+
+Scanning is reconnaissance, not compromise. The analyst's job is to decide, quickly and defensibly, whether the source is (a) an authorised tester (false_positive - documented), (b) a hostile scanner whose probes were rejected (false_positive - blocked-malicious, never "benign"), (c) an actor whose scan located and then reached a live/sensitive endpoint (true_positive - progression toward exploitation), (d) a benign misbehaving client (misconfiguration), or (e) unproven (needs_escalation). The discriminators are *what returned success (2xx) versus what was blocked (4xx)*, *whether recognisable scanner tooling or exploit payloads appear*, and *whether the source moved from broad probing to sustained interaction with a specific endpoint*.</Overview>
+    <BusinessImpact>An alert means: from $client_ip, one client generated a high-rate, high-error, many-URL request pattern against a FortiWeb-fronted NBI banking host within a short window - the observable signature of automated vulnerability scanning or fuzzing (dirbusting, template-based scanners such as nuclei, SQL/XSS fuzzers, or a bespoke script).
+
+It does not by itself mean the application was breached. Most scanning is answered by errors (404/403/400) and blocked. The alert is a *prompt to determine outcome*: did the scan merely rattle the front door (blocked recon), or did it find an unlocked one (a 2xx to a sensitive/unexpected path, or an exploit payload that reached live functionality)? Because the source is fronted by a shared CDN/SNAT pool on this estate, the true origin is the x_forwarded_for client, not the edge data.src - de-proxy before attributing.</BusinessImpact>
+  </ExecutiveSummary>
+  <Investigation>
+    <Goal>Decide true_positive / false_positive / misconfiguration / needs_escalation for FortiWeb — High-Rate Web Vulnerability Scan / Fuzzing.</Goal>
+    <Workflow>
+      <Step order="1" name="Scan profile - volume, breadth, error ratio, target (confirm the alert)">
+        <Purpose>Scan profile - volume, breadth, error ratio, target (confirm the alert)</Purpose>
+        <Query platform="Elastic" language="ES|QL" id="Q-01">
+          <![CDATA[
+FROM logs-tcp.generic-*
+| WHERE @timestamp >= NOW() - 1 hours
+    AND (data.src == "$client_ip" OR x_forwarded_for LIKE "*$client_ip*")
+    AND data.http_method IS NOT NULL
+| EVAL rc = TO_INTEGER(data.http_retcode)
+| STATS hits = COUNT(*), urls = COUNT_DISTINCT(data.http_url),
+        err4xx = COUNT(CASE(rc >= 400 AND rc < 500, 1, null)),
+        ok2xx = COUNT(CASE(rc >= 200 AND rc < 300, 1, null))
+    BY data.http_host
+| SORT hits DESC
+| LIMIT 10
+]]>
+        </Query>
+      </Step>
+      <Step order="2" name="What responded successfully (the exposure)">
+        <Purpose>What responded successfully (the exposure)</Purpose>
+        <Query platform="Elastic" language="ES|QL" id="Q-02">
+          <![CDATA[
+FROM logs-tcp.generic-*
+| WHERE @timestamp >= NOW() - 1 hours
+    AND (data.src == "$client_ip" OR x_forwarded_for LIKE "*$client_ip*")
+    AND data.http_method IS NOT NULL
+    AND TO_INTEGER(data.http_retcode) >= 200 AND TO_INTEGER(data.http_retcode) < 300
+| STATS hits = COUNT(*) BY data.http_host, data.http_url
+| SORT hits DESC
+| LIMIT 20
+]]>
+        </Query>
+      </Step>
+      <Step order="3" name="Entity pivoting">
+        <Purpose>Entity pivoting</Purpose>
+        <Query platform="Elastic" language="ES|QL" id="Q-03">
+          <![CDATA[
+FROM logs-tcp.generic-*
+| WHERE @timestamp >= NOW() - 1 hours
+    AND (data.src == "$client_ip" OR x_forwarded_for LIKE "*$client_ip*")
+    AND data.http_method IS NOT NULL
+| EVAL real_client = COALESCE(TRIM(MV_FIRST(SPLIT(x_forwarded_for, ","))), data.src)
+| KEEP @timestamp, data.src, real_client, data.http_host, data.http_method, data.http_url, data.http_retcode, data.http_agent, data.srccountry
+| SORT @timestamp DESC
+| LIMIT 50
+]]>
+        </Query>
+      </Step>
+      <Step order="4" name="Process investigation">
+        <Purpose>Process investigation</Purpose>
+        <Query platform="Elastic" language="ES|QL" id="Q-04">
+          <![CDATA[
+FROM logs-tcp.generic-*
+| WHERE @timestamp >= NOW() - 1 hours
+    AND (data.src == "$client_ip" OR x_forwarded_for LIKE "*$client_ip*")
+    AND data.http_method IS NOT NULL
+| STATS hits = COUNT(*), urls = COUNT_DISTINCT(data.http_url), methods = COUNT_DISTINCT(data.http_method)
+    BY data.http_agent
+| SORT hits DESC
+| LIMIT 10
+]]>
+        </Query>
+      </Step>
+      <Step order="5" name="Host investigation">
+        <Purpose>Host investigation</Purpose>
+        <Query platform="Elastic" language="ES|QL" id="Q-05">
+          <![CDATA[
+FROM logs-tcp.generic-*
+| WHERE @timestamp >= NOW() - 1 hours
+    AND (data.src == "$client_ip" OR x_forwarded_for LIKE "*$client_ip*")
+    AND data.http_method IS NOT NULL
+| EVAL rc = TO_INTEGER(data.http_retcode)
+| STATS hits = COUNT(*), urls = COUNT_DISTINCT(data.http_url),
+        ok2xx = COUNT(CASE(rc >= 200 AND rc < 300, 1, null)),
+        err4xx = COUNT(CASE(rc >= 400 AND rc < 500, 1, null))
+    BY data.http_host, syslog_location
+| SORT hits DESC
+| LIMIT 15
+]]>
+        </Query>
+      </Step>
+      <Step order="6" name="IP investigation">
+        <Purpose>IP investigation</Purpose>
+        <Query platform="Elastic" language="ES|QL" id="Q-06">
+          <![CDATA[
+FROM logs-tcp.generic-*
+| WHERE @timestamp >= NOW() - 1 hours
+    AND data.src == "$client_ip"
+    AND data.http_method IS NOT NULL
+| EVAL real_client = COALESCE(TRIM(MV_FIRST(SPLIT(x_forwarded_for, ","))), data.src),
+       rc = TO_INTEGER(data.http_retcode)
+| STATS hits = COUNT(*), urls = COUNT_DISTINCT(data.http_url),
+        err4xx = COUNT(CASE(rc >= 400 AND rc < 500, 1, null))
+    BY real_client
+| SORT hits DESC
+| LIMIT 20
+]]>
+        </Query>
+      </Step>
+      <Step order="7" name="IP investigation">
+        <Purpose>IP investigation</Purpose>
+        <Query platform="Elastic" language="ES|QL" id="Q-07">
+          <![CDATA[
+FROM logs-tcp.generic-*
+| WHERE @timestamp >= NOW() - 1 hours
+    AND x_forwarded_for LIKE "*$client_ip*"
+    AND data.http_method IS NOT NULL
+| EVAL rc = TO_INTEGER(data.http_retcode)
+| STATS hits = COUNT(*), urls = COUNT_DISTINCT(data.http_url), agents = COUNT_DISTINCT(data.http_agent)
+    BY data.http_host, data.srccountry
+| SORT hits DESC
+| LIMIT 20
+]]>
+        </Query>
+      </Step>
+      <Step order="8" name="Domain investigation">
+        <Purpose>Domain investigation</Purpose>
+        <Query platform="Elastic" language="ES|QL" id="Q-08">
+          <![CDATA[
+FROM logs-tcp.generic-*
+| WHERE @timestamp >= NOW() - 1 hours
+    AND (data.src == "$client_ip" OR x_forwarded_for LIKE "*$client_ip*")
+    AND data.http_host IS NOT NULL
+| STATS hits = COUNT(*), urls = COUNT_DISTINCT(data.http_url), methods = COUNT_DISTINCT(data.http_method)
+    BY data.http_host
+| SORT hits DESC
+| LIMIT 15
+]]>
+        </Query>
+      </Step>
+      <Step order="9" name="URL investigation">
+        <Purpose>URL investigation</Purpose>
+        <Query platform="Elastic" language="ES|QL" id="Q-09">
+          <![CDATA[
+FROM logs-tcp.generic-*
+| WHERE @timestamp >= NOW() - 1 hours
+    AND (data.src == "$client_ip" OR x_forwarded_for LIKE "*$client_ip*")
+    AND data.http_url IS NOT NULL
+| EVAL rc = TO_INTEGER(data.http_retcode)
+| STATS hits = COUNT(*), ok2xx = COUNT(CASE(rc >= 200 AND rc < 300, 1, null)),
+        blocked4xx = COUNT(CASE(rc >= 400 AND rc < 500, 1, null)), err5xx = COUNT(CASE(rc >= 500, 1, null))
+    BY data.http_url, data.http_method
+| SORT ok2xx DESC, hits DESC
+| LIMIT 40
+]]>
+        </Query>
+      </Step>
+      <Step order="10" name="Timeline Reconstruction">
+        <Purpose>Timeline Reconstruction</Purpose>
+        <Query platform="Elastic" language="ES|QL" id="Q-10">
+          <![CDATA[
+FROM logs-tcp.generic-*
+| WHERE @timestamp >= NOW() - 1 hours
+    AND (data.src == "$client_ip" OR x_forwarded_for LIKE "*$client_ip*")
+    AND data.http_method IS NOT NULL
+| EVAL real_client = COALESCE(TRIM(MV_FIRST(SPLIT(x_forwarded_for, ","))), data.src)
+| KEEP @timestamp, real_client, data.http_host, data.http_method, data.http_url, data.http_retcode, data.http_agent
+| SORT @timestamp ASC
+| LIMIT 200
+]]>
+        </Query>
+      </Step>
+      <Step order="11" name="Lateral movement validation">
+        <Purpose>Lateral movement validation</Purpose>
+        <Query platform="Elastic" language="ES|QL" id="Q-11">
+          <![CDATA[
+FROM logs-tcp.generic-*
+| WHERE @timestamp >= NOW() - 1 hours
+    AND (data.src == "$client_ip" OR x_forwarded_for LIKE "*$client_ip*")
+    AND data.http_url IS NOT NULL
+| EVAL path_family = MV_FIRST(SPLIT(data.http_url, "?"))
+| STATS hits = COUNT(*), distinct_paths = COUNT_DISTINCT(data.http_url) BY data.http_host, path_family
+| SORT hits DESC
+| LIMIT 30
+]]>
+        </Query>
+      </Step>
+      <Step order="12" name="Persistence validation">
+        <Purpose>Persistence validation</Purpose>
+        <Query platform="Elastic" language="ES|QL" id="Q-12">
+          <![CDATA[
+FROM logs-tcp.generic-*
+| WHERE @timestamp >= NOW() - 4 hours
+    AND (data.src == "$client_ip" OR x_forwarded_for LIKE "*$client_ip*")
+    AND data.http_method == "post"
+| EVAL rc = TO_INTEGER(data.http_retcode)
+| STATS posts = COUNT(*), served2xx = COUNT(CASE(rc >= 200 AND rc < 300, 1, null)) BY data.http_host, data.http_url
+| SORT served2xx DESC
+| LIMIT 20
+]]>
+        </Query>
+      </Step>
+      <Step order="13" name="Defense evasion validation">
+        <Purpose>Defense evasion validation</Purpose>
+        <Query platform="Elastic" language="ES|QL" id="Q-13">
+          <![CDATA[
+FROM logs-tcp.generic-*
+| WHERE @timestamp >= NOW() - 4 hours
+    AND (data.src == "$client_ip" OR x_forwarded_for LIKE "*$client_ip*")
+| STATS events = COUNT(*), attack_records = COUNT(CASE(data.type == "attack", 1, null)),
+        actions = VALUES(data.action), attack_types = VALUES(data.attack_type)
+    BY data.type
+| SORT events DESC
+| LIMIT 10
+]]>
+        </Query>
+      </Step>
+      <Step order="14" name="Impact assessment">
+        <Purpose>Impact assessment</Purpose>
+        <Query platform="Elastic" language="ES|QL" id="Q-14">
+          <![CDATA[
+FROM logs-tcp.generic-*
+| WHERE @timestamp >= NOW() - 1 hours
+    AND (data.src == "$client_ip" OR x_forwarded_for LIKE "*$client_ip*")
+    AND data.http_method IS NOT NULL
+| EVAL rc = TO_INTEGER(data.http_retcode)
+| STATS total = COUNT(*), served2xx = COUNT(CASE(rc >= 200 AND rc < 300, 1, null)),
+        blocked4xx = COUNT(CASE(rc >= 400 AND rc < 500, 1, null)), err5xx = COUNT(CASE(rc >= 500, 1, null))
+    BY data.http_host
+| SORT served2xx DESC
+| LIMIT 15
+]]>
+        </Query>
+      </Step>
+      <Step order="15" name="Finalize verdict">
+        <DecisionTree>
+        </DecisionTree>
+      </Step>
+    </Workflow>
+  </Investigation>
+  <ClassificationGuidance>
+    <TruePositive>
+      <Definition></Definition>
+    </TruePositive>
+    <FalsePositive>
+      <Definition></Definition>
+      <Indicators>
+        <Item>Authorised vulnerability scanning / penetration tests. Internal or contracted scanners (Qualys, Nessus, Burp, nuclei) on a schedule reproduce this footprint exactly. Authorised - but confirm from source and schedule, never assume from the address.</Item>
+        <Item>Uptime / synthetic monitoring and health-checkers that hammer many endpoints rapidly.</Item>
+        <Item>Broken or aggressive clients - a mobile app or SPA in a retry storm, a misconfigured crawler, or an integration looping over URLs, generating high volume and errors without hostile intent.</Item>
+        <Item>Search-engine / SEO bots and legitimate crawlers enumerating the public site (usually low-sensitivity 2xx to the site root and static assets only).</Item>
+        <Item>The shared CDN/SNAT edge pool inflates per-data.src volume. NBI's public banking apps are fronted by an upstream CDN/proxy tier: data.src is almost always one of a small pool of edge IPs (185.56.154.x, 159.60.162.x, 159.60.170.x, 5.182.213.x, 84.54.60.x; geo Germany / France / UAE / Sweden), and data.src == data.original_src in 100% of records. The busiest single edge IP produced 1,764 requests across 79 URLs in 4h - a volume that *looks* scan-like but is ordinary aggregated customer traffic. The edge IP is never the attacker. De-proxy on x_forwarded_for (the real client, 99.3% populated on traffic) before judging.</Item>
+        <Item>mobile.nbi.iq dominates (~122k events/4h), then businessonline.nbi.iq / www.businessonline.nbi.iq (~27k), loyalty.nbi.iq, mename.nbi.iq, and the low-volume nbiiqbusinessonline-preprod.nbi.iq. High URL breadth on mobile.nbi.iq from an edge IP is the expected baseline, not a scan.</Item>
+        <Item>The deployed rule already excludes pure bank-app clients (bank_app_ratio &gt;= 0.9), so a real customer app hammering its own API surface should not fire. A source that trips the rule is, by construction, spreading across many *non*-app paths with errors - investigate it.</Item>
+        <Item>No historical NBI benign-true-positive is recorded for this rule. There is no per-source allow-list; if one is warranted for a sanctioned scanner, scope it to the exact real client (x_forwarded_for), not the shared edge IP.</Item>
+      </Indicators>
+    </FalsePositive>
+    <Misconfiguration>
+      <Definition></Definition>
+    </Misconfiguration>
+    <NeedsEscalation>
+      <Definition></Definition>
+    </NeedsEscalation>
+  </ClassificationGuidance>
+  <ResponseActions>
+    <Phase name="Containment">
+      <Action>Block the real client at the WAF/edge (the de-proxied x_forwarded_for value from section 15.6, not the shared edge IP - blocking the edge would drop legitimate customers) once a hostile scan or exploitation is confirmed.</Action>
+      <Action>Rate-limit / challenge the source if an outright block is too broad, to stop the fuzzing while investigation continues.</Action>
+      <Action>Preserve evidence first: capture section 14/section 15/section 16 results (the URL set, the served-2xx list, the tooling, the real client) and attach to the alert before any change.</Action>
+      <Action>All blocks/rate-limits are applied only via the authorised, human-approved change path; investigation itself is read-only.</Action>
+    </Phase>
+    <Phase name="Eradication">
+      <Action>Review every endpoint the scan reached with 2xx (section 14.2, section 15.8) for exposure - an unintended admin/API/backup path served to a scanner is a finding in its own right; remove or re-protect it.</Action>
+      <Action>If exploit payloads or a served POST (section 17.2) are present, hunt for a planted web shell / backdoor on the targeted application and pivot to the specific web-attack playbook (SQLi/XSS/traversal) for that class.</Action>
+      <Action>Tune WAF signatures and rate-limits so the same probing is blocked earlier, and confirm the source is denied on retry.</Action>
+    </Phase>
+    <Phase name="Recovery">
+      <Action>Confirm the reached endpoints are patched/hardened and that any exposed path now returns the correct authorisation/denial.</Action>
+      <Action>Return to normal monitoring only after section 22 closing criteria are met and the source (real client) no longer reaches sensitive functionality.</Action>
+      <Action>Feed the confirmed hostile real-client IP to edge deny-lists / threat intel; feed a confirmed authorised scanner to a reviewed allow-list (scoped to the real client, still monitored).</Action>
+    </Phase>
+  </ResponseActions>
+  <Escalation>
+    <Trigger>Escalate to SOC L2 / IR and the banking-application owner when any hold:
+
+- The scan reached sensitive/unexpected endpoints with 2xx (section 14.2) from an unauthorised source.
+- Exploit payloads (injection/traversal/SSRF/Log4Shell markers) appear in the URLs (section 15.8) - pivot to the specific web-attack playbook.
+- Backend 5xx tied to a probed endpoint (section 17.5) suggests a payload reached and disturbed the application.
+- The source transitioned from broad probing to sustained interaction with one endpoint (section 16), or planted/interacted with a served POST endpoint (section 17.2).
+- Evidence is incomplete (authorisation unverifiable, app-side impact not visible in web logs) and the alert cannot be safely cleared - needs_escalation.</Trigger>
+    <To>SOC L2 / IR</To>
+  </Escalation>
+  <ClosureCriteria>
+    <Item>false_positive (authorised): a documented authorised scanner / announced pentest is matched to the real client + window. Record the reference; scope any allow-list to the exact real client, not the edge IP.</Item>
+    <Item>false_positive (blocked hostile scan): overwhelmingly 4xx, no meaningful 2xx to sensitive paths, no exploit payloads - a rejected reconnaissance attempt, documented as blocked-malicious (never "benign").</Item>
+    <Item>misconfiguration: a benign misbehaving client (crawler/monitor/retry storm) reproduced the pattern; source baselined/tuned with the owner.</Item>
+    <Item>true_positive: sensitive exposure reached or exploitation begun; source blocked, reached endpoints reviewed/remediated, follow-on web-attack playbook worked, incident documented.</Item>
+    <Item>needs_escalation: handed to Tier 3 / app owner with the specific gaps named.</Item>
+  </ClosureCriteria>
+  <Limitations>
+    <Item>De-proxy before you judge. The shared CDN/SNAT edge (185.56.154.x / 159.60.162.x / 159.60.170.x, geo DE/FR/UAE) fronts every banking app, so data.src volume is misleading and data.srccountry is edge geo. The real client is x_forwarded_for (99.3% on traffic); block/allow-list the real client, never the edge.</Item>
+    <Item>data.src == data.original_src always on NBI - data.original_src gives no extra de-proxy value here; only x_forwarded_for does.</Item>
+    <Item>Attack records are sparse (~0.2%). A loud scan may generate few/zero data.type == "attack" records - a clean attack layer is not proof of safety (section 17.4). Empty != safe.</Item>
+    <Item>The rule is deliberately loud (300+ reqs / 20+ URLs / 100+ errors) and excludes pure bank-app clients - a quiet, distributed, or app-mimicking scan will not fire; cover that with the complementary low-rate/new-terms analytics (section 24) and the specific web-attack playbooks.</Item>
+    <Item>**Deployed FROM logs-* scoped to logs-tcp.generic-*** in this playbook - the live FortiWeb data stream - for safety and to avoid estate-wide circuit-breaker risk; behaviour is unchanged.</Item>
+    <Item>KB-worthy (persist to NBI customer scope): (1) FortiWeb WAF under logs-tcp.generic-*, split by data.type (traffic ~149k/4h vs attack ~357/4h); (2) x_forwarded_for = real client, 99.3% on traffic, data.src == data.original_src = shared edge; (3) banking vhosts mobile.nbi.iq, businessonline.nbi.iq, loyalty.nbi.iq, mename.nbi.iq; (4) single WAF sensor syslog_location = 10.11.254.23. Observed live 2026-08-19.</Item>
+  </Limitations>
+</Playbook>

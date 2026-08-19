@@ -1,0 +1,355 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<Playbook xmlns="https://soc.example/playbooks" id="PB-ad-member-added-privileged-operators-group" name="AD — Member Added to Privileged Operators Group - SOC Playbook" version="3.0" status="Validated" classification="TLP:AMBER">
+  <Metadata>
+    <Owner>NBI SOC / Detection Engineering</Owner>
+    <LastUpdated>2026-08-19</LastUpdated>
+    <Severity default="high">high</Severity>
+    <Confidence default="Medium">Medium</Confidence>
+    <Category>Persistence</Category>
+    <MitreAttack>
+      <Technique id="T1098"/>
+      <Technique id="T1078.002"/>
+      <Technique id="T1078"/>
+      <Tactic id="TA0003"/>
+      <Tactic id="TA0008"/>
+    </MitreAttack>
+    <References>
+      <Reference title="MITRE ATT&amp;CK - Account Manipulation (T1098)" url="https://attack.mitre.org/techniques/T1098/"/>
+      <Reference title="MITRE ATT&amp;CK - Valid Accounts: Domain Accounts (T1078.002)" url="https://attack.mitre.org/techniques/T1078/002/"/>
+      <Reference title="MITRE ATT&amp;CK - Persistence tactic (TA0003)" url="https://attack.mitre.org/tactics/TA0003/"/>
+      <Reference title="MITRE ATT&amp;CK - Lateral Movement tactic (TA0008)" url="https://attack.mitre.org/tactics/TA0008/"/>
+      <Reference title="Microsoft Learn - 4728(S): A member was added to a security-enabled global group" url="https://learn.microsoft.com/en-us/windows/security/threat-protection/auditing/event-4728"/>
+      <Reference title="Microsoft Learn - 4732(S): A member was added to a security-enabled local group" url="https://learn.microsoft.com/en-us/windows/security/threat-protection/auditing/event-4732"/>
+      <Reference title="Microsoft Learn - 4756(S): A member was added to a security-enabled universal group" url="https://learn.microsoft.com/en-us/windows/security/threat-protection/auditing/event-4756"/>
+      <Reference title="Microsoft Learn - Active Directory security groups (Backup/Server/Account Operators)" url="https://learn.microsoft.com/en-us/windows-server/identity/ad-ds/manage/understand-security-groups"/>
+      <Reference title="Microsoft - Securing privileged access / Tier-0 model" url="https://learn.microsoft.com/en-us/security/privileged-access-workstations/overview"/>
+    </References>
+  </Metadata>
+  <AlertContext>
+    <RuleName>AD — Member Added to Privileged Operators Group</RuleName>
+    <RuleId>nbi-ad-operators-group-add</RuleId>
+    <RuleType>query</RuleType>
+    <Index>logs-system.security*</Index>
+    <TriggerLogic>The deployed rule's detection filter (Kibana KQL) is:
+
+
+
+Plain English: someone added a principal to one of the five built-in Operators groups on a Domain Controller. The rule captures the *actor* (winlog.event_data.SubjectUserName), the *added member* (winlog.event_data.MemberName as a DN, MemberSid as a SID), the *group* (TargetUserName / TargetSid), and the *DC* (host.name).
+
+A caution on field shape (validated on NBI): on 4728/4732/4756 the member is expressed as a distinguished name (e.g. CN=BZM-DM-DK-01,OU=Computers,…) in MemberName, and as an objectSID in MemberSid; the group is in TargetUserName/TargetSid. Read actor/member/group per the alert - do not assume a fixed position - and follow the member across other event types by SID, not by name.</TriggerLogic>
+    <KeyAlertFields>event.code, host.name</KeyAlertFields>
+  </AlertContext>
+  <Inputs>
+    <Input name="$actor"/>
+    <Input name="$member_dn"/>
+    <Input name="$member_sid"/>
+    <Input name="$group_sid"/>
+    <Input name="$dc_host"/>
+  </Inputs>
+  <ExecutiveSummary>
+    <Overview>This playbook drives triage and investigation of the AD - Member Added to Privileged Operators Group detection on NBI's Elastic Security deployment. The rule is an Elastic query rule that fires on Windows 4728 (member added to a security-enabled *global* group), 4732 (*local* group), or 4756 (*universal* group) when the target group's winlog.event_data.TargetSid is a built-in privileged Operators group:
+
+- Account Operators - S-1-5-32-548
+- Server Operators - S-1-5-32-549
+- Print Operators - S-1-5-32-550
+- Backup Operators - S-1-5-32-551
+- Cryptographic Operators - S-1-5-32-569
+
+A single matching membership add fires the rule. These groups are Tier-0-adjacent: Backup Operators can read NTDS.dit (every domain credential) and back up/restore system state; Server Operators can manage services and shares on Domain Controllers; Account Operators can manage most non-protected accounts. Membership therefore approaches Domain-Admin-equivalent power. The membership change is a completed action; the analyst's job is to decide whether it was an authorised administrative change (false_positive), an unauthorised privilege grant used for persistence/escalation (true_positive), an automated provisioning error (misconfiguration), or unproven (needs_escalation), with evidence attached.</Overview>
+    <BusinessImpact>An alert means: on $dc_host, $actor added $member_dn to a built-in Operators group. Because the grant is already effective, the question is not *did the member gain the rights* (they did) but *was the grant authorised, and are the rights being used*. The severity depends heavily on which Operators group:
+
+- Backup Operators is the highest concern - it is a direct path to NTDS.dit and thus to every domain credential (an offline DCSync equivalent).
+- Server Operators grants service/share control on DCs (service-hijack to SYSTEM on a DC).
+- Account/Print/Cryptographic Operators grant progressively narrower but still sensitive rights.
+
+In NBI's validation window, no add to any Operators SID was observed - the live 4728 stream is dominated by automated branch-device onboarding (computer accounts added to business groups such as *Disk Encryption* and *Audi.security*), not Operators groups. So an Operators-group hit stands out sharply and must be reconciled to a specific authorised change before it is cleared.</BusinessImpact>
+  </ExecutiveSummary>
+  <Investigation>
+    <Goal>Decide true_positive / false_positive / misconfiguration / needs_escalation for AD — Member Added to Privileged Operators Group.</Goal>
+    <Workflow>
+      <Step order="1" name="Reproduce the rule estate-wide (confirm the detection logic)">
+        <Purpose>Reproduce the rule estate-wide (confirm the detection logic)</Purpose>
+        <Query platform="Elastic" language="ES|QL" id="Q-01">
+          <![CDATA[
+FROM logs-system.security*
+| WHERE @timestamp >= NOW() - 4 hours
+    AND event.code IN ("4728", "4732", "4756")
+    AND winlog.event_data.TargetSid IN ("S-1-5-32-548", "S-1-5-32-549", "S-1-5-32-550", "S-1-5-32-551", "S-1-5-32-569")
+| KEEP @timestamp, host.name, event.code, winlog.event_data.SubjectUserName, winlog.event_data.MemberName, winlog.event_data.TargetUserName, winlog.event_data.TargetSid
+| SORT @timestamp DESC
+| LIMIT 50
+]]>
+        </Query>
+      </Step>
+      <Step order="2" name="Confirm the specific add for the alert member">
+        <Purpose>Confirm the specific add for the alert member</Purpose>
+        <Query platform="Elastic" language="ES|QL" id="Q-02">
+          <![CDATA[
+FROM logs-system.security*
+| WHERE @timestamp >= NOW() - 4 hours
+    AND event.code IN ("4728", "4732", "4756")
+    AND TO_LOWER(winlog.event_data.MemberName) == "$member_dn"
+| STATS adds = COUNT(*) BY event.code, winlog.event_data.SubjectUserName, winlog.event_data.TargetUserName, winlog.event_data.TargetSid, host.name
+| SORT adds DESC
+| LIMIT 20
+]]>
+        </Query>
+      </Step>
+      <Step order="3" name="Entity pivoting">
+        <Purpose>Entity pivoting</Purpose>
+        <Query platform="Elastic" language="ES|QL" id="Q-03">
+          <![CDATA[
+FROM logs-system.security*
+| WHERE @timestamp >= NOW() - 4 hours
+    AND event.code IN ("4728", "4732", "4756")
+    AND TO_LOWER(winlog.event_data.MemberName) == "$member_dn"
+| KEEP @timestamp, host.name, event.code, winlog.event_data.SubjectUserName, winlog.event_data.TargetUserName, winlog.event_data.TargetSid, winlog.event_data.MemberSid
+| SORT @timestamp DESC
+| LIMIT 30
+]]>
+        </Query>
+      </Step>
+      <Step order="4" name="Process investigation">
+        <Purpose>Process investigation</Purpose>
+        <Query platform="Elastic" language="ES|QL" id="Q-04">
+          <![CDATA[
+FROM logs-system.security*
+| WHERE @timestamp >= NOW() - 4 hours
+    AND event.code == "4688"
+    AND TO_LOWER(user.name) == "$actor"
+| STATS executions = COUNT(*), hosts = COUNT_DISTINCT(host.name) BY process.name, process.parent.name
+| SORT executions DESC
+| LIMIT 30
+]]>
+        </Query>
+      </Step>
+      <Step order="5" name="Parent-Child process analysis">
+        <Purpose>Parent-Child process analysis</Purpose>
+        <Query platform="Elastic" language="ES|QL" id="Q-05">
+          <![CDATA[
+FROM logs-system.security*
+| WHERE @timestamp >= NOW() - 4 hours
+    AND event.code == "4688"
+    AND TO_LOWER(user.name) == "$actor"
+| KEEP @timestamp, host.name, process.parent.name, process.parent.pid, process.name, process.pid, process.executable
+| SORT @timestamp DESC
+| LIMIT 50
+]]>
+        </Query>
+      </Step>
+      <Step order="6" name="User investigation">
+        <Purpose>User investigation</Purpose>
+        <Query platform="Elastic" language="ES|QL" id="Q-06">
+          <![CDATA[
+FROM logs-system.security*
+| WHERE @timestamp >= NOW() - 4 hours
+    AND event.code == "4624"
+    AND TO_LOWER(winlog.event_data.TargetUserName) == "$actor"
+| STATS logons = COUNT(*) BY source.ip, host.name, winlog.event_data.LogonType
+| SORT logons DESC
+| LIMIT 25
+]]>
+        </Query>
+      </Step>
+      <Step order="7" name="Host investigation">
+        <Purpose>Host investigation</Purpose>
+        <Query platform="Elastic" language="ES|QL" id="Q-07">
+          <![CDATA[
+FROM logs-system.security*
+| WHERE @timestamp >= NOW() - 4 hours
+    AND host.name == "$dc_host"
+    AND event.code IN ("4728", "4732", "4756", "4729", "4733", "4757")
+| STATS events = COUNT(*), actors = COUNT_DISTINCT(winlog.event_data.SubjectUserName) BY event.code
+| SORT events DESC
+| LIMIT 20
+]]>
+        </Query>
+      </Step>
+      <Step order="8" name="IP investigation">
+        <Purpose>IP investigation</Purpose>
+        <Query platform="Elastic" language="ES|QL" id="Q-08">
+          <![CDATA[
+FROM logs-system.security*
+| WHERE @timestamp >= NOW() - 4 hours
+    AND event.code == "4624"
+    AND TO_LOWER(winlog.event_data.TargetUserName) == "$actor"
+    AND source.ip IS NOT NULL
+| STATS logons = COUNT(*), hosts = COUNT_DISTINCT(host.name) BY source.ip, winlog.event_data.LogonType
+| SORT logons DESC
+| LIMIT 25
+]]>
+        </Query>
+      </Step>
+      <Step order="9" name="Authentication investigation">
+        <Purpose>Authentication investigation</Purpose>
+        <Query platform="Elastic" language="ES|QL" id="Q-09">
+          <![CDATA[
+FROM logs-system.security*
+| WHERE @timestamp >= NOW() - 4 hours
+    AND event.code IN ("4624", "4625", "4634", "4647")
+    AND winlog.event_data.TargetUserSid == "$member_sid"
+| STATS events = COUNT(*), first_seen = MIN(@timestamp), last_seen = MAX(@timestamp) BY event.code, winlog.event_data.LogonType, source.ip
+| SORT events DESC
+| LIMIT 30
+]]>
+        </Query>
+      </Step>
+      <Step order="10" name="Timeline Reconstruction">
+        <Purpose>Timeline Reconstruction</Purpose>
+        <Query platform="Elastic" language="ES|QL" id="Q-10">
+          <![CDATA[
+FROM logs-system.security*
+| WHERE @timestamp >= NOW() - 4 hours
+    AND TO_LOWER(winlog.event_data.SubjectUserName) == "$actor"
+    AND event.code IN ("4728", "4732", "4756", "4729", "4733", "4757", "4720", "4722", "4724", "5136")
+| KEEP @timestamp, host.name, event.code, winlog.event_data.MemberName, winlog.event_data.TargetUserName, winlog.event_data.TargetSid
+| SORT @timestamp ASC
+| LIMIT 200
+]]>
+        </Query>
+      </Step>
+      <Step order="11" name="Lateral movement validation">
+        <Purpose>Lateral movement validation</Purpose>
+        <Query platform="Elastic" language="ES|QL" id="Q-11">
+          <![CDATA[
+FROM logs-system.security*
+| WHERE @timestamp >= NOW() - 4 hours
+    AND winlog.event_data.TargetUserSid == "$member_sid"
+    AND event.code IN ("4624", "4648", "5140", "5145")
+| STATS events = COUNT(*) BY event.code, host.name, winlog.event_data.LogonType
+| SORT events DESC
+| LIMIT 30
+]]>
+        </Query>
+      </Step>
+      <Step order="12" name="Persistence validation">
+        <Purpose>Persistence validation</Purpose>
+        <Query platform="Elastic" language="ES|QL" id="Q-12">
+          <![CDATA[
+FROM logs-system.security*
+| WHERE @timestamp >= NOW() - 4 hours
+    AND TO_LOWER(winlog.event_data.SubjectUserName) == "$actor"
+    AND event.code IN ("4720", "4722", "4728", "4732", "4756", "4729", "4733", "4757", "7045", "4698")
+| STATS events = COUNT(*) BY event.code
+| SORT events DESC
+| LIMIT 20
+]]>
+        </Query>
+      </Step>
+      <Step order="13" name="Privilege escalation validation">
+        <Purpose>Privilege escalation validation</Purpose>
+        <Query platform="Elastic" language="ES|QL" id="Q-13">
+          <![CDATA[
+FROM logs-system.security*
+| WHERE @timestamp >= NOW() - 4 hours
+    AND event.code == "4672"
+    AND winlog.event_data.TargetUserSid == "$member_sid"
+| STATS special_priv = COUNT(*), hosts = COUNT_DISTINCT(host.name) BY winlog.event_data.TargetUserName
+| SORT special_priv DESC
+| LIMIT 15
+]]>
+        </Query>
+      </Step>
+      <Step order="14" name="Defense evasion validation">
+        <Purpose>Defense evasion validation</Purpose>
+        <Query platform="Elastic" language="ES|QL" id="Q-14">
+          <![CDATA[
+FROM logs-system.security*
+| WHERE @timestamp >= NOW() - 4 hours
+    AND host.name == "$dc_host"
+    AND (event.code IN ("4729", "4733", "4757") OR event.code == "1102" OR event.code == "4719")
+| STATS events = COUNT(*) BY event.code, winlog.event_data.SubjectUserName
+| SORT events DESC
+| LIMIT 25
+]]>
+        </Query>
+      </Step>
+      <Step order="15" name="Impact assessment">
+        <Purpose>Impact assessment</Purpose>
+        <Query platform="Elastic" language="ES|QL" id="Q-15">
+          <![CDATA[
+FROM logs-system.security*
+| WHERE @timestamp >= NOW() - 4 hours
+    AND event.code IN ("4728", "4732", "4756")
+    AND winlog.event_data.TargetSid == "$group_sid"
+| STATS adds = COUNT(*) BY winlog.event_data.SubjectUserName, winlog.event_data.MemberName, host.name
+| SORT adds DESC
+| LIMIT 20
+]]>
+        </Query>
+      </Step>
+      <Step order="16" name="Finalize verdict">
+        <DecisionTree>
+        </DecisionTree>
+      </Step>
+    </Workflow>
+  </Investigation>
+  <ClassificationGuidance>
+    <TruePositive>
+      <Definition></Definition>
+    </TruePositive>
+    <FalsePositive>
+      <Definition></Definition>
+      <Indicators>
+        <Item>Authorised onboarding/delegation: an operator legitimately adds an administrator or a service identity to an Operators group as part of a documented change (e.g. granting Backup Operators to a backup service). Must be matched to an approved ticket, not assumed.</Item>
+        <Item>Automated provisioning/IAM tooling placing accounts into groups by role mapping. If the tool targets an Operators group, verify the mapping is intended.</Item>
+        <Item>Break-glass/emergency administration adding an admin to Server/Account Operators during an incident - legitimate but often outside normal change flow (reconcile to the incident).</Item>
+        <Item>The live 4728 stream is automated branch-device onboarding, not Operators grants. In the validation window, adds are computer accounts (CN=BZM-*-DK-*,…) placed into business groups - Disk Encryption (…-23244) and Audi.security (…-19779) - by branch-administration accounts (Yasser.Amar, Mohammed.Adnan, Abdulrahman.Diaa) on nim-dc-dbap01. Zero adds targeted any Operators SID. So the Operators-group rule is silent (healthy), and there is no legitimate Operators-add stream to tune out.</Item>
+        <Item>All group management is authoritative on the DCs (nim-dc-dbap01 primary, nim-dc2-dbap). An Operators add should appear on a DC; a report elsewhere is a data-quality question first.</Item>
+        <Item>No historical NBI benign Operators-add is on record. There is no environment-specific allow-list. Do not create a standing exception; scope any exception, if warranted, to the exact member SID + group + actor after a documented authorised cause.</Item>
+      </Indicators>
+    </FalsePositive>
+    <Misconfiguration>
+      <Definition></Definition>
+    </Misconfiguration>
+    <NeedsEscalation>
+      <Definition></Definition>
+    </NeedsEscalation>
+  </ClassificationGuidance>
+  <ResponseActions>
+    <Phase name="Containment">
+      <Action>Remove the unauthorised membership on a confirmed true_positive (via the authorised DEPLOY path), prioritising Backup/Server/Account Operators.</Action>
+      <Action>Disable/segregate the added principal ($member_sid) and, if the actor is implicated, disable/reset the actor account and suspend its sessions.</Action>
+      <Action>If Backup Operators was granted, treat directory secrets as at risk: check for NTDS.dit/backup access (section 17.1) and prepare for credential rotation.</Action>
+      <Action>Preserve evidence first (the DC Security logs, the group's current membership, any member session) before changes - an attacker may add-then-remove to hide the grant.</Action>
+      <Action>All containment changes go through the authorised, human-approved DEPLOY path; investigation itself is read-only.</Action>
+    </Phase>
+    <Phase name="Eradication">
+      <Action>Remove the membership and any other persistence discovered in section 17.2 (rogue accounts, additional group adds, services, scheduled tasks).</Action>
+      <Action>If the rights were exercised (section 17.1/section 17.3), rotate the credentials and secrets the member could have reached - for Backup Operators/NTDS access this means treating all domain credentials as exposed and planning a krbtgt/Tier-0 rotation.</Action>
+      <Action>Investigate the actor account for compromise and remediate the path that let it modify Operators membership (over-delegation is a common root cause).</Action>
+      <Action>Hunt peers: the same actor/member SID across other DCs and hosts (section 15.4, section 17.1).</Action>
+    </Phase>
+    <Phase name="Recovery">
+      <Action>Reset the actor's and the member's credentials as warranted; if privileged secrets were exposed, rotate in the correct order (member → actor → Tier-0/krbtgt).</Action>
+      <Action>Restore correct group membership and validate no residual Operators members remain that lack an approved basis.</Action>
+      <Action>Return accounts to service only after section 22 closing criteria are met and monitoring confirms no re-add.</Action>
+      <Action>Harden: enforce change control and PAM/JIT for Operators-group changes, alert on every future Operators add and on add-then-remove within a short window, and periodically audit nested membership of the Operators groups (the rule keys on the direct SID and can miss nesting).</Action>
+    </Phase>
+  </ResponseActions>
+  <Escalation>
+    <Trigger>Escalate to Tier 3 / IR and the AD/Tier-0 team when any of the following hold:
+
+- The add is not reconciled to an approved change record, or the group is Backup/Server/Account Operators.
+- The added member is already exercising the rights - special-privilege logons (section 17.3) or admin-share/NTDS access (section 17.1) by $member_sid.
+- The actor authenticated from an unexpected origin (section 15.6) or shows a persistence spree (section 17.2).
+- An add-then-remove transient grant or audit tampering appears (section 17.4).
+- Authorisation, member, or actor cannot be established - escalate as needs_escalation with the gaps named.</Trigger>
+    <To>SOC L2 / IR</To>
+  </Escalation>
+  <ClosureCriteria>
+    <Item>false_positive (authorised change): an approved onboarding/delegation ticket matches the exact actor + member + group + time; actor from a sanctioned origin; member shows no unexpected privilege use. Record the reference; do not create a broad exception.</Item>
+    <Item>false_positive (blocked-malicious): a hostile add positively proven reverted before any use of the rights; documented as blocked-authorised, never "benign".</Item>
+    <Item>misconfiguration: an automated provisioning/IAM identity added the member to the wrong (Operators) group in error; engage the owner, correct the membership, record the process gap.</Item>
+    <Item>true_positive: an unauthorised Operators grant (optionally with the rights already abused); membership removed, principals contained, exposed secrets rotated, member/actor scope established, incident documented.</Item>
+    <Item>needs_escalation: handed to AD/IAM + SOC L2/IR with the specific evidence gaps documented.</Item>
+  </ClosureCriteria>
+  <Limitations>
+    <Item>Follow the member by SID, not by name. On NBI the member is a DN on the group-add but a sAMAccountName on logons; the strings never match. MemberSid (add) == TargetUserSid (logon/priv) is the proven join and underpins every member-use pivot in section 15.12/section 17.1/section 17.3.</Item>
+    <Item>The group SID decides severity. Backup Operators (…-551) → NTDS.dit/all-credentials; Server Operators (…-549) → DC service control; Account Operators (…-548) → broad account control. Read TargetSid first.</Item>
+    <Item>Zero Operators baseline. NBI's live 4728 stream is automated branch-device onboarding into business groups (Disk Encryption, Audi.security) - no Operators adds. So the rule is near-silent; when it fires, believe it and reconcile to a specific change.</Item>
+    <Item>Watch add-then-remove and nesting. A transient grant (add then 4729/4733/4757) or a member placed in a non-Operators group that is itself nested into an Operators group both evade the point-in-time SID match; section 17.4 and periodic nested-membership audits cover these.</Item>
+    <Item>Known != trusted. A recognised branch-admin actor or an automation identity is context to verify against a change record, not an automatic pass; any scanner/automation identity is investigated identically, never auto-trusted.</Item>
+    <Item>KB-worthy (persist to NBI customer scope): (1) live 4728 on NBI is branch-device onboarding into Disk Encryption (…-23244) / Audi.security (…-19779) by branch admins on nim-dc-dbap01, zero Operators adds; (2) member identity is a DN on 4728 and a sAMAccountName on 4624 - join by MemberSid/TargetUserSid; (3) TargetUserSid populates on 4624/4672. All observed live on 2026-08-17.</Item>
+  </Limitations>
+</Playbook>

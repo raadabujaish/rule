@@ -1,0 +1,428 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<Playbook xmlns="https://soc.example/playbooks" id="PB-windows-single-account-many-sources" name="Windows — Single Account Failing From Many Sources - SOC Playbook" version="3.0" status="Validated" classification="TLP:AMBER">
+  <Metadata>
+    <Owner>NBI SOC / Detection Engineering</Owner>
+    <LastUpdated>2026-08-19</LastUpdated>
+    <Severity default="Medium">Medium</Severity>
+    <Confidence default="Medium">Medium</Confidence>
+    <Category>Credential Access</Category>
+    <MitreAttack>
+      <Technique id="T1110"/>
+      <Technique id="T1110.001"/>
+      <Technique id="T1110.003"/>
+      <Technique id="T1110.004"/>
+      <Technique id="T1078"/>
+      <Tactic id="TA0006"/>
+    </MitreAttack>
+    <References>
+      <Reference title="MITRE ATT&amp;CK - Brute Force (T1110)" url="https://attack.mitre.org/techniques/T1110/"/>
+      <Reference title="MITRE ATT&amp;CK - Brute Force: Password Guessing (T1110.001)" url="https://attack.mitre.org/techniques/T1110/001/"/>
+      <Reference title="MITRE ATT&amp;CK - Brute Force: Credential Stuffing (T1110.004)" url="https://attack.mitre.org/techniques/T1110/004/"/>
+      <Reference title="MITRE ATT&amp;CK - Valid Accounts (T1078)" url="https://attack.mitre.org/techniques/T1078/"/>
+      <Reference title="MITRE ATT&amp;CK - Credential Access tactic (TA0006)" url="https://attack.mitre.org/tactics/TA0006/"/>
+      <Reference title="Microsoft Learn - Event 4625: An account failed to log on (with SubStatus codes)" url="https://learn.microsoft.com/en-us/windows/security/threat-protection/auditing/event-4625"/>
+      <Reference title="Microsoft Learn - Event 4624: An account was successfully logged on (logon types)" url="https://learn.microsoft.com/en-us/windows/security/threat-protection/auditing/event-4624"/>
+      <Reference title="Microsoft Learn - Account lockout policy / smart lockout" url="https://learn.microsoft.com/en-us/windows/security/threat-protection/security-policy-settings/account-lockout-policy"/>
+      <Reference title="Microsoft Learn - Group Managed Service Accounts (gMSA)" url="https://learn.microsoft.com/en-us/windows-server/security/group-managed-service-accounts/group-managed-service-accounts-overview"/>
+    </References>
+  </Metadata>
+  <AlertContext>
+    <RuleName>Windows — Single Account Failing From Many Sources</RuleName>
+    <RuleId>nbi-auth-distributed-account-attack</RuleId>
+    <RuleType>threshold</RuleType>
+    <Index>logs-system.security-*</Index>
+    <TriggerLogic>The deployed rule is a threshold rule over Windows Security 4625. Its logic is:
+
+
+Threshold: group by winlog.event_data.TargetUserName; fire when cardinality(source.ip) &gt;= 5 within the 1-hour window.
+
+Plain English: one account failing network sign-ins from five or more different source IPs in an hour. Because it counts *distinct sources* per account rather than volume per source, it catches the distributed/low-and-slow pattern that single-source brute-force rules miss - an attacker spreading attempts across a botnet, a proxy pool, or many compromised internal hosts to evade per-source lockout and rate thresholds.
+
+One-line Kibana KQL detection filter (for fast pivoting in Discover / Timeline):
+
+
+
+The rule's exclusions (*$, ANONYMOUS LOGON, SRLCL) are an identity baseline that must be re-verified against current infrastructure (section 23) - a distributed attacker who targets an excluded name is invisible to this rule.</TriggerLogic>
+    <KeyAlertFields>source.ip, host.name</KeyAlertFields>
+  </AlertContext>
+  <Inputs>
+    <Input name="$target_username"/>
+    <Input name="$source_ip"/>
+  </Inputs>
+  <ExecutiveSummary>
+    <Overview>This playbook drives triage and investigation of the Single Account Failing From Many Sources detection on NBI's Elastic Security deployment. The rule is a threshold analytic over Windows Security 4625 network-logon (LogonType 3) failures, grouped by winlog.event_data.TargetUserName, firing when a single account fails from 5 or more distinct source.ip within a 1-hour window (evaluated over now-70m). ANONYMOUS LOGON, machine accounts (*$), and the SRLCL service account are excluded by the rule. The shape it catches is many sources → one account: a *distributed* credential attack (password guessing / credential stuffing / spray focused on one identity) designed to stay under single-source thresholds.
+
+The analyst's job is to decide whether this is a coordinated attack that succeeded (true_positive - a credential was cracked, possibly with post-access), a genuine distributed attack that failed (false_positive - a real malicious attempt, positively proven unsuccessful, never "benign"), a service/scheduled-task account failing across its deployment hosts on a stale credential (misconfiguration), or undeterminable (needs_escalation). The three discriminators are the nature of the failing sources and reasons, whether the account is a service or human identity, and - decisively - whether the account produced any successful sign-in in the window.</Overview>
+    <BusinessImpact>A 4625 with LogonType 3 is a failed network authentication - an SMB/RPC/HTTP/LDAP or similar remote sign-in that the target host or DC rejected. The winlog.event_data.SubStatus code says *why*: 0xc000006a = bad password (the account exists, wrong secret - guessing/stuffing), 0xc0000064 = user name does not exist (enumeration, or a stale/renamed credential), 0xc0000234 = account locked out, 0xc0000072 = account disabled. Aggregated to one account from many sources, the pattern is a distributed credential attack against a single identity.
+
+An alert therefore means: $target_username failed network sign-in from at least five distinct sources within an hour. Two very different causes compete, and the reason codes plus the account's nature separate them:
+- A coordinated attack - many unrelated/external sources, 0xc000006a/0xc0000064, against a human or high-value account.
+- A service/scheduled-task account with a stale stored credential deployed across many hosts - those hosts each retry with the wrong secret and fail from their own IPs, producing the same "many sources, one account" fan-out with no attacker involved (misconfiguration).
+
+The verdict pivots on whether the account succeede</BusinessImpact>
+  </ExecutiveSummary>
+  <Investigation>
+    <Goal>Decide true_positive / false_positive / misconfiguration / needs_escalation for Windows — Single Account Failing From Many Sources.</Goal>
+    <Workflow>
+      <Step order="1" name="Profile the distributed failures">
+        <Purpose>Profile the distributed failures</Purpose>
+        <Query platform="Elastic" language="ES|QL" id="Q-01">
+          <![CDATA[
+FROM logs-system.security-*
+| WHERE winlog.event_data.TargetUserName == "$target_username" AND event.code == "4625"
+    AND winlog.event_data.LogonType == "3"
+    AND @timestamp >= NOW() - 2 hours
+| STATS failures = COUNT(*), reasons = VALUES(winlog.event_data.SubStatus)
+    BY source.ip
+| SORT failures DESC
+| LIMIT 30
+]]>
+        </Query>
+      </Step>
+      <Step order="2" name="Account nature - service vs human">
+        <Purpose>Account nature - service vs human</Purpose>
+        <Query platform="Elastic" language="ES|QL" id="Q-02">
+          <![CDATA[
+FROM logs-system.security-*
+| WHERE winlog.event_data.SubjectUserName == "$target_username" AND event.code == "4688"
+    AND @timestamp >= NOW() - 2 hours
+| STATS processes = COUNT(*), sample = VALUES(process.name)
+]]>
+        </Query>
+      </Step>
+      <Step order="3" name="Outcome - did the account succeed from any source">
+        <Purpose>Outcome - did the account succeed from any source</Purpose>
+        <Query platform="Elastic" language="ES|QL" id="Q-03">
+          <![CDATA[
+FROM logs-system.security-*
+| WHERE winlog.event_data.TargetUserName == "$target_username" AND event.code == "4624"
+    AND winlog.event_data.LogonType == "3"
+    AND @timestamp >= NOW() - 2 hours
+| STATS successes = COUNT(*) BY source.ip
+| SORT successes DESC
+| LIMIT 30
+]]>
+        </Query>
+      </Step>
+      <Step order="4" name="Post-access after a successful sign-in">
+        <Purpose>Post-access after a successful sign-in</Purpose>
+        <Query platform="Elastic" language="ES|QL" id="Q-04">
+          <![CDATA[
+FROM logs-system.security-*
+| WHERE winlog.event_data.SubjectUserName == "$target_username"
+    AND event.code IN ("5140","5145")
+    AND @timestamp >= NOW() - 2 hours
+| STATS accesses = COUNT(*) BY winlog.event_data.ShareName, host.name
+| SORT accesses DESC
+| LIMIT 20
+]]>
+        </Query>
+      </Step>
+      <Step order="5" name="Entity pivoting">
+        <Purpose>Entity pivoting</Purpose>
+        <Query platform="Elastic" language="ES|QL" id="Q-05">
+          <![CDATA[
+FROM logs-system.security-*
+| WHERE @timestamp >= NOW() - 2 hours
+    AND winlog.event_data.TargetUserName == "$target_username"
+    AND event.code == "4625"
+    AND winlog.event_data.LogonType == "3"
+| STATS failures = COUNT(*), reasons = VALUES(winlog.event_data.SubStatus), first_seen = MIN(@timestamp), last_seen = MAX(@timestamp) BY source.ip
+| SORT failures DESC
+| LIMIT 30
+]]>
+        </Query>
+      </Step>
+      <Step order="6" name="Process investigation">
+        <Purpose>Process investigation</Purpose>
+        <Query platform="Elastic" language="ES|QL" id="Q-06">
+          <![CDATA[
+FROM logs-system.security-*
+| WHERE @timestamp >= NOW() - 2 hours
+    AND event.code == "4688"
+    AND winlog.event_data.SubjectUserName == "$target_username"
+| STATS processes = COUNT(*), distinct_procs = COUNT_DISTINCT(process.name), sample = VALUES(process.name)
+]]>
+        </Query>
+      </Step>
+      <Step order="7" name="Process investigation">
+        <Purpose>Process investigation</Purpose>
+        <Query platform="Elastic" language="ES|QL" id="Q-07">
+          <![CDATA[
+FROM logs-system.security-*
+| WHERE @timestamp >= NOW() - 2 hours
+    AND event.code == "4688"
+    AND winlog.event_data.SubjectUserName == "$target_username"
+| STATS executions = COUNT(*), distinct_images = COUNT_DISTINCT(process.executable) BY host.name
+| SORT executions DESC
+| LIMIT 20
+]]>
+        </Query>
+      </Step>
+      <Step order="8" name="Parent-Child process analysis">
+        <Purpose>Parent-Child process analysis</Purpose>
+        <Query platform="Elastic" language="ES|QL" id="Q-08">
+          <![CDATA[
+FROM logs-system.security-*
+| WHERE @timestamp >= NOW() - 2 hours
+    AND event.code == "4688"
+    AND winlog.event_data.SubjectUserName == "$target_username"
+| STATS executions = COUNT(*) BY process.parent.name, process.name
+| SORT executions DESC
+| LIMIT 30
+]]>
+        </Query>
+      </Step>
+      <Step order="9" name="User investigation">
+        <Purpose>User investigation</Purpose>
+        <Query platform="Elastic" language="ES|QL" id="Q-09">
+          <![CDATA[
+FROM logs-system.security-*
+| WHERE @timestamp >= NOW() - 2 hours
+    AND (
+        (event.code IN ("4624","4625") AND winlog.event_data.TargetUserName == "$target_username")
+        OR (event.code == "4688" AND winlog.event_data.SubjectUserName == "$target_username")
+    )
+| STATS events = COUNT(*) BY host.name, event.code
+| SORT events DESC
+| LIMIT 30
+]]>
+        </Query>
+      </Step>
+      <Step order="10" name="Host investigation">
+        <Purpose>Host investigation</Purpose>
+        <Query platform="Elastic" language="ES|QL" id="Q-10">
+          <![CDATA[
+FROM logs-system.security-*
+| WHERE @timestamp >= NOW() - 2 hours
+    AND event.code == "4625"
+    AND winlog.event_data.TargetUserName == "$target_username"
+    AND winlog.event_data.LogonType == "3"
+| STATS failures = COUNT(*), sources = COUNT_DISTINCT(source.ip) BY host.name
+| SORT failures DESC
+| LIMIT 25
+]]>
+        </Query>
+      </Step>
+      <Step order="11" name="IP investigation">
+        <Purpose>IP investigation</Purpose>
+        <Query platform="Elastic" language="ES|QL" id="Q-11">
+          <![CDATA[
+FROM logs-system.security-*
+| WHERE @timestamp >= NOW() - 2 hours
+    AND winlog.event_data.TargetUserName == "$target_username"
+    AND event.code IN ("4624", "4625")
+    AND winlog.event_data.LogonType == "3"
+    AND source.ip IS NOT NULL
+| STATS events = COUNT(*) BY source.ip, event.code
+| SORT events DESC
+| LIMIT 30
+]]>
+        </Query>
+      </Step>
+      <Step order="12" name="IP investigation">
+        <Purpose>IP investigation</Purpose>
+        <Query platform="Elastic" language="ES|QL" id="Q-12">
+          <![CDATA[
+FROM logs-system.security-*
+| WHERE @timestamp >= NOW() - 2 hours
+    AND source.ip == "$source_ip"
+    AND event.code IN ("4624", "4625")
+| STATS events = COUNT(*) BY event.code, winlog.event_data.TargetUserName
+| SORT events DESC
+| LIMIT 25
+]]>
+        </Query>
+      </Step>
+      <Step order="13" name="File investigation">
+        <Purpose>File investigation</Purpose>
+        <Query platform="Elastic" language="ES|QL" id="Q-13">
+          <![CDATA[
+FROM logs-system.security-*
+| WHERE @timestamp >= NOW() - 2 hours
+    AND event.code == "4688"
+    AND winlog.event_data.SubjectUserName == "$target_username"
+| STATS executions = COUNT(*), first_seen = MIN(@timestamp), last_seen = MAX(@timestamp) BY process.executable
+| SORT executions DESC
+| LIMIT 30
+]]>
+        </Query>
+      </Step>
+      <Step order="14" name="Authentication investigation">
+        <Purpose>Authentication investigation</Purpose>
+        <Query platform="Elastic" language="ES|QL" id="Q-14">
+          <![CDATA[
+FROM logs-system.security-*
+| WHERE @timestamp >= NOW() - 2 hours
+    AND event.code IN ("4624", "4625")
+    AND winlog.event_data.TargetUserName == "$target_username"
+| STATS events = COUNT(*), sources = COUNT_DISTINCT(source.ip), reasons = VALUES(winlog.event_data.SubStatus) BY event.code, winlog.event_data.LogonType
+| SORT events DESC
+| LIMIT 20
+]]>
+        </Query>
+      </Step>
+      <Step order="15" name="Timeline Reconstruction">
+        <Purpose>Timeline Reconstruction</Purpose>
+        <Query platform="Elastic" language="ES|QL" id="Q-15">
+          <![CDATA[
+FROM logs-system.security-*
+| WHERE @timestamp >= NOW() - 2 hours
+    AND event.code IN ("4624", "4625")
+    AND winlog.event_data.TargetUserName == "$target_username"
+    AND winlog.event_data.LogonType == "3"
+| KEEP @timestamp, event.code, source.ip, winlog.event_data.SubStatus, host.name
+| SORT @timestamp ASC
+| LIMIT 200
+]]>
+        </Query>
+      </Step>
+      <Step order="16" name="Lateral movement validation">
+        <Purpose>Lateral movement validation</Purpose>
+        <Query platform="Elastic" language="ES|QL" id="Q-16">
+          <![CDATA[
+FROM logs-system.security-*
+| WHERE @timestamp >= NOW() - 2 hours
+    AND winlog.event_data.SubjectUserName == "$target_username"
+    AND event.code IN ("5140", "5145", "4648")
+| STATS events = COUNT(*) BY event.code, winlog.event_data.ShareName, host.name
+| SORT events DESC
+| LIMIT 25
+]]>
+        </Query>
+      </Step>
+      <Step order="17" name="Persistence validation">
+        <Purpose>Persistence validation</Purpose>
+        <Query platform="Elastic" language="ES|QL" id="Q-17">
+          <![CDATA[
+FROM logs-system.security-*
+| WHERE @timestamp >= NOW() - 2 hours
+    AND event.code == "4688"
+    AND winlog.event_data.SubjectUserName == "$target_username"
+    AND TO_LOWER(process.name) IN ("schtasks.exe", "sc.exe", "net.exe", "net1.exe", "reg.exe", "powershell.exe", "wmic.exe", "at.exe")
+| STATS events = COUNT(*), last_seen = MAX(@timestamp) BY process.name
+| SORT events DESC
+| LIMIT 20
+]]>
+        </Query>
+      </Step>
+      <Step order="18" name="Privilege escalation validation">
+        <Purpose>Privilege escalation validation</Purpose>
+        <Query platform="Elastic" language="ES|QL" id="Q-18">
+          <![CDATA[
+FROM logs-system.security-*
+| WHERE @timestamp >= NOW() - 2 hours
+    AND event.code == "4672"
+    AND winlog.event_data.SubjectUserName == "$target_username"
+| STATS special_priv = COUNT(*) BY host.name
+| SORT special_priv DESC
+| LIMIT 20
+]]>
+        </Query>
+      </Step>
+      <Step order="19" name="Defense evasion validation">
+        <Purpose>Defense evasion validation</Purpose>
+        <Query platform="Elastic" language="ES|QL" id="Q-19">
+          <![CDATA[
+FROM logs-system.security-*
+| WHERE @timestamp >= NOW() - 2 hours
+    AND event.code == "4688"
+    AND winlog.event_data.SubjectUserName == "$target_username"
+    AND TO_LOWER(process.name) IN ("wevtutil.exe", "fsutil.exe", "vssadmin.exe", "wmic.exe", "cipher.exe", "sdelete.exe", "sdelete64.exe")
+| STATS events = COUNT(*) BY process.name
+| SORT events DESC
+| LIMIT 20
+]]>
+        </Query>
+      </Step>
+      <Step order="20" name="Impact assessment">
+        <Purpose>Impact assessment</Purpose>
+        <Query platform="Elastic" language="ES|QL" id="Q-20">
+          <![CDATA[
+FROM logs-system.security-*
+| WHERE @timestamp >= NOW() - 2 hours
+    AND event.code == "4688"
+    AND winlog.event_data.SubjectUserName == "$target_username"
+| STATS executions = COUNT(*), hosts = COUNT_DISTINCT(host.name), distinct_procs = COUNT_DISTINCT(process.name)
+| LIMIT 5
+]]>
+        </Query>
+      </Step>
+      <Step order="21" name="Finalize verdict">
+        <DecisionTree>
+        </DecisionTree>
+      </Step>
+    </Workflow>
+  </Investigation>
+  <ClassificationGuidance>
+    <TruePositive>
+      <Definition></Definition>
+    </TruePositive>
+    <FalsePositive>
+      <Definition></Definition>
+      <Indicators>
+        <Item>A genuine attack that failed - many unrelated sources, bad-password/enumeration reasons, but no successful sign-in from any source (section 14.3 empty). Record as *malicious distributed attempt, blocked/unsuccessful* - never "benign" - and still act on the sources.</Item>
+        <Item>Lockout noise - once the account locks, subsequent failures shift to 0xc0000234; the underlying attempt is still real.</Item>
+        <Item>Service/scheduled-task account with a stale credential across many hosts → misconfiguration (the failing sources are the account's own deployment hosts; consistent 0xc000006a; the account runs processes - section 14.2). This is the most common non-attack cause on NBI.</Item>
+        <Item>A success that cannot be attributed to an attacking source, or ambiguous account nature → needs_escalation.</Item>
+        <Item>Service-account stale-credential fan-out is the dominant non-attack cause here - and it is live right now. The validation account Ahmed.Adminnnnnn runs 143 NetBackup processes (Cohesity/Veritas bpclntcmd.exe, nbcertcmd.exe, vnetd.exe, nbcmdrun.exe) on PAM hosts (nim-pam-apv04, nim-pam-apv05) and fails type-3 logon (0xc0000064) against ~13 backup-target hosts (nim-dbc-dbv01, nim-st-dbv05, nim-sc-dbv04/05, nim-dc2-dbap, …). That is a backup agent authenticating across the fleet with a name the targets do not resolve - a misconfiguration, not an attack.</Item>
+        <Item>The "many sources" are often shared infrastructure, not distinct attackers. The dominant failing source 10.11.18.21 is a shared Citrix broker egress that also fronts CITRIX.NBI (31k successful logons), Solarwinds.Srv, machine accounts, and many named admins. A single shared egress IP can inflate the apparent source diversity - always inspect what each source.ip actually is before calling it a distributed attack, and treat source.ip as weak attribution.</Item>
+        <Item>Reason codes disambiguate. 0xc000006a (bad password) across unrelated/external sources = guessing/stuffing; 0xc0000064 (user does not exist) = enumeration or a stale/renamed credential; a wall of 0xc000006a from internal server subnets that are the account's own hosts = the stale-credential loop.</Item>
+        <Item>No historical NBI benign-true-positive is on record for this rule. There is no allow-list. Never record the account/sources as "benign"; a proven-failed attack is *blocked/unsuccessful*, and a service fan-out is *misconfiguration*.</Item>
+      </Indicators>
+    </FalsePositive>
+    <Misconfiguration>
+      <Definition></Definition>
+    </Misconfiguration>
+    <NeedsEscalation>
+      <Definition></Definition>
+    </NeedsEscalation>
+  </ClassificationGuidance>
+  <ResponseActions>
+    <Phase name="Containment">
+      <Action>If a success is attributable to an attacking source (true_positive): reset $target_username immediately and revoke sessions/Kerberos tickets to invalidate the cracked credential, then isolate any host showing post-access (section 14.4 / section 17.1).</Action>
+      <Action>If a genuine attack with no success (false_positive - blocked/unsuccessful): block/deny the attacking sources at the firewall/identity layer where feasible, and enforce/tighten account lockout for the targeted account class to cap further attempts.</Action>
+      <Action>If a service stale-credential misconfiguration: do NOT blanket-reset blindly - a reset that is not propagated to every deployment host will worsen the failure loop and can cause outages. Engage the account owner to correct the stored credential across the affected hosts in a controlled change.</Action>
+      <Action>Preserve evidence first: the 4625 source set + reasons (section 14.1), the success set (section 14.3), account nature (section 14.2), and any post-access (section 14.4).</Action>
+      <Action>Deploy/confirm changes only via the authorised human-approved DEPLOY path; investigation itself is read-only.</Action>
+    </Phase>
+    <Phase name="Eradication">
+      <Action>On compromise: rotate $target_username and any credentials it could reach; remove any persistence created under it (section 17.2); hunt the attacking source set across other accounts (section 15.6b) and the success source across the estate; close the initial-access vector that seeded the source pool.</Action>
+      <Action>On a blocked attack: ensure the attacking sources are denied and cannot simply resume under the source threshold; review whether the targeted account needs a stronger secret or MFA on its exposed surface.</Action>
+      <Action>On misconfiguration: update the stale stored credential on every affected host (section 15.2b/section 15.5 name the fleet), confirm the failures stop, and record the change; consider migrating the identity to a managed service account.</Action>
+    </Phase>
+    <Phase name="Recovery">
+      <Action>Confirm lockout / smart-lockout is enforced for the account class so distributed guessing is capped, and review whether the exposed authentication surface should require MFA or be network-restricted.</Action>
+      <Action>Migrate service identities to gMSA where feasible so the secret is machine-managed and cannot go stale across hosts (directly prevents the NetBackup-style fan-out).</Action>
+      <Action>Restore any host with confirmed post-access from known-good if compromise is proven; otherwise validate that credential rotation/session revocation holds.</Action>
+      <Action>Return the account to service only after section 22 closing criteria are met and monitoring confirms the failure fan-out (and any success) does not recur.</Action>
+    </Phase>
+  </ResponseActions>
+  <Escalation>
+    <Trigger>Escalate to Tier 3 / Incident Response and the AD/identity team (and notify the customer) when any of the following hold:
+
+- A success (4624) attributable to an attacking source appears (section 14.3) - a cracked credential - with or without post-access.
+- ADMIN$/C$ post-access to hosts the account does not normally administer (section 14.4 / section 17.1).
+- The targeted account is human/high-value or privileged (section 17.3) and the attack is genuine.
+- A success exists but cannot be tied to a source, or the account's service/human nature is unresolved - escalate as needs_escalation.
+- The failing sources include externally-routable or clearly hostile infrastructure that warrants perimeter blocking.
+
+Reset the account and revoke tickets/sessions as part of escalation when a success is in play.</Trigger>
+    <To>SOC L2 / IR</To>
+  </Escalation>
+  <ClosureCriteria>
+    <Item>true_positive: a success attributable to an attacking source (± post-access) confirmed; account reset, sessions/tickets revoked, post-access hunted, hosts with post-access contained, incident documented.</Item>
+    <Item>false_positive (blocked/unsuccessful): a genuine distributed attack with section 14.3 empty (no success) and section 14.4 clean - recorded as *"malicious distributed attempt, blocked/unsuccessful"*, never "benign"; attacking sources blocked and lockout reviewed.</Item>
+    <Item>misconfiguration: a service/scheduled-task identity failing across its own deployment hosts on a stale credential (section 14.2 service nature + section 15.2b/section 15.5 fleet match), no success, no post-access; stored credential corrected across the fleet.</Item>
+    <Item>needs_escalation: a success that cannot be attributed, or ambiguous account nature - handed to the AD/identity team with the specifics.</Item>
+  </ClosureCriteria>
+  <Limitations>
+    <Item>The success set is the verdict. Failures alone never decide this rule - section 14.3 does. An empty 4624 set is authoritative (the outcome is recorded): the distributed attempt did not compromise the account. A success from a source that also failed is the compromise.</Item>
+    <Item>**Count *genuinely distinct* sources.** A single shared broker/egress IP (10.11.18.21 fronts CITRIX.NBI, Solarwinds.Srv, machine accounts, and many admins) can inflate apparent source diversity. Inspect what each source.ip is before calling five sources a distributed attack; source.ip never identifies an individual.</Item>
+    <Item>Service stale-credential fan-out is the dominant non-attack cause on NBI. The validation account Ahmed.Adminnnnnn is a NetBackup agent (bpclntcmd, nbcertcmd, vnetd from Program Files\Veritas/Cohesity NetBackup) on PAM hosts, failing 0xc0000064 against ~13 backup-target hosts - a misconfiguration, not an attack. Prove nature (section 14.2) before assuming malice.</Item>
+    <Item>Read the reason codes. 0xc000006a (bad password) = guessing/stuffing against an existing account; 0xc0000064 (no such user) = enumeration or a stale/renamed credential; 0xc0000234 = locked out (the attempt is still real). They steer the branch.</Item>
+    <Item>The rule name is not the account's privilege. "Admin"-named identities here (Ahmed.Adminnnnnn) may hold no special privileges (4672 empty). Verify actual privilege (section 17.3), don't infer it from the name.</Item>
+    <Item>Mind the exclusions and the evasion. The rule excludes *$, ANONYMOUS, and SRLCL; a distributed attacker who stays under 5 sources/hour, rotates a large pool slowly, or targets an excluded name is invisible. Complement with a single-source spray analytic, impossible-travel / success-from-new-source monitoring, and lockout-rate spikes (section 24).</Item>
+    <Item>KB-worthy (persist to NBI customer scope): (1) Ahmed.Adminnnnnn = NetBackup service identity on nim-pam-apv04/05, failing 0xc0000064 type-3 across ~13 backup targets (stale-credential misconfiguration); (2) 10.11.18.21 = shared Citrix broker egress fronting many identities; (3) SubStatus reason codes populated on 4625; (4) rule exclusions *$/ANONYMOUS/SRLCL need periodic re-verification. Observed live 2026-08-19.</Item>
+  </Limitations>
+</Playbook>

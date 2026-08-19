@@ -1,0 +1,282 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<Playbook xmlns="https://soc.example/playbooks" id="PB-fortigate-webshell-backdoor-rat" name="FortiGate — Web Shell, Backdoor or RAT Malware Detected on the Network - SOC Playbook" version="3.0" status="Validated" classification="TLP:AMBER">
+  <Metadata>
+    <Owner>NBI SOC / Detection Engineering</Owner>
+    <LastUpdated>2026-08-19</LastUpdated>
+    <Severity default="Critical">Critical</Severity>
+    <Confidence default="Medium">Medium</Confidence>
+    <Category>Persistence</Category>
+    <MitreAttack>
+      <Technique id="T1505.003"/>
+      <Technique id="T1505"/>
+      <Technique id="T1105"/>
+      <Technique id="T1219"/>
+      <Tactic id="TA0003"/>
+      <Tactic id="TA0011"/>
+    </MitreAttack>
+    <References>
+      <Reference title="MITRE ATT&amp;CK - Server Software Component: Web Shell (T1505.003)" url="https://attack.mitre.org/techniques/T1505/003/"/>
+      <Reference title="MITRE ATT&amp;CK - Ingress Tool Transfer (T1105)" url="https://attack.mitre.org/techniques/T1105/"/>
+      <Reference title="MITRE ATT&amp;CK - Remote Access Software (T1219)" url="https://attack.mitre.org/techniques/T1219/"/>
+      <Reference title="MITRE ATT&amp;CK - Persistence tactic (TA0003)" url="https://attack.mitre.org/tactics/TA0003/"/>
+      <Reference title="MITRE ATT&amp;CK - Command and Control tactic (TA0011)" url="https://attack.mitre.org/tactics/TA0011/"/>
+      <Reference title="CISA - Detect and Prevent Web Shell Malware (joint advisory)" url="https://www.cisa.gov/news-events/cybersecurity-advisories/aa20-258a"/>
+      <Reference title="Elastic - Fortinet FortiGate integration (antivirus/IPS fields)" url="https://docs.elastic.co/integrations/fortinet_fortigate"/>
+      <Reference title="Fortinet - FortiGate UTM/AntiVirus log reference (action: blocked/monitored/analytics)" url="https://docs.fortinet.com/document/fortigate/7.4.0/fortios-log-message-reference"/>
+      <Reference title="Microsoft - Web shell threats and detection guidance" url="https://www.microsoft.com/en-us/security/blog/2020/02/04/ghost-in-the-shell-investigating-web-shell-attacks/"/>
+    </References>
+  </Metadata>
+  <AlertContext>
+    <RuleName>FortiGate — Web Shell, Backdoor or RAT Malware Detected on the Network</RuleName>
+    <RuleId>nbi-forti-webshell-backdoor</RuleId>
+    <RuleType>query</RuleType>
+    <Index>logs-fortinet_fortigate.log-*</Index>
+    <TriggerLogic>The deployed rule is an Elastic query rule over FortiGate antivirus logs. The one-line Kibana-KQL detection filter:
+
+
+
+Plain English: the FortiGate AV engine identified an object matching a web-shell / backdoor / RAT / trojan / ransomware family name as it crossed the network. Two directions matter and lead to different incidents:
+
+- Object destined FOR an internal server (external source.ip → internal destination.ip, e.g. to 443/8080) - an upload, i.e. an attempt to plant a web shell / backdoor on that server.
+- Object served FROM an internal server (internal source.ip → out, or served on its web port) - an existing shell / compromised host being retrieved, or a host distributing malware.
+
+&gt; VALIDATION_BLOCKED - exact rule trigger (documented live): NBI's FortiGate AV populates fortinet.firewall.virus with an object hash (e.g. 11ca4578cb026a23713aea6781b8ece3) rather than the family names the KQL keys on (*Webshell*, *Backdoor*, *RAT*, …). In-window, no family-name string was present, so the family-name match may not fire even while genuinely malicious objects are being flagged (e.g. blocked HTTPS uploads to internal servers). This investigation therefore keys on the involved serv</TriggerLogic>
+    <KeyAlertFields>fortinet.firewall.virus, fortinet.firewall.action, source.ip, destination.ip, destination.port, fortinet.firewall.service, fortinet.firewall.attack, url.full</KeyAlertFields>
+  </AlertContext>
+  <Inputs>
+    <Input name="$dest_ip"/>
+    <Input name="$src_ip"/>
+    <Input name="$virus"/>
+  </Inputs>
+  <ExecutiveSummary>
+    <Overview>This playbook drives triage and investigation of the FortiGate - Web Shell, Backdoor or RAT Malware Detected on the Network detection on NBI's Elastic Security deployment. The rule fires when the FortiGate antivirus engine identifies a web-shell / backdoor / RAT / trojan / ransomware object transiting the network (fortinet.firewall.subtype: "virus" with a fortinet.firewall.virus value matching a malicious-family pattern) - either uploaded toward an internal server or served from one.
+
+The analyst's job is to decide whether a real malicious object reached or resides on an NBI server (true_positive), whether the AV positively blocked the transfer and the server is confirmed clean (false_positive - blocked malicious transfer, never "benign"), whether the detection is a verified misclassification of a legitimate file (false_positive - misclassification), or whether delivery/persistence is undetermined (needs_escalation). Because the file was flagged on the wire, the involved server must be inspected on disk for an already-present shell even when the transfer was blocked.</Overview>
+    <BusinessImpact>An alert means: the FortiGate AV engine flagged an object - matching a web-shell/backdoor/RAT/ransomware pattern - moving to or from an NBI server. The consequential questions are direction (plant vs. existing shell) and delivery (did any transfer *pass*, or were all *blocked*).
+
+The AV action vocabulary at NBI is decisive and easy to misread:
+
+- blocked - the FortiGate stopped the transfer on the wire. The object did not cross via this flow - but a shell may already be present from an earlier, unflagged transfer, so the server is not cleared without host inspection.
+- monitored - the object was detected but PASSED to its destination. This is a delivery: treat as reached/present.
+- analytics - the object was submitted to sandbox analysis; not necessarily blocked.
+
+A web shell or backdoor on an internet-facing or banking server gives an attacker persistent remote command execution inside the bank - a foothold for data theft, lateral movement and fraud that survives a blocked network transfer. Hence the rule is Critical and the default posture is "treat as live until the server is proven clean."</BusinessImpact>
+  </ExecutiveSummary>
+  <Investigation>
+    <Goal>Decide true_positive / false_positive / misconfiguration / needs_escalation for FortiGate — Web Shell, Backdoor or RAT Malware Detected on the Network.</Goal>
+    <Workflow>
+      <Step order="1" name="Read the detection and its direction (confirm the alert; verbatim WSHELL-01)">
+        <Purpose>Read the detection and its direction (confirm the alert; verbatim WSHELL-01)</Purpose>
+        <Query platform="Elastic" language="ES|QL" id="Q-01">
+          <![CDATA[
+FROM logs-fortinet_fortigate.log-*
+| WHERE fortinet.firewall.subtype == "virus"
+    AND (destination.ip == "$dest_ip" OR source.ip == "$src_ip")
+    AND fortinet.firewall.virus IS NOT NULL
+    AND @timestamp >= NOW() - 4 hours
+| STATS detections = COUNT(*), actions = VALUES(fortinet.firewall.action),
+        viruses = VALUES(fortinet.firewall.virus), service = VALUES(fortinet.firewall.service)
+    BY source.ip, destination.ip, destination.port
+| SORT detections DESC
+| LIMIT 20
+]]>
+        </Query>
+      </Step>
+      <Step order="2" name="Entity pivoting">
+        <Purpose>Entity pivoting</Purpose>
+        <Query platform="Elastic" language="ES|QL" id="Q-02">
+          <![CDATA[
+FROM logs-fortinet_fortigate.log-*
+| WHERE fortinet.firewall.subtype == "virus"
+    AND (destination.ip == "$dest_ip" OR source.ip == "$src_ip")
+    AND @timestamp >= NOW() - 4 hours
+| KEEP @timestamp, source.ip, destination.ip, destination.port, fortinet.firewall.action, fortinet.firewall.virus
+| SORT @timestamp DESC
+| LIMIT 30
+]]>
+        </Query>
+      </Step>
+      <Step order="3" name="Host investigation">
+        <Purpose>Host investigation</Purpose>
+        <Query platform="Elastic" language="ES|QL" id="Q-03">
+          <![CDATA[
+FROM logs-fortinet_fortigate.log-*
+| WHERE fortinet.firewall.subtype IN ("virus","ips")
+    AND (fortinet.firewall.virus == "$virus"
+         OR destination.ip == "$dest_ip" OR source.ip == "$src_ip")
+    AND @timestamp >= NOW() - 4 hours
+| STATS events = COUNT(*), internal_servers = COUNT_DISTINCT(destination.ip),
+        ext_peers = COUNT_DISTINCT(source.ip), attacks = VALUES(fortinet.firewall.attack)
+    BY fortinet.firewall.subtype, fortinet.firewall.action
+| SORT events DESC
+| LIMIT 15
+]]>
+        </Query>
+      </Step>
+      <Step order="4" name="IP investigation">
+        <Purpose>IP investigation</Purpose>
+        <Query platform="Elastic" language="ES|QL" id="Q-04">
+          <![CDATA[
+FROM logs-fortinet_fortigate.log-*
+| WHERE fortinet.firewall.subtype == "virus"
+    AND (destination.ip == "$dest_ip" OR source.ip == "$src_ip")
+    AND @timestamp >= NOW() - 4 hours
+| STATS transfers = COUNT(*), objects = COUNT_DISTINCT(fortinet.firewall.virus),
+        peers = COUNT_DISTINCT(source.ip)
+    BY fortinet.firewall.action
+| SORT transfers DESC
+| LIMIT 10
+]]>
+        </Query>
+      </Step>
+      <Step order="5" name="Hash investigation">
+        <Purpose>Hash investigation</Purpose>
+        <Query platform="Elastic" language="ES|QL" id="Q-05">
+          <![CDATA[
+FROM logs-fortinet_fortigate.log-*
+| WHERE fortinet.firewall.subtype == "virus" AND fortinet.firewall.virus == "$virus"
+    AND @timestamp >= NOW() - 4 hours
+| STATS detections = COUNT(*), servers = COUNT_DISTINCT(destination.ip),
+        peers = COUNT_DISTINCT(source.ip)
+    BY fortinet.firewall.action, destination.port
+| SORT detections DESC
+| LIMIT 15
+]]>
+        </Query>
+      </Step>
+      <Step order="6" name="Timeline Reconstruction">
+        <Purpose>Timeline Reconstruction</Purpose>
+        <Query platform="Elastic" language="ES|QL" id="Q-06">
+          <![CDATA[
+FROM logs-fortinet_fortigate.log-*
+| WHERE fortinet.firewall.subtype IN ("virus","ips")
+    AND (destination.ip == "$dest_ip" OR source.ip == "$src_ip")
+    AND @timestamp >= NOW() - 4 hours
+| KEEP @timestamp, fortinet.firewall.subtype, source.ip, destination.ip, destination.port, fortinet.firewall.action, fortinet.firewall.virus, fortinet.firewall.attack
+| SORT @timestamp ASC
+| LIMIT 200
+]]>
+        </Query>
+      </Step>
+      <Step order="7" name="Lateral movement validation">
+        <Purpose>Lateral movement validation</Purpose>
+        <Query platform="Elastic" language="ES|QL" id="Q-07">
+          <![CDATA[
+FROM logs-fortinet_fortigate.log-*
+| WHERE source.ip == "$dest_ip" AND fortinet.firewall.subtype == "forward"
+    AND @timestamp >= NOW() - 4 hours
+| STATS flows = COUNT(*), bytes = SUM(source.bytes)
+    BY destination.ip, destination.port
+| SORT flows DESC
+| LIMIT 30
+]]>
+        </Query>
+      </Step>
+      <Step order="8" name="Defense evasion validation">
+        <Purpose>Defense evasion validation</Purpose>
+        <Query platform="Elastic" language="ES|QL" id="Q-08">
+          <![CDATA[
+FROM logs-fortinet_fortigate.log-*
+| WHERE fortinet.firewall.subtype == "virus"
+    AND (destination.ip == "$dest_ip" OR source.ip == "$src_ip")
+    AND fortinet.firewall.action != "blocked"
+    AND @timestamp >= NOW() - 4 hours
+| STATS passed = COUNT(*), objects = COUNT_DISTINCT(fortinet.firewall.virus)
+    BY fortinet.firewall.action, destination.ip
+| SORT passed DESC
+| LIMIT 15
+]]>
+        </Query>
+      </Step>
+      <Step order="9" name="Impact assessment">
+        <Purpose>Impact assessment</Purpose>
+        <Query platform="Elastic" language="ES|QL" id="Q-09">
+          <![CDATA[
+FROM logs-fortinet_fortigate.log-*
+| WHERE source.ip == "$dest_ip" AND fortinet.firewall.subtype == "forward"
+    AND @timestamp >= NOW() - 4 hours
+| STATS total_flows = COUNT(*), total_bytes = SUM(source.bytes),
+        internal_dests = COUNT_DISTINCT(destination.ip), ports = COUNT_DISTINCT(destination.port)
+| LIMIT 1
+]]>
+        </Query>
+      </Step>
+      <Step order="10" name="Finalize verdict">
+        <DecisionTree>
+        </DecisionTree>
+      </Step>
+    </Workflow>
+  </Investigation>
+  <ClassificationGuidance>
+    <TruePositive>
+      <Definition></Definition>
+    </TruePositive>
+    <FalsePositive>
+      <Definition></Definition>
+      <Indicators>
+        <Item>AV misclassification of a legitimate file. A benign administrative tool, an installer, or a security-testing artifact can heuristically match a malware-family/hash pattern. This is a verified misclassification *only* once the object's hash reputation is confirmed clean - evidence-backed, never assumed on sight.</Item>
+        <Item>Sanctioned security testing / red-team tooling transiting the network (e.g. an authorised Cobalt-Strike/Meterpreter exercise). This is not benign - it is authorised malicious-technique traffic and must be matched to an exercise ROE before classification, and the target server still inspected.</Item>
+        <Item>Dual-use remote-access software (legitimate RAT-class tools such as remote-support agents) flagged by the RAT signature. Confirm the tool is sanctioned on that server and that the transfer path is expected.</Item>
+        <Item>A blocked transfer with a clean server is not a benign false positive in the ordinary sense - it is a *blocked malicious transfer* (section 13), documented as such, with the source blocked and the server watched.</Item>
+        <Item>The virus field carries an object hash, not a family name. Live in a 24h window the AV actions were analytics (~193,800), monitored (~35,100) and blocked (~4); the blocked events carried a hash fortinet.firewall.virus (e.g. 11ca4578cb026a23713aea6781b8ece3) while analytics/monitored rows frequently had a null virus value. So the deployed family-name match under-fires (section 2), and analysts must key on server/object and resolve the hash reputation out of band.</Item>
+        <Item>monitored is high-volume and means DELIVERED. With tens of thousands of monitored AV events, a monitored verdict on a web-shell-class object is not rare noise to dismiss - it is a passed delivery. Do not read monitored/analytics as "blocked."</Item>
+        <Item>fortinet.firewall.service / profile and url.full are sparse/unmapped on this feed, so direction is derived from internal-vs-external of source.ip/destination.ip and the port (e.g. 443), not from a URL or service string. 10.11.204.232 (validated) is an internet-facing internal server on 443 receiving flagged transfers from many external sources.</Item>
+        <Item>No source is auto-trusted. A scanner, a partner, or a security tool that appears as the peer is investigated identically - the object reputation and the server's on-disk state decide the verdict, never the identity of the peer.</Item>
+      </Indicators>
+    </FalsePositive>
+    <Misconfiguration>
+      <Definition></Definition>
+    </Misconfiguration>
+    <NeedsEscalation>
+      <Definition></Definition>
+    </NeedsEscalation>
+  </ClassificationGuidance>
+  <ResponseActions>
+    <Phase name="Containment">
+      <Action>True_positive (delivered / served / shell found): isolate the server (network-contain) to stop C2 and lateral movement; terminate live web-shell/backdoor sessions and the serving process; block the external peer(s) ($src_ip and any others from section 15.6/section 15.9) at the perimeter; and preserve the shell sample and web-server logs before cleanup.</Action>
+      <Action>Blocked transfer, server not yet cleared: block/monitor the peer, keep the server under heightened watch, and prioritise on-disk inspection - a blocked wire transfer does not rule out a resident shell from an earlier transfer.</Action>
+      <Action>Preserve evidence: attach WSHELL-01/02/03 outputs, the object hash $virus, the exploit-correlation (section 15.5), and the host-inspection result to the case.</Action>
+      <Action>Investigation is read-only; isolation, peer blocks and host actions run only via the authorised, human-approved change path. Treat a web shell on a banking/internet-facing server as live until on-disk inspection disproves it.</Action>
+    </Phase>
+    <Phase name="Eradication">
+      <Action>Remove the web shell/backdoor and any RAT persistence found on the server (dropped handlers in web-writable paths, new services/scheduled tasks, additional shells - section 17.2).</Action>
+      <Action>Close the delivery/exploit vector: patch the exploited web service (correlate the IPS attack from section 15.5), remove upload flaws, and restrict write access to web-servable paths.</Action>
+      <Action>Rotate credentials accessible from the server (service accounts, app secrets, any admin creds used there) and review for reuse across the estate.</Action>
+      <Action>Hunt the same object hash and persistence across peers - especially the other internal servers surfaced by the fleet pivot (section 15.9) - and remediate any that also received the object.</Action>
+    </Phase>
+    <Phase name="Recovery">
+      <Action>Reimage the server if integrity is uncertain (a web shell implies arbitrary code execution under the web identity); otherwise validate that all eradication actions hold after restart.</Action>
+      <Action>Return to service only after the shell/persistence is removed, the exploited service is patched, credentials are rotated, and monitoring confirms no re-delivery or outbound C2.</Action>
+      <Action>Harden: ensure AV is in blocking (not monitor) mode on these flows, enable TLS inspection where policy permits (so encrypted uploads are scanned), application-allowlist server-side executables, and place WAF/virtual-patching in front of the exposed app.</Action>
+      <Action>Recommend tuning the deployed rule to match on hash reputation + AV verdict/direction rather than only family-name strings (section 2), closing the coverage defect that let a hash-named object under-fire.</Action>
+    </Phase>
+  </ResponseActions>
+  <Escalation>
+    <Trigger>Escalate to SOC L2 / Incident Response, the server/app owner and the endpoint team when any of the following hold:
+
+- A monitored/passed delivery of the object (section 15.6), or the internal host is the SOURCE serving it (section 14.1) - the object reached/left the server.
+- Exploit-then-plant - IPS exploit signatures against the same server around the AV hit (section 15.5/section 16).
+- The same object across multiple internal servers (section 15.9) - a spreading campaign.
+- A shell found on disk during host inspection.
+- Inability to inspect the server or resolve the object reputation - escalate as needs_escalation with the gaps named; treat the shell as live until disproven.
+
+Hand off with WSHELL-01/02/03, the object hash, the exploit correlation, and the host-inspection result; isolate the server.</Trigger>
+    <To>SOC L2 / IR</To>
+  </Escalation>
+  <ClosureCriteria>
+    <Item>false_positive (blocked malicious transfer): every transfer blocked (section 15.6), no monitored delivery, no correlated exploitation, and the server confirmed clean on disk; documented as a blocked malicious attempt (never benign); peer blocked.</Item>
+    <Item>false_positive (verified misclassification): the object hash reputation is verified clean (evidence-backed) and no shell is present; a scoped, evidence-backed exclusion is added for that exact object.</Item>
+    <Item>misconfiguration: a recognised internal tooling/testing transfer path produced the detection with no malicious object and no shell; baseline the path with the owner and tune the profile.</Item>
+    <Item>true_positive: the server is isolated and cleaned/reimaged, the shell/backdoor and persistence removed, the delivery/exploit vector closed, credentials rotated, and peers/fleet hunted; incident documented.</Item>
+    <Item>needs_escalation: handed to server/app owner + endpoint team + SOC L2 with the reputation/host-inspection gaps documented.</Item>
+  </ClosureCriteria>
+  <Limitations>
+    <Item>The virus field is a HASH at NBI, not a family name - so the deployed rule under-fires. The family-name KQL (*Webshell*, *Backdoor*, *RAT*, …) matches nothing when the AV reports an object hash (e.g. 11ca4578cb026a23713aea6781b8ece3). Investigate on server/object identity and raise the rule change (match on hash reputation + AV verdict/direction). This is a deployed-rule coverage defect, reported for separate human-authorised tuning.</Item>
+    <Item>monitored means DELIVERED, not blocked. With ~35k monitored and ~194k analytics AV events per 24h vs only ~4 blocked, the common verdict is *not* a block. A monitored web-shell-class object reached its destination - treat it as present.</Item>
+    <Item>Direction is derived from internal-vs-external + port, not a URL. service/profile/url.full are sparse/unmapped. Validated: 10.11.204.232 is an internet-facing internal server on 443 receiving flagged HTTPS transfers from many external sources.</Item>
+    <Item>The wire cannot see a resident shell. A blocked transfer never clears the server; on-disk inspection is mandatory. Empty AV windows do not mean a clean host.</Item>
+    <Item>Exploit-then-plant is the confirming correlation. IPS attack signatures against the same server around the AV hit strongly indicate a real compromise chain over a misclassification - always run the virus+ips fleet/exploit pivot (section 15.5).</Item>
+    <Item>Evasion. TLS-inspection gaps, payload encoding, and exploit-before-file delivery all bypass on-wire AV; complement with perimeter IPS analytics, WAF detections on the banking apps, and host-side web-shell hunting (new web-writable files, anomalous handler processes).</Item>
+    <Item>KB-worthy (persist to NBI customer scope): (1) FortiGate AV fortinet.firewall.virus = object hash, family names absent → deployed web-shell rule under-fires; (2) AV action distribution ~analytics 194k / monitored 35k / blocked 4 per 24h; (3) service/profile/url.full sparse → direction from internal/external + port; (4) 10.11.204.232 internet-facing server on 443 with blocked object hash 11ca4578cb026a23713aea6781b8ece3 from multiple external peers (159.60.x.x) on 2026-08-19. All observed live on 2026-08-19.</Item>
+  </Limitations>
+</Playbook>

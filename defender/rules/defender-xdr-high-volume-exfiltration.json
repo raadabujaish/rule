@@ -1,0 +1,49 @@
+{
+  "name": "Microsoft Defender XDR — High-Volume Data Exfiltration Activity (Single Entity)",
+  "tags": [
+    "NBI-Advanced",
+    "Phase2-Batch3",
+    "M365-Defender-XDR",
+    "Exfiltration"
+  ],
+  "interval": "1440m",
+  "enabled": true,
+  "description": "Raises an alert when a single entity accumulates 50 or more Microsoft Defender XDR Exfiltration alerts within the window, indicating anomalous outbound data-movement activity. The alert surfaces the alert count, maximum severity, source IPs, techniques, and sample Defender messages.",
+  "risk_score": 73,
+  "severity": "high",
+  "note": "## Investigation\n1. Review `threat_details` and `techniques` to see what data-movement Defender flagged.\n2. Determine whether `account` is a legitimate high-volume data mover (backup/ETL/reporting) or an anomaly.\n3. Check destination of the transfers and correlate with FortiGate egress + endpoint for the same window.\n4. If unexplained, treat as potential data exfiltration.",
+  "output_index": "",
+  "investigation_fields": {
+    "field_names": [
+      "account",
+      "exfil_alerts",
+      "max_severity",
+      "source_ips",
+      "techniques",
+      "threat_details"
+    ]
+  },
+  "author": [
+    "raadabujaish"
+  ],
+  "false_positives": [],
+  "from": "now-1450m",
+  "rule_id": "nbi-b3-defender-exfil-burst",
+  "max_signals": 100,
+  "risk_score_mapping": [],
+  "severity_mapping": [],
+  "threat": [],
+  "to": "now",
+  "references": [
+    "https://learn.microsoft.com/en-us/defender-xdr/"
+  ],
+  "version": 1,
+  "exceptions_list": [],
+  "related_integrations": [],
+  "required_fields": [],
+  "setup": "",
+  "type": "esql",
+  "language": "esql",
+  "query": "FROM logs-m365_defender.*\n| MV_EXPAND threat.tactic.name\n| WHERE threat.tactic.name == \"Exfiltration\"\n| STATS exfil_alerts = COUNT(*), max_severity = MAX(event.severity), source_ips = VALUES(source.ip),\n        techniques = VALUES(threat.technique.subtechnique.id), threat_details = VALUES(message),\n        device_id = VALUES(host.id), first_seen = MIN(@timestamp), last_seen = MAX(@timestamp) BY account = user.name\n| WHERE exfil_alerts >= 50\n| SORT exfil_alerts DESC",
+  "actions": []
+}

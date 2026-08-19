@@ -1,0 +1,77 @@
+{
+  "name": "FortiGate — Web Shell, Backdoor or RAT Malware Detected on the Network",
+  "tags": [
+    "NBI-Perimeter",
+    "Phase3",
+    "FortiGate",
+    "Malware"
+  ],
+  "interval": "5m",
+  "enabled": true,
+  "description": "Detects the FortiGate antivirus/IPS engine identifying a web shell, backdoor, RAT, or ransomware family on network traffic (e.g. PHP/Webshell, PHP/Rst backdoor). A web shell or backdoor traversing the network is a strong indicator that a server has been compromised or that a malicious upload is in progress.",
+  "risk_score": 85,
+  "severity": "critical",
+  "note": "## Investigation\n1. `fortinet.firewall.virus` is the malware family; `source.ip`/`destination.ip` and `url.full` show the transfer.\n2. Determine whether the file was destined FOR an internal server (upload → likely compromise) or served FROM one (existing web shell).\n3. Even if the AV blocked the transfer, inspect the target server for an already-present web shell.\n## Response\nQuarantine/inspect the involved server, hunt for the web shell on disk, and review web-server logs for the upload vector.",
+  "output_index": "",
+  "investigation_fields": {
+    "field_names": [
+      "fortinet.firewall.virus",
+      "fortinet.firewall.action",
+      "source.ip",
+      "destination.ip",
+      "url.full",
+      "fortinet.firewall.service",
+      "fortinet.firewall.profile",
+      "host.name"
+    ]
+  },
+  "author": [
+    "raadabujaish"
+  ],
+  "false_positives": [],
+  "from": "now-9m",
+  "rule_id": "nbi-forti-webshell-backdoor",
+  "max_signals": 100,
+  "risk_score_mapping": [],
+  "severity_mapping": [],
+  "threat": [
+    {
+      "framework": "MITRE ATT&CK",
+      "tactic": {
+        "id": "TA0003",
+        "name": "Persistence",
+        "reference": "https://attack.mitre.org/tactics/TA0003/"
+      },
+      "technique": [
+        {
+          "id": "T1505",
+          "name": "Server Software Component",
+          "reference": "https://attack.mitre.org/techniques/T1505/",
+          "subtechnique": [
+            {
+              "id": "T1505.003",
+              "name": "Web Shell",
+              "reference": "https://attack.mitre.org/techniques/T1505/003/"
+            }
+          ]
+        }
+      ]
+    }
+  ],
+  "to": "now",
+  "references": [
+    "https://attack.mitre.org/techniques/T1505/003/"
+  ],
+  "version": 1,
+  "exceptions_list": [],
+  "related_integrations": [],
+  "required_fields": [],
+  "setup": "",
+  "type": "query",
+  "language": "kuery",
+  "index": [
+    "logs-fortinet_fortigate.log-*"
+  ],
+  "query": "fortinet.firewall.subtype:\"virus\" and fortinet.firewall.virus:(*Webshell* or *WebShell* or *Backdoor* or *bdr* or *Trojan* or *Rst* or *CobaltStrike* or *Meterpreter* or *RAT* or *Ransom* or *Cryptor*)",
+  "actions": []
+}

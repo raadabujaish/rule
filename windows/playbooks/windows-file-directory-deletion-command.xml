@@ -1,0 +1,426 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<Playbook xmlns="https://soc.example/playbooks" id="PB-windows-file-directory-deletion-command" name="File or Directory Deletion Command [NBI-4688] - SOC Playbook" version="3.0" status="Validated" classification="TLP:AMBER">
+  <Metadata>
+    <Owner>NBI SOC / Detection Engineering</Owner>
+    <LastUpdated>2026-08-19</LastUpdated>
+    <Severity default="Low">Low</Severity>
+    <Confidence default="Medium">Medium</Confidence>
+    <Category>Defense Evasion</Category>
+    <MitreAttack>
+      <Technique id="T1070.004"/>
+      <Technique id="T1070"/>
+      <Technique id="T1070.001"/>
+      <Technique id="T1490"/>
+      <Tactic id="TA0005"/>
+    </MitreAttack>
+    <References>
+      <Reference title="MITRE ATT&amp;CK - Indicator Removal: File Deletion (T1070.004)" url="https://attack.mitre.org/techniques/T1070/004/"/>
+      <Reference title="MITRE ATT&amp;CK - Indicator Removal: Clear Windows Event Logs (T1070.001)" url="https://attack.mitre.org/techniques/T1070/001/"/>
+      <Reference title="MITRE ATT&amp;CK - Defense Evasion tactic (TA0005)" url="https://attack.mitre.org/tactics/TA0005/"/>
+      <Reference title="MITRE ATT&amp;CK - Inhibit System Recovery (T1490)" url="https://attack.mitre.org/techniques/T1490/"/>
+      <Reference title="Microsoft Learn - 4688: A new process has been created" url="https://learn.microsoft.com/en-us/windows/security/threat-protection/auditing/event-4688"/>
+      <Reference title="Microsoft Learn - 1102: The audit log was cleared" url="https://learn.microsoft.com/en-us/windows/security/threat-protection/auditing/event-1102"/>
+      <Reference title="Microsoft Learn - vssadmin delete shadows" url="https://learn.microsoft.com/en-us/windows-server/administration/windows-commands/vssadmin-delete-shadows"/>
+      <Reference title="LOLBAS - Rundll32.exe (InetCpl.cpl ClearMyTracksByProcess)" url="https://lolbas-project.github.io/lolbas/Binaries/Rundll32/"/>
+    </References>
+  </Metadata>
+  <AlertContext>
+    <RuleName>File or Directory Deletion Command [NBI-4688]</RuleName>
+    <RuleId>nbi-b2-file-or-directory-deletion-command</RuleId>
+    <RuleType>eql</RuleType>
+    <Index>logs-system.security*</Index>
+    <TriggerLogic>Deployed logic (plain English): a non-SYSTEM 4688 where process.name is rundll32.exe/reg.exe/cmd.exe/powershell.exe and the effective command line contains a deletion/history-clearing token (InetCpl.cpl ClearMyTracksByProcess, reg … delete, rmdir/rm/rd/del, Remove-Item, [IO.File]::Delete), excluding SYSTEM and specific OneDrive/Docker/Temp cleanup paths. NBI's investigation folds process.command_line and multivalued process.args before matching the tokens (host-dependent capture - section 8).
+
+One-line Kibana KQL detection filter (for fast pivoting in Discover / Timeline):
+
+
+
+Why this is meaningful: the rule filters out SYSTEM housekeeping and known-benign cleanup paths, so remaining hits are non-system accounts issuing deletion commands - the population worth reading for anti-forensic or destructive intent. The target and volume separate routine cleanup from evidence destruction.</TriggerLogic>
+    <KeyAlertFields>process.name, process.executable, process.parent.name, process.parent.executable, process.pid, process.parent.pid, process.entity_id, user.name, user.id, host.name, host.os.type, process.command_line</KeyAlertFields>
+  </AlertContext>
+  <Inputs>
+    <Input name="$host"/>
+    <Input name="$user"/>
+    <Input name="$process"/>
+    <Input name="$parent"/>
+  </Inputs>
+  <ExecutiveSummary>
+    <Overview>This playbook drives triage and investigation of the File or Directory Deletion Command detection on NBI's Elastic Security deployment. The rule fires on a non-SYSTEM (user.id not S-1-5-18) Windows process start (Event 4688) that deletes files/directories or clears history via a built-in tool: rundll32.exe running InetCpl.cpl,ClearMyTracksByProcess (clear browser history), reg.exe with a delete argument, cmd.exe running rmdir/rm (with a few OneDrive/Docker/Temp exclusions), or powershell.exe running rmdir/rm/rd/Remove-Item/del/[IO.File]::Delete(). In short: a human/non-system account issuing a deletion or history-clearing command.
+
+Deletion by hand is routine housekeeping - but it is also the anti-forensic / indicator-removal stage of an intrusion (clearing browser tracks, deleting registry keys, removing logs/tools/staged files) and the destructive-impact stage of ransomware (wiping backups and shadow copies). The analyst decides whether this is legitimate cleanup (false_positive - authorised), deliberate evidence destruction or destructive impact (true_positive), a benign automated maintenance job not yet baselined (misconfiguration), or insufficiently evidenced (needs_escalation). What was deleted, how much, and by which parent decide it.</Overview>
+    <BusinessImpact>An alert means: on $host, the non-SYSTEM account $user issued a file/directory deletion or history-clearing command via $process. Crucially, this index records the command (4688), not the file-system delete operation - it does not by itself prove the object was removed. The open questions are what target the command named, how much was deleted, and whether logs/backups/shadow copies were affected.
+
+This maps to Defense Evasion / Indicator Removal. Most hits are benign cleanup; the investigation's job is to catch the minority that are anti-forensic or destructive.</BusinessImpact>
+  </ExecutiveSummary>
+  <Investigation>
+    <Goal>Decide true_positive / false_positive / misconfiguration / needs_escalation for File or Directory Deletion Command [NBI-4688].</Goal>
+    <Workflow>
+      <Step order="1" name="Confirm the deletion command and its target (on $host)">
+        <Purpose>Confirm the deletion command and its target (on $host)</Purpose>
+        <Query platform="Elastic" language="ES|QL" id="Q-01">
+          <![CDATA[
+FROM logs-system.security*
+| WHERE event.code == "4688" AND host.name == "$host" AND user.name == "$user" AND process.name == "$process" AND user.id != "S-1-5-18" AND @timestamp >= NOW() - 4 hours
+| EVAL cl = TO_LOWER(COALESCE(process.command_line, MV_CONCAT(process.args, " ")))
+| WHERE cl LIKE "*inetcpl.cpl*" OR cl LIKE "*delete*" OR cl LIKE "*rmdir*" OR cl LIKE "*remove-item*" OR cl LIKE "*]::delete(*" OR cl LIKE "* rm *" OR cl LIKE "* del *" OR cl LIKE "* rd *"
+| KEEP @timestamp, user.name, process.name, process.parent.name, process.command_line
+| SORT @timestamp DESC
+| LIMIT 25
+]]>
+        </Query>
+      </Step>
+      <Step order="2" name="Deletion volume and anti-forensic signature">
+        <Purpose>Deletion volume and anti-forensic signature</Purpose>
+        <Query platform="Elastic" language="ES|QL" id="Q-02">
+          <![CDATA[
+FROM logs-system.security*
+| WHERE event.code == "4688" AND host.name == "$host" AND user.name == "$user" AND user.id != "S-1-5-18" AND @timestamp >= NOW() - 4 hours
+| EVAL cl = TO_LOWER(COALESCE(process.command_line, MV_CONCAT(process.args, " ")))
+| WHERE cl LIKE "*rmdir*" OR cl LIKE "*remove-item*" OR cl LIKE "*]::delete(*" OR cl LIKE "*delete*" OR cl LIKE "*inetcpl.cpl*" OR cl LIKE "* del *" OR cl LIKE "* rd *"
+| EVAL antiforensic = CASE(cl LIKE "*prefetch*" OR cl LIKE "*eventlog*" OR cl LIKE "*.evtx*" OR cl LIKE "*inetcpl*" OR cl LIKE "*wevtutil*" OR cl LIKE "*shadow*" OR cl LIKE "*backup*" OR cl LIKE "*vss*", 1, 0)
+| STATS del_cmds = COUNT(*), antiforensic_cmds = SUM(antiforensic) BY process.name
+| SORT del_cmds DESC
+| LIMIT 20
+]]>
+        </Query>
+      </Step>
+      <Step order="3" name="Characterise the launching parent">
+        <Purpose>Characterise the launching parent</Purpose>
+        <Query platform="Elastic" language="ES|QL" id="Q-03">
+          <![CDATA[
+FROM logs-system.security*
+| WHERE event.code == "4688" AND host.name == "$host" AND process.parent.name == "$parent" AND user.id != "S-1-5-18" AND @timestamp >= NOW() - 4 hours
+| STATS spawned = COUNT(*), users = COUNT_DISTINCT(user.name), distinct_children = COUNT_DISTINCT(process.name) BY process.name
+| SORT spawned DESC
+| LIMIT 20
+]]>
+        </Query>
+      </Step>
+      <Step order="4" name="Entity pivoting">
+        <Purpose>Entity pivoting</Purpose>
+        <Query platform="Elastic" language="ES|QL" id="Q-04">
+          <![CDATA[
+FROM logs-system.security*
+| WHERE @timestamp >= NOW() - 4 hours
+    AND event.code == "4688"
+    AND host.name == "$host"
+    AND user.name == "$user"
+    AND process.name == "$process"
+    AND user.id != "S-1-5-18"
+| KEEP @timestamp, host.name, user.name, process.name, process.executable, process.parent.name, process.parent.pid, process.pid
+| SORT @timestamp DESC
+| LIMIT 50
+]]>
+        </Query>
+      </Step>
+      <Step order="5" name="Process investigation">
+        <Purpose>Process investigation</Purpose>
+        <Query platform="Elastic" language="ES|QL" id="Q-05">
+          <![CDATA[
+FROM logs-system.security*
+| WHERE @timestamp >= NOW() - 4 hours
+    AND event.code == "4688"
+    AND host.name == "$host"
+    AND process.name == "$process"
+    AND user.id != "S-1-5-18"
+| STATS execs = COUNT(*), users = COUNT_DISTINCT(user.name) BY process.parent.name
+| SORT execs DESC
+| LIMIT 25
+]]>
+        </Query>
+      </Step>
+      <Step order="6" name="Process investigation">
+        <Purpose>Process investigation</Purpose>
+        <Query platform="Elastic" language="ES|QL" id="Q-06">
+          <![CDATA[
+FROM logs-system.security*
+| WHERE @timestamp >= NOW() - 4 hours
+    AND event.code == "4688"
+    AND host.name == "$host" AND user.name == "$user"
+    AND user.id != "S-1-5-18"
+    AND TO_LOWER(process.name) IN ("vssadmin.exe", "wbadmin.exe", "wevtutil.exe", "fsutil.exe", "cipher.exe", "sdelete.exe", "sdelete64.exe", "reg.exe", "rundll32.exe")
+| STATS execs = COUNT(*), last_seen = MAX(@timestamp) BY process.name, process.parent.name
+| SORT execs DESC
+| LIMIT 25
+]]>
+        </Query>
+      </Step>
+      <Step order="7" name="Parent-Child process analysis">
+        <Purpose>Parent-Child process analysis</Purpose>
+        <Query platform="Elastic" language="ES|QL" id="Q-07">
+          <![CDATA[
+FROM logs-system.security*
+| WHERE @timestamp >= NOW() - 4 hours
+    AND event.code == "4688"
+    AND host.name == "$host"
+    AND process.parent.name == "$parent"
+    AND user.id != "S-1-5-18"
+| KEEP @timestamp, user.name, process.parent.name, process.parent.pid, process.name, process.pid, process.executable
+| SORT @timestamp DESC
+| LIMIT 50
+]]>
+        </Query>
+      </Step>
+      <Step order="8" name="Parent-Child process analysis">
+        <Purpose>Parent-Child process analysis</Purpose>
+        <Query platform="Elastic" language="ES|QL" id="Q-08">
+          <![CDATA[
+FROM logs-system.security*
+| WHERE @timestamp >= NOW() - 4 hours
+    AND event.code == "4688"
+    AND host.name == "$host"
+    AND process.parent.name == "$process"
+| KEEP @timestamp, user.name, process.parent.name, process.parent.pid, process.name, process.pid, process.executable
+| SORT @timestamp ASC
+| LIMIT 100
+]]>
+        </Query>
+      </Step>
+      <Step order="9" name="User investigation">
+        <Purpose>User investigation</Purpose>
+        <Query platform="Elastic" language="ES|QL" id="Q-09">
+          <![CDATA[
+FROM logs-system.security*
+| WHERE @timestamp >= NOW() - 4 hours
+    AND event.code == "4688"
+    AND user.name == "$user"
+    AND user.id != "S-1-5-18"
+| STATS executions = COUNT(*), distinct_procs = COUNT_DISTINCT(process.name) BY host.name
+| SORT executions DESC
+| LIMIT 20
+]]>
+        </Query>
+      </Step>
+      <Step order="10" name="Host investigation">
+        <Purpose>Host investigation</Purpose>
+        <Query platform="Elastic" language="ES|QL" id="Q-10">
+          <![CDATA[
+FROM logs-system.security*
+| WHERE @timestamp >= NOW() - 4 hours
+    AND event.code == "4688"
+    AND host.name == "$host"
+    AND user.id != "S-1-5-18"
+| STATS executions = COUNT(*), users = COUNT_DISTINCT(user.name) BY process.name, process.parent.name
+| SORT executions ASC
+| LIMIT 40
+]]>
+        </Query>
+      </Step>
+      <Step order="11" name="IP investigation">
+        <Purpose>IP investigation</Purpose>
+        <Query platform="Elastic" language="ES|QL" id="Q-11">
+          <![CDATA[
+FROM logs-system.security*
+| WHERE @timestamp >= NOW() - 4 hours
+    AND event.code == "4624"
+    AND host.name == "$host" AND user.name == "$user"
+    AND source.ip IS NOT NULL
+| STATS logons = COUNT(*) BY source.ip, winlog.event_data.LogonType
+| SORT logons DESC
+| LIMIT 20
+]]>
+        </Query>
+      </Step>
+      <Step order="12" name="File investigation">
+        <Purpose>File investigation</Purpose>
+        <Query platform="Elastic" language="ES|QL" id="Q-12">
+          <![CDATA[
+FROM logs-system.security*
+| WHERE @timestamp >= NOW() - 4 hours
+    AND event.code == "4688"
+    AND host.name == "$host"
+    AND process.name == "$process"
+    AND user.id != "S-1-5-18"
+| STATS executions = COUNT(*), first_seen = MIN(@timestamp), last_seen = MAX(@timestamp) BY process.executable
+| SORT executions DESC
+| LIMIT 30
+]]>
+        </Query>
+      </Step>
+      <Step order="13" name="Authentication investigation">
+        <Purpose>Authentication investigation</Purpose>
+        <Query platform="Elastic" language="ES|QL" id="Q-13">
+          <![CDATA[
+FROM logs-system.security*
+| WHERE @timestamp >= NOW() - 4 hours
+    AND event.code IN ("4624", "4625", "4634", "4647")
+    AND host.name == "$host" AND user.name == "$user"
+| STATS events = COUNT(*), first_seen = MIN(@timestamp), last_seen = MAX(@timestamp) BY event.code, winlog.event_data.LogonType, source.ip
+| SORT events DESC
+| LIMIT 30
+]]>
+        </Query>
+      </Step>
+      <Step order="14" name="Timeline Reconstruction">
+        <Purpose>Timeline Reconstruction</Purpose>
+        <Query platform="Elastic" language="ES|QL" id="Q-14">
+          <![CDATA[
+FROM logs-system.security*
+| WHERE @timestamp >= NOW() - 4 hours
+    AND event.code == "4688"
+    AND host.name == "$host"
+    AND user.name == "$user"
+| KEEP @timestamp, process.parent.name, process.parent.pid, process.name, process.pid, process.executable
+| SORT @timestamp ASC
+| LIMIT 200
+]]>
+        </Query>
+      </Step>
+      <Step order="15" name="Lateral movement validation">
+        <Purpose>Lateral movement validation</Purpose>
+        <Query platform="Elastic" language="ES|QL" id="Q-15">
+          <![CDATA[
+FROM logs-system.security*
+| WHERE @timestamp >= NOW() - 4 hours
+    AND event.code IN ("4624", "4648", "4768", "4769", "5140")
+    AND user.name == "$user"
+    AND host.name != "$host"
+| STATS events = COUNT(*) BY host.name, event.code, winlog.event_data.LogonType
+| SORT events DESC
+| LIMIT 30
+]]>
+        </Query>
+      </Step>
+      <Step order="16" name="Persistence validation">
+        <Purpose>Persistence validation</Purpose>
+        <Query platform="Elastic" language="ES|QL" id="Q-16">
+          <![CDATA[
+FROM logs-system.security*
+| WHERE @timestamp >= NOW() - 4 hours
+    AND host.name == "$host"
+    AND (
+        (event.code == "4688" AND TO_LOWER(process.name) IN ("schtasks.exe", "reg.exe", "sc.exe", "at.exe", "powershell.exe", "wscript.exe", "cscript.exe", "rundll32.exe", "mshta.exe"))
+        OR event.code == "7045"
+        OR event.code == "4720"
+        OR event.code == "4698"
+    )
+| STATS events = COUNT(*) BY event.code, process.name, user.name
+| SORT events DESC
+| LIMIT 40
+]]>
+        </Query>
+      </Step>
+      <Step order="17" name="Privilege escalation validation">
+        <Purpose>Privilege escalation validation</Purpose>
+        <Query platform="Elastic" language="ES|QL" id="Q-17">
+          <![CDATA[
+FROM logs-system.security*
+| WHERE @timestamp >= NOW() - 4 hours
+    AND event.code == "4672"
+    AND host.name == "$host"
+| STATS special_priv_logons = COUNT(*) BY user.name
+| SORT special_priv_logons DESC
+| LIMIT 25
+]]>
+        </Query>
+      </Step>
+      <Step order="18" name="Defense evasion validation">
+        <Purpose>Defense evasion validation</Purpose>
+        <Query platform="Elastic" language="ES|QL" id="Q-18">
+          <![CDATA[
+FROM logs-system.security*
+| WHERE @timestamp >= NOW() - 4 hours
+    AND host.name == "$host"
+    AND (
+        (event.code == "4688" AND TO_LOWER(process.name) IN ("wevtutil.exe", "fsutil.exe", "vssadmin.exe", "wmic.exe", "cipher.exe", "sdelete.exe", "sdelete64.exe", "wbadmin.exe"))
+        OR event.code == "1102"
+        OR event.code == "4719"
+    )
+| STATS events = COUNT(*) BY event.code, process.name, user.name
+| SORT events DESC
+| LIMIT 30
+]]>
+        </Query>
+      </Step>
+      <Step order="19" name="Impact assessment">
+        <Purpose>Impact assessment</Purpose>
+        <Query platform="Elastic" language="ES|QL" id="Q-19">
+          <![CDATA[
+FROM logs-system.security*
+| WHERE @timestamp >= NOW() - 4 hours
+    AND host.name == "$host"
+    AND event.code == "4688"
+    AND TO_LOWER(process.name) IN ("vssadmin.exe", "wbadmin.exe", "wmic.exe", "diskshadow.exe")
+| STATS execs = COUNT(*), users = COUNT_DISTINCT(user.name), last_seen = MAX(@timestamp) BY process.name, process.parent.name
+| SORT execs DESC
+| LIMIT 25
+]]>
+        </Query>
+      </Step>
+      <Step order="20" name="Finalize verdict">
+        <DecisionTree>
+        </DecisionTree>
+      </Step>
+    </Workflow>
+  </Investigation>
+  <ClassificationGuidance>
+    <TruePositive>
+      <Definition></Definition>
+    </TruePositive>
+    <FalsePositive>
+      <Definition></Definition>
+      <Indicators>
+        <Item>Routine user/admin cleanup - a person deleting their own temp/personal files or a folder from an interactive shell. The dominant benign cause on an interactive host.</Item>
+        <Item>Documented admin maintenance - a known task clearing caches/temp directories, matched to a change record.</Item>
+        <Item>Automated maintenance jobs - a scheduled cleanup that deletes benign targets on a schedule (see misconfiguration).</Item>
+        <Item>No deletion-token command was present in the live 4-hour window on the validated host - but this is partly because the victim/interactive tier has command-line auditing OFF (see below), so token-based matching is blind there. Absence is not a clean bill of health.</Item>
+        <Item>The interactive tier has command-line auditing OFF. $host (nim-jump-apv02) and the jump/VDI class measure 0% process.command_line/process.args on 4688. So on the exact host class where a human issues deletion commands by hand, the deletion target is not captured in this index - the rule's token match cannot see it, and confirmation of *what* was deleted must come from process.args (also null here), file-audit, or EDR. This is a genuine gap: an interactive Remove-Item/rmdir on the jump tier can occur without the target ever reaching NBI.</Item>
+        <Item>The rule already filters SYSTEM and known-benign cleanup paths (OneDrive/Docker/Temp), so remaining non-system hits are worth reading - but on the command-line-less tier you are reading lineage and volume, not the target string.</Item>
+        <Item>$user is a normal interactive user (SID S-1-5-21-…, not privileged - no 4672 on the jump host for named users). Routine personal cleanup by such a user is the expected benign case; a burst against logs/backups is not.</Item>
+        <Item>No NBI benign-true-positive allow-list applies blindly. Scope any future exception to the exact host + user + command + parent after a documented authorised cause.</Item>
+      </Indicators>
+    </FalsePositive>
+    <Misconfiguration>
+      <Definition></Definition>
+    </Misconfiguration>
+    <NeedsEscalation>
+      <Definition></Definition>
+    </NeedsEscalation>
+  </ClassificationGuidance>
+  <ResponseActions>
+    <Phase name="Containment">
+      <Action>If anti-forensic/destructive (true_positive): preserve remaining evidence first - isolate $host *before* further deletion, and snapshot/preserve surviving logs and backups. On a shared jump host, coordinate with IT but prioritise stopping ongoing destruction.</Action>
+      <Action>If backup/shadow-copy deletion is seen (section 17.5): treat as a ransomware precursor - engage IR immediately, check for encryption activity, and protect remaining backups off-host.</Action>
+      <Action>Terminate the deletion process and its chain (the PID tree from section 15.3b) if the host cannot yet be isolated.</Action>
+      <Action>Suspend/disable $user and revoke sessions if the account is implicated in destruction; reset credentials (section 20).</Action>
+      <Action>For benign cleanup: no containment - proceed to closure. Apply changes only via the authorised human-approved DEPLOY path; investigation is read-only.</Action>
+    </Phase>
+    <Phase name="Eradication">
+      <Action>Hunt the surrounding intrusion/ransomware chain - the deletion is usually a stage, not the whole incident. Trace what preceded it (section 16) and remove dropped tooling and persistence (section 17.2).</Action>
+      <Action>Confirm what was destroyed via file-audit (4660/4663) / EDR and assess recoverability (backups, shadow copies, forwarded logs).</Action>
+      <Action>Remove any attacker persistence and remediate the initial-access vector if the deletion was anti-forensic cleanup of an intrusion.</Action>
+      <Action>Run a full anti-malware / EDR scan on $host and hunt the same tooling/behaviour across peers and any host $user touched (section 15.4, section 17.1).</Action>
+    </Phase>
+    <Phase name="Recovery">
+      <Action>Restore destroyed data from off-host/immutable backups where the deletion removed logs, artifacts, or business data; verify backup integrity.</Action>
+      <Action>Reset $user's credentials if the account was implicated in a destructive/anti-forensic chain; rotate any privileged credentials exposed on $host (section 17.3).</Action>
+      <Action>Restore $host from a known-good image if tampering was extensive; otherwise validate eradication holds after reboot.</Action>
+      <Action>Return to service only after section 22 closing criteria are met. Recommend hardening (section 23): forward event logs off-host, protect backups/shadow copies (immutable/off-host), restrict destructive built-ins on servers, and enable command-line auditing on the interactive tier.</Action>
+    </Phase>
+  </ResponseActions>
+  <Escalation>
+    <Trigger>Escalate to Tier 3 / IR when any of the following hold:
+
+- Deletion/clearing of logs, event logs (1102), prefetch, shadow copies, or backups (section 14.2/section 17.4/section 17.5).
+- A deletion burst or deletion from a script host on a server/Tier-0 host (section 14.2/section 14.3).
+- Backup/shadow-copy deletion (vssadmin/wbadmin/wmic shadowcopy) - treat as a ransomware precursor and engage IR immediately (section 17.5).
+- The acting account is privileged/service (section 17.3), or lateral movement/persistence accompanies the deletion (section 17.1/section 17.2).
+- The deleted target or justification cannot be established (command-line/args null, no file-audit/EDR) - escalate as needs_escalation.</Trigger>
+    <To>SOC L2 / IR</To>
+  </Escalation>
+  <ClosureCriteria>
+    <Item>false_positive (authorised): a user/admin cleaning own temp/personal files or a documented admin task, from an interactive shell, with benign targets - context confirmed and documented. Scope any exception to host + user + command + parent.</Item>
+    <Item>false_positive (proven-blocked): a destructive command positively proven blocked/failed with nothing removed - documented as a blocked-malicious attempt, never "benign".</Item>
+    <Item>misconfiguration: a recognised automated maintenance job performs benign scheduled deletions, not yet baselined; baseline it.</Item>
+    <Item>true_positive: anti-forensic evidence destruction or destructive impact confirmed; remaining evidence preserved, intrusion/ransomware chain hunted, account and parent investigated, backups verified, incident documented.</Item>
+    <Item>needs_escalation: deleted target/justification unresolved - handed to Tier 3 with file-audit/EDR requested.</Item>
+  </ClosureCriteria>
+  <Limitations>
+    <Item>Command, not delete. This index proves a deletion *command* ran (4688), not that an object was removed - confirm actual removal via file-audit (4660/4663, SACL-scoped) or EDR. A command-only or empty result proves neither destruction nor safety.</Item>
+    <Item>The target is the case, and it is often uncaptured here. On the interactive/VDI tier process.command_line/process.args are 0% populated, so the deletion target is not in-index - pull it from EDR/file-audit. Lean on tool name (section 15.2b: vssadmin/wbadmin/wevtutil), volume/burst, parent, and PID lineage, which are captured regardless.</Item>
+    <Item>Anti-forensic and impact targets are the discriminators. Logs/.evtx/prefetch/InetCpl tracks, 1102 log clearing, and especially shadow-copy/backup deletion turn a Low-severity cleanup alert into an IR-grade destructive event.</Item>
+    <Item>Interactive vs scripted parent. userinit/explorer→cmd (validated on $host) is hands-on cleanup; a script-host parent alongside encoded PowerShell/LOLBins is an automated anti-forensic chain.</Item>
+    <Item>Evasion: an attacker can delete as SYSTEM (excluded by the rule), use the excluded OneDrive/Docker/Temp paths, wipe via a non-matching API, or rename tools. Complement with backup/shadow-copy deletion detection (vssadmin/wbadmin) and event-log-cleared (1102) monitoring independent of the deletion-token match.</Item>
+    <Item>KB-worthy (persist to NBI customer scope): (1) nim-jump-apv02/jump-VDI tier command-line auditing 0% (deletion target uncaptured - EDR/file-audit required); (2) machine accounts resolve to user.id = S-1-5-18 and are excluded, but named accounts (e.g. Sam.Rajendran, SID S-1-5-21-…) are included; (3) userinit.exe → cmd.exe/explorer.exe interactive chain on the jump tier; (4) 4688 records the command, not the delete - corroborate with 4660/4663/EDR. All observed live on 2026-08-19.</Item>
+  </Limitations>
+</Playbook>

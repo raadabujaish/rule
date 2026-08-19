@@ -1,0 +1,455 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<Playbook xmlns="https://soc.example/playbooks" id="PB-windows-volume-shadow-copy-backup-deletion" name="Windows — Volume Shadow Copy / Backup Deletion (Ransomware Impact) - SOC Playbook" version="3.0" status="Validated" classification="TLP:AMBER">
+  <Metadata>
+    <Owner>NBI SOC / Detection Engineering</Owner>
+    <LastUpdated>2026-08-19</LastUpdated>
+    <Severity default="Critical">Critical</Severity>
+    <Confidence default="Medium">Medium</Confidence>
+    <Category>Impact</Category>
+    <MitreAttack>
+      <Technique id="T1490"/>
+      <Technique id="T1485"/>
+      <Tactic id="TA0040"/>
+    </MitreAttack>
+    <References>
+      <Reference title="MITRE ATT&amp;CK - Inhibit System Recovery (T1490)" url="https://attack.mitre.org/techniques/T1490/"/>
+      <Reference title="MITRE ATT&amp;CK - Data Destruction (T1485)" url="https://attack.mitre.org/techniques/T1485/"/>
+      <Reference title="MITRE ATT&amp;CK - Impact tactic (TA0040)" url="https://attack.mitre.org/tactics/TA0040/"/>
+      <Reference title='Elastic Security - prebuilt detection rules reference (see "Volume Shadow Copy Deletion via VssAdmin", "Deleting Backup Catalogs with Wbadmin", "Third-party Bac' url="https://www.elastic.co/docs/reference/security/prebuilt-rules"/>
+      <Reference title="Microsoft Learn - vssadmin command reference" url="https://learn.microsoft.com/en-us/windows-server/administration/windows-commands/vssadmin"/>
+      <Reference title="Microsoft Learn - wbadmin command reference" url="https://learn.microsoft.com/en-us/windows-server/administration/windows-commands/wbadmin"/>
+      <Reference title="Microsoft Learn - bcdedit command reference" url="https://learn.microsoft.com/en-us/windows-server/administration/windows-commands/bcdedit"/>
+      <Reference title="Microsoft Learn - Command line process auditing (Event 4688 command-line GPO)" url="https://learn.microsoft.com/en-us/windows-server/identity/ad-ds/manage/component-updates/command-line-process-auditing"/>
+    </References>
+  </Metadata>
+  <AlertContext>
+    <RuleName>Windows — Volume Shadow Copy / Backup Deletion (Ransomware Impact)</RuleName>
+    <RuleId>nbi-win-ransomware-shadow-delete</RuleId>
+    <RuleType>query</RuleType>
+    <Index>logs-system.security-*</Index>
+    <TriggerLogic>The deployed rule is an Elastic query rule (KQL). Faithful reconstruction of the deployed condition:
+
+
+
+Plain English: any process creation (event.code : "4688") whose image is one of the five native recovery/boot tools and whose command line contains one of the shadow/recovery keywords. The keyword set is deliberately broad to catch the many syntaxes of recovery destruction:
+
+- vssadmin.exe delete shadows /all /quiet · vssadmin.exe resize shadowstorage … (shrink to evict shadows)
+- wbadmin.exe delete catalog · wbadmin.exe delete systemstatebackup
+- bcdedit.exe /set {default} recoveryenabled No · bcdedit.exe /set {default} bootstatuspolicy ignoreallfailures
+- wmic.exe shadowcopy delete · diskshadow.exe scripts calling delete shadows
+
+The trade-off baked into that keyword set: ***shadows* also matches the read-only vssadmin list shadows (backup verification), so benign enumeration triggers the rule. The exact verb - list/query (read-only) versus delete/resize/recoveryenabled No/ignoreallfailures (destructive) - is therefore the single most important thing the analyst recovers.
+
+Because the rule matches on process.command_line, it can only fire where that field is populated. On hosts</TriggerLogic>
+    <KeyAlertFields>jamal.admin, vssadmin.exe, process.name, process.executable, process.parent.name, process.parent.executable, cmd.exe, process.pid, process.parent.pid, process.entity_id, user.name, user.domain</KeyAlertFields>
+  </AlertContext>
+  <Inputs>
+    <Input name="$host"/>
+    <Input name="$subject_user"/>
+    <Input name="$process"/>
+    <Input name="$source_ip"/>
+  </Inputs>
+  <ExecutiveSummary>
+    <Overview>This playbook drives triage and investigation of the Windows - Volume Shadow Copy / Backup Deletion (Ransomware Impact) detection on NBI's Elastic Security deployment. The rule fires when one of the native Windows recovery tools - vssadmin.exe, wbadmin.exe, wmic.exe, bcdedit.exe, or diskshadow.exe - is created (Event 4688) with a command line containing a shadow/recovery keyword (delete, shadowcopy, shadows, recoveryenabled, ignoreallfailures). Destroying Volume Shadow Copies and backup/recovery configuration is the near-universal action ransomware performs immediately before encryption, so victims cannot roll back. It is classic Impact / Inhibit System Recovery.
+
+The analyst's job is to decide, quickly and defensibly, whether the execution is destructive backup/recovery sabotage (treat as active ransomware) or a legitimate/benign use of the same tools - most often read-only list shadows enumeration or sanctioned backup maintenance by a recognised account - and to classify the alert as true_positive, false_positive, misconfiguration, or needs_escalation with evidence attached. Two structural facts make this rule unusually error-prone and shape everything below: (1) the *shadows* keyword also matches read-only vssadmin list shadows, so benign backup verification fires the rule; and (2) process.command_line is captured on only part of the NBI estate, so on some hosts the rule is blind to genuinely destructive commands and the verb cannot be recovered from telemetry.</Overview>
+    <BusinessImpact>An alert means: on $host, the account $subject_user launched a native recovery tool ($process) with a shadow/recovery keyword in its command line. What it does not tell you on its own is whether recovery was actually *destroyed* or merely *enumerated* - both land in this rule.
+
+- If the verb is destructive (delete shadows, resize shadowstorage, delete catalog, delete systemstatebackup, recoveryenabled No, ignoreallfailures, shadowcopy delete), the alert means recovery capability on that host has, in spirit, already been degraded or removed. In a ransomware kill-chain this is one of the last pre-encryption steps; encryption may follow within minutes. Treat as active ransomware until disproven.
+- If the verb is read-only (list shadows, query), the tool merely listed existing shadow copies - no destruction - and the alert is benign backup verification that happened to match the keyword.
+- If the command line is empty on both process.command_line and process.args, the verb is unknown: this is a telemetry gap, not evidence of innocence, and on a data-bearing server must be escalated rather than cleared.
+
+The acting context sharpens the read: an interactive shell parent (cmd.exe/powershe</BusinessImpact>
+  </ExecutiveSummary>
+  <Investigation>
+    <Goal>Decide true_positive / false_positive / misconfiguration / needs_escalation for Windows — Volume Shadow Copy / Backup Deletion (Ransomware Impact).</Goal>
+    <Workflow>
+      <Step order="1" name="Reproduce the rule estate-wide (confirm the detection logic)">
+        <Purpose>Reproduce the rule estate-wide (confirm the detection logic)</Purpose>
+        <Query platform="Elastic" language="ES|QL" id="Q-01">
+          <![CDATA[
+FROM logs-system.security-*
+| WHERE @timestamp >= NOW() - 4 hours
+    AND event.code == "4688"
+    AND process.name IN ("vssadmin.exe", "wbadmin.exe", "wmic.exe", "bcdedit.exe", "diskshadow.exe")
+| EVAL cmd = TO_LOWER(COALESCE(process.command_line, MV_CONCAT(process.args, " ")))
+| WHERE cmd LIKE "*delete*" OR cmd LIKE "*shadowcopy*" OR cmd LIKE "*shadows*" OR cmd LIKE "*recoveryenabled*" OR cmd LIKE "*ignoreallfailures*"
+| KEEP @timestamp, host.name, winlog.event_data.SubjectUserName, process.name, process.parent.name, process.command_line
+| SORT @timestamp DESC
+| LIMIT 100
+]]>
+        </Query>
+      </Step>
+      <Step order="2" name="Confirm on the alert host - recover the exact verb (rule query INV-01)">
+        <Purpose>Confirm on the alert host - recover the exact verb (rule query INV-01)</Purpose>
+        <Query platform="Elastic" language="ES|QL" id="Q-02">
+          <![CDATA[
+FROM logs-system.security-*
+| WHERE event.code == "4688" AND host.name == "$host"
+    AND winlog.event_data.SubjectUserName == "$subject_user"
+    AND process.name IN ("vssadmin.exe","wbadmin.exe","wmic.exe","bcdedit.exe","diskshadow.exe")
+    AND @timestamp >= NOW() - 4 hours
+| EVAL argline = MV_CONCAT(process.args, " ")
+| KEEP @timestamp, process.name, process.parent.name, process.command_line, argline
+| SORT @timestamp DESC
+| LIMIT 20
+]]>
+        </Query>
+      </Step>
+      <Step order="3" name="Entity pivoting">
+        <Purpose>Entity pivoting</Purpose>
+        <Query platform="Elastic" language="ES|QL" id="Q-03">
+          <![CDATA[
+FROM logs-system.security-*
+| WHERE @timestamp >= NOW() - 4 hours
+    AND event.code == "4688" AND host.name == "$host"
+    AND winlog.event_data.SubjectUserName == "$subject_user"
+    AND process.name IN ("vssadmin.exe","wbadmin.exe","wmic.exe","bcdedit.exe","diskshadow.exe")
+| EVAL argline = MV_CONCAT(process.args, " ")
+| KEEP @timestamp, host.name, user.name, user.domain, process.name, process.executable, process.parent.name, process.parent.executable, process.pid, process.parent.pid, process.command_line, argline
+| SORT @timestamp DESC
+| LIMIT 50
+]]>
+        </Query>
+      </Step>
+      <Step order="4" name="Process investigation">
+        <Purpose>Process investigation</Purpose>
+        <Query platform="Elastic" language="ES|QL" id="Q-04">
+          <![CDATA[
+FROM logs-system.security-*
+| WHERE @timestamp >= NOW() - 4 hours
+    AND event.code == "4688" AND process.name == "$process"
+| STATS executions = COUNT(*), hosts = COUNT_DISTINCT(host.name), actors = COUNT_DISTINCT(winlog.event_data.SubjectUserName) BY process.executable, process.parent.name
+| SORT executions DESC
+| LIMIT 50
+]]>
+        </Query>
+      </Step>
+      <Step order="5" name="Process investigation">
+        <Purpose>Process investigation</Purpose>
+        <Query platform="Elastic" language="ES|QL" id="Q-05">
+          <![CDATA[
+FROM logs-system.security-*
+| WHERE @timestamp >= NOW() - 4 hours
+    AND event.code == "4688"
+    AND process.name IN ("vssadmin.exe","wbadmin.exe","wmic.exe","bcdedit.exe","diskshadow.exe")
+    AND process.args IS NOT NULL
+| EVAL argline = MV_CONCAT(process.args, " ")
+| KEEP @timestamp, host.name, winlog.event_data.SubjectUserName, process.name, process.parent.name, argline
+| SORT @timestamp DESC
+| LIMIT 50
+]]>
+        </Query>
+      </Step>
+      <Step order="6" name="Parent-Child process analysis">
+        <Purpose>Parent-Child process analysis</Purpose>
+        <Query platform="Elastic" language="ES|QL" id="Q-06">
+          <![CDATA[
+FROM logs-system.security-*
+| WHERE @timestamp >= NOW() - 4 hours
+    AND event.code == "4688" AND host.name == "$host"
+    AND process.name IN ("vssadmin.exe","wbadmin.exe","wmic.exe","bcdedit.exe","diskshadow.exe")
+| STATS executions = COUNT(*), last_seen = MAX(@timestamp) BY process.name, process.parent.name, process.parent.executable
+| SORT executions DESC
+| LIMIT 30
+]]>
+        </Query>
+      </Step>
+      <Step order="7" name="Parent-Child process analysis">
+        <Purpose>Parent-Child process analysis</Purpose>
+        <Query platform="Elastic" language="ES|QL" id="Q-07">
+          <![CDATA[
+FROM logs-system.security-*
+| WHERE @timestamp >= NOW() - 4 hours
+    AND event.code == "4688" AND host.name == "$host"
+    AND winlog.event_data.SubjectUserName == "$subject_user"
+    AND TO_LOWER(process.parent.name) IN ("cmd.exe","powershell.exe","pwsh.exe","wscript.exe","cscript.exe","wmic.exe")
+| KEEP @timestamp, process.parent.name, process.parent.pid, process.name, process.pid, process.executable
+| SORT @timestamp DESC
+| LIMIT 100
+]]>
+        </Query>
+      </Step>
+      <Step order="8" name="User investigation">
+        <Purpose>User investigation</Purpose>
+        <Query platform="Elastic" language="ES|QL" id="Q-08">
+          <![CDATA[
+FROM logs-system.security-*
+| WHERE event.code == "4688" AND winlog.event_data.SubjectUserName == "$subject_user"
+    AND process.name IN ("vssadmin.exe","wbadmin.exe","wmic.exe","bcdedit.exe","diskshadow.exe")
+    AND @timestamp >= NOW() - 4 hours
+| STATS execs = COUNT(*), cmd_populated = COUNT(process.command_line),
+        hosts = COUNT_DISTINCT(host.name) BY process.name
+| SORT execs DESC
+| LIMIT 20
+]]>
+        </Query>
+      </Step>
+      <Step order="9" name="User investigation">
+        <Purpose>User investigation</Purpose>
+        <Query platform="Elastic" language="ES|QL" id="Q-09">
+          <![CDATA[
+FROM logs-system.security-*
+| WHERE @timestamp >= NOW() - 4 hours
+    AND event.code == "4688" AND winlog.event_data.SubjectUserName == "$subject_user"
+| STATS executions = COUNT(*), distinct_procs = COUNT_DISTINCT(process.name) BY host.name
+| SORT executions DESC
+| LIMIT 25
+]]>
+        </Query>
+      </Step>
+      <Step order="10" name="Host investigation">
+        <Purpose>Host investigation</Purpose>
+        <Query platform="Elastic" language="ES|QL" id="Q-10">
+          <![CDATA[
+FROM logs-system.security-*
+| WHERE @timestamp >= NOW() - 4 hours
+    AND event.code == "4688" AND host.name == "$host"
+| STATS executions = COUNT(*), users = COUNT_DISTINCT(winlog.event_data.SubjectUserName) BY process.name, process.parent.name
+| SORT executions ASC
+| LIMIT 40
+]]>
+        </Query>
+      </Step>
+      <Step order="11" name="IP investigation">
+        <Purpose>IP investigation</Purpose>
+        <Query platform="Elastic" language="ES|QL" id="Q-11">
+          <![CDATA[
+FROM logs-system.security-*
+| WHERE @timestamp >= NOW() - 4 hours
+    AND event.code == "4624"
+    AND host.name == "$host" AND user.name == "$subject_user"
+    AND source.ip IS NOT NULL
+| STATS logons = COUNT(*) BY source.ip, winlog.event_data.LogonType
+| SORT logons DESC
+| LIMIT 20
+]]>
+        </Query>
+      </Step>
+      <Step order="12" name="IP investigation">
+        <Purpose>IP investigation</Purpose>
+        <Query platform="Elastic" language="ES|QL" id="Q-12">
+          <![CDATA[
+FROM logs-system.security-*
+| WHERE @timestamp >= NOW() - 4 hours
+    AND event.code == "4624"
+    AND source.ip == "$source_ip"
+| STATS logons = COUNT(*) BY user.name, host.name, winlog.event_data.LogonType
+| SORT logons DESC
+| LIMIT 25
+]]>
+        </Query>
+      </Step>
+      <Step order="13" name="File investigation">
+        <Purpose>File investigation</Purpose>
+        <Query platform="Elastic" language="ES|QL" id="Q-13">
+          <![CDATA[
+FROM logs-system.security-*
+| WHERE @timestamp >= NOW() - 4 hours
+    AND event.code == "4688" AND host.name == "$host"
+    AND process.name == "$process"
+| STATS executions = COUNT(*), first_seen = MIN(@timestamp), last_seen = MAX(@timestamp) BY process.executable
+| SORT executions DESC
+| LIMIT 30
+]]>
+        </Query>
+      </Step>
+      <Step order="14" name="Authentication investigation">
+        <Purpose>Authentication investigation</Purpose>
+        <Query platform="Elastic" language="ES|QL" id="Q-14">
+          <![CDATA[
+FROM logs-system.security-*
+| WHERE @timestamp >= NOW() - 4 hours
+    AND event.code IN ("4624", "4625", "4634", "4647")
+    AND host.name == "$host" AND user.name == "$subject_user"
+| STATS events = COUNT(*), first_seen = MIN(@timestamp), last_seen = MAX(@timestamp) BY event.code, winlog.event_data.LogonType, source.ip
+| SORT events DESC
+| LIMIT 30
+]]>
+        </Query>
+      </Step>
+      <Step order="15" name="Timeline Reconstruction">
+        <Purpose>Timeline Reconstruction</Purpose>
+        <Query platform="Elastic" language="ES|QL" id="Q-15">
+          <![CDATA[
+FROM logs-system.security-*
+| WHERE @timestamp >= NOW() - 4 hours
+    AND event.code == "4688" AND host.name == "$host"
+    AND winlog.event_data.SubjectUserName == "$subject_user"
+| KEEP @timestamp, process.parent.name, process.parent.pid, process.name, process.pid, process.executable, process.command_line
+| SORT @timestamp ASC
+| LIMIT 200
+]]>
+        </Query>
+      </Step>
+      <Step order="16" name="Lateral movement validation">
+        <Purpose>Lateral movement validation</Purpose>
+        <Query platform="Elastic" language="ES|QL" id="Q-16">
+          <![CDATA[
+FROM logs-system.security-*
+| WHERE @timestamp >= NOW() - 4 hours
+    AND event.code IN ("4624", "4648", "4768", "4769", "5140")
+    AND user.name == "$subject_user"
+    AND host.name != "$host"
+| STATS events = COUNT(*) BY host.name, event.code, winlog.event_data.LogonType
+| SORT events DESC
+| LIMIT 30
+]]>
+        </Query>
+      </Step>
+      <Step order="17" name="Persistence validation">
+        <Purpose>Persistence validation</Purpose>
+        <Query platform="Elastic" language="ES|QL" id="Q-17">
+          <![CDATA[
+FROM logs-system.security-*
+| WHERE @timestamp >= NOW() - 4 hours
+    AND host.name == "$host"
+    AND (
+        (event.code == "4688" AND TO_LOWER(process.name) IN ("schtasks.exe", "reg.exe", "sc.exe", "at.exe", "powershell.exe", "wscript.exe", "cscript.exe", "rundll32.exe", "mshta.exe"))
+        OR event.code == "4698"
+        OR event.code == "4720"
+    )
+| STATS events = COUNT(*) BY event.code, process.name, winlog.event_data.SubjectUserName
+| SORT events DESC
+| LIMIT 40
+]]>
+        </Query>
+      </Step>
+      <Step order="18" name="Privilege escalation validation">
+        <Purpose>Privilege escalation validation</Purpose>
+        <Query platform="Elastic" language="ES|QL" id="Q-18">
+          <![CDATA[
+FROM logs-system.security-*
+| WHERE @timestamp >= NOW() - 4 hours
+    AND event.code == "4672" AND host.name == "$host"
+| STATS special_priv_logons = COUNT(*) BY user.name
+| SORT special_priv_logons DESC
+| LIMIT 25
+]]>
+        </Query>
+      </Step>
+      <Step order="19" name="Defense evasion validation">
+        <Purpose>Defense evasion validation</Purpose>
+        <Query platform="Elastic" language="ES|QL" id="Q-19">
+          <![CDATA[
+FROM logs-system.security-*
+| WHERE @timestamp >= NOW() - 4 hours
+    AND host.name == "$host"
+    AND (
+        (event.code == "4688" AND TO_LOWER(process.name) IN ("net.exe", "net1.exe", "sc.exe", "taskkill.exe", "wevtutil.exe", "fsutil.exe", "cipher.exe", "vssadmin.exe", "wbadmin.exe", "bcdedit.exe", "wmic.exe", "diskshadow.exe", "powershell.exe"))
+        OR event.code == "1102"
+        OR event.code == "4719"
+    )
+| STATS events = COUNT(*), last_seen = MAX(@timestamp) BY event.code, process.name, winlog.event_data.SubjectUserName
+| SORT events DESC
+| LIMIT 40
+]]>
+        </Query>
+      </Step>
+      <Step order="20" name="Impact assessment">
+        <Purpose>Impact assessment</Purpose>
+        <Query platform="Elastic" language="ES|QL" id="Q-20">
+          <![CDATA[
+FROM logs-system.security-*
+| WHERE event.code == "4688" AND host.name == "$host"
+    AND winlog.event_data.SubjectUserName == "$subject_user"
+    AND @timestamp >= NOW() - 4 hours
+| STATS execs = COUNT(*), last_seen = MAX(@timestamp) BY process.name
+| SORT execs DESC
+| LIMIT 25
+]]>
+        </Query>
+      </Step>
+      <Step order="21" name="Impact assessment">
+        <Purpose>Impact assessment</Purpose>
+        <Query platform="Elastic" language="ES|QL" id="Q-21">
+          <![CDATA[
+FROM logs-system.security-*
+| WHERE @timestamp >= NOW() - 4 hours
+    AND event.code == "4688"
+    AND process.name IN ("vssadmin.exe","wbadmin.exe","wmic.exe","bcdedit.exe","diskshadow.exe")
+| STATS execs = COUNT(*), actors = COUNT_DISTINCT(winlog.event_data.SubjectUserName) BY host.name, process.name
+| SORT execs DESC
+| LIMIT 40
+]]>
+        </Query>
+      </Step>
+      <Step order="22" name="Finalize verdict">
+        <DecisionTree>
+        </DecisionTree>
+      </Step>
+    </Workflow>
+  </Investigation>
+  <ClassificationGuidance>
+    <TruePositive>
+      <Definition></Definition>
+    </TruePositive>
+    <FalsePositive>
+      <Definition></Definition>
+      <Indicators>
+        <Item>Read-only enumeration. vssadmin list shadows and vssadmin list shadowstorage (and wbadmin get versions/get status) are routine backup-verification commands that match the rule's *shadows* keyword but destroy nothing. This is the most frequent benign trigger.</Item>
+        <Item>Sanctioned backup maintenance. Backup products and administrators legitimately resize shadow storage, prune old system-state backups, or delete a backup catalog as part of maintenance. Benign only when tied to a recognised backup account/product and a schedule/change record - confirmed, never assumed.</Item>
+        <Item>Backup-product self-management. Some backup agents delete their own old shadow copies by design; recognised-but-not-yet-baselined behaviour is a misconfiguration (tuning) condition, not an attack (see section 13).</Item>
+        <Item>Administrator / red-team / purple-team testing deliberately running deletion commands. These are *not* "benign" - they are authorised execution of a destructive technique and must be matched to a change ticket or exercise ROE before closing as false_positive (authorised), never dismissed on sight.</Item>
+        <Item>The dominant live trigger is benign enumeration by a backup/admin account. Over the last 14 days, the only recovery tool seen in 4688 was vssadmin.exe, run exclusively by jamal.admin across three hosts. On nim-jump-apv22 it runs on a near-daily ~19:56 schedule (parent cmd.exe, command line null on that host); on the command-line-audited server nim-est-apv07 the captured command line is literally vssadmin.exe list shadows - read-only backup verification. There is a real, recurring, benign pattern here that must be recognised, but it must never be auto-whitelisted: the same account and tools are exactly what an attacker would abuse.</Item>
+        <Item>jamal.admin is a very broadly-privileged identity. It holds special privileges (Event 4672) on nim-est-apv07 (thousands of grants) and authenticates at scale across domain controllers (nim-dc-dbap01, nim-dc2-dbap), jump hosts, and DB/app servers. Its presence on a host is therefore weak evidence of intent by itself, and its cross-host activity (section 17.1) is voluminous and mostly legitimate - correlate on the verb and the destructive chain, not on the account alone.</Item>
+        <Item>Command-line capture is bimodal and account-independent. nim-est-apv07 populates process.command_line/process.args (~100%), while the jump tier (nim-jump-apv22) does not (null). The same jamal.admin vssadmin run is fully readable on one host and opaque on another. On the opaque hosts the verb is unknowable from telemetry (see section 8) - the routine list shadows there could equally be a delete shadows and the rule would neither show the verb nor, if the whole command line is null, even fire.</Item>
+        <Item>Shared source infrastructure. jamal.admin reaches nim-est-apv07 (and nim-est-apv04, nim-jump-apv22) from 10.11.77.31 - one source address fronting activity to many hosts. Treat source.ip as a weak individual identifier and correlate IP + user + host.</Item>
+      </Indicators>
+    </FalsePositive>
+    <Misconfiguration>
+      <Definition></Definition>
+    </Misconfiguration>
+    <NeedsEscalation>
+      <Definition></Definition>
+    </NeedsEscalation>
+  </ClassificationGuidance>
+  <ResponseActions>
+    <Phase name="Containment">
+      <Action>Isolate $host immediately (network-contain / quarantine) when a destructive verb is confirmed (section 14.2), a destruction chain is present (section 17.4/section 17.5), or the verb is unknown on a data-bearing server. Shadow deletion is a pre-encryption step - speed matters; do not wait for full investigation on a crown-jewel host.</Action>
+      <Action>Preserve volatile evidence first where feasible: current shadow-copy state (vssadmin list shadows), running process list, BCD configuration (bcdedit /enum), and memory of any suspicious process - NBI does not audit the VSS/COM deletion, so host-side capture is the only way to recover ground truth.</Action>
+      <Action>Suspend or force-logoff $subject_user's session on $host and disable the account if it is implicated (weighing that jamal.admin-class identities are widely used - coordinate to avoid mass disruption, but prioritise containment on confirmed destruction).</Action>
+      <Action>Stop lateral spread: using section 17.1/section 17.5b, identify other hosts the actor touched or where recovery tools ran, and contain those exhibiting the same chain.</Action>
+      <Action>Deploy/confirm any change only via the authorised, human-approved DEPLOY path; investigation itself is read-only.</Action>
+    </Phase>
+    <Phase name="Eradication">
+      <Action>Identify and remove the payload and its launch mechanism: the parent shell/script (section 15.3), any persistence found in section 17.2 (scheduled tasks, Run keys, rogue accounts, and - checked out of band - service installs), and any dropped/renamed recovery binary in a non-System32 path (section 15.10).</Action>
+      <Action>Terminate the destruction chain (recovery tools, service-stop and process-kill tooling) still running, and re-enable/repair any backup and endpoint-protection services the attacker stopped (section 17.4).</Action>
+      <Action>Run a full anti-malware / EDR scan on $host and hunt fleet-wide for the same chain and any payload hash across peers, especially the other hosts surfaced in section 15.4b and section 17.5b.</Action>
+      <Action>Remediate the initial-access and privilege path that let the actor reach admin rights on $host; if $subject_user's credentials were abused, treat them as compromised (section 20).</Action>
+    </Phase>
+    <Phase name="Recovery">
+      <Action>Restore recovery capability first: rebuild shadow-copy storage and re-establish backups from offline / immutable copies (the on-host shadows may be gone). Validate that restored data is clean and that backup jobs run.</Action>
+      <Action>Rotate credentials for $subject_user and any privileged accounts that were exposed on $host during the incident window (section 17.3); review for Kerberos/NTLM secret exposure given the account's DC reach.</Action>
+      <Action>Rebuild $host from a known-good image if encryption occurred or tampering was extensive; otherwise verify all eradication holds after reboot and that shadow copies/BCD are back to expected state.</Action>
+      <Action>Return host/account to service only after section 22 closing criteria are met and monitoring confirms no recurrence.</Action>
+      <Action>Close the detection blind spot: the single highest-value hardening action from this rule is rolling out command-line process auditing to the hosts that lack it (notably the jump tier) so the verb is always recoverable, and restricting who may run recovery tools.</Action>
+    </Phase>
+  </ResponseActions>
+  <Escalation>
+    <Trigger>Escalate to Tier 3 / Incident Response (and notify the customer), treating the host as active ransomware until disproven, when any hold:
+
+- A destructive verb is confirmed on $host (section 14.2) - this alone warrants IR and immediate isolation.
+- A destruction chain or process burst is present (section 17.4/section 17.5): multiple recovery tools, service/AV-stop tooling, log clearing, or a sudden spike of distinct processes.
+- Recovery-tool activity is spreading across multiple hosts (section 15.4a/section 17.5b).
+- The command line is unknown (both process.command_line and process.args null) on a data-bearing server - escalate for host-level (EDR/Sysmon) verification rather than clearing.
+- Evidence is incomplete because of NBI's telemetry gaps (no VSS/COM auditing, command-line blind spots) and the alert cannot be safely cleared - escalate as needs_escalation with the gaps named.</Trigger>
+    <To>SOC L2 / IR</To>
+  </Escalation>
+  <ClosureCriteria>
+    <Item>false_positive (authorised / benign): the verb is positively read-only (list/query shadows) or an authorised backup-maintenance command matched to a recognised backup/admin account + product/change record, with no destruction chain (section 17.4). Record which. Shadow-copy/backup state verified intact. Do not create a broad exception; if tuning is warranted, scope the rule to destructive verbs (exclude list/query).</Item>
+    <Item>false_positive (blocked malicious attempt): the destructive command is positively proven to have failed / been denied and shadows remain intact - documented as a blocked attempt, actor investigated, never labelled "benign".</Item>
+    <Item>misconfiguration: a recognised backup product deletes only its own old shadows/catalog by design; baseline it and raise the rule-tightening action.</Item>
+    <Item>true_positive: destruction confirmed; $host (and any peers in the chain) contained, initial access and actor identified, fleet spread hunted, recovery from offline/immutable backups validated, incident documented.</Item>
+    <Item>needs_escalation: handed to Tier 3/IR with the specific evidence gaps documented (unknown verb, telemetry blind spot).</Item>
+  </ClosureCriteria>
+  <Limitations>
+    <Item>The verb is everything. This rule cannot, by itself, tell destruction from enumeration - *shadows* matches both delete shadows and list shadows. Recover process.command_line/process.args (section 14.2) before doing anything else, and never close on the account or the tool name alone.</Item>
+    <Item>Empty command line != benign. Command-line capture is bimodal on NBI: nim-est-apv07 populates it, the jump tier does not. A null command line means the verb is unknown and, on the jump tier, a genuine delete shadows would not even fire the rule. On data-bearing hosts, escalate for host-side verification.</Item>
+    <Item>The benign baseline is real but not a free pass. Live, the only recurring trigger is jamal.admin running vssadmin list shadows (daily on nim-jump-apv22; readable on nim-est-apv07). Recognise it, but re-verify the verb every time - the same account/tool is exactly what an attacker would ride.</Item>
+    <Item>jamal.admin is broadly privileged. It holds 4672 on nim-est-apv07 and reaches DCs and many hosts, so its presence/lateral volume is weak evidence. Discriminate on verb + chain, not identity.</Item>
+    <Item>No Sysmon → PID lineage; no hashes; no VSS/COM audit. Reconstruct trees with process.pid/process.parent.pid in a tight window (corroborate by parent name - PIDs reuse). Image reputation and the actual VSS deletion call must be recovered host-side.</Item>
+    <Item>Evasion is easy against a name+keyword rule. COM Win32_ShadowCopy, PowerShell Get-WmiObject Win32_ShadowCopy | Remove-WmiObject, a renamed binary, or a command-line-less host all defeat it. Complementary analytics: monitor VSS service state / backup-catalog changes, PowerShell script-block logging (logs-windows.powershell*) for WMI shadow-copy deletion, and mass file-rename/encryption behaviour.</Item>
+    <Item>**KB-worthy (persist to NBI customer scope), observed live 2026-08-19 on logs-system.security-*:** (1) recovery-tool 4688 in the last 14d is exclusively vssadmin.exe by jamal.admin on nim-jump-apv22/nim-est-apv04/nim-est-apv07; the captured verb is list shadows (benign enumeration FP); (2) process.command_line bimodal - nim-est-apv07 populated, nim-jump-apv22 null; (3) jamal.admin holds 4672 on nim-est-apv07 and authenticates broadly to DCs/jump/DB hosts; (4) 10.11.77.31 = shared source fronting jamal.admin to multiple hosts; (5) process.hash.* absent on 4688, VSS/COM deletion unaudited.</Item>
+  </Limitations>
+</Playbook>

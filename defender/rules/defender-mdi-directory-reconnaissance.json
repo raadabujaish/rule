@@ -1,0 +1,89 @@
+{
+  "name": "Microsoft Defender / MDI — Active Directory Reconnaissance (LDAP / SPN / ADCS / SAMR / DNS Enumeration)",
+  "tags": [
+    "Tactic: Discovery",
+    "Data Source: Microsoft Defender for Identity",
+    "Domain: Identity",
+    "raadabujaish"
+  ],
+  "interval": "1h",
+  "enabled": true,
+  "description": "Promotes every Microsoft Defender for Identity / XDR **Discovery** detection into a SOC-worked Elastic alert, for ANY account — AD Certificate Services enumeration, LDAP search reconnaissance, SPN enumeration via LDAP, security-principal (SAMR/LDAP) reconnaissance, DNS reconnaissance, and Kerberoasting LDAP recon. These are the pre-attack mapping steps (BloodHound/SharpHound/ldapsearch/Certipy-find) that precede credential theft and lateral movement. NBI had NO rule consuming Defender Discovery alerts; the native equivalents are blind here — 4662 DS-access is buried under thousands of legitimate admin/DirSync reads, and AD CS auditing (4886-4900) is not collected at all. Identity-agnostic: keys only on ECS threat.tactic.name + event.kind. Portable to any tenant shipping logs-m365_defender.* via the Elastic Microsoft 365 Defender integration.",
+  "risk_score": 47,
+  "severity": "medium",
+  "note": "## Triage\n1. Open the Defender/MDI incident (`m365_defender.alert.incident_web_url`).\n2. Actor = `user.name`; targets = `evidence[].deviceEvidence` (usually the DCs).\n3. `detector_id`: `xdr_PossibleActiveDirectoryCertificateServicesEnumeration` = ADCS recon (ESC hunting); `LdapSearchReconnaissanceSecurityAlert`/`xdr_PossibleSpnEnumerationLdap` = BloodHound/SPN mapping; `SamrReconnaissanceSecurityAlert` = SAMR enum; `DnsReconnaissanceSecurityAlert` = DNS zone recon.\n4. Recon against DCs from a non-admin or unmanaged host is a strong pre-attack indicator — pivot to the same actor's Credential-Access alerts and 4624 logon spread.\n",
+  "output_index": "",
+  "investigation_fields": {
+    "field_names": [
+      "host.name",
+      "user.name"
+    ]
+  },
+  "author": [
+    "raadabujaish"
+  ],
+  "false_positives": [],
+  "from": "now-6h",
+  "rule_id": "nbi-defender-discovery-recon-behavior",
+  "max_signals": 200,
+  "risk_score_mapping": [],
+  "severity_mapping": [],
+  "threat": [
+    {
+      "framework": "MITRE ATT&CK",
+      "tactic": {
+        "id": "TA0007",
+        "name": "Discovery",
+        "reference": "https://attack.mitre.org/tactics/TA0007/"
+      },
+      "technique": [
+        {
+          "id": "T1087",
+          "name": "Account Discovery",
+          "reference": "https://attack.mitre.org/techniques/T1087/",
+          "subtechnique": [
+            {
+              "id": "T1087.002",
+              "name": "Domain Account",
+              "reference": "https://attack.mitre.org/techniques/T1087/002/"
+            }
+          ]
+        },
+        {
+          "id": "T1069",
+          "name": "Permission Groups Discovery",
+          "reference": "https://attack.mitre.org/techniques/T1069/"
+        },
+        {
+          "id": "T1018",
+          "name": "Remote System Discovery",
+          "reference": "https://attack.mitre.org/techniques/T1018/"
+        },
+        {
+          "id": "T1046",
+          "name": "Network Service Discovery",
+          "reference": "https://attack.mitre.org/techniques/T1046/"
+        },
+        {
+          "id": "T1649",
+          "name": "Steal or Forge Authentication Certificates",
+          "reference": "https://attack.mitre.org/techniques/T1649/"
+        }
+      ]
+    }
+  ],
+  "to": "now",
+  "references": [],
+  "version": 1,
+  "exceptions_list": [],
+  "related_integrations": [],
+  "required_fields": [],
+  "setup": "",
+  "type": "query",
+  "language": "kuery",
+  "index": [
+    "logs-m365_defender.*"
+  ],
+  "query": "event.kind:\"alert\" and threat.tactic.name:\"Discovery\"",
+  "actions": []
+}

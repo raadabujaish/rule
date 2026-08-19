@@ -1,0 +1,348 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<Playbook xmlns="https://soc.example/playbooks" id="PB-defender-mdi-directory-reconnaissance" name="Microsoft Defender / MDI — Active Directory Reconnaissance (LDAP / SPN / ADCS / SAMR / DNS Enumeration) - SOC Playbook" version="3.0" status="Validated" classification="TLP:AMBER">
+  <Metadata>
+    <Owner>NBI SOC / Detection Engineering</Owner>
+    <LastUpdated>2026-08-19</LastUpdated>
+    <Severity default="medium">medium</Severity>
+    <Confidence default="Medium">Medium</Confidence>
+    <Category>Discovery</Category>
+    <MitreAttack>
+      <Technique id="T1087.002"/>
+      <Technique id="T1087"/>
+      <Technique id="T1069.002"/>
+      <Technique id="T1069"/>
+      <Technique id="T1018"/>
+      <Technique id="T1482"/>
+      <Technique id="T1046"/>
+      <Technique id="T1558.003"/>
+      <Tactic id="TA0007"/>
+    </MitreAttack>
+    <References>
+      <Reference title="MITRE ATT&amp;CK - Discovery tactic (TA0007)" url="https://attack.mitre.org/tactics/TA0007/"/>
+      <Reference title="MITRE ATT&amp;CK - Account Discovery: Domain Account (T1087.002)" url="https://attack.mitre.org/techniques/T1087/002/"/>
+      <Reference title="MITRE ATT&amp;CK - Permission Groups Discovery: Domain Groups (T1069.002)" url="https://attack.mitre.org/techniques/T1069/002/"/>
+      <Reference title="MITRE ATT&amp;CK - Remote System Discovery (T1018)" url="https://attack.mitre.org/techniques/T1018/"/>
+      <Reference title="MITRE ATT&amp;CK - Domain Trust Discovery (T1482)" url="https://attack.mitre.org/techniques/T1482/"/>
+      <Reference title="MITRE ATT&amp;CK - Network Service Discovery (T1046)" url="https://attack.mitre.org/techniques/T1046/"/>
+      <Reference title="Microsoft Learn - Defender for Identity reconnaissance and discovery alerts" url="https://learn.microsoft.com/en-us/defender-for-identity/reconnaissance-discovery-alerts"/>
+      <Reference title="Elastic - ES|QL reference" url="https://www.elastic.co/guide/en/elasticsearch/reference/current/esql.html"/>
+    </References>
+  </Metadata>
+  <AlertContext>
+    <RuleName>Microsoft Defender / MDI — Active Directory Reconnaissance (LDAP / SPN / ADCS / SAMR / DNS Enumeration)</RuleName>
+    <RuleId>nbi-defender-discovery-recon-behavior</RuleId>
+    <RuleType>query</RuleType>
+    <Index>logs-m365_defender.*</Index>
+    <TriggerLogic>The deployed rule is an Elastic query (KQL) rule over logs-m365_defender.*. It fires on every Defender alert whose tactic is Discovery:
+
+
+
+Plain English: any MDI / Defender alert (event.kind == "alert") carrying the Discovery tactic (threat.tactic.name == "Discovery") re-surfaces as an Elastic alert. The *specific* enumeration method is in m365_defender.alert.detector_id / title, for example (all observed live in NBI):
+
+- LdapSearchReconnaissanceSecurityAlert - "Security principal reconnaissance (LDAP)" (the dominant NBI recon detector, ~50 alerts / 30 days).
+- xdr_PossibleActiveDirectoryCertificateServicesEnumeration - ADCS / ESC hunting.
+- xdr_PossibleSpnEnumerationLdap / xdr_PossibleSpnEnumerationAdws - SPN enumeration (LDAP / ADWS).
+- SamrReconnaissanceSecurityAlert - "User and group membership reconnaissance (SAMR)".
+- DnsReconnaissanceSecurityAlert - DNS zone mapping.
+- xdr_PossibleKerberoastingLdapRecon - LDAP recon that precedes Kerberoasting.
+- xdr_SuspectedAccountEnumeration, xdr_SuspiciousSensitiveAttributeLdapQuery, xdr_SuspiciousAdditionOfOnPremDevice.
+
+This is an alert-driven meta-detection with no threshold of its own; it inherits MDI's verdict. The investigative bur</TriggerLogic>
+    <KeyAlertFields>m365_defender.alert.detector_id, m365_defender.alert.evidence.device_dns_name, event.severity, jamal.admin, user.name, source.ip, evidence.ip_address, evidence.process.command_line, file_details.sha256, evidence.url, m365_defender.alert.service_source, host.name</KeyAlertFields>
+  </AlertContext>
+  <Inputs>
+    <Input name="$actor"/>
+    <Input name="$target_device"/>
+  </Inputs>
+  <ExecutiveSummary>
+    <Overview>This playbook drives triage and investigation of the Active Directory Reconnaissance meta-detection on NBI's Elastic Security deployment. The rule re-surfaces any Microsoft Defender for Identity (MDI) / Defender XDR alert whose tactic is Discovery against the domain - LDAP security-principal and SPN enumeration, ADCS / certificate-services enumeration, SAMR user/group enumeration, and DNS zone mapping. This is the structured enumeration that BloodHound, PowerView, ADSearch, and certipy produce before an attack, run against domain controllers (NBI's Tier-0).
+
+Because the enumeration targets DCs, it is a strong pre-attack indicator - but it is also exactly what a sanctioned vulnerability scan, an authorised red-team / ScanWave engagement, or a misconfigured management tool produces. The SOC job is to corroborate Defender's verdict and decide whether this is genuine adversary enumeration staging for credential access and lateral movement (true_positive), an authorised assessment or benign management activity or a proven-blocked probe (false_positive), a noisy detector / stale baseline (misconfiguration), or unproven (needs_escalation). The single strongest discriminator is progression: whether the same actor moves from enumeration into credential access / lateral movement.</Overview>
+    <BusinessImpact>An alert means Defender for Identity observed directory-enumeration behaviour against $target_device (a DC) - a principal read the directory in a pattern consistent with adversary mapping. MDI derives these from DC-side network/ETW sensors watching LDAP searches, SAMR calls, ADCS queries, and DNS.
+
+Interpreting the method:
+- LDAP / SPN / sensitive-attribute recon = the actor is mapping security principals, SPNs (to roast later), and high-value attributes - the BloodHound/ADSearch signature.
+- ADCS enumeration = the actor is hunting certificate-template misconfigurations (ESC1-ESC8) to abuse for privilege escalation - the certipy signature.
+- SAMR recon = user/group membership enumeration (net.exe / PowerView equivalent).
+- DNS reconnaissance = zone mapping to enumerate hosts.
+
+Two caveats define the NBI reality of this alert. First, **it asserts the enumeration was *observed*, not that it *succeeded* or was malicious - a sanctioned scan reads the directory the same way. Second, and most important, the actor is frequently null**: in NBI ~71% of Discovery alerts have no resolved user.name, and the broadest multi-method enumeration against DCs (7 distinct detectors on NIM-DC-DBAP01) i</BusinessImpact>
+  </ExecutiveSummary>
+  <Investigation>
+    <Goal>Decide true_positive / false_positive / misconfiguration / needs_escalation for Microsoft Defender / MDI — Active Directory Reconnaissance (LDAP / SPN / ADCS / SAMR / DNS Enumeration).</Goal>
+    <Workflow>
+      <Step order="1" name="Confirm the actor's enumeration breadth (reuse of the deployed investigation query MDIRECON-INV-01)">
+        <Purpose>Confirm the actor's enumeration breadth (reuse of the deployed investigation query MDIRECON-INV-01)</Purpose>
+        <Query platform="Elastic" language="ES|QL" id="Q-01">
+          <![CDATA[
+FROM logs-m365_defender.*
+| MV_EXPAND threat.tactic.name
+| WHERE user.name == "$actor" AND threat.tactic.name == "Discovery"
+    AND @timestamp >= NOW() - 4 hours
+| STATS alerts = COUNT(*),
+        devices = COUNT_DISTINCT(m365_defender.alert.evidence.device_dns_name),
+        first_seen = MIN(@timestamp), last_seen = MAX(@timestamp)
+    BY m365_defender.alert.detector_id, m365_defender.alert.title
+| SORT alerts DESC
+| LIMIT 20
+]]>
+        </Query>
+      </Step>
+      <Step order="2" name="Confirm the targeted domain controller and its enumeration pressure (adapted from the deployed investigation query MDIRE">
+        <Purpose>Confirm the targeted domain controller and its enumeration pressure (adapted from the deployed investigation query MDIRECON-INV-03)</Purpose>
+        <Query platform="Elastic" language="ES|QL" id="Q-02">
+          <![CDATA[
+FROM logs-m365_defender.*
+| WHERE @timestamp >= NOW() - 4 hours AND event.kind == "alert"
+| MV_EXPAND m365_defender.alert.evidence.device_dns_name
+| WHERE m365_defender.alert.evidence.device_dns_name == "$target_device"
+| MV_EXPAND threat.tactic.name
+| WHERE threat.tactic.name == "Discovery"
+| STATS alerts = COUNT(*), actors = COUNT_DISTINCT(user.name),
+        detectors = VALUES(m365_defender.alert.detector_id)
+    BY m365_defender.alert.evidence.device_dns_name
+| SORT alerts DESC
+| LIMIT 15
+]]>
+        </Query>
+      </Step>
+      <Step order="3" name="Entity pivoting">
+        <Purpose>Entity pivoting</Purpose>
+        <Query platform="Elastic" language="ES|QL" id="Q-03">
+          <![CDATA[
+FROM logs-m365_defender.*
+| WHERE @timestamp >= NOW() - 4 hours
+    AND event.kind == "alert" AND user.name == "$actor"
+| MV_EXPAND threat.tactic.name
+| WHERE threat.tactic.name == "Discovery"
+| STATS alerts = COUNT(*), devices = COUNT_DISTINCT(m365_defender.alert.evidence.device_dns_name),
+        first_seen = MIN(@timestamp), last_seen = MAX(@timestamp)
+    BY m365_defender.alert.detector_id, m365_defender.alert.title, m365_defender.alert.status
+| SORT alerts DESC
+| LIMIT 25
+]]>
+        </Query>
+      </Step>
+      <Step order="4" name="User investigation">
+        <Purpose>User investigation</Purpose>
+        <Query platform="Elastic" language="ES|QL" id="Q-04">
+          <![CDATA[
+FROM logs-m365_defender.*
+| WHERE @timestamp >= NOW() - 4 hours
+    AND event.kind == "alert" AND user.name == "$actor"
+| MV_EXPAND threat.tactic.name
+| STATS alerts = COUNT(*), devices = COUNT_DISTINCT(m365_defender.alert.evidence.device_dns_name),
+        max_severity = MAX(event.severity)
+    BY threat.tactic.name, m365_defender.alert.detector_id
+| SORT alerts DESC
+| LIMIT 30
+]]>
+        </Query>
+      </Step>
+      <Step order="5" name="Host investigation">
+        <Purpose>Host investigation</Purpose>
+        <Query platform="Elastic" language="ES|QL" id="Q-05">
+          <![CDATA[
+FROM logs-m365_defender.*
+| WHERE @timestamp >= NOW() - 4 hours AND event.kind == "alert"
+| MV_EXPAND m365_defender.alert.evidence.device_dns_name
+| WHERE m365_defender.alert.evidence.device_dns_name == "$target_device"
+| MV_EXPAND threat.tactic.name
+| WHERE threat.tactic.name == "Discovery"
+| STATS alerts = COUNT(*), actors = COUNT_DISTINCT(user.name), max_severity = MAX(event.severity)
+    BY m365_defender.alert.detector_id, m365_defender.alert.title
+| SORT alerts DESC
+| LIMIT 25
+]]>
+        </Query>
+      </Step>
+      <Step order="6" name="Timeline Reconstruction">
+        <Purpose>Timeline Reconstruction</Purpose>
+        <Query platform="Elastic" language="ES|QL" id="Q-06">
+          <![CDATA[
+FROM logs-m365_defender.*
+| WHERE @timestamp >= NOW() - 4 hours
+    AND event.kind == "alert" AND user.name == "$actor"
+| MV_EXPAND threat.tactic.name
+| KEEP @timestamp, threat.tactic.name, m365_defender.alert.detector_id, m365_defender.alert.title,
+       event.severity, m365_defender.alert.status, m365_defender.alert.evidence.device_dns_name
+| SORT @timestamp ASC
+| LIMIT 200
+]]>
+        </Query>
+      </Step>
+      <Step order="7" name="Attack-Chain Validation">
+        <Purpose>Attack-Chain Validation</Purpose>
+        <Query platform="Elastic" language="ES|QL" id="Q-07">
+          <![CDATA[
+FROM logs-m365_defender.*
+| MV_EXPAND threat.tactic.name
+| WHERE user.name == "$actor"
+    AND threat.tactic.name IN ("CredentialAccess","LateralMovement","PrivilegeEscalation","Exfiltration")
+    AND @timestamp >= NOW() - 4 hours
+| STATS alerts = COUNT(*), max_severity = MAX(event.severity),
+        detectors = VALUES(m365_defender.alert.detector_id)
+    BY threat.tactic.name
+| SORT alerts DESC
+| LIMIT 20
+]]>
+        </Query>
+      </Step>
+      <Step order="8" name="Lateral movement validation">
+        <Purpose>Lateral movement validation</Purpose>
+        <Query platform="Elastic" language="ES|QL" id="Q-08">
+          <![CDATA[
+FROM logs-m365_defender.*
+| WHERE @timestamp >= NOW() - 4 hours AND event.kind == "alert" AND user.name == "$actor"
+| MV_EXPAND threat.tactic.name
+| WHERE threat.tactic.name == "LateralMovement"
+| STATS alerts = COUNT(*), devices = COUNT_DISTINCT(m365_defender.alert.evidence.device_dns_name),
+        max_severity = MAX(event.severity)
+    BY m365_defender.alert.detector_id, m365_defender.alert.title
+| SORT alerts DESC
+| LIMIT 20
+]]>
+        </Query>
+      </Step>
+      <Step order="9" name="Persistence validation">
+        <Purpose>Persistence validation</Purpose>
+        <Query platform="Elastic" language="ES|QL" id="Q-09">
+          <![CDATA[
+FROM logs-m365_defender.*
+| WHERE @timestamp >= NOW() - 4 hours AND event.kind == "alert" AND user.name == "$actor"
+| MV_EXPAND threat.tactic.name
+| WHERE threat.tactic.name == "Persistence"
+| STATS alerts = COUNT(*), devices = COUNT_DISTINCT(m365_defender.alert.evidence.device_dns_name),
+        max_severity = MAX(event.severity)
+    BY m365_defender.alert.detector_id, m365_defender.alert.title
+| SORT alerts DESC
+| LIMIT 20
+]]>
+        </Query>
+      </Step>
+      <Step order="10" name="Privilege escalation validation">
+        <Purpose>Privilege escalation validation</Purpose>
+        <Query platform="Elastic" language="ES|QL" id="Q-10">
+          <![CDATA[
+FROM logs-m365_defender.*
+| WHERE @timestamp >= NOW() - 4 hours AND event.kind == "alert" AND user.name == "$actor"
+| MV_EXPAND threat.tactic.name
+| WHERE threat.tactic.name == "PrivilegeEscalation"
+| STATS alerts = COUNT(*), devices = COUNT_DISTINCT(m365_defender.alert.evidence.device_dns_name),
+        max_severity = MAX(event.severity)
+    BY m365_defender.alert.detector_id, m365_defender.alert.title
+| SORT alerts DESC
+| LIMIT 20
+]]>
+        </Query>
+      </Step>
+      <Step order="11" name="Defense evasion validation">
+        <Purpose>Defense evasion validation</Purpose>
+        <Query platform="Elastic" language="ES|QL" id="Q-11">
+          <![CDATA[
+FROM logs-m365_defender.*
+| WHERE @timestamp >= NOW() - 4 hours AND event.kind == "alert" AND user.name == "$actor"
+| MV_EXPAND threat.tactic.name
+| WHERE threat.tactic.name == "DefenseEvasion"
+| STATS alerts = COUNT(*), devices = COUNT_DISTINCT(m365_defender.alert.evidence.device_dns_name),
+        max_severity = MAX(event.severity)
+    BY m365_defender.alert.detector_id, m365_defender.alert.title
+| SORT alerts DESC
+| LIMIT 20
+]]>
+        </Query>
+      </Step>
+      <Step order="12" name="Impact assessment">
+        <Purpose>Impact assessment</Purpose>
+        <Query platform="Elastic" language="ES|QL" id="Q-12">
+          <![CDATA[
+FROM logs-m365_defender.*
+| WHERE @timestamp >= NOW() - 4 hours AND event.kind == "alert" AND user.name == "$actor"
+| MV_EXPAND threat.tactic.name
+| WHERE threat.tactic.name IN ("CredentialAccess","LateralMovement","Exfiltration","Impact")
+| STATS alerts = COUNT(*), devices = COUNT_DISTINCT(m365_defender.alert.evidence.device_dns_name),
+        max_severity = MAX(event.severity)
+    BY threat.tactic.name, m365_defender.alert.detector_id
+| SORT alerts DESC
+| LIMIT 20
+]]>
+        </Query>
+      </Step>
+      <Step order="13" name="Finalize verdict">
+        <DecisionTree>
+        </DecisionTree>
+      </Step>
+    </Workflow>
+  </Investigation>
+  <ClassificationGuidance>
+    <TruePositive>
+      <Definition></Definition>
+    </TruePositive>
+    <FalsePositive>
+      <Definition></Definition>
+      <Indicators>
+        <Item>Authorised vulnerability scans and red-team / ScanWave engagements. Sanctioned assessments run precisely this enumeration (BloodHound, certipy, ADSearch) and light up every detector. NBI's scanwave.* identities are the clearest example. A scanner or sanctioned-test identity is investigated identically and is never auto-trusted or whitelisted - authorisation is confirmed against the authorised-testing register by scope and window, not assumed from the name.</Item>
+        <Item>Legitimate management / health-check tooling that queries the directory broadly (identity governance, attack-surface tools, backup/HR-sync connectors) can trip a single recon detector repeatedly - a baseline condition (see section 6, misconfiguration).</Item>
+        <Item>Vulnerability scanners sweeping DCs for service discovery (T1046) can raise DNS/LDAP recon.</Item>
+        <Item>Blocked / failed enumeration. Recon that was denied or returned no data is a *malicious attempt positively proven blocked* - recorded as blocked-malicious, never "benign".</Item>
+        <Item>The broad enumeration is unattributed. The single largest Discovery bucket - 81 alerts spanning 6 distinct detectors across 11 devices - has a null user.name. Only ~30 of 103 Discovery alerts carry an actor. So the textbook "many methods against DCs" pattern in NBI arrives *without* an actor, which is an attribution gap (needs_escalation), not evidence of benignness.</Item>
+        <Item>Attributed recon actors are narrow and are admin identities. The non-null Discovery actors are jamal.admin (8, xdr_SuspiciousAdditionOfOnPremDevice), mohammadd.admin (5), Sysadm (4), wahab.admin (4), iz.adminnnnn (4), and even krbtgt (4) and guest (1). Each fires a single detector. A single recognised admin/management identity tripping one detector is the misconfiguration/benign-management pattern - but must still be corroborated, and krbtgt/guest as an actor is itself worth scrutiny.</Item>
+        <Item>NIM-DC-DBAP01.nbirq.com is the primary recon target. It bears 7 distinct enumeration detectors (LDAP 33, ADCS 13, SPN-LDAP 9, SAMR 5, Kerberoast-LDAP-recon 5, SPN-ADWS 4, sensitive-attribute LDAP 1) - the classic BloodHound+certipy footprint - but almost entirely null-actor. NIM-DC2-DBAP (41 alerts, 5 actors) and the IP 10.11.29.113 (46 alerts, null actor) are the next targets.</Item>
+        <Item>No environment-specific allow-list exists. There is no recorded benign-true-positive tuning. Do not blanket-except a DC or an admin identity; if warranted after positive authorisation, scope to the exact identity + detector + device + window and re-confirm.</Item>
+      </Indicators>
+    </FalsePositive>
+    <Misconfiguration>
+      <Definition></Definition>
+    </Misconfiguration>
+    <NeedsEscalation>
+      <Definition></Definition>
+    </NeedsEscalation>
+  </ClassificationGuidance>
+  <ResponseActions>
+    <Phase name="Containment">
+      <Action>Locate and isolate the source host. The enumeration ran from somewhere; where $actor is null, work with the AD team to resolve the source from DC logs, then network-contain it.</Action>
+      <Action>Disable / reset $actor where an identity is resolved and progression is confirmed; treat any account it could reach as exposed.</Action>
+      <Action>Pivot to the credential-access and lateral-movement playbooks for the same actor - recon is the precursor; the compromise is downstream.</Action>
+      <Action>Preserve evidence first: the MDI alert set (section 14/section 15), DC directory-query logs, and the source host's memory/artefacts (SharpHound/certipy output).</Action>
+      <Action>Deploy changes only via the authorised human-approved DEPLOY path; investigation is read-only.</Action>
+    </Phase>
+    <Phase name="Eradication">
+      <Action>Remove enumeration tooling and any harvested output from the source host (SharpHound .zip, certipy output, ADSearch logs).</Action>
+      <Action>Remediate what the recon targeted: rotate/roast-proof exposed service accounts (gMSA, AES), harden the ADCS templates the actor enumerated (ESC1-ESC8), and restrict SAMR/LDAP read exposure where feasible.</Action>
+      <Action>Hunt for reuse: the same actor and the same DCs in logs-system.security*, and other identities enumerating the same DC (section 15.5), especially the null-actor broad set on NIM-DC-DBAP01.</Action>
+      <Action>Remediate the initial-access vector that provided the foothold.</Action>
+    </Phase>
+    <Phase name="Recovery">
+      <Action>Reduce directory-read exposure: restrict SAMR/LDAP anonymous and broad reads where the business allows, harden ADCS templates, and segment DC admin paths.</Action>
+      <Action>Return the source host / $actor to service only after section 22 closing criteria are met and monitoring shows recon does not recur against the affected DCs.</Action>
+      <Action>Harden telemetry: because this index lacks origin IP and raw query detail, ensure DC-side directory-query auditing and network-logon capture are retained in logs-system.security* so future unattributed recon can be sourced.</Action>
+    </Phase>
+  </ResponseActions>
+  <Escalation>
+    <Trigger>Escalate to Tier 3 / IR (and notify the customer and AD / identity team) when any hold:
+
+- Broad multi-method enumeration against a DC by one actor (section 14.1 / section 15.5), especially LDAP + ADCS + SPN + SAMR together.
+- The same actor progresses into credential access / lateral movement / privilege escalation (section 17) - pivot to those playbooks.
+- The targeted DC is under enumeration from multiple actors (section 15.5) - a broader campaign.
+- $actor is null on broad DC enumeration and the source host cannot be resolved from available data - escalate as needs_escalation for AD-team source resolution.
+- Evidence is incomplete because of NBI's alert-index gaps (no origin IP, no query detail here) and the alert cannot be safely cleared.</Trigger>
+    <To>SOC L2 / IR</To>
+  </Escalation>
+  <ClosureCriteria>
+    <Item>false_positive (authorised assessment): the authorised-testing register positively matches the source + window (including ScanWave). Record the reference; do not auto-trust the name; scope any exception tightly.</Item>
+    <Item>false_positive (benign management): a single detector is positively tied to a recognised management tool / health-check with no breadth and no follow-on. Attach the evidence.</Item>
+    <Item>false_positive (blocked malicious enumeration): the recon is proven blocked/failed (denied, no directory read). Documented as blocked-malicious, never "benign"; keep watching.</Item>
+    <Item>misconfiguration: a recognised tool over-fires one detector; baseline it in known_infrastructure and tune.</Item>
+    <Item>true_positive: adversary enumeration confirmed (breadth and/or progression); source host isolated, actor disabled/reset, tooling and harvested credentials hunted, follow-on stages worked, incident documented.</Item>
+    <Item>needs_escalation: null/unresolved actor, or authorisation/progression undecidable - handed to Tier 3 / IR + AD team with the gaps documented.</Item>
+  </ClosureCriteria>
+  <Limitations>
+    <Item>The actor is usually null. ~71% of Discovery alerts have no user.name, and the broadest enumeration against DCs is itself unattributed. Treat the null as an attribution gap to resolve (needs_escalation), never as a reason to close.</Item>
+    <Item>This is an alert index, not raw DC auditing. Reliable fields: detector_id, title, status, event.severity, evidence.device_dns_name. Process/file/URL/IP evidence and service_source/category/description are 0% on recon alerts - do not build a step on them.</Item>
+    <Item>evidence.device_dns_name is multivalued - always MV_EXPAND before ==. A bare equality silently returns zero rows for multivalued docs (proven live: 0 vs the real 70 on NIM-DC-DBAP01).</Item>
+    <Item>Progression is the verdict. Recon alone is early-stage/benign; recon by an identity that then shows credential access / lateral movement (as jamal.admin → overpass-the-hash) is the true_positive signal. section 17 is where the case is decided.</Item>
+    <Item>Severity is mixed (47/73). MDI stamps the broad set and some actors 73 and narrow detectors 47 - do not read the deployed "medium" as low.</Item>
+    <Item>Complementary detections: the credential-access rule (the same actor's roasting/OPtH), the multi-stage / high-impact correlation rule (one entity spanning tactics), and the new-entity high-severity rule catch low-and-slow or distributed recon a single Discovery alert misses.</Item>
+    <Item>KB-worthy (persist to NBI customer scope): (1) Discovery-subset actor null rate ~71%; (2) NIM-DC-DBAP01.nbirq.com = primary 7-method recon target (LDAP/ADCS/SPN/SAMR/Kerberoast-LDAP/ADWS/sensitive-attr), largely null-actor; (3) evidence.device_dns_name multivalued → MV_EXPAND before ==; (4) jamal.admin demonstrates Discovery→CredentialAccess progression; (5) recon-alert severities are mixed 47/73. All observed live 2026-08-17.</Item>
+  </Limitations>
+</Playbook>

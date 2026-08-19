@@ -1,0 +1,65 @@
+{
+  "name": "VMware vSphere — Virtual Machine Deleted (non-backup)",
+  "tags": [
+    "NBI-Virtualization",
+    "Phase3",
+    "VMware-vSphere"
+  ],
+  "interval": "5m",
+  "enabled": true,
+  "description": "Detects removal/deletion of a virtual machine from vCenter by a non-backup principal (excludes routine Veeam.Backup lifecycle). Deleting a VM destroys its workload and data — a destructive/impact action or attacker cleanup on the virtualization Tier-0.",
+  "risk_score": 73,
+  "severity": "high",
+  "note": "## Investigation\n1. The `message` names the actor and the deleted VM/host.\n2. Confirm the deletion was authorised; correlate with the actor's other vCenter activity.\n## Response\nIf unauthorised, restore the VM from backup and investigate the actor for compromise.",
+  "output_index": "",
+  "investigation_fields": {
+    "field_names": [
+      "message",
+      "host.name",
+      "log.source.address",
+      "process.name"
+    ]
+  },
+  "author": [
+    "raadabujaish"
+  ],
+  "false_positives": [],
+  "from": "now-9m",
+  "rule_id": "nbi-vsphere-vm-deleted",
+  "max_signals": 100,
+  "risk_score_mapping": [],
+  "severity_mapping": [],
+  "threat": [
+    {
+      "framework": "MITRE ATT&CK",
+      "tactic": {
+        "id": "TA0040",
+        "name": "Impact",
+        "reference": "https://attack.mitre.org/tactics/TA0040/"
+      },
+      "technique": [
+        {
+          "id": "T1485",
+          "name": "Data Destruction",
+          "reference": "https://attack.mitre.org/techniques/T1485/"
+        }
+      ]
+    }
+  ],
+  "to": "now",
+  "references": [
+    "https://attack.mitre.org/"
+  ],
+  "version": 1,
+  "exceptions_list": [],
+  "related_integrations": [],
+  "required_fields": [],
+  "setup": "",
+  "type": "query",
+  "language": "kuery",
+  "index": [
+    "logs-vsphere.log-*"
+  ],
+  "query": "event.dataset:\"vsphere.log\" and message:\"Removed\" and message:\"from NBI-Datacenter\" and not message:\"Veeam.Backup\"",
+  "actions": []
+}

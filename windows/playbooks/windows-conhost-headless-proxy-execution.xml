@@ -1,0 +1,418 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<Playbook xmlns="https://soc.example/playbooks" id="PB-windows-conhost-headless-proxy-execution" name="Proxy Execution via Console Window Host [NBI-4688] - SOC Playbook" version="3.0" status="Validated" classification="TLP:AMBER">
+  <Metadata>
+    <Owner>NBI SOC / Detection Engineering</Owner>
+    <LastUpdated>2026-08-19</LastUpdated>
+    <Severity default="High">High</Severity>
+    <Confidence default="Medium">Medium</Confidence>
+    <Category>Defense Evasion</Category>
+    <MitreAttack>
+      <Technique id="T1218"/>
+      <Technique id="T1202"/>
+      <Technique id="T1059.001"/>
+      <Tactic id="TA0005"/>
+    </MitreAttack>
+    <References>
+      <Reference title="MITRE ATT&amp;CK - System Binary Proxy Execution (T1218)" url="https://attack.mitre.org/techniques/T1218/"/>
+      <Reference title="MITRE ATT&amp;CK - Indirect Command Execution (T1202)" url="https://attack.mitre.org/techniques/T1202/"/>
+      <Reference title="MITRE ATT&amp;CK - Defense Evasion tactic (TA0005)" url="https://attack.mitre.org/tactics/TA0005/"/>
+      <Reference title="MITRE ATT&amp;CK - Command and Scripting Interpreter: PowerShell (T1059.001)" url="https://attack.mitre.org/techniques/T1059/001/"/>
+      <Reference title="Microsoft Learn - Command line process auditing (Event 4688 command-line GPO)" url="https://learn.microsoft.com/en-us/windows-server/identity/ad-ds/manage/component-updates/command-line-process-auditing"/>
+      <Reference title="Microsoft Learn - 4688: A new process has been created" url="https://learn.microsoft.com/en-us/windows/security/threat-protection/auditing/event-4688"/>
+      <Reference title="Elastic Security - ES|QL reference" url="https://www.elastic.co/guide/en/elasticsearch/reference/current/esql.html"/>
+      <Reference title="ConPtY / conhost --headless background (pseudoconsole hosting)" url="https://devblogs.microsoft.com/commandline/windows-command-line-introducing-the-windows-pseudo-console-conpty/"/>
+    </References>
+  </Metadata>
+  <AlertContext>
+    <RuleName>Proxy Execution via Console Window Host [NBI-4688]</RuleName>
+    <RuleId>nbi-b2-proxy-execution-via-console-window-host</RuleId>
+    <RuleType>eql</RuleType>
+    <Index>logs-system.security*</Index>
+    <TriggerLogic>Deployed logic (plain English): a Windows 4688 process start where process.name is conhost.exe, the effective command line contains --headless, and the same command line contains one of the proxied-payload tokens above. NBI's investigation reproduces this in ES|QL by folding process.command_line and the multivalued process.args into a single lowercased string (because command-line capture is host-dependent - see section 8) and matching --headless plus the payload token.
+
+One-line Kibana KQL detection filter (for fast pivoting in Discover / Timeline):
+
+
+
+Why this is meaningful: benign conhost.exe overwhelmingly appears as the auto-spawned console host of another process with arguments like 0xffffffff -ForceV1 (validated live on $host: every in-window conhost.exe command line was \??\C:\windows\system32\conhost.exe 0xffffffff -ForceV1, launched by InspireICM.exe). The --headless flag carrying a command payload is the anomaly - normal console hosting does not proxy an interpreter or a download cradle behind a hidden window.</TriggerLogic>
+    <KeyAlertFields>process.name, process.executable, conhost.exe, process.parent.name, process.parent.executable, process.pid, process.parent.pid, process.entity_id, user.name, user.id, host.name, host.os.type</KeyAlertFields>
+  </AlertContext>
+  <Inputs>
+    <Input name="$host"/>
+    <Input name="$user"/>
+  </Inputs>
+  <ExecutiveSummary>
+    <Overview>This playbook drives triage and investigation of the Proxy Execution via Console Window Host detection on NBI's Elastic Security deployment. The rule fires when a process-creation event (Windows Security 4688) shows conhost.exe launched with the --headless argument and a command line that also carries a proxied-payload token - powershell, cmd, mshta, curl, http, schtasks, a .bat/.cmd/.vbs/.js reference, a UNC path, or @SSL.
+
+conhost.exe --headless runs a console program with no visible window. That is a legitimate primitive used by a handful of automation and remote-console scenarios, but it is also a defense-evasion technique: an operator or malware wraps a command behind headless conhost so the real child (a download cradle, an interpreter, a scheduled-task creation) executes hidden, defeating simple window-visibility and parent/child heuristics.
+
+The analyst's job is to decide, quickly and defensibly, whether a headless-console proxied execution on $host is sanctioned automation/administration or hidden proxied command execution driven by an operator or malware, and to classify the alert as true_positive, false_positive, misconfiguration, or needs_escalation with evidence attached. The discriminators are the payload behind --headless and the launching parent.</Overview>
+    <BusinessImpact>An alert means: on $host, conhost.exe was started with --headless and a command payload. Because conhost --headless launches its target with no window, the observable residue in 4688 is the conhost invocation itself plus (where command-line auditing is on) the proxied command text. The alert therefore asserts that a hidden-console proxied execution *occurred*; the open questions are what was proxied and who/what launched it.
+
+This is a defense-evasion / signed-binary-proxy-execution signal, not a guaranteed compromise: the same mechanism is used by legitimate automation. But because the flag deliberately hides the child, treat the event as suspicious until the payload and parent are positively explained.</BusinessImpact>
+  </ExecutiveSummary>
+  <Investigation>
+    <Goal>Decide true_positive / false_positive / misconfiguration / needs_escalation for Proxy Execution via Console Window Host [NBI-4688].</Goal>
+    <Workflow>
+      <Step order="1" name="Confirm the headless console execution and read its payload (on $host)">
+        <Purpose>Confirm the headless console execution and read its payload (on $host)</Purpose>
+        <Query platform="Elastic" language="ES|QL" id="Q-01">
+          <![CDATA[
+FROM logs-system.security*
+| WHERE event.code == "4688" AND host.name == "$host"
+    AND TO_LOWER(process.name) == "conhost.exe"
+    AND @timestamp >= NOW() - 4 hours
+| EVAL cl = TO_LOWER(CONCAT(COALESCE(process.command_line, ""), " ", COALESCE(MV_CONCAT(process.args, " "), "")))
+| WHERE cl LIKE "*--headless*"
+| KEEP @timestamp, host.name, user.name, process.parent.name, process.command_line, process.args
+| SORT @timestamp DESC
+| LIMIT 20
+]]>
+        </Query>
+      </Step>
+      <Step order="2" name="Classify the payload and the launching parent">
+        <Purpose>Classify the payload and the launching parent</Purpose>
+        <Query platform="Elastic" language="ES|QL" id="Q-02">
+          <![CDATA[
+FROM logs-system.security*
+| WHERE event.code == "4688" AND host.name == "$host"
+    AND TO_LOWER(process.name) == "conhost.exe"
+    AND @timestamp >= NOW() - 4 hours
+| EVAL cl = TO_LOWER(CONCAT(COALESCE(process.command_line, ""), " ", COALESCE(MV_CONCAT(process.args, " "), "")))
+| WHERE cl LIKE "*--headless*"
+| EVAL payload = CASE(
+    cl LIKE "*powershell*", "powershell",
+    cl LIKE "*mshta*", "mshta",
+    cl LIKE "*curl*", "curl-download",
+    cl LIKE "*http*", "http-cradle",
+    cl LIKE "*schtasks*", "scheduled-task",
+    cl LIKE "*.bat*" OR cl LIKE "*.cmd*", "batch-script",
+    cl LIKE "*.vbs*" OR cl LIKE "*.js*", "wsh-script",
+    "other-proxied")
+| STATS execs = COUNT(*) BY payload, process.parent.name, user.name
+| SORT execs DESC
+| LIMIT 20
+]]>
+        </Query>
+      </Step>
+      <Step order="3" name="Entity pivoting">
+        <Purpose>Entity pivoting</Purpose>
+        <Query platform="Elastic" language="ES|QL" id="Q-03">
+          <![CDATA[
+FROM logs-system.security*
+| WHERE @timestamp >= NOW() - 4 hours
+    AND event.code == "4688"
+    AND host.name == "$host"
+    AND user.name == "$user"
+    AND TO_LOWER(process.name) == "conhost.exe"
+| KEEP @timestamp, host.name, user.name, process.parent.name, process.parent.pid, process.pid, process.command_line
+| SORT @timestamp DESC
+| LIMIT 50
+]]>
+        </Query>
+      </Step>
+      <Step order="4" name="Process investigation">
+        <Purpose>Process investigation</Purpose>
+        <Query platform="Elastic" language="ES|QL" id="Q-04">
+          <![CDATA[
+FROM logs-system.security*
+| WHERE @timestamp >= NOW() - 4 hours
+    AND event.code == "4688"
+    AND TO_LOWER(process.name) == "conhost.exe"
+| EVAL cl = TO_LOWER(CONCAT(COALESCE(process.command_line, ""), " ", COALESCE(MV_CONCAT(process.args, " "), "")))
+| WHERE cl LIKE "*--headless*"
+| STATS execs = COUNT(*), hosts = COUNT_DISTINCT(host.name), users = COUNT_DISTINCT(user.name) BY process.parent.name
+| SORT execs DESC
+| LIMIT 25
+]]>
+        </Query>
+      </Step>
+      <Step order="5" name="Process investigation">
+        <Purpose>Process investigation</Purpose>
+        <Query platform="Elastic" language="ES|QL" id="Q-05">
+          <![CDATA[
+FROM logs-system.security*
+| WHERE @timestamp >= NOW() - 4 hours
+    AND event.code == "4688"
+    AND host.name == "$host" AND user.name == "$user"
+    AND TO_LOWER(process.name) IN ("powershell.exe", "cmd.exe", "mshta.exe", "curl.exe", "certutil.exe", "bitsadmin.exe", "rundll32.exe", "regsvr32.exe", "schtasks.exe", "wscript.exe", "cscript.exe")
+| STATS execs = COUNT(*), last_seen = MAX(@timestamp) BY process.name
+| SORT execs DESC
+| LIMIT 20
+]]>
+        </Query>
+      </Step>
+      <Step order="6" name="Parent-Child process analysis">
+        <Purpose>Parent-Child process analysis</Purpose>
+        <Query platform="Elastic" language="ES|QL" id="Q-06">
+          <![CDATA[
+FROM logs-system.security*
+| WHERE @timestamp >= NOW() - 4 hours
+    AND event.code == "4688"
+    AND host.name == "$host"
+    AND TO_LOWER(process.name) == "conhost.exe"
+| STATS execs = COUNT(*), users = COUNT_DISTINCT(user.name) BY process.parent.name
+| SORT execs DESC
+| LIMIT 25
+]]>
+        </Query>
+      </Step>
+      <Step order="7" name="Parent-Child process analysis">
+        <Purpose>Parent-Child process analysis</Purpose>
+        <Query platform="Elastic" language="ES|QL" id="Q-07">
+          <![CDATA[
+FROM logs-system.security*
+| WHERE @timestamp >= NOW() - 4 hours
+    AND event.code == "4688"
+    AND host.name == "$host"
+    AND process.parent.name == "conhost.exe"
+| KEEP @timestamp, user.name, process.parent.name, process.parent.pid, process.name, process.pid, process.executable
+| SORT @timestamp ASC
+| LIMIT 100
+]]>
+        </Query>
+      </Step>
+      <Step order="8" name="User investigation">
+        <Purpose>User investigation</Purpose>
+        <Query platform="Elastic" language="ES|QL" id="Q-08">
+          <![CDATA[
+FROM logs-system.security*
+| WHERE @timestamp >= NOW() - 4 hours
+    AND event.code == "4688"
+    AND user.name == "$user"
+| STATS executions = COUNT(*), distinct_procs = COUNT_DISTINCT(process.name) BY host.name
+| SORT executions DESC
+| LIMIT 20
+]]>
+        </Query>
+      </Step>
+      <Step order="9" name="Host investigation">
+        <Purpose>Host investigation</Purpose>
+        <Query platform="Elastic" language="ES|QL" id="Q-09">
+          <![CDATA[
+FROM logs-system.security*
+| WHERE @timestamp >= NOW() - 4 hours
+    AND event.code == "4688"
+    AND host.name == "$host"
+| STATS executions = COUNT(*), users = COUNT_DISTINCT(user.name) BY process.name, process.parent.name
+| SORT executions ASC
+| LIMIT 40
+]]>
+        </Query>
+      </Step>
+      <Step order="10" name="IP investigation">
+        <Purpose>IP investigation</Purpose>
+        <Query platform="Elastic" language="ES|QL" id="Q-10">
+          <![CDATA[
+FROM logs-system.security*
+| WHERE @timestamp >= NOW() - 4 hours
+    AND event.code == "4624"
+    AND host.name == "$host" AND user.name == "$user"
+    AND source.ip IS NOT NULL
+| STATS logons = COUNT(*) BY source.ip, winlog.event_data.LogonType
+| SORT logons DESC
+| LIMIT 20
+]]>
+        </Query>
+      </Step>
+      <Step order="11" name="File investigation">
+        <Purpose>File investigation</Purpose>
+        <Query platform="Elastic" language="ES|QL" id="Q-11">
+          <![CDATA[
+FROM logs-system.security*
+| WHERE @timestamp >= NOW() - 4 hours
+    AND event.code == "4688"
+    AND host.name == "$host"
+    AND (TO_LOWER(process.name) == "conhost.exe" OR TO_LOWER(process.parent.name) == "conhost.exe")
+| STATS executions = COUNT(*), first_seen = MIN(@timestamp), last_seen = MAX(@timestamp) BY process.name, process.executable
+| SORT executions DESC
+| LIMIT 30
+]]>
+        </Query>
+      </Step>
+      <Step order="12" name="Authentication investigation">
+        <Purpose>Authentication investigation</Purpose>
+        <Query platform="Elastic" language="ES|QL" id="Q-12">
+          <![CDATA[
+FROM logs-system.security*
+| WHERE @timestamp >= NOW() - 4 hours
+    AND event.code IN ("4624", "4625", "4634", "4647")
+    AND host.name == "$host" AND user.name == "$user"
+| STATS events = COUNT(*), first_seen = MIN(@timestamp), last_seen = MAX(@timestamp) BY event.code, winlog.event_data.LogonType, source.ip
+| SORT events DESC
+| LIMIT 30
+]]>
+        </Query>
+      </Step>
+      <Step order="13" name="Timeline Reconstruction">
+        <Purpose>Timeline Reconstruction</Purpose>
+        <Query platform="Elastic" language="ES|QL" id="Q-13">
+          <![CDATA[
+FROM logs-system.security*
+| WHERE @timestamp >= NOW() - 4 hours
+    AND event.code == "4688"
+    AND host.name == "$host"
+    AND user.name == "$user"
+| KEEP @timestamp, process.parent.name, process.parent.pid, process.name, process.pid, process.executable
+| SORT @timestamp ASC
+| LIMIT 200
+]]>
+        </Query>
+      </Step>
+      <Step order="14" name="Lateral movement validation">
+        <Purpose>Lateral movement validation</Purpose>
+        <Query platform="Elastic" language="ES|QL" id="Q-14">
+          <![CDATA[
+FROM logs-system.security*
+| WHERE @timestamp >= NOW() - 4 hours
+    AND event.code IN ("4624", "4648", "4768", "4769", "5140")
+    AND user.name == "$user"
+    AND host.name != "$host"
+| STATS events = COUNT(*) BY host.name, event.code, winlog.event_data.LogonType
+| SORT events DESC
+| LIMIT 30
+]]>
+        </Query>
+      </Step>
+      <Step order="15" name="Persistence validation">
+        <Purpose>Persistence validation</Purpose>
+        <Query platform="Elastic" language="ES|QL" id="Q-15">
+          <![CDATA[
+FROM logs-system.security*
+| WHERE @timestamp >= NOW() - 4 hours
+    AND host.name == "$host"
+    AND (
+        (event.code == "4688" AND TO_LOWER(process.name) IN ("schtasks.exe", "reg.exe", "sc.exe", "at.exe", "powershell.exe", "wscript.exe", "cscript.exe", "rundll32.exe", "regsvr32.exe", "mshta.exe"))
+        OR event.code == "7045"
+        OR event.code == "4720"
+        OR event.code == "4698"
+    )
+| STATS events = COUNT(*) BY event.code, process.name, user.name
+| SORT events DESC
+| LIMIT 40
+]]>
+        </Query>
+      </Step>
+      <Step order="16" name="Privilege escalation validation">
+        <Purpose>Privilege escalation validation</Purpose>
+        <Query platform="Elastic" language="ES|QL" id="Q-16">
+          <![CDATA[
+FROM logs-system.security*
+| WHERE @timestamp >= NOW() - 4 hours
+    AND event.code == "4672"
+    AND host.name == "$host"
+| STATS special_priv_logons = COUNT(*) BY user.name
+| SORT special_priv_logons DESC
+| LIMIT 25
+]]>
+        </Query>
+      </Step>
+      <Step order="17" name="Defense evasion validation">
+        <Purpose>Defense evasion validation</Purpose>
+        <Query platform="Elastic" language="ES|QL" id="Q-17">
+          <![CDATA[
+FROM logs-system.security*
+| WHERE @timestamp >= NOW() - 4 hours
+    AND host.name == "$host"
+    AND (
+        (event.code == "4688" AND TO_LOWER(process.name) IN ("wevtutil.exe", "fsutil.exe", "vssadmin.exe", "wmic.exe", "cipher.exe", "sdelete.exe", "sdelete64.exe"))
+        OR event.code == "1102"
+        OR event.code == "4719"
+    )
+| STATS events = COUNT(*) BY event.code, process.name, user.name
+| SORT events DESC
+| LIMIT 30
+]]>
+        </Query>
+      </Step>
+      <Step order="18" name="Impact assessment">
+        <Purpose>Impact assessment</Purpose>
+        <Query platform="Elastic" language="ES|QL" id="Q-18">
+          <![CDATA[
+FROM logs-system.security*
+| WHERE @timestamp >= NOW() - 4 hours
+    AND host.name == "$host"
+    AND event.code == "4688"
+    AND TO_LOWER(process.parent.name) == "conhost.exe"
+| STATS children = COUNT(*), distinct_children = COUNT_DISTINCT(process.name) BY process.name
+| SORT children DESC
+| LIMIT 30
+]]>
+        </Query>
+      </Step>
+      <Step order="19" name="Finalize verdict">
+        <DecisionTree>
+        </DecisionTree>
+      </Step>
+    </Workflow>
+  </Investigation>
+  <ClassificationGuidance>
+    <TruePositive>
+      <Definition></Definition>
+    </TruePositive>
+    <FalsePositive>
+      <Definition></Definition>
+      <Indicators>
+        <Item>Sanctioned automation and management agents that legitimately use conhost --headless to host a console tool without a window (backup jobs, deployment agents, monitoring, RMM). These repeat a consistent, benign payload under a recognised service/agent parent and a service identity.</Item>
+        <Item>Remote-console / virtualization tooling that hosts headless consoles as part of its normal operation.</Item>
+        <Item>Administrator scripting that deliberately runs a console job hidden. This must be matched to a change record or a named admin before being called benign - a hidden proxied command is not dismissed on sight.</Item>
+        <Item>The --headless proxied variant has a zero baseline. Over the live 4-hour window, conhost.exe --headless appeared 0 times across the entire estate (0 hosts), even though conhost.exe itself is enormous (&gt;16,000 executions on nim-est-apv07 alone). So any true --headless proxied hit is a strong anomaly with no noisy legitimate source to tune out.</Item>
+        <Item>conhost.exe is otherwise ubiquitous and benign. On $host (nim-est-apv07) it is the auto-spawned console host of InspireICM.exe with 0xffffffff -ForceV1 arguments - the ordinary Windows console-hosting pattern, not the --headless proxy. Do not confuse high conhost volume with this rule; the rule requires the --headless flag plus a payload token.</Item>
+        <Item>Command-line capture is bimodal across NBI. It is 100% populated on server hosts such as nim-est-apv07/nim-st-apv10 (measured live) and 0% on the jump/VDI tier (e.g. nim-jump-apv02, nim-fti-apv01). On a command-line-less host, --headless may still be recoverable from process.args, but if both are null the payload is invisible in this index and must come from EDR - an empty payload is not evidence of benign use.</Item>
+        <Item>No NBI benign-true-positive is on record for this rule. There is no environment allow-list to apply; scope any future exception to an exact parent + payload + account after a documented authorised cause.</Item>
+      </Indicators>
+    </FalsePositive>
+    <Misconfiguration>
+      <Definition></Definition>
+    </Misconfiguration>
+    <NeedsEscalation>
+      <Definition></Definition>
+    </NeedsEscalation>
+  </ClassificationGuidance>
+  <ResponseActions>
+    <Phase name="Containment">
+      <Action>Isolate $host (network-contain / quarantine) if a true_positive is confirmed, to stop post-proxy activity. On a shared server, coordinate with IT to avoid dropping unrelated services, but prioritise containment.</Action>
+      <Action>Terminate the conhost proxied child and its descendants (the PID tree from section 15.3b / section 17.5) if the host cannot yet be isolated.</Action>
+      <Action>Suspend or force-logoff $user's session and disable the account pending investigation if a human/interactive context is implicated; reset its credentials (section 20).</Action>
+      <Action>Preserve volatile evidence first where feasible (running process list, the hidden child's memory, the parent's on-disk artifacts) - because the payload may be invisible in this index on command-line-less hosts, host-side capture is the only way to recover it.</Action>
+      <Action>Apply changes only via the authorised human-approved DEPLOY path; investigation itself is read-only.</Action>
+    </Phase>
+    <Phase name="Eradication">
+      <Action>Remove persistence discovered in section 17.2 (services, scheduled tasks, Run keys, rogue accounts) and any dropped payload identified via section 15.10 (process.executable path).</Action>
+      <Action>Remove the delivery mechanism - the parent that launched conhost --headless (malicious document/.hta/.lnk, a compromised automation task) and any downloaded stage.</Action>
+      <Action>Run a full anti-malware / EDR scan on $host and hunt for the same payload and parent across peers, especially other hosts $user touched (section 15.4, section 17.1).</Action>
+      <Action>Remediate the initial-access vector that produced the foothold from which the proxied execution was launched.</Action>
+    </Phase>
+    <Phase name="Recovery">
+      <Action>Reset $user's credentials and any secrets accessible from $host during the compromised window; if privileged accounts logged on there (section 17.3), rotate those too.</Action>
+      <Action>Restore $host from a known-good image if persistence or tampering was extensive; otherwise validate that eradication holds after reboot.</Action>
+      <Action>Return the host/account to service only after section 22 closing criteria are met and monitoring confirms the --headless proxied condition does not recur.</Action>
+      <Action>Recommend host hardening (section 23): full command-line auditing on the interactive/VDI tier (currently 0%) and an alert on office/browser/script parents spawning conhost --headless.</Action>
+    </Phase>
+  </ResponseActions>
+  <Escalation>
+    <Trigger>Escalate to Tier 3 / Incident Response (and notify the customer) when any of the following hold:
+
+- A download/script cradle is recovered behind --headless (section 14.1), especially from an office/browser/script or interactive parent.
+- Follow-on download/execute tooling or second-stage children appear under $user on $host (section 15.2b, section 17.5), or persistence was installed (section 17.2).
+- Lateral movement from $host/$user is observed (section 17.1), especially toward domain controllers or privileged systems.
+- Log clearing or audit-policy tampering appears (section 17.4), or a privileged/Tier-0 account or server is involved.
+- The payload cannot be recovered because of NBI's command-line gap and the alert cannot be safely cleared - escalate as needs_escalation with the gap named.</Trigger>
+    <To>SOC L2 / IR</To>
+  </Escalation>
+  <ClosureCriteria>
+    <Item>false_positive (authorised): a recognised automation/agent parent repeating a benign payload, matched to a change/task record with a named owner. Scope any exception to the exact parent + payload + account.</Item>
+    <Item>false_positive (proven-blocked): the proxied command positively proven to have failed/been blocked - documented as a blocked-malicious attempt, never "benign".</Item>
+    <Item>misconfiguration: a legitimate new/changed automation uses conhost --headless benignly and simply was not baselined; baseline it and recommend a non-hidden invocation where feasible.</Item>
+    <Item>true_positive: hidden proxied execution confirmed; containment/eradication/recovery completed, scope of $user/$host/peers established, no residual persistence or recurrence.</Item>
+    <Item>needs_escalation: handed to Tier 3/IR with the specific evidence gaps (unrecoverable payload, unknown parent) documented.</Item>
+  </ClosureCriteria>
+  <Limitations>
+    <Item>Zero --headless baseline = high fidelity. conhost --headless was 0 across the estate over 4h; there is nothing legitimate to tune out, so when it fires, believe it - but confirm the payload and parent before acting.</Item>
+    <Item>Command-line capture is bimodal and decides how far this index can take you. 100% on nim-est-apv07/nim-st-apv10, 0% on the jump/VDI tier. On a command-line-less host the --headless payload is invisible here; lean on parent, PID lineage, image path, and follow-on behaviour, and pull the command from EDR. Enabling command-line auditing on the interactive/VDI class is the single highest-value hardening ask from this rule.</Item>
+    <Item>conhost.exe volume is a trap. It is one of the busiest process names on NBI (&gt;16k/4h on one host) but almost always benign console hosting (0xffffffff -ForceV1). The rule's value is entirely in the --headless + payload-token condition; do not let raw conhost volume distract triage.</Item>
+    <Item>Parent is the discriminator. A recognised automation agent repeating one payload = FP-authorised; an office/browser/script or interactive parent behind a cradle = TP. Read process.parent.name first.</Item>
+    <Item>No Sysmon → PID-based lineage. Reconstruct trees with process.pid/process.parent.pid in a tight window, corroborated by process.parent.name (PIDs are reused).</Item>
+    <Item>KB-worthy (persist to NBI customer scope): (1) conhost --headless zero-baseline over 4h estate-wide; (2) command-line/process.args host-bimodality - nim-est-apv07/nim-st-apv10 = 100%, nim-jump-apv02/nim-fti-apv01 = 0%; (3) benign conhost signature on nim-est-apv07 = InspireICM.exe parent, 0xffffffff -ForceV1; (4) process.hash.* absent on 4688. All observed live on 2026-08-19.</Item>
+  </Limitations>
+</Playbook>

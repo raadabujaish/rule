@@ -1,0 +1,371 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<Playbook xmlns="https://soc.example/playbooks" id="PB-windows-system-file-ownership-change" name="System File Ownership Change [NBI-4688] - SOC Playbook" version="3.0" status="Validated" classification="TLP:AMBER">
+  <Metadata>
+    <Owner>NBI SOC / Detection Engineering</Owner>
+    <LastUpdated>2026-08-19</LastUpdated>
+    <Severity default="Medium">Medium</Severity>
+    <Confidence default="Medium">Medium</Confidence>
+    <Category>Defense Evasion</Category>
+    <MitreAttack>
+      <Technique id="T1222.001"/>
+      <Tactic id="TA0005"/>
+      <Tactic id="TA0003"/>
+    </MitreAttack>
+    <References>
+      <Reference title="MITRE ATT&amp;CK - T1222.001, File and Directory Permissions Modification: Windows" url="https://attack.mitre.org/techniques/T1222/001/"/>
+      <Reference title="MITRE ATT&amp;CK - TA0005 Defense Evasion" url="https://attack.mitre.org/tactics/TA0005/"/>
+      <Reference title="Microsoft - icacls command reference" url="https://learn.microsoft.com/en-us/windows-server/administration/windows-commands/icacls"/>
+      <Reference title="Microsoft - takeown command reference" url="https://learn.microsoft.com/en-us/windows-server/administration/windows-commands/takeown"/>
+      <Reference title="Elastic Security - detection rules and ES|QL reference" url="https://www.elastic.co/guide/en/security/current/es-overview.html"/>
+    </References>
+  </Metadata>
+  <AlertContext>
+    <RuleName>System File Ownership Change [NBI-4688]</RuleName>
+    <RuleId>nbi-b2-system-file-ownership-change</RuleId>
+    <RuleType>eql</RuleType>
+    <Index>logs-system.security-*</Index>
+    <TriggerLogic>The deployed rule fires on a Windows Security 4688 process‑creation event where the new process is icacls.exe or takeown.exe and the command line both targets a path under C:\Windows and performs a loosening operation - /reset, /grant Everyone:F, or /f (take ownership).
+
+One‑line detection intent (Kibana‑KQL equivalent of the deployed EQL, for reference only - all runnable investigation queries below are ES|QL):
+
+
+
+The signal is the *combination* of a permission tool, a system path, and a loosening verb - not any one alone. NBI observation: icacls.exe/takeown.exe were absent from the live 4‑hour window, so any hit is rare and administratively significant.</TriggerLogic>
+    <KeyAlertFields>process.name, process.parent.name, process.command_line, process.args, host.name, user.name</KeyAlertFields>
+  </AlertContext>
+  <Inputs>
+    <Input name="$host"/>
+    <Input name="$user"/>
+  </Inputs>
+  <ExecutiveSummary>
+    <Overview>This playbook guides a SOC analyst through an alert raised when icacls.exe or takeown.exe was used to reset an ACL, grant Everyone full control, or seize ownership of a path under C:\Windows on an NBI host. The goal is a defensible verdict - true_positive / false_positive / misconfiguration / needs_escalation - for a permission change that, on a protected system path, weakens the access controls that stop non‑privileged code from overwriting trusted system binaries. Loosening ownership or ACLs on system files is a recognised precursor to replacing a signed system binary (durable persistence) or disabling security tooling (defense evasion).</Overview>
+    <BusinessImpact>Someone ran a Windows permission tool to change who can access or own a file/folder under C:\Windows. Benignly, an administrator or a servicing/installer tool sometimes /resets an ACL on an application folder that happens to live under C:\Windows. Maliciously, an attacker who already has local admin loosens the ACL or takes ownership of a system binary, driver, or security‑tooling directory so they can overwrite it - planting a backdoored DLL/EXE for persistence, or neutralising a defensive agent. The alert says the *permission change* happened; it does not by itself prove a file was replaced. The discriminators are the exact target path, the grant type, and whether a file‑write / service change / persistence action follows.</BusinessImpact>
+  </ExecutiveSummary>
+  <Investigation>
+    <Goal>Decide true_positive / false_positive / misconfiguration / needs_escalation for System File Ownership Change [NBI-4688].</Goal>
+    <Workflow>
+      <Step order="1" name="Confirm the ownership/ACL change and read the target (OWN-INV-01)">
+        <Purpose>Confirm the ownership/ACL change and read the target (OWN-INV-01)</Purpose>
+        <Query platform="Elastic" language="ES|QL" id="Q-01">
+          <![CDATA[
+FROM logs-system.security-*
+| WHERE event.code == "4688" AND host.name == "$host"
+    AND TO_LOWER(process.name) IN ("icacls.exe", "takeown.exe")
+    AND @timestamp >= NOW() - 4 hours
+| EVAL cl = TO_LOWER(CONCAT(COALESCE(process.command_line, ""), " ", COALESCE(MV_CONCAT(process.args, " "), "")))
+| WHERE cl LIKE "*windows*" AND (cl LIKE "*/reset*" OR cl LIKE "*/grant*" OR cl LIKE "*/f*" OR cl LIKE "*everyone*")
+| KEEP @timestamp, host.name, user.name, process.name, process.parent.name, process.command_line, process.args
+| SORT @timestamp DESC
+| LIMIT 20
+]]>
+        </Query>
+      </Step>
+      <Step order="2" name="Grade the target sensitivity and grant type (OWN-INV-02)">
+        <Purpose>Grade the target sensitivity and grant type (OWN-INV-02)</Purpose>
+        <Query platform="Elastic" language="ES|QL" id="Q-02">
+          <![CDATA[
+FROM logs-system.security-*
+| WHERE event.code == "4688" AND host.name == "$host"
+    AND TO_LOWER(process.name) IN ("icacls.exe", "takeown.exe")
+    AND @timestamp >= NOW() - 4 hours
+| EVAL cl = TO_LOWER(CONCAT(COALESCE(process.command_line, ""), " ", COALESCE(MV_CONCAT(process.args, " "), "")))
+| WHERE cl LIKE "*windows*"
+| EVAL target = CASE(
+    cl LIKE "*defender*", "security-tooling",
+    cl LIKE "*drivers*", "drivers",
+    cl LIKE "*system32*" OR cl LIKE "*syswow64*", "system32-binaries",
+    cl LIKE "*tasks*", "scheduled-tasks",
+    "windows-general")
+| EVAL grant = CASE(
+    cl LIKE "*everyone*", "grant-everyone-full",
+    cl LIKE "*/reset*", "reset-acl",
+    TO_LOWER(process.name) == "takeown.exe" OR cl LIKE "*/f*", "take-ownership",
+    "other-perm-change")
+| STATS execs = COUNT(*) BY target, grant, process.name
+| SORT execs DESC
+| LIMIT 20
+]]>
+        </Query>
+      </Step>
+      <Step order="3" name="Entity pivoting">
+        <Purpose>Entity pivoting</Purpose>
+        <Query platform="Elastic" language="ES|QL" id="Q-03">
+          <![CDATA[
+FROM logs-system.security-*
+| WHERE event.code == "4688" AND host.name == "$host"
+    AND @timestamp >= NOW() - 4 hours
+    AND TO_LOWER(process.name) IN ("icacls.exe", "takeown.exe", "sc.exe", "reg.exe", "schtasks.exe")
+| STATS execs = COUNT(*), last_seen = MAX(@timestamp) BY process.name, user.name
+| SORT execs DESC
+| LIMIT 20
+]]>
+        </Query>
+      </Step>
+      <Step order="4" name="Process investigation">
+        <Purpose>Process investigation</Purpose>
+        <Query platform="Elastic" language="ES|QL" id="Q-04">
+          <![CDATA[
+FROM logs-system.security-*
+| WHERE event.code == "4688" AND host.name == "$host"
+    AND TO_LOWER(process.name) IN ("icacls.exe", "takeown.exe")
+    AND @timestamp >= NOW() - 4 hours
+| KEEP @timestamp, user.name, process.name, process.executable, process.parent.name, process.command_line, process.args
+| SORT @timestamp DESC
+| LIMIT 20
+]]>
+        </Query>
+      </Step>
+      <Step order="5" name="Parent-Child process analysis">
+        <Purpose>Parent-Child process analysis</Purpose>
+        <Query platform="Elastic" language="ES|QL" id="Q-05">
+          <![CDATA[
+FROM logs-system.security-*
+| WHERE event.code == "4688" AND host.name == "$host"
+    AND TO_LOWER(process.name) IN ("icacls.exe", "takeown.exe")
+    AND @timestamp >= NOW() - 4 hours
+| STATS execs = COUNT(*) BY process.parent.name, process.name
+| SORT execs DESC
+| LIMIT 20
+]]>
+        </Query>
+      </Step>
+      <Step order="6" name="User investigation">
+        <Purpose>User investigation</Purpose>
+        <Query platform="Elastic" language="ES|QL" id="Q-06">
+          <![CDATA[
+FROM logs-system.security-*
+| WHERE event.code == "4688" AND host.name == "$host" AND user.name == "$user"
+    AND @timestamp >= NOW() - 4 hours
+| STATS execs = COUNT(*), last_seen = MAX(@timestamp) BY process.name
+| SORT execs DESC
+| LIMIT 25
+]]>
+        </Query>
+      </Step>
+      <Step order="7" name="Host investigation">
+        <Purpose>Host investigation</Purpose>
+        <Query platform="Elastic" language="ES|QL" id="Q-07">
+          <![CDATA[
+FROM logs-system.security-*
+| WHERE event.code == "4688" AND host.name == "$host"
+    AND @timestamp >= NOW() - 4 hours
+    AND TO_LOWER(process.name) IN ("icacls.exe", "takeown.exe", "cacls.exe")
+| STATS execs = COUNT(*) BY user.name, process.name
+| SORT execs DESC
+| LIMIT 20
+]]>
+        </Query>
+      </Step>
+      <Step order="8" name="IP investigation">
+        <Purpose>IP investigation</Purpose>
+        <Query platform="Elastic" language="ES|QL" id="Q-08">
+          <![CDATA[
+FROM logs-system.security-*
+| WHERE event.code == "4624" AND user.name == "$user"
+    AND @timestamp >= NOW() - 4 hours
+    AND source.ip IS NOT NULL
+| STATS logons = COUNT(*) BY source.ip, host.name
+| SORT logons DESC
+| LIMIT 20
+]]>
+        </Query>
+      </Step>
+      <Step order="9" name="File investigation">
+        <Purpose>File investigation</Purpose>
+        <Query platform="Elastic" language="ES|QL" id="Q-09">
+          <![CDATA[
+FROM logs-system.security-*
+| WHERE event.code == "4688" AND host.name == "$host" AND user.name == "$user"
+    AND @timestamp >= NOW() - 4 hours
+    AND TO_LOWER(process.name) IN ("cmd.exe", "powershell.exe", "robocopy.exe", "xcopy.exe")
+| EVAL cl = TO_LOWER(CONCAT(COALESCE(process.command_line, ""), " ", COALESCE(MV_CONCAT(process.args, " "), "")))
+| WHERE cl LIKE "*windows*" AND (cl LIKE "*copy*" OR cl LIKE "*move*" OR cl LIKE "*.dll*" OR cl LIKE "*.sys*")
+| KEEP @timestamp, process.name, process.command_line, process.args
+| SORT @timestamp DESC
+| LIMIT 20
+]]>
+        </Query>
+      </Step>
+      <Step order="10" name="Authentication investigation">
+        <Purpose>Authentication investigation</Purpose>
+        <Query platform="Elastic" language="ES|QL" id="Q-10">
+          <![CDATA[
+FROM logs-system.security-*
+| WHERE host.name == "$host" AND user.name == "$user"
+    AND event.code IN ("4624", "4672")
+    AND @timestamp >= NOW() - 4 hours
+| STATS events = COUNT(*), last_seen = MAX(@timestamp) BY event.code
+| SORT event.code ASC
+| LIMIT 20
+]]>
+        </Query>
+      </Step>
+      <Step order="11" name="Timeline Reconstruction">
+        <Purpose>Timeline Reconstruction</Purpose>
+        <Query platform="Elastic" language="ES|QL" id="Q-11">
+          <![CDATA[
+FROM logs-system.security-*
+| WHERE event.code == "4688" AND host.name == "$host" AND user.name == "$user"
+    AND @timestamp >= NOW() - 4 hours
+| KEEP @timestamp, process.name, process.parent.name, process.command_line
+| SORT @timestamp ASC
+| LIMIT 100
+]]>
+        </Query>
+      </Step>
+      <Step order="12" name="Lateral movement validation">
+        <Purpose>Lateral movement validation</Purpose>
+        <Query platform="Elastic" language="ES|QL" id="Q-12">
+          <![CDATA[
+FROM logs-system.security-*
+| WHERE event.code == "4624" AND user.name == "$user"
+    AND @timestamp >= NOW() - 4 hours
+    AND source.ip IS NOT NULL
+| STATS logons = COUNT(*) BY host.name, source.ip
+| SORT logons DESC
+| LIMIT 20
+]]>
+        </Query>
+      </Step>
+      <Step order="13" name="Persistence validation">
+        <Purpose>Persistence validation</Purpose>
+        <Query platform="Elastic" language="ES|QL" id="Q-13">
+          <![CDATA[
+FROM logs-system.security-*
+| WHERE event.code == "4688" AND host.name == "$host" AND user.name == "$user"
+    AND @timestamp >= NOW() - 4 hours
+    AND TO_LOWER(process.name) IN ("sc.exe", "schtasks.exe", "reg.exe")
+| EVAL cl = TO_LOWER(CONCAT(COALESCE(process.command_line, ""), " ", COALESCE(MV_CONCAT(process.args, " "), "")))
+| KEEP @timestamp, process.name, process.command_line, process.args
+| SORT @timestamp DESC
+| LIMIT 20
+]]>
+        </Query>
+      </Step>
+      <Step order="14" name="Privilege escalation validation">
+        <Purpose>Privilege escalation validation</Purpose>
+        <Query platform="Elastic" language="ES|QL" id="Q-14">
+          <![CDATA[
+FROM logs-system.security-*
+| WHERE event.code == "4672" AND host.name == "$host" AND user.name == "$user"
+    AND @timestamp >= NOW() - 4 hours
+| STATS assignments = COUNT(*), last_seen = MAX(@timestamp) BY user.name
+| SORT assignments DESC
+| LIMIT 10
+]]>
+        </Query>
+      </Step>
+      <Step order="15" name="Defense evasion validation (tamper follow-on - OWN-INV-03)">
+        <Purpose>Defense evasion validation (tamper follow-on - OWN-INV-03)</Purpose>
+        <Query platform="Elastic" language="ES|QL" id="Q-15">
+          <![CDATA[
+FROM logs-system.security-*
+| WHERE event.code == "4688" AND host.name == "$host" AND user.name == "$user"
+    AND @timestamp >= NOW() - 4 hours
+    AND TO_LOWER(process.name) IN ("sc.exe", "icacls.exe", "takeown.exe", "reg.exe", "schtasks.exe", "cmd.exe", "powershell.exe", "robocopy.exe", "xcopy.exe")
+| EVAL cl = TO_LOWER(CONCAT(COALESCE(process.command_line, ""), " ", COALESCE(MV_CONCAT(process.args, " "), "")))
+| EVAL action = CASE(
+    TO_LOWER(process.name) == "sc.exe" AND (cl LIKE "*create*" OR cl LIKE "*config*"), "service-modify",
+    (cl LIKE "*copy*windows*" OR cl LIKE "*move*windows*" OR cl LIKE "*windows*.exe*") AND TO_LOWER(process.name) IN ("cmd.exe", "powershell.exe", "robocopy.exe", "xcopy.exe"), "file-write-in-windows",
+    TO_LOWER(process.name) IN ("schtasks.exe", "reg.exe"), "persistence",
+    TO_LOWER(process.name) IN ("icacls.exe", "takeown.exe"), "more-acl-changes",
+    "other")
+| STATS execs = COUNT(*), last_seen = MAX(@timestamp) BY action, process.name
+| SORT execs DESC
+| LIMIT 20
+]]>
+        </Query>
+      </Step>
+      <Step order="16" name="Impact assessment">
+        <Purpose>Impact assessment</Purpose>
+        <Query platform="Elastic" language="ES|QL" id="Q-16">
+          <![CDATA[
+FROM logs-system.security-*
+| WHERE event.code == "4688" AND host.name == "$host"
+    AND @timestamp >= NOW() - 4 hours
+    AND TO_LOWER(process.name) IN ("cmd.exe", "powershell.exe", "robocopy.exe", "xcopy.exe")
+| EVAL cl = TO_LOWER(CONCAT(COALESCE(process.command_line, ""), " ", COALESCE(MV_CONCAT(process.args, " "), "")))
+| WHERE cl LIKE "*windows*" AND (cl LIKE "*.dll*" OR cl LIKE "*.exe*" OR cl LIKE "*.sys*")
+| STATS writes = COUNT(*), last_seen = MAX(@timestamp) BY user.name, process.name
+| SORT writes DESC
+| LIMIT 20
+]]>
+        </Query>
+      </Step>
+      <Step order="17" name="Finalize verdict">
+        <DecisionTree>
+          <Node>
+            <Condition>Everyone:F / take‑ownership on system32 / drivers / security‑tooling (section 14.2) AND a following file‑write / service‑modify / persistence by $user (section 17.4/section 17.5) → true_positive (ACL tampering used to alter system files; open IR, isolate $host).</Condition>
+          </Node>
+          <Node>
+            <Condition>Documented administrator servicing/repair (recognised admin or agent, scoped target, change‑controlled) with no tamper follow‑on → false_positive (authorised). *Or* the operation was positively proven denied/failed (a blocked attempt) → false_positive (proven‑blocked‑malicious - record which; never "benign").</Condition>
+          </Node>
+          <Node>
+            <Condition>A legitimate installer/servicing tool routinely resets ACLs under C:\Windows and was not yet baselined → misconfiguration (baseline the tool; restrict ACL changes on protected paths).</Condition>
+          </Node>
+          <Node>
+            <Condition>Exact target not recoverable (empty command line/args) and no visible follow‑on → needs_escalation (recover the path + verify integrity via FIM/EDR).</Condition>
+          </Node>
+        </DecisionTree>
+      </Step>
+    </Workflow>
+  </Investigation>
+  <ClassificationGuidance>
+    <TruePositive>
+      <Definition>Everyone:F / take‑ownership on system32 / drivers / security‑tooling (section 14.2) AND a following file‑write / service‑modify / persistence by $user (section 17.4/section 17.5) → true_positive (ACL tampering used to alter system files; open IR, isolate $host).</Definition>
+    </TruePositive>
+    <FalsePositive>
+      <Definition>Documented administrator servicing/repair (recognised admin or agent, scoped target, change‑controlled) with no tamper follow‑on → false_positive (authorised). *Or* the operation was positively proven denied/failed (a blocked attempt) → false_positive (proven‑blocked‑malicious - record which; never "benign").</Definition>
+      <Indicators>
+        <Item>Software installation / servicing: installers and patch agents sometimes /reset ACLs on their own folders under C:\Windows (or C:\Windows\Temp, C:\Windows\Microsoft.NET).</Item>
+        <Item>Sanctioned administrative repair: an admin fixing a genuinely broken ACL (e.g. after a failed update) using icacls /reset or takeown /f on a specific path, under change control.</Item>
+        <Item>Imaging / build automation: golden‑image and provisioning scripts that normalise permissions during host build.</Item>
+        <Item>Command‑line auditing is bimodal on NBI. process.command_line is ~50% populated overall and effectively 0% on the interactive jump/VDI tier - the exact host class where a hands‑on admin repair (or a hands‑on‑keyboard attacker) is most plausible. On those hosts the rule's /reset/Everyone:F string match cannot evaluate; corroborate with process.args (MV_CONCAT) and, where auditing is off, with FIM/EDR. Empty != safe.</Item>
+        <Item>Servicing tools under C:\Windows: NBI runs vendor agents (patching, banking middleware) that touch permissions on their own subfolders; these are the recurring authorised‑servicing FP and should be baselined by tool + scoped path, never by "the account looked like an admin."</Item>
+        <Item>No Sysmon / no file‑write auditing: NBI has no Sysmon and object‑access SACLs are not broadly enabled, so the *result* of the ACL change (was a file actually overwritten?) is generally not in this index - it must be confirmed out‑of‑band (FIM/EDR).</Item>
+      </Indicators>
+    </FalsePositive>
+    <Misconfiguration>
+      <Definition>A legitimate installer/servicing tool routinely resets ACLs under C:\Windows and was not yet baselined → misconfiguration (baseline the tool; restrict ACL changes on protected paths).</Definition>
+    </Misconfiguration>
+    <NeedsEscalation>
+      <Definition>Exact target not recoverable (empty command line/args) and no visible follow‑on → needs_escalation (recover the path + verify integrity via FIM/EDR).</Definition>
+    </NeedsEscalation>
+  </ClassificationGuidance>
+  <ResponseActions>
+    <Phase name="Containment">
+      <Action>If section 17.4/section 17.5 show a tamper follow‑on (file‑write into C:\Windows, service/task/registry persistence) after the ACL change on a system binary/driver/security‑tooling path, queue $host for network isolation and page IR.</Action>
+      <Action>Preserve volatile evidence first where feasible (process list, the targeted file's current ACL/owner and hash) before remediation.</Action>
+      <Action>Suspend or closely monitor $user's sessions pending the actor‑context review (section 17.3), especially if the logon source (section 15.6) is unexpected.</Action>
+      <Action>Containment actions on a production banking host are human‑authorised DEPLOY steps - this playbook recommends; it does not execute changes on the customer stack.</Action>
+    </Phase>
+    <Phase name="Eradication">
+      <Action>Restore correct ownership and ACLs on the targeted path (return ownership to TrustedInstaller/SYSTEM, remove any Everyone:F grant).</Action>
+      <Action>Verify and, if altered, restore the integrity of the targeted system file(s) from a known‑good source (SFC/DISM or trusted media) - confirmed via FIM/EDR hash comparison.</Action>
+      <Action>Remove any binary that was written into C:\Windows, and any service/scheduled task/registry key added as persistence (section 17.2/section 17.4).</Action>
+      <Action>Reset credentials for $user (and any account observed in the follow‑on) if compromise is confirmed.</Action>
+    </Phase>
+    <Phase name="Recovery">
+      <Action>Return $host to service only after system‑file integrity is verified intact and persistence is removed.</Action>
+      <Action>Confirm the legitimate function that the ACL was (benignly) being repaired for, if any, still works.</Action>
+      <Action>Monitor $host/$user for recurrence of icacls/takeown against protected paths for a defined watch period.</Action>
+    </Phase>
+  </ResponseActions>
+  <Escalation>
+    <Trigger>Escalate to SOC L2 / IR (and the Windows platform team) when any of the following hold: Everyone:F or take‑ownership on system32/SysWOW64/drivers/security‑tooling; any tamper follow‑on (file‑write/service/task/registry) by $user; a server or Tier‑0 host is involved; or the exact target cannot be recovered and integrity cannot be confirmed. Hand over OWN‑INV‑01/02/03 output, the exact path, the grant type, and the follow‑on evidence.</Trigger>
+    <To>SOC L2 / IR</To>
+  </Escalation>
+  <ClosureCriteria>
+    <Item>True positive: $host isolated, ACLs/ownership restored, system‑file integrity verified/restored, replaced binaries and persistence removed, credentials reset, incident documented with section 14/section 17 evidence.</Item>
+    <Item>False positive (authorised): change tied to a documented administrator servicing/repair action (admin + change record confirmed, not assumed), scoped target, no tamper follow‑on, system‑file integrity intact.</Item>
+    <Item>False positive (proven‑blocked): the operation was positively proven denied/failed (access denied, no permission applied) - documented as a blocked attempt with source preserved, never labelled "benign".</Item>
+    <Item>Misconfiguration: a recognised installer/servicing tool routinely resets ACLs under C:\Windows; baseline the tool and restrict ACL changes on protected paths.</Item>
+    <Item>Needs escalation: target/intent not recoverable from telemetry - recorded, with FIM/EDR integrity check requested, and handed to L2.</Item>
+  </ClosureCriteria>
+  <Limitations>
+    <Item>The rule detects the enabling step, not the impact. A 4688 icacls/takeown hit is a permission *command*; whether a system file was actually overwritten is answered by the follow‑on (section 17.4/section 17.5) and, authoritatively, by FIM/EDR. Do not upgrade to true_positive on the ACL change alone, and do not close on an empty follow‑on alone.</Item>
+    <Item>Command‑line auditing is bimodal on NBI (~100% on server/servicing tiers such as nim-est-*/nim-st-*; ~0% on the jump/VDI tier). On the 0% hosts the rule's string match cannot evaluate and this playbook's command‑line queries return nothing - pivot to process.args and FIM/EDR. Enabling "Include command line in process creation events" on the jump/VDI/workstation class is the single highest‑value hardening step for this and the other command‑line‑bound NBI detections.</Item>
+    <Item>Coverage gaps to note for tuning (human‑authorised, not auto‑fixed): the rule keys on icacls/takeown only - PowerShell Set-Acl, the SetSecurityInfo/SetNamedSecurityInfo APIs, and SYSTEM‑context changes bypass it; and it needs FIM on protected system paths to see the *result*. Recommend a complementary file‑integrity/permission‑change analytic on C:\Windows\System32, driver paths, and security‑tooling directories.</Item>
+    <Item>Baseline reality: icacls/takeown were absent from the live window, so this is a genuine low‑volume, high‑fidelity detector - a real hit deserves attention, but the target/grant/follow‑on triage above is what separates authorised servicing from tampering.</Item>
+  </Limitations>
+</Playbook>

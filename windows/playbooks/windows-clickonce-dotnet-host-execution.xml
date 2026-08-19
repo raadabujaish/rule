@@ -1,0 +1,367 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<Playbook xmlns="https://soc.example/playbooks" id="PB-windows-clickonce-dotnet-host-execution" name="Execution via Microsoft DotNet ClickOnce Host [NBI-4688] - SOC Playbook" version="3.0" status="Validated" classification="TLP:AMBER">
+  <Metadata>
+    <Owner>NBI SOC / Detection Engineering</Owner>
+    <LastUpdated>2026-08-19</LastUpdated>
+    <Severity default="low">low</Severity>
+    <Confidence default="Medium">Medium</Confidence>
+    <Category>Defense Evasion</Category>
+    <MitreAttack>
+      <Technique id="T1218"/>
+      <Technique id="T1204"/>
+      <Technique id="T1204.002"/>
+      <Tactic id="TA0005"/>
+    </MitreAttack>
+    <References>
+      <Reference title="MITRE ATT&amp;CK - System Binary Proxy Execution (T1218)" url="https://attack.mitre.org/techniques/T1218/"/>
+      <Reference title="MITRE ATT&amp;CK - User Execution: Malicious File (T1204.002)" url="https://attack.mitre.org/techniques/T1204/002/"/>
+      <Reference title="MITRE ATT&amp;CK - Defense Evasion tactic (TA0005)" url="https://attack.mitre.org/tactics/TA0005/"/>
+      <Reference title='Elastic Security - "Execution via Microsoft DotNet ClickOnce Host" prebuilt rule reference' url="https://www.elastic.co/docs/reference/security/prebuilt-rules/rules/windows/defense_evasion_execution_msdotnet_clickonce_host"/>
+      <Reference title="Microsoft Learn - ClickOnce security and deployment" url="https://learn.microsoft.com/en-us/visualstudio/deployment/clickonce-security-and-deployment"/>
+      <Reference title="Microsoft Learn - dfsvc.exe / dfshim (ClickOnce deployment service) overview" url="https://learn.microsoft.com/en-us/visualstudio/deployment/clickonce-deployment"/>
+      <Reference title="LOLBAS - Rundll32.exe" url="https://lolbas-project.github.io/lolbas/Binaries/Rundll32/"/>
+      <Reference title="William Burgess / research on ClickOnce (dfsvc/dfshim) abuse for proxy execution" url="https://posts.specterops.io/"/>
+    </References>
+  </Metadata>
+  <AlertContext>
+    <RuleName>Execution via Microsoft DotNet ClickOnce Host [NBI-4688]</RuleName>
+    <RuleId>nbi-b2-execution-via-microsoft-dotnet-clickonce-host</RuleId>
+    <RuleType>eql</RuleType>
+    <Index>logs-system.security-*</Index>
+    <TriggerLogic>The deployed rule is an EQL sequence (faithful to the rule definition):
+
+
+
+Plain English: rundll32.exe invoked the ClickOnce shim (dfshim, ShOpenVerbApplication) and, within 5 seconds and under the same user SID, the .NET deployment service dfsvc.exe made a network connection - the sequence that installs and runs a ClickOnce (.application) package, usually from a remote manifest URL.
+
+NBI telemetry caveat (critical): the second leg is a network event, and logs-system.security-* carries no process-to-network (5156) telemetry - see section 8. On NBI the network leg cannot be observed on the primary index; the investigation corroborates via dfsvc.exe process presence (4688) and process ancestry, and recovers the manifest URL/CDN from proxy/DNS/EDR out of band.
+
+One-line Kibana KQL detection filter (for fast pivoting in Discover / Timeline):</TriggerLogic>
+    <KeyAlertFields>rundll32.exe, dfsvc.exe, process.name, process.executable, process.parent.name, process.parent.executable, process.command_line, process.args, user.id, user.name, host.name, process.pid</KeyAlertFields>
+  </AlertContext>
+  <Inputs>
+    <Input name="$host"/>
+    <Input name="$user"/>
+    <Input name="$user_sid"/>
+  </Inputs>
+  <ExecutiveSummary>
+    <Overview>This playbook drives triage and investigation of the Execution via Microsoft DotNet ClickOnce Host detection on NBI's Elastic Security deployment. The rule is an EQL sequence keyed by user.id within 5 seconds: (1) a process start where rundll32.exe runs the ClickOnce shim - command line containing dfshim with ShOpenVerbApplication or dfshim#… - followed by (2) a network event from dfsvc.exe (the .NET ClickOnce deployment service reaching out to fetch/launch the application). Together this is the Windows ClickOnce host being used to deploy and run a .NET application, typically from a remote manifest.
+
+ClickOnce is a legitimate Microsoft application-deployment mechanism, but because it is signed, built-in, and can launch remote .NET code with a single click, attackers use it to proxy execution of malware past application controls (a signed-binary proxy-execution / user-execution technique). The analyst decides whether this deployed a sanctioned internal ClickOnce application (false_positive - authorised), delivered attacker code (true_positive), is an unmanaged/legacy app that should be inventoried (misconfiguration), or cannot be resolved from available telemetry (needs_escalation). *What ClickOnce fetched* and *what it then spawned* decide it.</Overview>
+    <BusinessImpact>An alert means: on $host, under SID $user_sid ($user), rundll32.exe invoked the ClickOnce shim and dfsvc.exe reached out within 5 seconds - a ClickOnce (.NET) application was deployed and launched. What is and is not established:
+
+- Established: the ClickOnce host mechanism ran and initiated a deployment for this user identity.
+- Not established on NBI's primary index: *where the manifest came from* (the dfsvc network leg - the manifest host/CDN - is not on logs-system.security-*), and *what the deployed application then did* unless it appears as a subsequent 4688 process on the host.
+
+So the alert establishes that remote-manifest .NET code was deployed via a signed Microsoft host. The investigative questions are: was the manifest an internal, sanctioned source or an external/attacker one, and did the ClickOnce chain spawn a benign packaged application or attacker payload (script hosts, LOLBins, unknown binaries).</BusinessImpact>
+  </ExecutiveSummary>
+  <Investigation>
+    <Goal>Decide true_positive / false_positive / misconfiguration / needs_escalation for Execution via Microsoft DotNet ClickOnce Host [NBI-4688].</Goal>
+    <Workflow>
+      <Step order="1" name="Confirm the ClickOnce host invocation">
+        <Purpose>Confirm the ClickOnce host invocation</Purpose>
+        <Query platform="Elastic" language="ES|QL" id="Q-01">
+          <![CDATA[
+FROM logs-system.security-*
+| WHERE event.code == "4688" AND host.name == "$host" AND TO_LOWER(process.name) == "rundll32.exe" AND @timestamp >= NOW() - 4 hours
+| EVAL cl = TO_LOWER(COALESCE(process.command_line, MV_CONCAT(process.args, " ")))
+| WHERE cl LIKE "*dfshim*" AND (cl LIKE "*shopenverbapplication*" OR cl LIKE "*dfshim#*")
+| KEEP @timestamp, user.name, user.id, process.parent.name, process.command_line, process.args
+| SORT @timestamp DESC
+| LIMIT 20
+]]>
+        </Query>
+      </Step>
+      <Step order="2" name="What the ClickOnce chain executed next">
+        <Purpose>What the ClickOnce chain executed next</Purpose>
+        <Query platform="Elastic" language="ES|QL" id="Q-02">
+          <![CDATA[
+FROM logs-system.security-*
+| WHERE event.code == "4688" AND host.name == "$host" AND user.name == "$user" AND TO_LOWER(process.parent.name) IN ("dfsvc.exe", "rundll32.exe") AND @timestamp >= NOW() - 4 hours
+| STATS execs = COUNT(*), first_seen = MIN(@timestamp), last_seen = MAX(@timestamp) BY process.name, process.parent.name
+| SORT execs DESC
+| LIMIT 20
+]]>
+        </Query>
+      </Step>
+      <Step order="3" name="Entity pivoting">
+        <Purpose>Entity pivoting</Purpose>
+        <Query platform="Elastic" language="ES|QL" id="Q-03">
+          <![CDATA[
+FROM logs-system.security-*
+| WHERE event.code == "4688" AND user.id == "$user_sid" AND TO_LOWER(process.name) == "dfsvc.exe" AND @timestamp >= NOW() - 4 hours
+| KEEP @timestamp, host.name, process.parent.name, process.command_line, process.args
+| SORT @timestamp DESC
+| LIMIT 20
+]]>
+        </Query>
+      </Step>
+      <Step order="4" name="Process investigation">
+        <Purpose>Process investigation</Purpose>
+        <Query platform="Elastic" language="ES|QL" id="Q-04">
+          <![CDATA[
+FROM logs-system.security-*
+| WHERE @timestamp >= NOW() - 4 hours
+    AND event.code == "4688"
+    AND host.name == "$host" AND user.name == "$user"
+| STATS executions = COUNT(*), first_seen = MIN(@timestamp), last_seen = MAX(@timestamp) BY process.name, process.parent.name
+| SORT executions DESC
+| LIMIT 40
+]]>
+        </Query>
+      </Step>
+      <Step order="5" name="Parent-Child process analysis">
+        <Purpose>Parent-Child process analysis</Purpose>
+        <Query platform="Elastic" language="ES|QL" id="Q-05">
+          <![CDATA[
+FROM logs-system.security-*
+| WHERE @timestamp >= NOW() - 4 hours
+    AND event.code == "4688"
+    AND host.name == "$host" AND user.name == "$user"
+    AND (TO_LOWER(process.name) IN ("rundll32.exe", "dfsvc.exe") OR TO_LOWER(process.parent.name) IN ("rundll32.exe", "dfsvc.exe"))
+| STATS executions = COUNT(*), first_seen = MIN(@timestamp), last_seen = MAX(@timestamp) BY process.parent.name, process.name
+| SORT executions DESC
+| LIMIT 30
+]]>
+        </Query>
+      </Step>
+      <Step order="6" name="User investigation">
+        <Purpose>User investigation</Purpose>
+        <Query platform="Elastic" language="ES|QL" id="Q-06">
+          <![CDATA[
+FROM logs-system.security-*
+| WHERE @timestamp >= NOW() - 4 hours
+    AND event.code == "4688"
+    AND user.name == "$user"
+| STATS executions = COUNT(*), distinct_procs = COUNT_DISTINCT(process.name) BY host.name
+| SORT executions DESC
+| LIMIT 25
+]]>
+        </Query>
+      </Step>
+      <Step order="7" name="Host investigation">
+        <Purpose>Host investigation</Purpose>
+        <Query platform="Elastic" language="ES|QL" id="Q-07">
+          <![CDATA[
+FROM logs-system.security-*
+| WHERE @timestamp >= NOW() - 4 hours
+    AND event.code == "4688"
+    AND host.name == "$host"
+| STATS executions = COUNT(*), users = COUNT_DISTINCT(user.name) BY process.name, process.parent.name
+| SORT executions ASC
+| LIMIT 40
+]]>
+        </Query>
+      </Step>
+      <Step order="8" name="IP investigation">
+        <Purpose>IP investigation</Purpose>
+        <Query platform="Elastic" language="ES|QL" id="Q-08">
+          <![CDATA[
+FROM logs-system.security-*
+| WHERE @timestamp >= NOW() - 4 hours
+    AND event.code == "4624"
+    AND host.name == "$host" AND user.name == "$user"
+    AND source.ip IS NOT NULL
+| STATS logons = COUNT(*) BY source.ip, winlog.event_data.LogonType
+| SORT logons DESC
+| LIMIT 20
+]]>
+        </Query>
+      </Step>
+      <Step order="9" name="File investigation">
+        <Purpose>File investigation</Purpose>
+        <Query platform="Elastic" language="ES|QL" id="Q-09">
+          <![CDATA[
+FROM logs-system.security-*
+| WHERE @timestamp >= NOW() - 4 hours
+    AND event.code == "4688"
+    AND host.name == "$host" AND user.name == "$user"
+    AND (TO_LOWER(process.name) IN ("rundll32.exe", "dfsvc.exe") OR TO_LOWER(process.executable) LIKE "*apps*2.0*")
+| STATS executions = COUNT(*), first_seen = MIN(@timestamp), last_seen = MAX(@timestamp) BY process.name, process.executable
+| SORT executions DESC
+| LIMIT 30
+]]>
+        </Query>
+      </Step>
+      <Step order="10" name="Authentication investigation">
+        <Purpose>Authentication investigation</Purpose>
+        <Query platform="Elastic" language="ES|QL" id="Q-10">
+          <![CDATA[
+FROM logs-system.security-*
+| WHERE @timestamp >= NOW() - 4 hours
+    AND event.code IN ("4624", "4625", "4634", "4647")
+    AND host.name == "$host" AND user.name == "$user"
+| STATS events = COUNT(*), first_seen = MIN(@timestamp), last_seen = MAX(@timestamp) BY event.code, winlog.event_data.LogonType, source.ip
+| SORT events DESC
+| LIMIT 30
+]]>
+        </Query>
+      </Step>
+      <Step order="11" name="Timeline Reconstruction">
+        <Purpose>Timeline Reconstruction</Purpose>
+        <Query platform="Elastic" language="ES|QL" id="Q-11">
+          <![CDATA[
+FROM logs-system.security-*
+| WHERE @timestamp >= NOW() - 4 hours
+    AND event.code == "4688"
+    AND host.name == "$host" AND user.name == "$user"
+| KEEP @timestamp, process.parent.name, process.parent.pid, process.name, process.pid, process.executable, process.command_line
+| SORT @timestamp ASC
+| LIMIT 200
+]]>
+        </Query>
+      </Step>
+      <Step order="12" name="Lateral movement validation">
+        <Purpose>Lateral movement validation</Purpose>
+        <Query platform="Elastic" language="ES|QL" id="Q-12">
+          <![CDATA[
+FROM logs-system.security-*
+| WHERE @timestamp >= NOW() - 4 hours
+    AND event.code IN ("4624", "4648", "4768", "4769", "5140", "5145")
+    AND user.name == "$user"
+    AND host.name != "$host"
+| STATS events = COUNT(*), last_seen = MAX(@timestamp) BY host.name, event.code, winlog.event_data.LogonType
+| SORT events DESC
+| LIMIT 30
+]]>
+        </Query>
+      </Step>
+      <Step order="13" name="Persistence validation">
+        <Purpose>Persistence validation</Purpose>
+        <Query platform="Elastic" language="ES|QL" id="Q-13">
+          <![CDATA[
+FROM logs-system.security-*
+| WHERE @timestamp >= NOW() - 4 hours
+    AND host.name == "$host"
+    AND (
+        event.code IN ("7045", "4720", "4698")
+        OR (event.code == "4688" AND TO_LOWER(process.name) IN ("schtasks.exe", "sc.exe", "at.exe", "reg.exe", "powershell.exe", "wscript.exe", "cscript.exe", "mshta.exe"))
+    )
+| STATS events = COUNT(*), last_seen = MAX(@timestamp) BY event.code, process.name, user.name
+| SORT events DESC
+| LIMIT 40
+]]>
+        </Query>
+      </Step>
+      <Step order="14" name="Privilege escalation validation">
+        <Purpose>Privilege escalation validation</Purpose>
+        <Query platform="Elastic" language="ES|QL" id="Q-14">
+          <![CDATA[
+FROM logs-system.security-*
+| WHERE @timestamp >= NOW() - 4 hours
+    AND event.code == "4672"
+    AND host.name == "$host"
+| STATS special_priv_logons = COUNT(*) BY user.name
+| SORT special_priv_logons DESC
+| LIMIT 25
+]]>
+        </Query>
+      </Step>
+      <Step order="15" name="Defense evasion validation">
+        <Purpose>Defense evasion validation</Purpose>
+        <Query platform="Elastic" language="ES|QL" id="Q-15">
+          <![CDATA[
+FROM logs-system.security-*
+| WHERE @timestamp >= NOW() - 4 hours
+    AND host.name == "$host"
+    AND (
+        event.code IN ("1102", "4719")
+        OR (event.code == "4688" AND TO_LOWER(process.name) IN ("wevtutil.exe", "vssadmin.exe", "fsutil.exe", "cipher.exe", "sdelete.exe", "sdelete64.exe"))
+    )
+| STATS events = COUNT(*), last_seen = MAX(@timestamp) BY event.code, process.name, user.name
+| SORT events DESC
+| LIMIT 30
+]]>
+        </Query>
+      </Step>
+      <Step order="16" name="Impact assessment">
+        <Purpose>Impact assessment</Purpose>
+        <Query platform="Elastic" language="ES|QL" id="Q-16">
+          <![CDATA[
+FROM logs-system.security-*
+| WHERE @timestamp >= NOW() - 4 hours
+    AND event.code == "4688"
+    AND host.name == "$host" AND user.name == "$user"
+    AND TO_LOWER(process.parent.name) IN ("dfsvc.exe", "rundll32.exe")
+| STATS children = COUNT(*), distinct_children = COUNT_DISTINCT(process.name), images = VALUES(process.name) BY process.parent.name
+| SORT children DESC
+| LIMIT 20
+]]>
+        </Query>
+      </Step>
+      <Step order="17" name="Finalize verdict">
+        <DecisionTree>
+        </DecisionTree>
+      </Step>
+    </Workflow>
+  </Investigation>
+  <ClassificationGuidance>
+    <TruePositive>
+      <Definition></Definition>
+    </TruePositive>
+    <FalsePositive>
+      <Definition></Definition>
+      <Indicators>
+        <Item>Sanctioned internal ClickOnce applications. Some enterprises deploy line-of-business .NET apps via ClickOnce from an internal manifest host / intranet. A user launching one from explorer.exe/the intranet, deploying a known signed child, is the common benign case - confirmed against the software inventory, not assumed.</Item>
+        <Item>Legacy / unmanaged ClickOnce apps running from a location not in the software inventory, with a benign signed child and no remote-untrusted manifest - a governance gap (misconfiguration), not an attack.</Item>
+        <Item>A deployment positively proven to have failed - the manifest was unreachable or the launch errored with no payload executed - recorded as a blocked/failed attempt, never "benign".</Item>
+        <Item>ClickOnce is rare in this estate. No rundll32/dfshim or dfsvc.exe execution appeared on the 4688 stream in the validation window - so a firing is inherently notable and there is no noisy legitimate ClickOnce source to tune out. There is no known-benign internal ClickOnce application on record for NBI.</Item>
+        <Item>The active interactive tier is application/Temenos hosts and jump hosts. Highly-active named users (validated: IBC.MohamadChbaro on nim-fti-apv01 with thousands of 4688 events, plus goany, BPM.admin, and service identities like SQL.NetBackup) dominate process activity. A ClickOnce deployment surfacing on such an interactive host, launched from explorer.exe or a browser, could be either a sanctioned internal app or phishing delivery - the manifest source and the spawned child decide it.</Item>
+        <Item>The manifest fetch is invisible here. Because there is no process-to-network telemetry (see section 8), NBI cannot show which CDN/host dfsvc.exe contacted; you must pull proxy/DNS/EDR to see the manifest source. Treat a ClickOnce firing as **not clearable from logs-system.security-* alone**.</Item>
+        <Item>No standing allow-list. Do not exempt a host/user off one alert; if a sanctioned internal ClickOnce app is confirmed, catalogue its exact manifest host and signed child rather than whitelisting dfsvc/rundll32 broadly.</Item>
+      </Indicators>
+    </FalsePositive>
+    <Misconfiguration>
+      <Definition></Definition>
+    </Misconfiguration>
+    <NeedsEscalation>
+      <Definition></Definition>
+    </NeedsEscalation>
+  </ClassificationGuidance>
+  <ResponseActions>
+    <Phase name="Containment">
+      <Action>Isolate $host (network-contain / quarantine) to stop the deployed payload's activity and any C2.</Action>
+      <Action>Block the manifest / CDN source at the proxy once recovered (from section 15.7/section 15.8 out-of-band), so re-deployment fails and other hosts cannot fetch it.</Action>
+      <Action>Terminate the ClickOnce chain and its children (dfsvc/rundll32 tree and the deployed application) identified via section 14.2/section 17.5.</Action>
+      <Action>Preserve volatile evidence first where feasible: the running process tree, the ClickOnce cache under %LocalAppData%\Apps\2.0\..., the deployment log, and the rundll32 command line - NBI does not capture the manifest fetch, so host-side capture is the only way to recover the source and payload.</Action>
+      <Action>All containment changes go through the authorised human-approved DEPLOY path; investigation is read-only.</Action>
+    </Phase>
+    <Phase name="Eradication">
+      <Action>Remove the deployed application from the ClickOnce cache and any persistence it established (section 17.2 - services, tasks, Run keys), plus any dropped payload identified via section 15.10/section 17.5.</Action>
+      <Action>Block the manifest host durably at the proxy/DNS and hunt the same manifest URL and deployed image across peers, especially other interactive/application hosts and any host $user touched (section 15.4, section 17.1).</Action>
+      <Action>Rotate credentials exposed on $host during the deployment window if the payload had credential access; if $user holds privilege (section 17.3), review for broader exposure.</Action>
+      <Action>Remediate the delivery vector (the phishing/lure that delivered the .application), using the mail-security pivot (section 15.11) to scope who else received it.</Action>
+    </Phase>
+    <Phase name="Recovery">
+      <Action>Restore $host from a known-good image if the payload established persistence or tampering was extensive; otherwise validate that eradication holds after reboot.</Action>
+      <Action>Reset $user's credentials if compromise is confirmed, and validate no residual ClickOnce persistence recurs.</Action>
+      <Action>Return the host/account to service only after section 22 closing criteria are met and monitoring confirms no renewed ClickOnce deployment from the blocked source.</Action>
+      <Action>Recommend hardening: restrict ClickOnce to approved internal manifest hosts (or disable it where unused), inventory legitimate ClickOnce apps, monitor dfsvc outbound at the proxy, and enable command-line auditing on the interactive tier so the manifest reference is captured.</Action>
+    </Phase>
+  </ResponseActions>
+  <Escalation>
+    <Trigger>Escalate to Tier 3 / IR (and involve the endpoint owner and proxy team) when any of the following hold:
+
+- The rundll32/ClickOnce launch is parented by Office / mshta / a script host (delivery), or the manifest source is remote/untrusted (recovered out of band).
+- The ClickOnce chain spawned script hosts / LOLBins / unknown binaries (section 14.2/section 17.5).
+- ClickOnce ran on a server / Tier-0 host where interactive app deployment is unexpected, or $user holds admin on $host (section 17.3).
+- Persistence (section 17.2), lateral movement (section 17.1), or defence tampering (section 17.4) accompanies the deployment.
+- The manifest source or the deployed payload cannot be identified from available telemetry - escalate as needs_escalation with the gap named (the network leg is telemetry-blocked on NBI).</Trigger>
+    <To>SOC L2 / IR</To>
+  </Escalation>
+  <ClosureCriteria>
+    <Item>true_positive: ClickOnce was used to proxy attacker-controlled .NET code (malicious parent, untrusted manifest, or payload children); $host isolated, manifest source blocked, deployed app and persistence removed, payload activity hunted, incident documented.</Item>
+    <Item>false_positive (authorised): a documented internal ClickOnce application deploying from a known manifest host with an expected signed child, user-initiated; confirmed in the software inventory and catalogued.</Item>
+    <Item>false_positive (blocked/failed): the deployment is positively proven to have failed (manifest unreachable / launch errored) with no payload executed; recorded as blocked, never "benign".</Item>
+    <Item>misconfiguration: a legitimate but uninventoried/legacy ClickOnce app from a location not catalogued, with a benign child and no untrusted manifest; catalogued or retired.</Item>
+    <Item>needs_escalation: handed to SOC L2/IR with EDR process-tree and proxy/DNS requests for the manifest host and deployed image, and the telemetry gap documented.</Item>
+  </ClosureCriteria>
+  <Limitations>
+    <Item>The decisive facts are off this index. NBI's primary Windows index cannot show the dfsvc network leg or the manifest URL/CDN (no 5156). Confirm the ClickOnce host invocation and payload children here, but you must pull proxy/DNS/EDR to judge the manifest source - do not close on logs-system.security-* alone.</Item>
+    <Item>Parent is the early tell. explorer/browser fits a user click (benign app *or* phishing); Office/mshta/script-host parents point to malicious delivery. Read section 14.1's parent first.</Item>
+    <Item>Payload children are the confirmation. A single signed app off the ClickOnce chain is a business deployment; script hosts/LOLBins/unknown binaries are the attack (section 14.2/section 17.5).</Item>
+    <Item>ClickOnce is rare in NBI - validated: no rundll32/dfshim or dfsvc.exe in the validation window. A firing is inherently notable, and there is no benign internal ClickOnce baseline on record to tune against.</Item>
+    <Item>Evasion (design complementary analytics): an attacker can host the manifest on a trusted-looking CDN, sign the payload, or fetch it before the 5-second sequence window (splitting the legs so the rule misses). Complement with proxy detection of .application/.manifest fetches, monitoring of dfsvc outbound destinations, and .NET/ClickOnce deployment-log collection via EDR.</Item>
+    <Item>KB-worthy (persist to NBI customer scope): (1) ClickOnce (rundll32/dfshim, dfsvc.exe) absent from the 4688 stream in the validation window - rare in NBI; (2) the rule's network leg (dfsvc connection) and manifest URL are not collectable on logs-system.security-* (no 5156) - requires proxy/EDR; (3) interactive/app hosts like nim-fti-apv01 carry heavy named-user 4688 volume. Observed live 2026-08-19.</Item>
+  </Limitations>
+</Playbook>

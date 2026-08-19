@@ -1,0 +1,87 @@
+{
+  "name": "System File Ownership Change [NBI-4688]",
+  "tags": [
+    "Domain: Endpoint",
+    "OS: Windows",
+    "Use Case: Threat Detection",
+    "Tactic: Defense Evasion",
+    "Tactic: Persistence",
+    "Data Source: Elastic Endgame",
+    "Resources: Investigation Guide",
+    "Data Source: Elastic Defend",
+    "Data Source: Windows Security Event Logs",
+    "Data Source: Microsoft Defender for Endpoint",
+    "Data Source: Sysmon",
+    "Data Source: SentinelOne",
+    "Data Source: Crowdstrike",
+    "NBI-Recovered",
+    "Phase2-Batch2",
+    "Windows-4688",
+    "coverage:partial-29pct"
+  ],
+  "interval": "5m",
+  "enabled": true,
+  "description": "Adversaries may modify file or directory ownership to evade access control lists (ACLs) and access protected files.",
+  "risk_score": 47,
+  "severity": "medium",
+  "note": "## Coverage\nThis rule runs on Windows Security 4688 process-creation events. Command-line-dependent conditions currently apply to hosts where command-line auditing is enabled.\n\n## Detection guidance\n## Triage and analysis\n\n### Investigating System File Ownership Change\n\nAdversaries may modify file or directory ownership to evade access control lists (ACLs) and access protected files.\n\n#### Possible investigation steps\n\n- Assess the ownership target file or directory and identify if it's a system critical file.\n- Identify the user account that performed the action and whether it should perform this kind of action.\n- Investigate the process execution chain (parent process tree) for unknown processes. Examine their executable files for prevalence, whether they are located in expected locations, and if they are signed with valid digital signatures.\n- Investigate other alerts associated with the user/host during the past 48 hours.\n\n### False positive analysis\n\n- System updates, backup software and uninstallers tend to modify files ownership.\n\n### Response and remediation\n\n- Initiate the incident response process based on the outcome of the triage.\n- Isolate the involved host to prevent further post-compromise behavior.\n- If the triage identified malware, search the environment for additional compromised hosts.\n  - Implement temporary network rules, procedures, and segmentation to c",
+  "output_index": "",
+  "investigation_fields": {
+    "field_names": [
+      "user.name",
+      "process.name",
+      "process.parent.name",
+      "process.command_line",
+      "host.name"
+    ]
+  },
+  "author": [
+    "raadabujaish"
+  ],
+  "false_positives": [],
+  "from": "now-9m",
+  "rule_id": "nbi-b2-system-file-ownership-change",
+  "max_signals": 100,
+  "risk_score_mapping": [],
+  "severity_mapping": [],
+  "threat": [
+    {
+      "framework": "MITRE ATT&CK",
+      "tactic": {
+        "id": "TA0005",
+        "name": "Defense Evasion",
+        "reference": "https://attack.mitre.org/tactics/TA0005/"
+      },
+      "technique": [
+        {
+          "id": "T1222",
+          "name": "File and Directory Permissions Modification",
+          "reference": "https://attack.mitre.org/techniques/T1222/",
+          "subtechnique": [
+            {
+              "id": "T1222.001",
+              "name": "Windows File and Directory Permissions Modification",
+              "reference": "https://attack.mitre.org/techniques/T1222/001/"
+            }
+          ]
+        }
+      ]
+    }
+  ],
+  "to": "now",
+  "references": [
+    "https://www.elastic.co/guide/en/security/current/prebuilt-rules.html"
+  ],
+  "version": 1,
+  "exceptions_list": [],
+  "related_integrations": [],
+  "required_fields": [],
+  "setup": "",
+  "type": "eql",
+  "language": "eql",
+  "index": [
+    "logs-system.security-*"
+  ],
+  "query": "process where host.os.type == \"windows\" and event.type == \"start\" and\n  (\n   (process.name : \"icacls.exe\" and process.args : \"/reset\") or\n   (process.name : \"takeown.exe\" and process.args : \"/f\") or\n   (process.name : \"icacls.exe\" and process.args : \"/grant\" and process.args : \"Everyone:F\")\n   ) and\n   process.command_line : \"*.exe *C:\\\\Windows\\\\*\"\n",
+  "actions": []
+}

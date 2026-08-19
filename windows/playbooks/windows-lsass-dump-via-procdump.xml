@@ -1,0 +1,397 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<Playbook xmlns="https://soc.example/playbooks" id="PB-windows-lsass-dump-via-procdump" name="Dump LSASS via procdump - SOC Playbook" version="3.0" status="Validated" classification="TLP:AMBER">
+  <Metadata>
+    <Owner>NBI SOC / Detection Engineering</Owner>
+    <LastUpdated>2026-08-19</LastUpdated>
+    <Severity default="High">High</Severity>
+    <Confidence default="Medium">Medium</Confidence>
+    <Category>Credential Access</Category>
+    <MitreAttack>
+      <Technique id="T1003.001"/>
+      <Technique id="T1003"/>
+      <Technique id="T1036.005"/>
+      <Technique id="T1036"/>
+      <Tactic id="TA0006"/>
+    </MitreAttack>
+    <References>
+      <Reference title="MITRE ATT&amp;CK - OS Credential Dumping: LSASS Memory (T1003.001)" url="https://attack.mitre.org/techniques/T1003/001/"/>
+      <Reference title="MITRE ATT&amp;CK - Masquerading: Match Legitimate Name or Location (T1036.005)" url="https://attack.mitre.org/techniques/T1036/005/"/>
+      <Reference title="MITRE ATT&amp;CK - Credential Access tactic (TA0006)" url="https://attack.mitre.org/tactics/TA0006/"/>
+      <Reference title="Microsoft Sysinternals - ProcDump" url="https://learn.microsoft.com/en-us/sysinternals/downloads/procdump"/>
+      <Reference title="Microsoft Learn - Configuring additional LSA protection (RunAsPPL)" url="https://learn.microsoft.com/en-us/windows-server/security/credentials-protection-and-management/configuring-additional-lsa-protection"/>
+      <Reference title="Microsoft Learn - Protect derived domain credentials with Credential Guard" url="https://learn.microsoft.com/en-us/windows/security/identity-protection/credential-guard/"/>
+      <Reference title="Microsoft Learn - Command line process auditing (Event 4688 command-line GPO)" url="https://learn.microsoft.com/en-us/windows-server/identity/ad-ds/manage/component-updates/command-line-process-auditing"/>
+      <Reference title="Elastic Security - detection-rules repository" url="https://github.com/elastic/detection-rules"/>
+    </References>
+  </Metadata>
+  <AlertContext>
+    <RuleName>Dump LSASS via procdump</RuleName>
+    <RuleId>b52c040c-a21f-4c82-b579-485a294cf190</RuleId>
+    <RuleType>query</RuleType>
+    <Index>logs-system.security*</Index>
+    <TriggerLogic>The deployed rule is a query-type Elastic rule over Windows Security process-creation. In plain English it matches: a 4688 process-creation event where the image is procdump.exe and the command line references lsass. ProcDump against LSASS is rarely legitimate outside a controlled, ticketed crash diagnostic, so the deployed logic treats every hit as high priority.
+
+One-line Kibana KQL detection filter (for fast pivoting in Discover / Timeline):
+
+
+
+Read the honest limitation into the detection itself. On NBI, process.command_line is populated on only ~50% of 4688 events and is bimodal - fully populated on some servers (e.g. nim-est-apv07 ≈100%) and null on the jump/VDI tier (e.g. nim-jump-apv02). Because the deployed rule requires the lsass command-line token, it can miss a ProcDump-of-LSASS on a command-line-null host. This investigation therefore anchors on process.name == "procdump.exe" (≈100% populated) as the reliable signal and treats the command line as corroboration where present (via MV_CONCAT(process.args, " ")). See section 8 for field population and section 23 for the hardening ask.</TriggerLogic>
+    <KeyAlertFields>process.name, process.executable, process.parent.name, process.parent.executable, cmd.exe, powershell.exe, process.pid, process.parent.pid, process.entity_id, user.name, user.domain, host.name</KeyAlertFields>
+  </AlertContext>
+  <Inputs>
+    <Input name="$host"/>
+    <Input name="$user"/>
+    <Input name="$source_ip"/>
+  </Inputs>
+  <ExecutiveSummary>
+    <Overview>This playbook drives triage and investigation of the Dump LSASS via procdump detection on NBI's Elastic Security deployment. The rule fires when procdump.exe is created (Event 4688) with a command line that references lsass - i.e. Sysinternals ProcDump is being used to write a memory image of the LSA Subsystem Service (lsass.exe), the process that holds cached credentials, NTLM secrets, and Kerberos tickets. Dumping LSASS is a direct, high-fidelity credential-theft action: the attacker takes the dump offline and extracts every credential resident on the host.
+
+The analyst's job is to decide, quickly and defensibly, whether this ProcDump-against-LSASS event is credential theft or a documented, authorised crash diagnostic, and to classify the alert as true_positive, false_positive, misconfiguration, or needs_escalation with evidence attached - and, critically, to establish which credentials were exposed so they can be reset.</Overview>
+    <BusinessImpact>An alert means: on $host, procdump.exe was launched to read the memory of lsass.exe. LSASS caches the secrets of every principal logged on to the machine - interactive users, service accounts, and cached domain admins - as NTLM hashes, Kerberos TGT/TGS material, and, in some legacy/WDigest configurations, reversibly-stored plaintext. A successful LSASS dump is therefore a near-unambiguous, completed credential-access action, not a "possible" or "attempted" signal: if the dump wrote to disk, the credentials are already exposed and must be considered compromised.
+
+The rare legitimate case is an engineer capturing an LSASS crash dump for a support case under a change record. The investigative question is not *whether LSASS memory was targeted* (the tool says it was) but *was this authorised or theft, and whose credentials just left the security boundary.*</BusinessImpact>
+  </ExecutiveSummary>
+  <Investigation>
+    <Goal>Decide true_positive / false_positive / misconfiguration / needs_escalation for Dump LSASS via procdump.</Goal>
+    <Workflow>
+      <Step order="1" name="Reproduce the deployed detection estate-wide (confirm the logic)">
+        <Purpose>Reproduce the deployed detection estate-wide (confirm the logic)</Purpose>
+        <Query platform="Elastic" language="ES|QL" id="Q-01">
+          <![CDATA[
+FROM logs-system.security*
+| WHERE @timestamp >= NOW() - 4 hours
+    AND event.code == "4688" AND event.type == "start" AND host.os.type == "windows"
+    AND TO_LOWER(process.name) == "procdump.exe"
+    AND process.command_line LIKE "*lsass*"
+| KEEP @timestamp, host.name, user.name, process.parent.name, process.command_line, process.pid, process.parent.pid
+| SORT @timestamp DESC
+| LIMIT 100
+]]>
+        </Query>
+      </Step>
+      <Step order="2" name="Confirm the ProcDump execution on the alert host (name-anchored)">
+        <Purpose>Confirm the ProcDump execution on the alert host (name-anchored)</Purpose>
+        <Query platform="Elastic" language="ES|QL" id="Q-02">
+          <![CDATA[
+FROM logs-system.security*
+| WHERE event.code == "4688" AND host.name == "$host"
+    AND process.name == "procdump.exe"
+    AND @timestamp >= NOW() - 4 hours
+| KEEP @timestamp, user.name, process.parent.name, process.command_line
+| SORT @timestamp DESC
+| LIMIT 20
+]]>
+        </Query>
+      </Step>
+      <Step order="3" name="Corroborate other LSASS-touching activity on the host">
+        <Purpose>Corroborate other LSASS-touching activity on the host</Purpose>
+        <Query platform="Elastic" language="ES|QL" id="Q-03">
+          <![CDATA[
+FROM logs-system.security*
+| WHERE event.code == "4688" AND host.name == "$host"
+    AND process.command_line LIKE "*lsass*"
+    AND @timestamp >= NOW() - 4 hours
+| STATS execs = COUNT(*), cmds = VALUES(process.command_line) BY process.name, user.name
+| SORT execs DESC
+| LIMIT 20
+]]>
+        </Query>
+      </Step>
+      <Step order="4" name="Entity pivoting">
+        <Purpose>Entity pivoting</Purpose>
+        <Query platform="Elastic" language="ES|QL" id="Q-04">
+          <![CDATA[
+FROM logs-system.security*
+| WHERE @timestamp >= NOW() - 4 hours AND event.code == "4688"
+    AND host.name == "$host"
+    AND TO_LOWER(process.name) == "procdump.exe"
+| KEEP @timestamp, host.name, user.name, user.domain, process.name, process.executable, process.parent.name, process.parent.executable, process.pid, process.parent.pid, process.command_line
+| SORT @timestamp DESC
+| LIMIT 50
+]]>
+        </Query>
+      </Step>
+      <Step order="5" name="Process investigation">
+        <Purpose>Process investigation</Purpose>
+        <Query platform="Elastic" language="ES|QL" id="Q-05">
+          <![CDATA[
+FROM logs-system.security*
+| WHERE @timestamp >= NOW() - 4 hours AND event.code == "4688"
+    AND TO_LOWER(process.name) == "procdump.exe"
+| STATS executions = COUNT(*), hosts = COUNT_DISTINCT(host.name), users = COUNT_DISTINCT(user.name) BY process.executable, process.parent.name
+| SORT executions DESC
+| LIMIT 50
+]]>
+        </Query>
+      </Step>
+      <Step order="6" name="Process investigation">
+        <Purpose>Process investigation</Purpose>
+        <Query platform="Elastic" language="ES|QL" id="Q-06">
+          <![CDATA[
+FROM logs-system.security*
+| WHERE @timestamp >= NOW() - 4 hours AND event.code == "4688"
+    AND host.name == "$host"
+    AND TO_LOWER(process.name) == "procdump.exe"
+    AND process.args IS NOT NULL
+| EVAL arguments = MV_CONCAT(process.args, " ")
+| KEEP @timestamp, user.name, process.parent.name, process.command_line, arguments
+| SORT @timestamp DESC
+| LIMIT 50
+]]>
+        </Query>
+      </Step>
+      <Step order="7" name="Parent-Child process analysis">
+        <Purpose>Parent-Child process analysis</Purpose>
+        <Query platform="Elastic" language="ES|QL" id="Q-07">
+          <![CDATA[
+FROM logs-system.security*
+| WHERE @timestamp >= NOW() - 4 hours AND event.code == "4688"
+    AND host.name == "$host"
+    AND (TO_LOWER(process.name) == "procdump.exe" OR TO_LOWER(process.parent.name) == "procdump.exe")
+| KEEP @timestamp, user.name, process.parent.name, process.parent.pid, process.name, process.pid, process.executable, process.command_line
+| SORT @timestamp DESC
+| LIMIT 50
+]]>
+        </Query>
+      </Step>
+      <Step order="8" name="User investigation">
+        <Purpose>User investigation</Purpose>
+        <Query platform="Elastic" language="ES|QL" id="Q-08">
+          <![CDATA[
+FROM logs-system.security*
+| WHERE @timestamp >= NOW() - 4 hours AND event.code == "4688" AND user.name == "$user"
+| STATS executions = COUNT(*), distinct_procs = COUNT_DISTINCT(process.name) BY host.name
+| SORT executions DESC
+| LIMIT 20
+]]>
+        </Query>
+      </Step>
+      <Step order="9" name="Host investigation">
+        <Purpose>Host investigation</Purpose>
+        <Query platform="Elastic" language="ES|QL" id="Q-09">
+          <![CDATA[
+FROM logs-system.security*
+| WHERE @timestamp >= NOW() - 4 hours AND event.code == "4688" AND host.name == "$host"
+| STATS executions = COUNT(*), users = COUNT_DISTINCT(user.name) BY process.name, process.parent.name
+| SORT executions ASC
+| LIMIT 40
+]]>
+        </Query>
+      </Step>
+      <Step order="10" name="IP investigation">
+        <Purpose>IP investigation</Purpose>
+        <Query platform="Elastic" language="ES|QL" id="Q-10">
+          <![CDATA[
+FROM logs-system.security*
+| WHERE @timestamp >= NOW() - 4 hours AND event.code == "4624"
+    AND host.name == "$host" AND user.name == "$user" AND source.ip IS NOT NULL
+| STATS logons = COUNT(*) BY source.ip, winlog.event_data.LogonType
+| SORT logons DESC
+| LIMIT 20
+]]>
+        </Query>
+      </Step>
+      <Step order="11" name="IP investigation">
+        <Purpose>IP investigation</Purpose>
+        <Query platform="Elastic" language="ES|QL" id="Q-11">
+          <![CDATA[
+FROM logs-system.security*
+| WHERE @timestamp >= NOW() - 4 hours AND event.code == "4624" AND source.ip == "$source_ip"
+| STATS logons = COUNT(*) BY user.name, host.name, winlog.event_data.LogonType
+| SORT logons DESC
+| LIMIT 25
+]]>
+        </Query>
+      </Step>
+      <Step order="12" name="File investigation">
+        <Purpose>File investigation</Purpose>
+        <Query platform="Elastic" language="ES|QL" id="Q-12">
+          <![CDATA[
+FROM logs-system.security*
+| WHERE @timestamp >= NOW() - 4 hours AND event.code == "4688" AND host.name == "$host"
+    AND TO_LOWER(process.name) IN ("procdump.exe", "procdump64.exe", "rundll32.exe", "taskmgr.exe", "sqldumper.exe", "powershell.exe", "werfault.exe")
+| STATS executions = COUNT(*), first_seen = MIN(@timestamp), last_seen = MAX(@timestamp) BY process.name, process.executable
+| SORT executions DESC
+| LIMIT 30
+]]>
+        </Query>
+      </Step>
+      <Step order="13" name="Authentication investigation">
+        <Purpose>Authentication investigation</Purpose>
+        <Query platform="Elastic" language="ES|QL" id="Q-13">
+          <![CDATA[
+FROM logs-system.security*
+| WHERE @timestamp >= NOW() - 4 hours
+    AND event.code IN ("4624", "4625", "4634", "4647")
+    AND host.name == "$host" AND user.name == "$user"
+| STATS events = COUNT(*), first_seen = MIN(@timestamp), last_seen = MAX(@timestamp) BY event.code, winlog.event_data.LogonType, source.ip
+| SORT events DESC
+| LIMIT 30
+]]>
+        </Query>
+      </Step>
+      <Step order="14" name="Timeline Reconstruction">
+        <Purpose>Timeline Reconstruction</Purpose>
+        <Query platform="Elastic" language="ES|QL" id="Q-14">
+          <![CDATA[
+FROM logs-system.security*
+| WHERE @timestamp >= NOW() - 4 hours AND event.code == "4688"
+    AND host.name == "$host" AND user.name == "$user"
+| KEEP @timestamp, process.parent.name, process.parent.pid, process.name, process.pid, process.executable, process.command_line
+| SORT @timestamp ASC
+| LIMIT 200
+]]>
+        </Query>
+      </Step>
+      <Step order="15" name="Lateral movement validation">
+        <Purpose>Lateral movement validation</Purpose>
+        <Query platform="Elastic" language="ES|QL" id="Q-15">
+          <![CDATA[
+FROM logs-system.security*
+| WHERE @timestamp >= NOW() - 4 hours
+    AND event.code IN ("4624", "4648", "4768", "4769", "5140")
+    AND user.name == "$user" AND host.name != "$host"
+| STATS events = COUNT(*) BY host.name, event.code, winlog.event_data.LogonType
+| SORT events DESC
+| LIMIT 30
+]]>
+        </Query>
+      </Step>
+      <Step order="16" name="Persistence validation">
+        <Purpose>Persistence validation</Purpose>
+        <Query platform="Elastic" language="ES|QL" id="Q-16">
+          <![CDATA[
+FROM logs-system.security*
+| WHERE @timestamp >= NOW() - 4 hours AND host.name == "$host"
+    AND (
+        (event.code == "4688" AND TO_LOWER(process.name) IN ("schtasks.exe", "reg.exe", "sc.exe", "at.exe", "powershell.exe", "wscript.exe", "cscript.exe", "rundll32.exe", "mshta.exe"))
+        OR event.code == "7045"
+        OR event.code == "4720"
+        OR event.code == "4698"
+    )
+| STATS events = COUNT(*) BY event.code, process.name, user.name
+| SORT events DESC
+| LIMIT 40
+]]>
+        </Query>
+      </Step>
+      <Step order="17" name="Privilege escalation validation">
+        <Purpose>Privilege escalation validation</Purpose>
+        <Query platform="Elastic" language="ES|QL" id="Q-17">
+          <![CDATA[
+FROM logs-system.security*
+| WHERE @timestamp >= NOW() - 4 hours AND event.code == "4672" AND host.name == "$host"
+| STATS special_priv_logons = COUNT(*) BY user.name
+| SORT special_priv_logons DESC
+| LIMIT 25
+]]>
+        </Query>
+      </Step>
+      <Step order="18" name="Defense evasion validation">
+        <Purpose>Defense evasion validation</Purpose>
+        <Query platform="Elastic" language="ES|QL" id="Q-18">
+          <![CDATA[
+FROM logs-system.security*
+| WHERE @timestamp >= NOW() - 4 hours AND host.name == "$host"
+    AND (
+        (event.code == "4688" AND TO_LOWER(process.name) IN ("wevtutil.exe", "fsutil.exe", "vssadmin.exe", "wmic.exe", "cipher.exe", "sdelete.exe", "sdelete64.exe"))
+        OR event.code == "1102"
+        OR event.code == "4719"
+    )
+| STATS events = COUNT(*) BY event.code, process.name, user.name
+| SORT events DESC
+| LIMIT 30
+]]>
+        </Query>
+      </Step>
+      <Step order="19" name="Impact assessment">
+        <Purpose>Impact assessment</Purpose>
+        <Query platform="Elastic" language="ES|QL" id="Q-19">
+          <![CDATA[
+FROM logs-system.security*
+| WHERE event.code == "4688" AND host.name == "$host" AND user.name == "$user"
+    AND process.name IN ("procdump.exe", "procdump64.exe", "rundll32.exe", "taskmgr.exe", "sqldumper.exe", "powershell.exe")
+    AND @timestamp >= NOW() - 4 hours
+| STATS execs = COUNT(*), cmds = VALUES(process.command_line) BY process.name
+| SORT execs DESC
+| LIMIT 20
+]]>
+        </Query>
+      </Step>
+      <Step order="20" name="Finalize verdict">
+        <DecisionTree>
+        </DecisionTree>
+      </Step>
+    </Workflow>
+  </Investigation>
+  <ClassificationGuidance>
+    <TruePositive>
+      <Definition></Definition>
+    </TruePositive>
+    <FalsePositive>
+      <Definition></Definition>
+      <Indicators>
+        <Item>Authorised crash diagnostics. An engineer capturing an LSASS memory dump to troubleshoot an authentication/LSA hang or a recurring crash, under a change ticket, to a controlled path. This is the primary legitimate cause and must be positively matched to a ticket, the engineer's identity, and the time - never assumed from the account name.</Item>
+        <Item>Monitoring/diagnostic suites that capture full-process dumps as part of a support routine (some APM/EDR/vendor collectors). Legitimate but should be baselined; prefer diagnostics that do not target LSASS.</Item>
+        <Item>Red-team / purple-team exercises deliberately running ProcDump against LSASS. These are authorised malicious-technique execution - confirmed against exercise ROE and classified as false_positive (blocked/authorised), never dismissed as benign on sight.</Item>
+        <Item>A hostile attempt positively proven blocked - LSASS protection (RunAsPPL / PPL) or Credential Guard or EDR prevented a *valid* dump and no usable .dmp was produced. Recorded as a blocked malicious attempt, never "benign", and still investigated for how the actor reached the host.</Item>
+        <Item>ProcDump has a true zero-baseline. Over the live 4h window, procdump.exe / procdump64.exe appeared 0 times in 4688 estate-wide, and *lsass* command lines appeared 0 times. There is no noisy legitimate source to tune out - any firing is a strong anomaly. (Sysinternals taskmgr.exe, sqldumper.exe, and comsvcs.dll dumping were likewise absent; only powershell.exe (570 execs / 10 hosts) and rundll32.exe (13 / 6) - the *alternative* dump vectors - were present as normal system activity.)</Item>
+        <Item>The most likely legitimate locus is a server or jump host. Credential-dump investigations naturally centre on hosts that hold high-value logons: DB/app servers (nim-est-*, nim-*-dbv*) and interactive jump/VDI hosts (nim-jump-apv02/-apv03/-apv22). If an engineer genuinely captures an LSASS dump, it would surface there under an engineering identity with a change record.</Item>
+        <Item>No historical NBI benign-true-positive is on record for this rule. There is no environment-specific allow-list to apply. Do not create a blanket exception off a single alert; scope any exception to an exact process.executable path + user + host + time, and only after a documented authorised cause.</Item>
+      </Indicators>
+    </FalsePositive>
+    <Misconfiguration>
+      <Definition></Definition>
+    </Misconfiguration>
+    <NeedsEscalation>
+      <Definition></Definition>
+    </NeedsEscalation>
+  </ClassificationGuidance>
+  <ResponseActions>
+    <Phase name="Containment">
+      <Action>Isolate $host (network-contain / quarantine) if a true_positive is confirmed, to stop exfiltration of the .dmp and follow-on lateral movement. On a shared jump/VDI host, coordinate with IT to avoid dropping unrelated user sessions unnecessarily - but prioritise containment, because every credential resident there is at risk.</Action>
+      <Action>Preserve volatile evidence first where feasible: the running process list, the ProcDump command/arguments, and - critically - the .dmp output file (locate and preserve it before it is exfiltrated or deleted; NBI does not audit its creation, so host-side capture is the only record).</Action>
+      <Action>Suspend or force-logoff $user's session on $host and disable the account pending investigation if the user context is implicated; terminate the ProcDump process and its parent if the host cannot yet be isolated.</Action>
+      <Action>Begin the credential-exposure clock immediately. Treat every account from section 17.3 (and every interactive/service logon on the host) as compromised from the dump timestamp - the reset (section 20) is time-critical and starts now, in parallel with containment.</Action>
+      <Action>Deploy/confirm changes only via the authorised human-approved DEPLOY path; investigation itself is read-only.</Action>
+    </Phase>
+    <Phase name="Eradication">
+      <Action>Recover and destroy the dump. Locate the .dmp (from the arguments in section 15.2b or host-side triage), preserve a forensic copy, and securely delete the original and any archived/staged copies (section 17.5).</Action>
+      <Action>Remove the tooling and any persistence discovered in section 17.2 (services, scheduled tasks, rogue accounts) and the ProcDump binary itself, especially if dropped to a user-writable path (section 15.10).</Action>
+      <Action>Run a full anti-malware / EDR scan on $host and hunt for the same ProcDump image path, renamed dumpers, and the alternative dump vectors (section 17.4) across peer hosts - especially other jump/VDI hosts and any host $user touched (section 15.4, section 17.1).</Action>
+      <Action>Remediate the initial-access and privilege-escalation vectors that let the actor reach the host with the rights to open LSASS.</Action>
+    </Phase>
+    <Phase name="Recovery">
+      <Action>Reset every exposed credential - the defining recovery action. Prioritise privileged and service accounts from section 17.3 and any account with an interactive/network session on $host during the dump window. For service accounts, rotate the secret everywhere it is configured; for computer/krbtgt-adjacent exposure on a DC, follow the domain-wide credential-reset process. Consider all NTLM hashes and Kerberos keys resident on the host burned.</Action>
+      <Action>Restore $host from a known-good image if tooling/persistence was extensive; otherwise validate that eradication holds after reboot.</Action>
+      <Action>Return the host/accounts to service only after section 22 closing criteria are met and monitoring confirms no recurrence.</Action>
+      <Action>Harden (section 23): enable LSASS protection (RunAsPPL / Credential Guard) on the host class, restrict ProcDump distribution, and reduce privileged/service-account exposure on shared hosts.</Action>
+    </Phase>
+  </ResponseActions>
+  <Escalation>
+    <Trigger>Escalate to Tier 3 / Incident Response (and notify the customer) when any of the following hold:
+
+- Any confirmed LSASS dump - this alone warrants IR, because credentials are already exposed.
+- The host is a Domain Controller, database server, or shared jump/VDI, or a privileged/service account was logged on during the dump window (section 17.3) - potential domain-wide blast radius.
+- The dump is paired with staging/exfil tooling (section 17.5), additional dump techniques (section 14.3/section 17.4), or lateral movement using exposed accounts (section 17.1).
+- Log clearing or audit-policy tampering appears (section 17.4).
+- Evidence is incomplete because of NBI's telemetry gaps (no Sysmon memory-access event, null command line, no .dmp recovery) and the alert cannot be safely cleared - escalate as needs_escalation with the gaps named.</Trigger>
+    <To>SOC L2 / IR</To>
+  </Escalation>
+  <ClosureCriteria>
+    <Item>false_positive (authorised): a change ticket, known diagnostic routine, or sanctioned red/purple-team ROE is positively matched to the exact procdump.exe execution + $user + $host + time, with no staging/exfil and no unexplained credential exposure. Record the reference. Scope any exception narrowly (exact image + path + user + host).</Item>
+    <Item>false_positive (blocked malicious attempt): the dump was positively proven blocked (RunAsPPL / Credential Guard / EDR; no usable .dmp); documented as a blocked attempt (never "benign"), with the account still investigated.</Item>
+    <Item>misconfiguration: a benign monitoring/diagnostic routine dumped LSASS without attacker involvement; a baseline/hardening action is raised to move off LSASS-targeting diagnostics.</Item>
+    <Item>true_positive: an unauthorised LSASS dump; containment/eradication/recovery completed, the full exposure scope reset, the .dmp recovered/destroyed, exfiltration and lateral movement hunted, and no residual persistence or recurrence on monitoring.</Item>
+    <Item>needs_escalation: handed to Tier 3/IR with the specific evidence gaps documented.</Item>
+  </ClosureCriteria>
+  <Limitations>
+    <Item>Zero baseline = high fidelity. procdump.exe, procdump64.exe, taskmgr.exe, sqldumper.exe, and comsvcs.dll dumping all appeared 0 times in the live 4h window, and *lsass* command lines 0 times. There is nothing legitimate to tune out; when this rule fires, believe it.</Item>
+    <Item>The direct memory-access signal is telemetry-blocked. With no Sysmon there is no Event 10 / ProcessAccess to lsass.exe and no MiniDumpWriteDump image-load - NBI sees the *tool invocation* (4688 of procdump.exe), not the read. A reflective/in-memory dumper that never spawns a matching process image is invisible; do not treat a clean section 14/section 15 as proof no dump occurred.</Item>
+    <Item>Command-line capture is bimodal and worst exactly where it matters. Populated ≈100% on some servers (nim-est-apv07) but null on the jump/VDI tier (nim-jump-apv02) - precisely the interactive hosts where hands-on LSASS dumping is most likely. Expect the -ma lsass.exe arguments and output path to be null there; anchor on process.name + parent + account and recover arguments/dump host-side. Enabling the "Include command line in process creation events" GPO on the jump/workstation class is the single highest-value hardening ask from this rule.</Item>
+    <Item>The rule can be evaded and can miss by design. Renaming ProcDump defeats the process.name match; requiring the lsass command-line token means a command-line-null host can dump LSASS without firing section 14.1 at all. Complementary coverage: a name-anchored confirm (section 14.2), the lsass-context query (section 14.3), odd-path image detection (section 15.10), and alternative-vector parents (section 17.4) - plus a dedicated process-access-to-LSASS analytic if Sysmon Event 10 is ever onboarded.</Item>
+    <Item>source.ip is shared infrastructure. A single VDI/RDS egress (validated: 10.11.102.15 fronts 17 users) fronts many operators; never treat it as an individual identifier - correlate IP + user + host.</Item>
+    <Item>Exposure scope is the deliverable. The classification matters, but the reset list from section 17.3 + section 15.12 is what limits the damage. Enumerate every account resident on $host during the dump window and drive the resets.</Item>
+    <Item>KB-worthy (persist to NBI customer scope): (1) ProcDump/comsvcs/taskmgr/sqldumper zero-baseline and *lsass*-cmdline zero-baseline over 4h on logs-system.security*; (2) process.command_line/process.args host-bimodality (nim-est-apv07≈100% vs nim-jump-apv02=null); (3) no Sysmon Event 10 / process.hash.* absent on 4688 - direct LSASS-access signal not collected; (4) 10.11.102.15 = shared VDI/RDS egress (17 users). All observed live on 2026-08-19.</Item>
+  </Limitations>
+</Playbook>

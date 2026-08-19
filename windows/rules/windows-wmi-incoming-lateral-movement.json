@@ -1,0 +1,89 @@
+{
+  "name": "WMI Incoming Lateral Movement [NBI-4688]",
+  "tags": [
+    "Domain: Endpoint",
+    "OS: Windows",
+    "Use Case: Threat Detection",
+    "Tactic: Lateral Movement",
+    "Data Source: Elastic Defend",
+    "Data Source: Sysmon",
+    "Resources: Investigation Guide",
+    "NBI-Recovered",
+    "Phase2-Batch2",
+    "Windows-4688",
+    "coverage:partial-29pct"
+  ],
+  "interval": "5m",
+  "enabled": true,
+  "description": "Identifies processes executed via Windows Management Instrumentation (WMI) on a remote host. This could be indicative of adversary lateral movement, but could be noisy if administrators use WMI to remotely manage hosts.",
+  "risk_score": 47,
+  "severity": "medium",
+  "note": "## Coverage\nThis rule runs on Windows Security 4688 process-creation events. Command-line-dependent conditions currently apply to hosts where command-line auditing is enabled.\n\n## Detection guidance\n## Triage and analysis\n\n> **Disclaimer**:\n> This investigation guide was created using generative AI technology and has been reviewed to improve its accuracy and relevance. While every effort has been made to ensure its quality, we recommend validating the content and adapting it to suit your specific environment and operational needs.\n\n### Investigating WMI Incoming Lateral Movement\n\nWindows Management Instrumentation (WMI) is a core Windows feature enabling remote management and data collection. Adversaries exploit WMI for lateral movement by executing processes on remote hosts, often bypassing traditional security measures. The detection rule identifies suspicious WMI activity by monitoring specific network connections and process executions, filtering out common false positives to highlight potential threats.\n\n### Possible investigation steps\n\n- Review the source IP address of the incoming RPC connection to determine if it is from a known or trusted network segment, excluding localhost addresses like 127.0.0.1 and ::1.\n- Check the process name and parent process name, specifically looking for svchost.exe and WmiPrvSE.exe, to confirm the execution context and identify any unusua",
+  "output_index": "",
+  "investigation_fields": {
+    "field_names": [
+      "user.name",
+      "process.name",
+      "process.parent.name",
+      "process.command_line",
+      "host.name"
+    ]
+  },
+  "author": [
+    "raadabujaish"
+  ],
+  "false_positives": [],
+  "from": "now-9m",
+  "rule_id": "nbi-b2-wmi-incoming-lateral-movement",
+  "max_signals": 100,
+  "risk_score_mapping": [],
+  "severity_mapping": [],
+  "threat": [
+    {
+      "framework": "MITRE ATT&CK",
+      "tactic": {
+        "id": "TA0008",
+        "name": "Lateral Movement",
+        "reference": "https://attack.mitre.org/tactics/TA0008/"
+      },
+      "technique": [
+        {
+          "id": "T1021",
+          "name": "Remote Services",
+          "reference": "https://attack.mitre.org/techniques/T1021/"
+        }
+      ]
+    },
+    {
+      "framework": "MITRE ATT&CK",
+      "tactic": {
+        "id": "TA0002",
+        "name": "Execution",
+        "reference": "https://attack.mitre.org/tactics/TA0002/"
+      },
+      "technique": [
+        {
+          "id": "T1047",
+          "name": "Windows Management Instrumentation",
+          "reference": "https://attack.mitre.org/techniques/T1047/"
+        }
+      ]
+    }
+  ],
+  "to": "now",
+  "references": [
+    "https://www.elastic.co/guide/en/security/current/prebuilt-rules.html"
+  ],
+  "version": 1,
+  "exceptions_list": [],
+  "related_integrations": [],
+  "required_fields": [],
+  "setup": "",
+  "type": "eql",
+  "language": "eql",
+  "index": [
+    "logs-system.security-*"
+  ],
+  "query": "sequence by host.id with maxspan = 20s\n\n /* Accepted Incoming RPC connection by Winmgmt service */\n\n  [network where host.os.type == \"windows\" and process.name : \"svchost.exe\" and network.direction : (\"incoming\", \"ingress\") and\n   source.ip != \"127.0.0.1\" and source.ip != \"::1\" and destination.port == 135]\n\n  /* Excluding Common FPs Nessus and SCCM */\n\n  [process where host.os.type == \"windows\" and event.type == \"start\" and process.parent.name : \"WmiPrvSE.exe\" and\n   not (?process.Ext.token.integrity_level_name : \"System\" or ?winlog.event_data.IntegrityLevel : \"System\") and\n   not (\n         user.id : (\"S-1-5-18\", \"S-1-5-19\", \"S-1-5-20\") and\n         /* Don't apply the user.id exclusion to Sysmon for compatibility */\n         not event.dataset : (\"windows.sysmon_operational\", \"windows.sysmon\")\n   ) and\n   not process.executable :\n               (\"?:\\\\Program Files\\\\HPWBEM\\\\Tools\\\\hpsum_swdiscovery.exe\",\n                \"?:\\\\Windows\\\\CCM\\\\Ccm32BitLauncher.exe\",\n                \"?:\\\\Windows\\\\System32\\\\wbem\\\\mofcomp.exe\",\n                \"?:\\\\Windows\\\\Microsoft.NET\\\\Framework*\\\\csc.exe\",\n                \"?:\\\\Windows\\\\System32\\\\powercfg.exe\") and\n   not (process.executable : \"?:\\\\Windows\\\\System32\\\\msiexec.exe\" and process.args : \"REBOOT=ReallySuppress\") and\n   not (process.executable : \"?:\\\\Windows\\\\System32\\\\inetsrv\\\\appcmd.exe\" and process.args : \"uninstall\")\n   ]\n",
+  "actions": []
+}

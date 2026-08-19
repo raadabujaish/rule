@@ -1,0 +1,362 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<Playbook xmlns="https://soc.example/playbooks" id="PB-mssql-adhoc-openrowset-bulk-access" name="MS SQL — Ad-Hoc File/Data Access via OPENROWSET or BULK INSERT - SOC Playbook" version="3.0" status="Validated" classification="TLP:AMBER">
+  <Metadata>
+    <Owner>NBI SOC / Detection Engineering</Owner>
+    <LastUpdated>2026-08-19</LastUpdated>
+    <Severity default="Medium">Medium</Severity>
+    <Confidence default="Medium">Medium</Confidence>
+    <Category>Collection</Category>
+    <MitreAttack>
+      <Technique id="T1005"/>
+      <Technique id="T1213"/>
+      <Technique id="T1190"/>
+      <Tactic id="TA0009"/>
+    </MitreAttack>
+    <References>
+      <Reference title="MITRE ATT&amp;CK - Data from Local System (T1005)" url="https://attack.mitre.org/techniques/T1005/"/>
+      <Reference title="MITRE ATT&amp;CK - Data from Information Repositories (T1213)" url="https://attack.mitre.org/techniques/T1213/"/>
+      <Reference title="MITRE ATT&amp;CK - Exploit Public-Facing Application (T1190)" url="https://attack.mitre.org/techniques/T1190/"/>
+      <Reference title="MITRE ATT&amp;CK - Collection tactic (TA0009)" url="https://attack.mitre.org/tactics/TA0009/"/>
+      <Reference title="Microsoft Learn - OPENROWSET (Transact-SQL)" url="https://learn.microsoft.com/en-us/sql/t-sql/functions/openrowset-transact-sql"/>
+      <Reference title="Microsoft Learn - BULK INSERT (Transact-SQL)" url="https://learn.microsoft.com/en-us/sql/t-sql/statements/bulk-insert-transact-sql"/>
+      <Reference title="Microsoft Learn - Ad Hoc Distributed Queries server configuration option" url="https://learn.microsoft.com/en-us/sql/database-engine/configure-windows/ad-hoc-distributed-queries-server-configuration-option"/>
+      <Reference title="Microsoft Learn - SQL Server Audit (Database Engine)" url="https://learn.microsoft.com/en-us/sql/relational-databases/security/auditing/sql-server-audit-database-engine"/>
+      <Reference title="Elastic - Microsoft SQL Server integration (audit logs)" url="https://docs.elastic.co/integrations/microsoft_sqlserver"/>
+      <Reference title="MITRE ATT&amp;CK - SQL Stored Procedures / server software component context (T1505)" url="https://attack.mitre.org/techniques/T1505/"/>
+    </References>
+  </Metadata>
+  <AlertContext>
+    <RuleName>MS SQL — Ad-Hoc File/Data Access via OPENROWSET or BULK INSERT</RuleName>
+    <RuleId>nbi-sql-bulk-data-access</RuleId>
+    <RuleType>query (custom NBI rule)</RuleType>
+    <Index>logs-microsoft_sqlserver.audit-*</Index>
+    <TriggerLogic>The deployed rule is an Elastic query-type rule over the SQL Server audit stream. Its detection logic, as a one-line Kibana KQL filter (use it for fast pivoting in Discover / Timeline):
+
+
+
+Plain English: any audited statement whose text contains one of the three ad-hoc data-access tokens fires the rule. These are the SQL-native primitives for reading a file or a remote data source without going through a linked-server object:
+
+- OPENROWSET - one-off connection to a remote OLEDB provider, or OPENROWSET(BULK ...) to read a file directly into a rowset.
+- OPENDATASOURCE - inline ad-hoc connection string to a remote data source in a four-part name.
+- BULK INSERT - bulk load of a data file (local path or UNC) into a table.
+
+A deliberate scoping note carried forward from the deployed rule: the .NET SqlBulkCopy API logs as the token sequence insert bulk (different word order), which does not satisfy the "BULK INSERT" phrase match. The routine ETL bulk-copy traffic on this estate therefore does not trigger this rule - the rule is scoped to genuinely ad-hoc, statement-level access.</TriggerLogic>
+    <KeyAlertFields>sqlserver.audit.session_server_principal_name, sqlserver.audit.server_principal_name, sqlserver.audit.statement, sqlserver.audit.client_ip, sqlserver.audit.database_name, sqlserver.audit.application_name, sqlserver.audit.host_name, host.name, sqlserver.audit.action_id, sqlserver.audit.class_type, event.action, process.entity_id</KeyAlertFields>
+  </AlertContext>
+  <Inputs>
+    <Input name="$principal"/>
+    <Input name="$client_ip"/>
+  </Inputs>
+  <ExecutiveSummary>
+    <Overview>This playbook drives triage and investigation of the MS SQL - Ad-Hoc File/Data Access via OPENROWSET or BULK INSERT detection on NBI's Elastic Security deployment. The rule fires when an audited SQL statement contains OPENROWSET, OPENDATASOURCE, or the phrase BULK INSERT. Those three primitives all do the same dangerous thing: they read data directly from a file path or a remote OLEDB/data source from inside the database engine, bypassing the application data path where most of NBI's controls live.
+
+The analyst's job is to decide, quickly and defensibly, whether the ad-hoc access is authorised ETL/import work or an attacker using the database engine to read local files, pull from (or push to) a remote source, or open an out-of-band data channel - a common outcome of SQL injection against a banking application, or of hands-on database access. The classification is true_positive, false_positive (authorised import OR positively-proven-blocked attempt), misconfiguration, or needs_escalation, and it is driven by three facts: which principal ran the statement, from which client, and exactly what file or remote source the statement targeted.</Overview>
+    <BusinessImpact>An alert means that on a SQL Server audited into logs-microsoft_sqlserver.audit-*, a session under $principal from $client_ip executed a statement that opened a file or a remote data source directly through the engine. That is powerful, because these primitives run with the reach of the SQL Server service account and the engine host, not the application user:
+
+- OPENROWSET(BULK 'C:\...\web.config', SINGLE_CLOB) reads an on-disk file (config, backup, private key) straight into a result set.
+- SELECT * FROM OPENROWSET('SQLNCLI','Server=&lt;remote&gt;;...','SELECT ...') pulls data from - or, inverted, pushes data to - a remote SQL/OLEDB endpoint the attacker controls.
+- BULK INSERT tbl FROM '\\remote\share\file' ingests a file from a UNC path, which also forces the SQL host to authenticate outbound to that share (an NTLM-coercion side effect).
+
+So the alert is not merely "an unusual query" - it is the database engine being used as a file-read / data-movement instrument. The investigative question is whether that instrument was pointed at a legitimate, expected import source (sanctioned ETL) or at an attacker's file/endpoint (abuse). The answer is in the statement's target, which section 14</BusinessImpact>
+  </ExecutiveSummary>
+  <Investigation>
+    <Goal>Decide true_positive / false_positive / misconfiguration / needs_escalation for MS SQL — Ad-Hoc File/Data Access via OPENROWSET or BULK INSERT.</Goal>
+    <Workflow>
+      <Step order="1" name="Recover the statement and its data target">
+        <Purpose>Recover the statement and its data target</Purpose>
+        <Query platform="Elastic" language="ES|QL" id="Q-01">
+          <![CDATA[
+FROM logs-microsoft_sqlserver.audit-*
+| WHERE sqlserver.audit.session_server_principal_name == "$principal"
+    AND (sqlserver.audit.statement LIKE "*OPENROWSET*" OR sqlserver.audit.statement LIKE "*OPENDATASOURCE*" OR sqlserver.audit.statement LIKE "*BULK INSERT*")
+    AND @timestamp >= NOW() - 2 hours
+| STATS execs = COUNT(*), statements = VALUES(sqlserver.audit.statement)
+    BY sqlserver.audit.client_ip, sqlserver.audit.database_name, host.name
+| SORT execs DESC
+| LIMIT 10
+]]>
+        </Query>
+      </Step>
+      <Step order="2" name="Characterise the principal and whether Ad Hoc Distributed Queries was enabled">
+        <Purpose>Characterise the principal and whether Ad Hoc Distributed Queries was enabled</Purpose>
+        <Query platform="Elastic" language="ES|QL" id="Q-02">
+          <![CDATA[
+FROM logs-microsoft_sqlserver.audit-*
+| WHERE sqlserver.audit.session_server_principal_name == "$principal"
+    AND @timestamp >= NOW() - 2 hours
+| EVAL adhoc = CASE(sqlserver.audit.statement LIKE "*OPENROWSET*" OR sqlserver.audit.statement LIKE "*OPENDATASOURCE*" OR sqlserver.audit.statement LIKE "*BULK INSERT*", 1, 0),
+       enable = CASE(sqlserver.audit.statement LIKE "*sp_configure*" AND sqlserver.audit.statement LIKE "*Ad Hoc Distributed Queries*", 1, 0)
+| STATS total = COUNT(*), adhoc_ops = SUM(adhoc), enable_ops = SUM(enable), clients = COUNT_DISTINCT(sqlserver.audit.client_ip)
+    BY sqlserver.audit.database_name
+| SORT adhoc_ops DESC
+| LIMIT 10
+]]>
+        </Query>
+      </Step>
+      <Step order="3" name="Entity pivoting">
+        <Purpose>Entity pivoting</Purpose>
+        <Query platform="Elastic" language="ES|QL" id="Q-03">
+          <![CDATA[
+FROM logs-microsoft_sqlserver.audit-*
+| WHERE sqlserver.audit.session_server_principal_name == "$principal"
+    AND @timestamp >= NOW() - 2 hours
+| STATS events = COUNT(*), dbs = COUNT_DISTINCT(sqlserver.audit.database_name)
+    BY sqlserver.audit.client_ip, sqlserver.audit.host_name, host.name, sqlserver.audit.application_name
+| SORT events DESC
+| LIMIT 20
+]]>
+        </Query>
+      </Step>
+      <Step order="4" name="Process investigation">
+        <Purpose>Process investigation</Purpose>
+        <Query platform="Elastic" language="ES|QL" id="Q-04">
+          <![CDATA[
+FROM logs-microsoft_sqlserver.audit-*
+| WHERE sqlserver.audit.session_server_principal_name == "$principal"
+    AND @timestamp >= NOW() - 2 hours
+| STATS events = COUNT(*), clients = COUNT_DISTINCT(sqlserver.audit.client_ip)
+    BY sqlserver.audit.application_name
+| SORT events DESC
+| LIMIT 15
+]]>
+        </Query>
+      </Step>
+      <Step order="5" name="User investigation">
+        <Purpose>User investigation</Purpose>
+        <Query platform="Elastic" language="ES|QL" id="Q-05">
+          <![CDATA[
+FROM logs-microsoft_sqlserver.audit-*
+| WHERE sqlserver.audit.session_server_principal_name == "$principal"
+    AND @timestamp >= NOW() - 2 hours
+| STATS events = COUNT(*), clients = COUNT_DISTINCT(sqlserver.audit.client_ip)
+    BY host.name, sqlserver.audit.database_name
+| SORT events DESC
+| LIMIT 20
+]]>
+        </Query>
+      </Step>
+      <Step order="6" name="Host investigation">
+        <Purpose>Host investigation</Purpose>
+        <Query platform="Elastic" language="ES|QL" id="Q-06">
+          <![CDATA[
+FROM logs-microsoft_sqlserver.audit-*
+| WHERE host.name == "nim-kta-dbv01"
+    AND @timestamp >= NOW() - 1 hours
+| STATS events = COUNT(*), clients = COUNT_DISTINCT(sqlserver.audit.client_ip)
+    BY sqlserver.audit.session_server_principal_name, sqlserver.audit.database_name
+| SORT events DESC
+| LIMIT 20
+]]>
+        </Query>
+      </Step>
+      <Step order="7" name="IP investigation">
+        <Purpose>IP investigation</Purpose>
+        <Query platform="Elastic" language="ES|QL" id="Q-07">
+          <![CDATA[
+FROM logs-microsoft_sqlserver.audit-*
+| WHERE sqlserver.audit.client_ip == "$client_ip"
+    AND @timestamp >= NOW() - 2 hours
+| STATS statements = COUNT(*), principals = COUNT_DISTINCT(sqlserver.audit.session_server_principal_name),
+        dbs = COUNT_DISTINCT(sqlserver.audit.database_name), apps = VALUES(sqlserver.audit.application_name)
+    BY sqlserver.audit.host_name, host.name
+| SORT statements DESC
+| LIMIT 10
+]]>
+        </Query>
+      </Step>
+      <Step order="8" name="File investigation">
+        <Purpose>File investigation</Purpose>
+        <Query platform="Elastic" language="ES|QL" id="Q-08">
+          <![CDATA[
+FROM logs-microsoft_sqlserver.audit-*
+| WHERE sqlserver.audit.session_server_principal_name == "$principal"
+    AND (sqlserver.audit.statement LIKE "*OPENROWSET*" OR sqlserver.audit.statement LIKE "*BULK INSERT*" OR sqlserver.audit.statement LIKE "*OPENDATASOURCE*")
+    AND @timestamp >= NOW() - 2 hours
+| KEEP @timestamp, sqlserver.audit.client_ip, sqlserver.audit.database_name, sqlserver.audit.statement
+| SORT @timestamp DESC
+| LIMIT 25
+]]>
+        </Query>
+      </Step>
+      <Step order="9" name="Authentication investigation">
+        <Purpose>Authentication investigation</Purpose>
+        <Query platform="Elastic" language="ES|QL" id="Q-09">
+          <![CDATA[
+FROM logs-microsoft_sqlserver.audit-*
+| WHERE sqlserver.audit.session_server_principal_name == "$principal"
+    AND sqlserver.audit.class_type == "LOGIN"
+    AND @timestamp >= NOW() - 2 hours
+| STATS events = COUNT(*) BY sqlserver.audit.action_id, sqlserver.audit.client_ip, host.name
+| SORT events DESC
+| LIMIT 20
+]]>
+        </Query>
+      </Step>
+      <Step order="10" name="Timeline Reconstruction">
+        <Purpose>Timeline Reconstruction</Purpose>
+        <Query platform="Elastic" language="ES|QL" id="Q-10">
+          <![CDATA[
+FROM logs-microsoft_sqlserver.audit-*
+| WHERE sqlserver.audit.session_server_principal_name == "$principal"
+    AND sqlserver.audit.client_ip == "$client_ip"
+    AND @timestamp >= NOW() - 2 hours
+| KEEP @timestamp, sqlserver.audit.action_id, sqlserver.audit.database_name, sqlserver.audit.statement
+| SORT @timestamp ASC
+| LIMIT 200
+]]>
+        </Query>
+      </Step>
+      <Step order="11" name="Lateral movement validation">
+        <Purpose>Lateral movement validation</Purpose>
+        <Query platform="Elastic" language="ES|QL" id="Q-11">
+          <![CDATA[
+FROM logs-microsoft_sqlserver.audit-*
+| WHERE sqlserver.audit.session_server_principal_name == "$principal"
+    AND host.name != "nim-kta-dbv01"
+    AND @timestamp >= NOW() - 2 hours
+| STATS events = COUNT(*) BY host.name, sqlserver.audit.client_ip
+| SORT events DESC
+| LIMIT 20
+]]>
+        </Query>
+      </Step>
+      <Step order="12" name="Persistence validation">
+        <Purpose>Persistence validation</Purpose>
+        <Query platform="Elastic" language="ES|QL" id="Q-12">
+          <![CDATA[
+FROM logs-microsoft_sqlserver.audit-*
+| WHERE sqlserver.audit.session_server_principal_name == "$principal"
+    AND @timestamp >= NOW() - 2 hours
+| EVAL persist = CASE(
+    sqlserver.audit.statement LIKE "*sp_addlinkedserver*" OR sqlserver.audit.statement LIKE "*CREATE LOGIN*"
+    OR sqlserver.audit.statement LIKE "*ALTER SERVER ROLE*" OR sqlserver.audit.statement LIKE "*sp_addsrvrolemember*"
+    OR sqlserver.audit.statement LIKE "*CREATE TRIGGER*", 1, 0)
+| STATS total = COUNT(*), persistence_ops = SUM(persist) BY sqlserver.audit.database_name
+| SORT persistence_ops DESC
+| LIMIT 15
+]]>
+        </Query>
+      </Step>
+      <Step order="13" name="Privilege escalation validation">
+        <Purpose>Privilege escalation validation</Purpose>
+        <Query platform="Elastic" language="ES|QL" id="Q-13">
+          <![CDATA[
+FROM logs-microsoft_sqlserver.audit-*
+| WHERE sqlserver.audit.session_server_principal_name == "$principal"
+    AND sqlserver.audit.statement LIKE "*sp_configure*"
+    AND @timestamp >= NOW() - 2 hours
+| STATS execs = COUNT(*), statements = VALUES(sqlserver.audit.statement)
+    BY sqlserver.audit.client_ip, host.name
+| SORT execs DESC
+| LIMIT 10
+]]>
+        </Query>
+      </Step>
+      <Step order="14" name="Defense evasion validation">
+        <Purpose>Defense evasion validation</Purpose>
+        <Query platform="Elastic" language="ES|QL" id="Q-14">
+          <![CDATA[
+FROM logs-microsoft_sqlserver.audit-*
+| WHERE sqlserver.audit.session_server_principal_name == "$principal"
+    AND @timestamp >= NOW() - 2 hours
+| EVAL tamper = CASE(
+    sqlserver.audit.statement LIKE "*ALTER SERVER AUDIT*" OR sqlserver.audit.statement LIKE "*DROP SERVER AUDIT*"
+    OR sqlserver.audit.statement LIKE "*sp_audit*" OR sqlserver.audit.statement LIKE "*ALTER DATABASE AUDIT*", 1, 0)
+| STATS total = COUNT(*), tamper_ops = SUM(tamper) BY sqlserver.audit.database_name
+| SORT tamper_ops DESC
+| LIMIT 15
+]]>
+        </Query>
+      </Step>
+      <Step order="15" name="Impact assessment">
+        <Purpose>Impact assessment</Purpose>
+        <Query platform="Elastic" language="ES|QL" id="Q-15">
+          <![CDATA[
+FROM logs-microsoft_sqlserver.audit-*
+| WHERE sqlserver.audit.session_server_principal_name == "$principal"
+    AND host.name == "nim-kta-dbv01"
+    AND @timestamp >= NOW() - 2 hours
+| STATS ops = COUNT(*) BY sqlserver.audit.action_id, sqlserver.audit.database_name
+| SORT ops DESC
+| LIMIT 20
+]]>
+        </Query>
+      </Step>
+      <Step order="16" name="Finalize verdict">
+        <DecisionTree>
+        </DecisionTree>
+      </Step>
+    </Workflow>
+  </Investigation>
+  <ClassificationGuidance>
+    <TruePositive>
+      <Definition></Definition>
+    </TruePositive>
+    <FalsePositive>
+      <Definition></Definition>
+      <Indicators>
+        <Item>Sanctioned ETL / data-import jobs that legitimately use BULK INSERT or OPENROWSET(BULK ...) to load an expected local import file into a staging database on a schedule, under a recognised ETL/DBA principal. This is the single most common benign cause and must be matched to a change/ETL record, not assumed.</Item>
+        <Item>DBA maintenance / migration reading a local file with OPENROWSET(BULK ...) during a one-off, approved task.</Item>
+        <Item>Reporting integrations that pull from a known, internal linked/remote source via OPENROWSET where a linked server was not configured.</Item>
+        <Item>Positively-blocked attempts - the ad-hoc call errored because *Ad Hoc Distributed Queries* is disabled or the provider is not registered, and no data was returned. This is recorded as a blocked attempt (documented as such, investigated for the principal/client), never as "benign".</Item>
+        <Item>The ad-hoc primitives are effectively absent from the routine workload. Across the validation windows, adhoc_ops = 0 and enable_ops = 0 for the sampled principals - the estate's SQL traffic is application ORM/stored-procedure work (SELECT/UPDATE/EXECUTE via .Net SqlClient Data Provider and EntityFrameworkMUE), not statement-level file access. So any firing of this rule is off-baseline and warrants review; there is no noisy legitimate source to tune out at the estate level.</Item>
+        <Item>The busiest SQL host is a banking-onboarding platform. nim-kta-dbv01 hosts the Kofax TotalAgility databases (TotalAgility, TotalAgility_Documents, TotalAgility_Reporting, TotalAgility_Reporting_Staging) plus KYC/onboarding databases (KYC_Individual, Individual_Customer_Onboarding, OnboardingLookups, iLOP, CB_BPM_Business_Data). If a legitimate import job exists, this is the class of host where it would run - but so is this the class of host most damaging to expose. Confirm any "legitimate ETL" claim against an actual job/change record on the named database.</Item>
+        <Item>app_admin is a shared application identity, in three case-variants. The audit stores the login literal, so you will see app_admin, App_admin, and APP_ADMIN - SQL treats them as the same login, but they are the same shared service account driving the application. A shared app account performing ad-hoc access is *more* concerning, not less: it means the app tier (or something using its credentials) reached statement-level file access. Do not treat the app account as trusted.</Item>
+        <Item>No historical NBI benign-true-positive is on record for this rule. There is no environment-specific allow-list. If a genuine authorised ETL job is confirmed, scope any exception to the exact principal + client + database + statement shape, never a blanket host/principal exception.</Item>
+      </Indicators>
+    </FalsePositive>
+    <Misconfiguration>
+      <Definition></Definition>
+    </Misconfiguration>
+    <NeedsEscalation>
+      <Definition></Definition>
+    </NeedsEscalation>
+  </ClassificationGuidance>
+  <ResponseActions>
+    <Phase name="Containment">
+      <Action>If a true_positive is confirmed, block egress from the SQL host and treat the SQL Server service account as exposed - OPENROWSET/BULK INSERT run with the engine/service-account reach, so anything that account could read is potentially exposed.</Action>
+      <Action>Disable the implicated login ($principal) or its source path; if it is the shared application account, coordinate with the app owner because disabling it will affect the application - but prioritise containment of active data movement.</Action>
+      <Action>Preserve the audit evidence first - capture the raw audit records for the ad-hoc statements (full, untruncated, from the host if needed) before any change.</Action>
+      <Action>Contain the origin. If section 15.6 shows an application-server origin, isolate/contain that app server too - the injection point lives there, not on the SQL host.</Action>
+      <Action>All containment changes go through the authorised, human-approved DEPLOY path; investigation itself is read-only.</Action>
+    </Phase>
+    <Phase name="Eradication">
+      <Action>Identify and remove any persistence found in section 17.2 (linked servers via sp_addlinkedserver, rogue CREATE LOGIN, server-role additions, triggers).</Action>
+      <Action>Revert configuration changes from section 17.3 - disable *Ad Hoc Distributed Queries* (and any other feature the principal enabled), and confirm the audit specification (section 17.4) is intact and re-enabled if tampered.</Action>
+      <Action>Remove ad-hoc access from application logins - application principals should never need OPENROWSET/BULK INSERT; strip the capability and the underlying permissions.</Action>
+      <Action>Fix the injection point. If the origin is an application server, hunt for and remediate the SQL-injection vulnerability in the application (parameterise queries), and hunt the same payload/behaviour across peer app/SQL hosts (section 15.4, section 17.1).</Action>
+      <Action>Locate and remove any staged/exfiltrated files the statements read or wrote.</Action>
+    </Phase>
+    <Phase name="Recovery">
+      <Action>Rotate the SQL Server service account and the implicated login's credentials; rotate any secrets that were readable from the SQL host during the exposure window (config files, connection strings, keys).</Action>
+      <Action>Restore data integrity if BULK INSERT/INSERT wrote to tables - validate affected databases (especially TotalAgility*/KYC) against known-good state or backups.</Action>
+      <Action>Return the login/host to service only after section 22 closing criteria are met and monitoring confirms the ad-hoc behaviour does not recur.</Action>
+      <Action>Harden: disable *Ad Hoc Distributed Queries* estate-wide where feasible, least-privilege the SQL service account's file-system reach, and move any legitimate import to a parameterised, least-privilege path. Enabling full (untruncated) statement capture where volume allows would strengthen exactly this investigation.</Action>
+    </Phase>
+  </ResponseActions>
+  <Escalation>
+    <Trigger>Escalate to SOC L2 / IR (and notify the customer / DBA + application owner) when any of the following hold:
+
+- The statement targets an off-host or remote source, a UNC/URL/foreign IP, or reads OS files (section 14.1/section 15.10).
+- The enable-then-use pattern is present (section 17.3), or any sp_configure of dangerous surface by an application principal.
+- The ad-hoc access originates from an internet- or partner-facing banking application server (section 15.6) - injection-shaped.
+- Persistence (section 17.2) or audit tampering (section 17.4) is found, or the principal is seen on additional SQL hosts (section 17.1).
+- The statement/target is missing or truncated and cannot be recovered - escalate as needs_escalation with the gap named; empty != safe.</Trigger>
+    <To>SOC L2 / IR</To>
+  </Escalation>
+  <ClosureCriteria>
+    <Item>false_positive (authorised import): a change/ETL record positively matches the exact $principal + $client_ip + database + statement (a recognised ETL/DBA principal reading an expected local import file). Record the reference; scope any exception narrowly (principal + client + database + statement shape), never a blanket host/principal exception.</Item>
+    <Item>false_positive (blocked attempt): the ad-hoc call is positively proven to have failed (feature/provider disabled, access denied, no data returned). Documented as a blocked attempt, with the principal/client still investigated - never labelled "benign".</Item>
+    <Item>misconfiguration: a legitimate automated import/integration used the ad-hoc primitives and was simply not yet baselined; no off-host/OS-file access, no abuse indicators. Baseline and migrate the job to a least-privilege parameterised path.</Item>
+    <Item>true_positive: unauthorised ad-hoc file/remote access confirmed; SQL host contained, service account/login rotated, data exposure scoped, injection point and any staged files hunted, incident documented.</Item>
+    <Item>needs_escalation: handed to Tier 3 / DBA with the specific evidence gaps (truncated statement, unattributable principal/client) documented.</Item>
+  </ClosureCriteria>
+  <Limitations>
+    <Item>The target is the verdict. For this rule, the classification lives in the statement's file path / remote connection string, not in the keyword. Always recover it (section 14.1/section 15.10), and pull the raw audit document when the aggregate is empty or truncated - sqlserver.audit.statement truncates on long statements, so empty != safe.</Item>
+    <Item>Keyed queries only - the index will circuit-break otherwise. logs-microsoft_sqlserver.audit-* runs at ~3M events/hour (a single busy host contributes most of it). Every LIKE "*...*" in this playbook is safe only because it is preceded by a $principal/$client_ip/single-host.name filter. Never run an unkeyed estate-wide leading-wildcard scan on this index.</Item>
+    <Item>server_principal_name is dead here - use session_server_principal_name. On this estate the former is null; the latter is the authoritative login (and it case-preserves app_admin/App_admin/APP_ADMIN, which are the same shared application identity).</Item>
+    <Item>SqlBulkCopy (insert bulk) does not fire this rule - the routine ETL bulk-copy noise is out of scope by design, which is why a real firing is meaningful.</Item>
+    <Item>This rule is keyword-evadable; pair it with siblings. An attacker can avoid the tokens via linked servers (sp_addlinkedserver + OPENQUERY), CLR/OLE file access, or xp_cmdshell, and can split/obfuscate the statement so a substring match misses it. Corroborate with the complementary NBI SQL analytics on the same host/principal: linked-server creation, CLR assembly load, sp_configure feature enablement, and xp_cmdshell execution.</Item>
+    <Item>KB-worthy (persist to NBI customer scope): (1) logs-microsoft_sqlserver.audit-* ~3.1M docs/hr, nim-kta-dbv01 ~3M/hr - unkeyed leading-wildcard LIKE circuit-breaks; (2) sqlserver.audit.server_principal_name null estate-wide, session_server_principal_name authoritative; (3) nim-kta-dbv01 = Kofax TotalAgility onboarding/KYC platform (databases TotalAgility*, KYC_Individual, Individual_Customer_Onboarding, iLOP, OnboardingLookups, CB_BPM_Business_Data); (4) shared app identity app_admin in three case-variants from 10.11.44.1/NIM-KTA-APV01; (5) adhoc_ops/enable_ops = 0 in the sampled windows (ad-hoc primitives off-baseline). Observed live 2026-08-17.</Item>
+  </Limitations>
+</Playbook>

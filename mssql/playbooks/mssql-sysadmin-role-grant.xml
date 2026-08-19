@@ -1,0 +1,361 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<Playbook xmlns="https://soc.example/playbooks" id="PB-mssql-sysadmin-role-grant" name="MS SQL — Server-Level Privilege Escalation (sysadmin role grant) - SOC Playbook" version="3.0" status="Validated" classification="TLP:AMBER">
+  <Metadata>
+    <Owner>NBI SOC / Detection Engineering</Owner>
+    <LastUpdated>2026-08-19</LastUpdated>
+    <Severity default="High">High</Severity>
+    <Confidence default="Medium">Medium</Confidence>
+    <Category>Privilege Escalation</Category>
+    <MitreAttack>
+      <Technique id="T1098"/>
+      <Technique id="T1078"/>
+      <Technique id="T1548"/>
+      <Technique id="T1136"/>
+      <Tactic id="TA0004"/>
+    </MitreAttack>
+    <References>
+      <Reference title="MITRE ATT&amp;CK - Account Manipulation (T1098)" url="https://attack.mitre.org/techniques/T1098/"/>
+      <Reference title="MITRE ATT&amp;CK - Valid Accounts (T1078)" url="https://attack.mitre.org/techniques/T1078/"/>
+      <Reference title="MITRE ATT&amp;CK - Abuse Elevation Control Mechanism (T1548)" url="https://attack.mitre.org/techniques/T1548/"/>
+      <Reference title="MITRE ATT&amp;CK - Privilege Escalation tactic (TA0004)" url="https://attack.mitre.org/tactics/TA0004/"/>
+      <Reference title="Microsoft Learn - ALTER SERVER ROLE (Transact-SQL)" url="https://learn.microsoft.com/en-us/sql/t-sql/statements/alter-server-role-transact-sql"/>
+      <Reference title="Microsoft Learn - sp_addsrvrolemember (Transact-SQL)" url="https://learn.microsoft.com/en-us/sql/relational-databases/system-stored-procedures/sp-addsrvrolemember-transact-sql"/>
+      <Reference title="Microsoft Learn - sys.server_role_members (catalog view)" url="https://learn.microsoft.com/en-us/sql/relational-databases/system-catalog-views/sys-server-role-members-transact-sql"/>
+      <Reference title="Microsoft Learn - Server-Level Roles (sysadmin, securityadmin, serveradmin)" url="https://learn.microsoft.com/en-us/sql/relational-databases/security/authentication-access/server-level-roles"/>
+      <Reference title="Elastic Security - SQL Server audit integration (fields reference)" url="https://www.elastic.co/docs/reference/integrations/microsoft_sqlserver"/>
+    </References>
+  </Metadata>
+  <AlertContext>
+    <RuleName>MS SQL — Server-Level Privilege Escalation (sysadmin role grant)</RuleName>
+    <RuleId>nbi-sql-sysadmin-grant</RuleId>
+    <RuleType>query</RuleType>
+    <Index>logs-microsoft_sqlserver.audit-*</Index>
+    <TriggerLogic>The deployed rule is an Elastic query rule over the SQL Server audit data stream. It fires when a role-membership statement targets a high-privilege server role. One-line Kibana KQL detection filter (for fast pivoting in Discover / Timeline):
+
+
+
+Plain English: an audited statement adds a login to a powerful server role. Two forms exist: the legacy sp_addsrvrolemember '&lt;login&gt;', 'sysadmin' stored procedure (surfaces under event.action == "execute-stored-proc-or-function") and the modern ALTER SERVER ROLE [sysadmin] ADD MEMBER [&lt;login&gt;] DDL (surfaces under alter-object). The role names in the second predicate matter by descending blast radius: sysadmin (total control) and CONTROL SERVER (equivalent), then securityadmin (can grant permissions and self-escalate), then serveradmin (server configuration). The elevated login is read from the statement (or sqlserver.audit.target_server_principal_name) and becomes $target_login for the decisive section 14.2 pivot.
+
+Why this is high-severity by design: server-role management requires existing high privilege, and NBI's routine SQL workload performs no such grants - so any hit is off-baseline.</TriggerLogic>
+    <KeyAlertFields>sqlserver.audit.session_server_principal_name, sqlserver.audit.server_principal_name, sqlserver.audit.statement, sqlserver.audit.target_server_principal_name, sqlserver.audit.client_ip, sqlserver.audit.application_name, sqlserver.audit.succeeded, host.name, sys.server_role_members</KeyAlertFields>
+  </AlertContext>
+  <Inputs>
+    <Input name="$principal"/>
+    <Input name="$target_login"/>
+    <Input name="$client_ip"/>
+    <Input name="$host"/>
+  </Inputs>
+  <ExecutiveSummary>
+    <Overview>This playbook drives triage and investigation of the MS SQL - Server-Level Privilege Escalation (sysadmin role grant) detection on NBI's Elastic Security deployment. The rule fires when an audited statement uses sp_addsrvrolemember or ALTER SERVER ROLE together with a high-privilege server role - sysadmin, securityadmin, serveradmin, or CONTROL SERVER. Adding a login to such a role confers full or near-full control of the SQL Server instance: the elevated login can read or modify any database, run OS commands via xp_cmdshell, create logins, grant further roles, and disable auditing. On a banking SQL Server, sysadmin is effectively full control of that database tier - including the data and the auditing that watches it.
+
+The alert statement names both the actor ($principal, the session principal that performed the grant) and the login being elevated ($target_login). The analyst's job is to decide whether this is authorised provisioning (a DBA provisioning an operator or service account under change control) or attacker self-escalation / backdoor-account creation - and to classify the alert as true_positive, false_positive, misconfiguration, or needs_escalation with evidence attached. The decision is driven by who was elevated, by whom and from where, and - decisively - what the elevated login did next.</Overview>
+    <BusinessImpact>An alert means: on $host, actor $principal (from client $client_ip) added login $target_login to a high-privilege server role. The grant statement executed. What remains to be established is (a) who $target_login is - an application login, a freshly created login, the actor's own login, or a recognised operator/service account; (b) whether $target_login immediately exercised the new privilege (the strongest signal - section 14.2); and (c) whether the actor/origin is a DBA admin context or an application/anomalous origin.
+
+On NBI, session_server_principal_name is authoritative for both the actor and (when it later acts) the elevated login (server_principal_name is null estate-wide - section 8). The structured field sqlserver.audit.target_server_principal_name carries the added member on role operations, but it was unpopulated in the validation windows (no grants occurred), so read $target_login from the statement text via section 14.1 and confirm current membership host-side via sys.server_role_members.</BusinessImpact>
+  </ExecutiveSummary>
+  <Investigation>
+    <Goal>Decide true_positive / false_positive / misconfiguration / needs_escalation for MS SQL — Server-Level Privilege Escalation (sysadmin role grant).</Goal>
+    <Workflow>
+      <Step order="1" name="Recover the role grant for this actor (confirm the alert; identify $target_login)">
+        <Purpose>Recover the role grant for this actor (confirm the alert; identify $target_login)</Purpose>
+        <Query platform="Elastic" language="ES|QL" id="Q-01">
+          <![CDATA[
+FROM logs-microsoft_sqlserver.audit-*
+| WHERE sqlserver.audit.session_server_principal_name == "$principal"
+    AND (sqlserver.audit.statement LIKE "*sp_addsrvrolemember*" OR sqlserver.audit.statement LIKE "*ALTER SERVER ROLE*")
+    AND (sqlserver.audit.statement LIKE "*sysadmin*" OR sqlserver.audit.statement LIKE "*securityadmin*" OR sqlserver.audit.statement LIKE "*serveradmin*" OR sqlserver.audit.statement LIKE "*CONTROL SERVER*")
+    AND @timestamp >= NOW() - 2 hours
+| STATS execs = COUNT(*), statements = VALUES(sqlserver.audit.statement)
+    BY sqlserver.audit.client_ip, host.name
+| SORT execs DESC
+| LIMIT 10
+]]>
+        </Query>
+      </Step>
+      <Step order="2" name="Trace the elevated login's use of privilege (R7-INV-02 - the decisive pivot)">
+        <Purpose>Trace the elevated login's use of privilege (R7-INV-02 - the decisive pivot)</Purpose>
+        <Query platform="Elastic" language="ES|QL" id="Q-02">
+          <![CDATA[
+FROM logs-microsoft_sqlserver.audit-*
+| WHERE sqlserver.audit.session_server_principal_name == "$target_login"
+    AND @timestamp >= NOW() - 2 hours
+| EVAL priv_use = CASE(sqlserver.audit.statement LIKE "*sp_configure*" OR sqlserver.audit.statement LIKE "*xp_cmdshell*" OR sqlserver.audit.statement LIKE "*ALTER SERVER*" OR sqlserver.audit.statement LIKE "*CREATE LOGIN*" OR sqlserver.audit.statement LIKE "*sp_addsrvrolemember*" OR sqlserver.audit.statement LIKE "*OPENROWSET*", 1, 0)
+| STATS total = COUNT(*), priv_ops = SUM(priv_use), dbs = COUNT_DISTINCT(sqlserver.audit.database_name), clients = COUNT_DISTINCT(sqlserver.audit.client_ip)
+    BY host.name
+| SORT priv_ops DESC
+| LIMIT 10
+]]>
+        </Query>
+      </Step>
+      <Step order="3" name="Confirm on the alert host (all actors granting high-privilege roles)">
+        <Purpose>Confirm on the alert host (all actors granting high-privilege roles)</Purpose>
+        <Query platform="Elastic" language="ES|QL" id="Q-03">
+          <![CDATA[
+FROM logs-microsoft_sqlserver.audit-*
+| WHERE host.name == "$host" AND event.action IN ("execute-stored-proc-or-function", "alter-object")
+    AND (sqlserver.audit.statement LIKE "*sp_addsrvrolemember*" OR sqlserver.audit.statement LIKE "*ALTER SERVER ROLE*")
+    AND (sqlserver.audit.statement LIKE "*sysadmin*" OR sqlserver.audit.statement LIKE "*securityadmin*" OR sqlserver.audit.statement LIKE "*serveradmin*" OR sqlserver.audit.statement LIKE "*CONTROL SERVER*")
+    AND @timestamp >= NOW() - 4 hours
+| STATS execs = COUNT(*), statements = VALUES(sqlserver.audit.statement)
+    BY sqlserver.audit.session_server_principal_name, sqlserver.audit.client_ip, sqlserver.audit.application_name
+| SORT execs DESC
+| LIMIT 20
+]]>
+        </Query>
+      </Step>
+      <Step order="4" name="Entity pivoting">
+        <Purpose>Entity pivoting</Purpose>
+        <Query platform="Elastic" language="ES|QL" id="Q-04">
+          <![CDATA[
+FROM logs-microsoft_sqlserver.audit-*
+| WHERE sqlserver.audit.session_server_principal_name == "$principal"
+    AND @timestamp >= NOW() - 4 hours
+| STATS statements = COUNT(*), first_seen = MIN(@timestamp), last_seen = MAX(@timestamp)
+    BY sqlserver.audit.client_ip, host.name, sqlserver.audit.application_name, event.action
+| SORT statements DESC
+| LIMIT 30
+]]>
+        </Query>
+      </Step>
+      <Step order="5" name="Process investigation">
+        <Purpose>Process investigation</Purpose>
+        <Query platform="Elastic" language="ES|QL" id="Q-05">
+          <![CDATA[
+FROM logs-microsoft_sqlserver.audit-*
+| WHERE sqlserver.audit.session_server_principal_name == "$principal"
+    AND @timestamp >= NOW() - 4 hours
+| STATS statements = COUNT(*), dbs = COUNT_DISTINCT(sqlserver.audit.database_name)
+    BY sqlserver.audit.application_name, event.action
+| SORT statements DESC
+| LIMIT 20
+]]>
+        </Query>
+      </Step>
+      <Step order="6" name="User investigation">
+        <Purpose>User investigation</Purpose>
+        <Query platform="Elastic" language="ES|QL" id="Q-06">
+          <![CDATA[
+FROM logs-microsoft_sqlserver.audit-*
+| WHERE sqlserver.audit.session_server_principal_name == "$principal"
+    AND @timestamp >= NOW() - 4 hours
+| STATS statements = COUNT(*), hosts = COUNT_DISTINCT(host.name), clients = COUNT_DISTINCT(sqlserver.audit.client_ip)
+    BY sqlserver.audit.database_name
+| SORT statements DESC
+| LIMIT 25
+]]>
+        </Query>
+      </Step>
+      <Step order="7" name="Host investigation">
+        <Purpose>Host investigation</Purpose>
+        <Query platform="Elastic" language="ES|QL" id="Q-07">
+          <![CDATA[
+FROM logs-microsoft_sqlserver.audit-*
+| WHERE host.name == "$host"
+    AND @timestamp >= NOW() - 2 hours
+| STATS statements = COUNT(*), principals = COUNT_DISTINCT(sqlserver.audit.session_server_principal_name), clients = COUNT_DISTINCT(sqlserver.audit.client_ip)
+    BY event.action
+| SORT statements DESC
+| LIMIT 15
+]]>
+        </Query>
+      </Step>
+      <Step order="8" name="IP investigation">
+        <Purpose>IP investigation</Purpose>
+        <Query platform="Elastic" language="ES|QL" id="Q-08">
+          <![CDATA[
+FROM logs-microsoft_sqlserver.audit-*
+| WHERE sqlserver.audit.client_ip == "$client_ip"
+    AND @timestamp >= NOW() - 2 hours
+| STATS statements = COUNT(*), principals = COUNT_DISTINCT(sqlserver.audit.session_server_principal_name),
+        dbs = COUNT_DISTINCT(sqlserver.audit.database_name), apps = VALUES(sqlserver.audit.application_name)
+    BY sqlserver.audit.host_name, host.name
+| SORT statements DESC
+| LIMIT 10
+]]>
+        </Query>
+      </Step>
+      <Step order="9" name="Authentication investigation">
+        <Purpose>Authentication investigation</Purpose>
+        <Query platform="Elastic" language="ES|QL" id="Q-09">
+          <![CDATA[
+FROM logs-microsoft_sqlserver.audit-*
+| WHERE sqlserver.audit.client_ip == "$client_ip"
+    AND event.action IN ("login-succeeded", "login-failed")
+    AND @timestamp >= NOW() - 4 hours
+| STATS logins = COUNT(*), first_seen = MIN(@timestamp), last_seen = MAX(@timestamp)
+    BY event.action, sqlserver.audit.session_server_principal_name, user.name, host.name
+| SORT logins DESC
+| LIMIT 20
+]]>
+        </Query>
+      </Step>
+      <Step order="10" name="Timeline Reconstruction">
+        <Purpose>Timeline Reconstruction</Purpose>
+        <Query platform="Elastic" language="ES|QL" id="Q-10">
+          <![CDATA[
+FROM logs-microsoft_sqlserver.audit-*
+| WHERE sqlserver.audit.session_server_principal_name == "$principal"
+    AND host.name == "$host"
+    AND @timestamp >= NOW() - 4 hours
+| KEEP @timestamp, sqlserver.audit.client_ip, sqlserver.audit.database_name, event.action, sqlserver.audit.succeeded, sqlserver.audit.statement
+| SORT @timestamp ASC
+| LIMIT 200
+]]>
+        </Query>
+      </Step>
+      <Step order="11" name="Lateral movement validation">
+        <Purpose>Lateral movement validation</Purpose>
+        <Query platform="Elastic" language="ES|QL" id="Q-11">
+          <![CDATA[
+FROM logs-microsoft_sqlserver.audit-*
+| WHERE sqlserver.audit.session_server_principal_name == "$principal"
+    AND @timestamp >= NOW() - 4 hours
+    AND (host.name != "$host"
+         OR sqlserver.audit.statement LIKE "*addlinkedserver*"
+         OR sqlserver.audit.statement LIKE "*openquery*")
+| STATS statements = COUNT(*), actions = VALUES(event.action) BY host.name, sqlserver.audit.database_name
+| SORT statements DESC
+| LIMIT 25
+]]>
+        </Query>
+      </Step>
+      <Step order="12" name="Persistence validation">
+        <Purpose>Persistence validation</Purpose>
+        <Query platform="Elastic" language="ES|QL" id="Q-12">
+          <![CDATA[
+FROM logs-microsoft_sqlserver.audit-*
+| WHERE sqlserver.audit.session_server_principal_name == "$principal"
+    AND @timestamp >= NOW() - 4 hours
+    AND (sqlserver.audit.statement LIKE "*create login*" OR sqlserver.audit.statement LIKE "*create user*"
+         OR sqlserver.audit.statement LIKE "*sp_addsrvrolemember*" OR sqlserver.audit.statement LIKE "*ALTER SERVER ROLE*"
+         OR sqlserver.audit.statement LIKE "*create assembly*" OR sqlserver.audit.statement LIKE "*sp_add_job*"
+         OR sqlserver.audit.statement LIKE "*sp_addlinkedserver*")
+| STATS hits = COUNT(*), statements = VALUES(sqlserver.audit.statement) BY sqlserver.audit.database_name, event.action
+| SORT hits DESC
+| LIMIT 25
+]]>
+        </Query>
+      </Step>
+      <Step order="13" name="Privilege escalation validation">
+        <Purpose>Privilege escalation validation</Purpose>
+        <Query platform="Elastic" language="ES|QL" id="Q-13">
+          <![CDATA[
+FROM logs-microsoft_sqlserver.audit-*
+| WHERE sqlserver.audit.session_server_principal_name == "$principal"
+    AND @timestamp >= NOW() - 4 hours
+    AND (sqlserver.audit.statement LIKE "*sp_addsrvrolemember*" OR sqlserver.audit.statement LIKE "*ALTER SERVER ROLE*"
+         OR sqlserver.audit.statement LIKE "*securityadmin*" OR sqlserver.audit.statement LIKE "*sysadmin*"
+         OR sqlserver.audit.statement LIKE "*control server*" OR sqlserver.audit.statement LIKE "*grant*")
+| STATS hits = COUNT(*), statements = VALUES(sqlserver.audit.statement) BY sqlserver.audit.database_name, sqlserver.audit.succeeded
+| SORT hits DESC
+| LIMIT 25
+]]>
+        </Query>
+      </Step>
+      <Step order="14" name="Defense evasion validation">
+        <Purpose>Defense evasion validation</Purpose>
+        <Query platform="Elastic" language="ES|QL" id="Q-14">
+          <![CDATA[
+FROM logs-microsoft_sqlserver.audit-*
+| WHERE sqlserver.audit.session_server_principal_name == "$principal"
+    AND @timestamp >= NOW() - 4 hours
+    AND (sqlserver.audit.statement LIKE "*server audit*" OR sqlserver.audit.statement LIKE "*state = off*"
+         OR sqlserver.audit.statement LIKE "*state=off*" OR sqlserver.audit.statement LIKE "*drop*member*"
+         OR sqlserver.audit.statement LIKE "*sp_dropsrvrolemember*")
+| STATS hits = COUNT(*), statements = VALUES(sqlserver.audit.statement) BY event.action, sqlserver.audit.succeeded
+| SORT hits DESC
+| LIMIT 25
+]]>
+        </Query>
+      </Step>
+      <Step order="15" name="Impact assessment">
+        <Purpose>Impact assessment</Purpose>
+        <Query platform="Elastic" language="ES|QL" id="Q-15">
+          <![CDATA[
+FROM logs-microsoft_sqlserver.audit-*
+| WHERE sqlserver.audit.session_server_principal_name == "$target_login"
+    AND @timestamp >= NOW() - 4 hours
+| EVAL priv_use = CASE(sqlserver.audit.statement LIKE "*xp_cmdshell*" OR sqlserver.audit.statement LIKE "*sp_configure*" OR sqlserver.audit.statement LIKE "*ALTER SERVER*" OR sqlserver.audit.statement LIKE "*openrowset*" OR sqlserver.audit.statement LIKE "*create login*", 1, 0)
+| STATS statements = COUNT(*), priv_ops = SUM(priv_use), dbs = COUNT_DISTINCT(sqlserver.audit.database_name), hosts = COUNT_DISTINCT(host.name)
+    BY sqlserver.audit.client_ip
+| SORT statements DESC
+| LIMIT 20
+]]>
+        </Query>
+      </Step>
+      <Step order="16" name="Finalize verdict">
+        <DecisionTree>
+        </DecisionTree>
+      </Step>
+    </Workflow>
+  </Investigation>
+  <ClassificationGuidance>
+    <TruePositive>
+      <Definition></Definition>
+    </TruePositive>
+    <FalsePositive>
+      <Definition></Definition>
+      <Indicators>
+        <Item>Authorised DBA provisioning. A DBA elevates a recognised operator or service account under a change ticket - from an admin host, with role-appropriate subsequent use. Authorised, not benign-by-default: confirm against the change record and that the target/role are as approved.</Item>
+        <Item>Legitimate provisioning automation that grants a service account a server role during a deployment. If recognised, targeting an expected account, with role-appropriate use, this is a baseline gap rather than an attack (and often an over-grant to right-size).</Item>
+        <Item>A proven-blocked attempt. If the grant errored (permission denied; sqlserver.audit.succeeded = "False") and membership did not change (confirm via sys.server_role_members), that is a blocked attempt - documented as such, never "benign".</Item>
+        <Item>Privileged role grants are absent from NBI's routine workload. The SQL audit is dominated by the App_admin/TotalAgility application workload, which never grants server roles. There is no benign baseline of sysadmin/CONTROL SERVER grants to tune out, so any hit is off-baseline by construction.</Item>
+        <Item>An application principal granting a server role is highly anomalous. Applications have no reason to manage role membership; a grant issued by App_admin (or any data-provider application login) points to injection or a compromised app identity - and if it elevates the application's *own* login, that is textbook self-escalation.</Item>
+        <Item>No environment-specific allow-list exists. Do not create a blanket exception off one alert. A sanctioned DBA-provisioning pattern, once confirmed, can be scoped narrowly (exact DBA actor + admin client + approved target/role), but high-privilege membership changes should continue to alert and be reviewed for least privilege.</Item>
+      </Indicators>
+    </FalsePositive>
+    <Misconfiguration>
+      <Definition></Definition>
+    </Misconfiguration>
+    <NeedsEscalation>
+      <Definition></Definition>
+    </NeedsEscalation>
+  </ClassificationGuidance>
+  <ResponseActions>
+    <Phase name="Containment">
+      <Action>Remove the role membership after evidence capture. Once the grant is confirmed unauthorised (and captured for evidence), remove $target_login from the high-privilege role via the authorised human-approved DEPLOY path - this stops the elevated login exercising instance control. Confirm removal in sys.server_role_members.</Action>
+      <Action>Disable the backdoor login. If $target_login is a freshly created or attacker-controlled login, disable it; if it is the actor's own login self-escalated, disable/contain $principal.</Action>
+      <Action>Treat the instance as compromised if the elevated login exercised sysadmin power (section 14.2/section 17.5) - sysadmin can read any data, run OS commands, and disable auditing; scope accordingly.</Action>
+      <Action>Contain $host and block $client_ip at the app/network tier if it is an injection pivot; coordinate with the DBA/app owner on a business-critical instance.</Action>
+      <Action>Preserve evidence first: the grant statement, sys.server_role_members before/after, and the elevated login's activity - then remediate.</Action>
+    </Phase>
+    <Phase name="Eradication">
+      <Action>Right-size or remove all unauthorised memberships and any further grants the elevated login made (section 17.3) - an actor with sysadmin may have created additional backdoors.</Action>
+      <Action>Remove backdoor logins and persistence surfaced in section 17.2 (new logins, Agent jobs, CLR, linked servers), and reverse any config/audit changes the elevated login made (section 17.4).</Action>
+      <Action>Remediate the initial-access vector if $client_ip is an application server - parameterise/patch the injection point and strip role-management/sysadmin from the application login.</Action>
+      <Action>Hunt the same pattern across peers - other DB hosts the actor/elevated login touched (section 17.1) and instances sharing the identity - for grants, CREATE LOGIN→grant sequences, and sysadmin-only activity by newly privileged logins.</Action>
+    </Phase>
+    <Phase name="Recovery">
+      <Action>Confirm least-privilege membership across the instance: review sys.server_role_members for all high-privilege roles and remove any membership without a documented owner/justification.</Action>
+      <Action>Rotate credentials for $target_login, $principal, the SQL service account (if xp_cmdshell/OLE was used), and any secrets reachable during the elevated window.</Action>
+      <Action>Restore $host from known-good backup if the elevated login's activity or persistence was extensive; otherwise validate that all reversals hold and no residual membership/persistence remains.</Action>
+      <Action>Return to service only after section 22 closing criteria are met and monitoring confirms no further high-privilege role changes recur.</Action>
+      <Action>Recommend hardening (section 23): restrict who can alter server-role membership, require change control for sysadmin grants, and alert on every sys.server_role_members change.</Action>
+    </Phase>
+  </ResponseActions>
+  <Escalation>
+    <Trigger>Escalate to Tier 3 / Incident Response (and notify the customer) when any of the following hold:
+
+- sysadmin/CONTROL SERVER granted to an application, freshly created, or self login (section 14.1) - escalation/backdoor-shaped.
+- The elevated login immediately exercised privilege (priv_ops &gt; 0 - section 14.2/section 17.5) - a hands-on-keyboard true positive.
+- A CREATE LOGIN → grant backdoor pattern (section 17.2) or an escalation chain (securityadmin → self-grant sysadmin, section 17.3).
+- The grant originated from an internet-facing application server (section 15.6), or was accompanied by audit tampering (section 17.4).
+- Evidence is incomplete because the elevated login's OS-side actions are not collected on NBI and the alert cannot be safely cleared - escalate as needs_escalation with the gap named.</Trigger>
+    <To>SOC L2 / IR</To>
+  </Escalation>
+  <ClosureCriteria>
+    <Item>false_positive (authorised provisioning): a recognised DBA provisioned a recognised operator/service account under change control from an admin host, with role-appropriate use, positively matched to this actor + target + role + time. Record the change ticket. Right-size the membership; never a blanket allow.</Item>
+    <Item>false_positive (blocked attempt): the grant is proven to have failed (permission denied; membership unchanged in sys.server_role_members); documented as a blocked attempt (never "benign"), with the actor still investigated.</Item>
+    <Item>misconfiguration: a recognised provisioning process performed the grant (role-appropriate use) and was not baselined or over-granted; baseline it and right-size to least privilege.</Item>
+    <Item>true_positive: unauthorised escalation/backdoor confirmed; membership removed, backdoor login disabled, instance contained, elevated-login activity and further persistence hunted, and no recurrence.</Item>
+    <Item>needs_escalation: handed to Tier 3/IR with the specific gaps (truncated grant, dormant login, ambiguous origin) documented.</Item>
+  </ClosureCriteria>
+  <Limitations>
+    <Item>What the elevated login did next is the case. section 14.2/section 17.5 keyed on $target_login is the decisive pivot - immediate sysadmin-only use is a hands-on-keyboard true positive; dormancy weakens (but does not clear) it, because the privilege persists until removed.</Item>
+    <Item>Read the elevated login from the statement, and confirm state in the catalog view. The audit shows the grant *statement*; sys.server_role_members shows the *resulting membership*. sqlserver.audit.target_server_principal_name is the structured member field but was unpopulated in the validation windows.</Item>
+    <Item>securityadmin is a sysadmin in waiting. A member can grant itself higher roles - treat a securityadmin grant with the same seriousness and watch for the follow-on self-grant (section 17.3).</Item>
+    <Item>Key every statement LIKE on a principal (or narrow by event.action). On this ~2.5M-doc/hour index a host-only or client-only leading-wildcard LIKE circuit-breaks (verified live); section 14.3 narrows a host-scoped search by event.action IN ("execute-stored-proc-or-function","alter-object") because grants surface under both. session_server_principal_name is authoritative; server_principal_name is null estate-wide; login-failed carries the attempted login in user.name.</Item>
+    <Item>This rule cannot see the "no-grant" escalation. An attacker using an *already*-privileged compromised login performs no grant event - correlate sysadmin-only actions (xp_cmdshell, sp_configure, audit changes) by any login as a complementary analytic.</Item>
+    <Item>KB-worthy (persist to NBI customer scope): (1) no privileged server-role grants in NBI routine workload (live-clean 2026-08-16 and 2026-08-19) - any hit is off-baseline; (2) grants surface under both execute-stored-proc-or-function and alter-object; (3) target_server_principal_name is the structured member field (sparse); (4) same SQL-audit telemetry limits as the estate; confirm membership via sys.server_role_members. Observed live 2026-08-19.</Item>
+  </Limitations>
+</Playbook>

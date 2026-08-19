@@ -1,0 +1,51 @@
+{
+  "name": "Microsoft Defender XDR — Multi-Stage / High-Impact Threat Correlation (Single Entity)",
+  "tags": [
+    "NBI-Advanced",
+    "Phase2-Batch3",
+    "M365-Defender-XDR",
+    "Correlation",
+    "Kill-Chain"
+  ],
+  "interval": "1440m",
+  "enabled": true,
+  "description": "Correlates Microsoft Defender XDR alerts by entity (the user, or the device when no user is present) and raises a high-severity alert when a single entity shows EITHER three or more distinct ATT&CK tactics within the window (multi-stage activity) OR at least one high-severity alert in a high-impact tactic — Exfiltration, Credential Access, or Lateral Movement. The alert surfaces the correlated tactics, techniques, source IPs, the underlying Defender alert messages, and the first/last activity time.",
+  "risk_score": 80,
+  "severity": "high",
+  "note": "## Investigation\n1. Read `threat_details` (the underlying Defender alert messages), `tactics`, and `techniques` to see exactly what was detected.\n2. `account` / `device_id` identify the entity; `source_ips` and `first_seen`/`last_seen` give origin and time window.\n3. If >=3 tactics: treat as a multi-stage attack on one entity. If high-severity Credential Access / Exfiltration / Lateral Movement: prioritise accordingly.\n4. Pivot to Windows 4688, PowerShell 4104, and FortiGate for the same account/host and window.\n5. Confirm whether the account is authorised security testing before closing; otherwise isolate and rotate credentials.",
+  "output_index": "",
+  "investigation_fields": {
+    "field_names": [
+      "entity",
+      "defender_alerts",
+      "distinct_tactics",
+      "tactics",
+      "high_impact_alerts",
+      "max_severity"
+    ]
+  },
+  "author": [
+    "raadabujaish"
+  ],
+  "false_positives": [],
+  "from": "now-1450m",
+  "rule_id": "nbi-b3-defender-multistage-correlation",
+  "max_signals": 100,
+  "risk_score_mapping": [],
+  "severity_mapping": [],
+  "threat": [],
+  "to": "now",
+  "references": [
+    "https://learn.microsoft.com/en-us/defender-xdr/",
+    "https://attack.mitre.org/"
+  ],
+  "version": 1,
+  "exceptions_list": [],
+  "related_integrations": [],
+  "required_fields": [],
+  "setup": "",
+  "type": "esql",
+  "language": "esql",
+  "query": "FROM logs-m365_defender.*\n| EVAL entity = COALESCE(user.name, MV_FIRST(host.id))\n| MV_EXPAND threat.tactic.name\n| STATS defender_alerts = COUNT(*),\n        distinct_tactics = COUNT_DISTINCT(threat.tactic.name),\n        tactics = VALUES(threat.tactic.name),\n        high_impact_alerts = COUNT(*) WHERE (event.severity >= 73 AND threat.tactic.name IN (\"Exfiltration\",\"CredentialAccess\",\"LateralMovement\")),\n        max_severity = MAX(event.severity),\n        source_ips = VALUES(source.ip),\n        techniques = VALUES(threat.technique.subtechnique.id),\n        threat_details = VALUES(message),\n        account = VALUES(user.name),\n        device_id = VALUES(host.id),\n        first_seen = MIN(@timestamp),\n        last_seen = MAX(@timestamp)\n        BY entity\n| WHERE distinct_tactics >= 3 OR high_impact_alerts >= 1\n| SORT high_impact_alerts DESC, distinct_tactics DESC",
+  "actions": []
+}

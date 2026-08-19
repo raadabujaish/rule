@@ -1,0 +1,375 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<Playbook xmlns="https://soc.example/playbooks" id="PB-vsphere-virtual-machine-created" name="VMware vSphere — Virtual Machine Created (non-backup) - SOC Playbook" version="3.0" status="Validated" classification="TLP:AMBER">
+  <Metadata>
+    <Owner>NBI SOC / Detection Engineering</Owner>
+    <LastUpdated>2026-08-19</LastUpdated>
+    <Severity default="Medium">Medium</Severity>
+    <Confidence default="Medium">Medium</Confidence>
+    <Category>Defense Evasion</Category>
+    <MitreAttack>
+      <Technique id="T1564.006"/>
+      <Technique id="T1564"/>
+      <Technique id="T1078"/>
+      <Tactic id="TA0005"/>
+      <Tactic id="TA0003"/>
+    </MitreAttack>
+    <References>
+      <Reference title="MITRE ATT&amp;CK - Hide Artifacts: Run Virtual Instance (T1564.006)" url="https://attack.mitre.org/techniques/T1564/006/"/>
+      <Reference title="MITRE ATT&amp;CK - Valid Accounts (T1078)" url="https://attack.mitre.org/techniques/T1078/"/>
+      <Reference title="MITRE ATT&amp;CK - Defense Evasion tactic (TA0005)" url="https://attack.mitre.org/tactics/TA0005/"/>
+      <Reference title="MITRE ATT&amp;CK - Persistence tactic (TA0003)" url="https://attack.mitre.org/tactics/TA0003/"/>
+      <Reference title="Elastic - vSphere integration (vpxd/vCenter log fields, event.dataset vsphere.log)" url="https://www.elastic.co/docs/reference/integrations/vsphere"/>
+      <Reference title="VMware - vSphere Security (roles, privileges, and VM provisioning controls)" url="https://techdocs.broadcom.com/us/en/vmware-cis/vsphere/vsphere/8-0/vsphere-security-8-0.html"/>
+      <Reference title="Mandiant / Google Cloud - Defending vSphere/ESXi against rogue-VM and hypervisor abuse" url="https://cloud.google.com/blog/topics/threat-intelligence/esxi-hypervisors-detection-hardening"/>
+      <Reference title="CISA - Protecting VMware ESXi and vCenter (hardening and monitoring guidance)" url="https://www.cisa.gov/news-events/alerts"/>
+    </References>
+  </Metadata>
+  <AlertContext>
+    <RuleName>VMware vSphere — Virtual Machine Created (non-backup)</RuleName>
+    <RuleId>nbi-vsphere-vm-created</RuleId>
+    <RuleType>query</RuleType>
+    <Index>logs-vsphere.log-*</Index>
+    <TriggerLogic>The deployed rule is a query rule over the vCenter log stream. Its detection logic reduces to:
+
+
+
+One-line Kibana-KQL detection filter (for fast pivoting in Discover / Timeline):
+
+
+
+Plain English: a non-backup VM-creation event. In NBI the creation line renders as [NBIRQ\&lt;actor&gt;] [NBI-Datacenter] [&lt;taskid&gt;] [Creating &lt;VM&gt; on &lt;ESXi host&gt;, in NBI-Datacenter], so the actor (DOMAIN\user), the VM name, and the target ESXi host are all inside message. The Veeam.Backup exclusion removes the backup product's own instant-recovery / SureBackup VM instantiations, which are frequent and benign; every other creating identity is in scope. The investigation parses message with ES|QL DISSECT on the [actor] [datacenter] [taskid] [detail] structure. ScanWave or any scanner-created VM is investigated identically and never auto-trusted.</TriggerLogic>
+    <KeyAlertFields>event.dataset, vsphere.log, host.name, log.source.address, user.name, process.name</KeyAlertFields>
+  </AlertContext>
+  <Inputs>
+    <Input name="$vm"/>
+    <Input name="$actor"/>
+    <Input name="$esxi"/>
+    <Input name="$source_ip"/>
+  </Inputs>
+  <ExecutiveSummary>
+    <Overview>This playbook drives triage and investigation of the Virtual Machine Created (non-backup) detection on NBI's Elastic Security deployment. The rule fires when a vCenter vpxd event records that a new VM is being created in NBI-Datacenter by a non-backup identity - the free-text message contains Creating and in NBI-Datacenter and is not a Veeam.Backup task.
+
+VM creation is routine provisioning when performed by an authorised admin under change control. But an attacker with vCenter access can also create a rogue VM to run unmonitored compute inside the trusted virtualization tier - a foothold, a C2 relay, a data-staging box, or a cloned copy of a sensitive system - the "run virtual instance" evasion. A rogue VM runs on trusted infrastructure and storage but outside normal endpoint monitoring.
+
+The analyst's job is to decide whether this creation is authorised, change-controlled provisioning by a recognised admin from an expected source (false_positive), an unauthorised / rogue VM (true_positive), a legitimate-but-unbaselined automation (misconfiguration), or unprovable from available data (needs_escalation) - driven by *who* created it, *from where* they logged in, whether it is part of a *coherent provisioning batch*, and *where* it was placed.</Overview>
+    <BusinessImpact>An alert means: a non-backup identity ($actor) stood up a new virtual machine ($vm) on an ESXi host ($esxi) in NBI-Datacenter. The event is the vCenter task that registers the VM in inventory. Because it happens at the control plane, the new VM:
+
+- runs on trusted datacenter compute and storage, adjacent to core banking systems;
+- is not enrolled in endpoint monitoring, patching, or the standard build pipeline unless the admin adds it;
+- can be given any network, any disk (including a clone/mount of another VM's disk), and any name - including one that mimics a legitimate project prefix.
+
+The alert does not say whether the creation was authorised - it says a VM appeared by a non-backup hand. The investigation decides *who*, *from where*, *as part of what*, and *whether a change record matches*.</BusinessImpact>
+  </ExecutiveSummary>
+  <Investigation>
+    <Goal>Decide true_positive / false_positive / misconfiguration / needs_escalation for VMware vSphere — Virtual Machine Created (non-backup).</Goal>
+    <Workflow>
+      <Step order="1" name="Confirm the creation - actor, VM and placement (reused from the deployed playbook, verbatim)">
+        <Purpose>Confirm the creation - actor, VM and placement (reused from the deployed playbook, verbatim)</Purpose>
+        <Query platform="Elastic" language="ES|QL" id="Q-01">
+          <![CDATA[
+FROM logs-vsphere.log-*
+| WHERE event.dataset == "vsphere.log"
+    AND message LIKE "*$vm*"
+    AND TO_LOWER(message) LIKE "*creating*"
+    AND @timestamp >= NOW() - 2 hours
+| DISSECT message "[%{actor}] [%{datacenter}] [%{taskid}] [%{detail}]"
+| WHERE detail IS NOT NULL
+| KEEP @timestamp, actor, taskid, detail, log.source.address
+| SORT @timestamp DESC
+| LIMIT 15
+]]>
+        </Query>
+      </Step>
+      <Step order="2" name="Reconstruct the actor's vCenter session (reused from the deployed playbook, verbatim)">
+        <Purpose>Reconstruct the actor's vCenter session (reused from the deployed playbook, verbatim)</Purpose>
+        <Query platform="Elastic" language="ES|QL" id="Q-02">
+          <![CDATA[
+FROM logs-vsphere.log-*
+| WHERE event.dataset == "vsphere.log"
+    AND message LIKE "*$actor*"
+    AND @timestamp >= NOW() - 2 hours
+| DISSECT message "[%{actor}] [%{datacenter}] [%{taskid}] [%{detail}]"
+| WHERE detail IS NOT NULL
+| KEEP @timestamp, actor, detail
+| SORT @timestamp ASC
+| LIMIT 60
+]]>
+        </Query>
+      </Step>
+      <Step order="3" name="Entity pivoting">
+        <Purpose>Entity pivoting</Purpose>
+        <Query platform="Elastic" language="ES|QL" id="Q-03">
+          <![CDATA[
+FROM logs-vsphere.log-*
+| WHERE event.dataset == "vsphere.log"
+    AND message LIKE "*$vm*"
+    AND @timestamp >= NOW() - 4 hours
+| DISSECT message "[%{actor}] [%{datacenter}] [%{taskid}] [%{detail}]"
+| WHERE detail IS NOT NULL
+| KEEP @timestamp, actor, taskid, detail
+| SORT @timestamp DESC
+| LIMIT 40
+]]>
+        </Query>
+      </Step>
+      <Step order="4" name="User investigation">
+        <Purpose>User investigation</Purpose>
+        <Query platform="Elastic" language="ES|QL" id="Q-04">
+          <![CDATA[
+FROM logs-vsphere.log-*
+| WHERE event.dataset == "vsphere.log"
+    AND message LIKE "*$actor*"
+    AND @timestamp >= NOW() - 4 hours
+| DISSECT message "[%{actor}] [%{datacenter}] [%{taskid}] [%{detail}]"
+| WHERE detail IS NOT NULL
+| STATS events = COUNT(*), details = VALUES(detail) BY actor
+| SORT events DESC
+| LIMIT 20
+]]>
+        </Query>
+      </Step>
+      <Step order="5" name="Host investigation">
+        <Purpose>Host investigation</Purpose>
+        <Query platform="Elastic" language="ES|QL" id="Q-05">
+          <![CDATA[
+FROM logs-vsphere.log-*
+| WHERE event.dataset == "vsphere.log"
+    AND message LIKE "*$esxi*"
+    AND @timestamp >= NOW() - 4 hours
+| KEEP @timestamp, message
+| SORT @timestamp DESC
+| LIMIT 40
+]]>
+        </Query>
+      </Step>
+      <Step order="6" name="IP investigation">
+        <Purpose>IP investigation</Purpose>
+        <Query platform="Elastic" language="ES|QL" id="Q-06">
+          <![CDATA[
+FROM logs-vsphere.log-*
+| WHERE event.dataset == "vsphere.log"
+    AND message LIKE "*$source_ip*"
+    AND TO_LOWER(message) LIKE "*login*"
+    AND @timestamp >= NOW() - 4 hours
+| DISSECT message "[%{actor}] [%{datacenter}] [%{taskid}] [%{detail}]"
+| WHERE detail IS NOT NULL
+| KEEP @timestamp, actor, detail
+| SORT @timestamp DESC
+| LIMIT 30
+]]>
+        </Query>
+      </Step>
+      <Step order="7" name="File investigation">
+        <Purpose>File investigation</Purpose>
+        <Query platform="Elastic" language="ES|QL" id="Q-07">
+          <![CDATA[
+FROM logs-vsphere.log-*
+| WHERE event.dataset == "vsphere.log"
+    AND message LIKE "*$vm*"
+    AND (TO_LOWER(message) LIKE "*.vmx*" OR TO_LOWER(message) LIKE "*vmfs*")
+    AND @timestamp >= NOW() - 4 hours
+| KEEP @timestamp, message
+| SORT @timestamp DESC
+| LIMIT 20
+]]>
+        </Query>
+      </Step>
+      <Step order="8" name="Authentication investigation">
+        <Purpose>Authentication investigation</Purpose>
+        <Query platform="Elastic" language="ES|QL" id="Q-08">
+          <![CDATA[
+FROM logs-vsphere.log-*
+| WHERE event.dataset == "vsphere.log"
+    AND message LIKE "*$actor*"
+    AND (TO_LOWER(message) LIKE "*login*" OR TO_LOWER(message) LIKE "*logged in*"
+         OR TO_LOWER(message) LIKE "*logged out*")
+    AND @timestamp >= NOW() - 4 hours
+| DISSECT message "[%{actor}] [%{datacenter}] [%{taskid}] [%{detail}]"
+| WHERE detail IS NOT NULL
+| KEEP @timestamp, actor, detail
+| SORT @timestamp DESC
+| LIMIT 30
+]]>
+        </Query>
+      </Step>
+      <Step order="9" name="Timeline Reconstruction">
+        <Purpose>Timeline Reconstruction</Purpose>
+        <Query platform="Elastic" language="ES|QL" id="Q-09">
+          <![CDATA[
+FROM logs-vsphere.log-*
+| WHERE event.dataset == "vsphere.log"
+    AND message LIKE "*$actor*"
+    AND @timestamp >= NOW() - 4 hours
+| DISSECT message "[%{actor}] [%{datacenter}] [%{taskid}] [%{detail}]"
+| WHERE detail IS NOT NULL
+| KEEP @timestamp, actor, taskid, detail
+| SORT @timestamp ASC
+| LIMIT 200
+]]>
+        </Query>
+      </Step>
+      <Step order="10" name="Lateral movement validation">
+        <Purpose>Lateral movement validation</Purpose>
+        <Query platform="Elastic" language="ES|QL" id="Q-10">
+          <![CDATA[
+FROM logs-vsphere.log-*
+| WHERE event.dataset == "vsphere.log"
+    AND message LIKE "*$actor*"
+    AND (TO_LOWER(message) LIKE "*ssh session was opened*" OR TO_LOWER(message) LIKE "*.nbirq.com*"
+         OR TO_LOWER(message) LIKE "*task:*")
+    AND @timestamp >= NOW() - 4 hours
+| DISSECT message "[%{actor}] [%{datacenter}] [%{taskid}] [%{detail}]"
+| WHERE detail IS NOT NULL
+| STATS events = COUNT(*), details = VALUES(detail) BY actor
+| SORT events DESC
+| LIMIT 20
+]]>
+        </Query>
+      </Step>
+      <Step order="11" name="Persistence validation">
+        <Purpose>Persistence validation</Purpose>
+        <Query platform="Elastic" language="ES|QL" id="Q-11">
+          <![CDATA[
+FROM logs-vsphere.log-*
+| WHERE event.dataset == "vsphere.log"
+    AND message LIKE "*$actor*"
+    AND (TO_LOWER(message) LIKE "*creating*" OR TO_LOWER(message) LIKE "*ssh session was opened*"
+         OR TO_LOWER(message) LIKE "*permission*" OR TO_LOWER(message) LIKE "*password was changed*")
+    AND @timestamp >= NOW() - 4 hours
+| DISSECT message "[%{actor}] [%{datacenter}] [%{taskid}] [%{detail}]"
+| WHERE detail IS NOT NULL
+| KEEP @timestamp, actor, detail
+| SORT @timestamp DESC
+| LIMIT 30
+]]>
+        </Query>
+      </Step>
+      <Step order="12" name="Privilege escalation validation">
+        <Purpose>Privilege escalation validation</Purpose>
+        <Query platform="Elastic" language="ES|QL" id="Q-12">
+          <![CDATA[
+FROM logs-vsphere.log-*
+| WHERE event.dataset == "vsphere.log"
+    AND message LIKE "*$actor*"
+    AND (TO_LOWER(message) LIKE "*password was changed*" OR TO_LOWER(message) LIKE "*permission*"
+         OR TO_LOWER(message) LIKE "*role*" OR TO_LOWER(message) LIKE "*added*")
+    AND @timestamp >= NOW() - 4 hours
+| DISSECT message "[%{actor}] [%{datacenter}] [%{taskid}] [%{detail}]"
+| WHERE detail IS NOT NULL
+| KEEP @timestamp, actor, detail
+| SORT @timestamp DESC
+| LIMIT 30
+]]>
+        </Query>
+      </Step>
+      <Step order="13" name="Defense evasion validation">
+        <Purpose>Defense evasion validation</Purpose>
+        <Query platform="Elastic" language="ES|QL" id="Q-13">
+          <![CDATA[
+FROM logs-vsphere.log-*
+| WHERE event.dataset == "vsphere.log"
+    AND message LIKE "*$actor*"
+    AND (TO_LOWER(message) LIKE "*powered off*" OR TO_LOWER(message) LIKE "*removed*"
+         OR TO_LOWER(message) LIKE "*is powered off*")
+    AND @timestamp >= NOW() - 4 hours
+| DISSECT message "[%{actor}] [%{datacenter}] [%{taskid}] [%{detail}]"
+| WHERE detail IS NOT NULL
+| KEEP @timestamp, actor, detail
+| SORT @timestamp DESC
+| LIMIT 30
+]]>
+        </Query>
+      </Step>
+      <Step order="14" name="Impact assessment">
+        <Purpose>Impact assessment</Purpose>
+        <Query platform="Elastic" language="ES|QL" id="Q-14">
+          <![CDATA[
+FROM logs-vsphere.log-*
+| WHERE event.dataset == "vsphere.log"
+    AND message LIKE "*$actor*"
+    AND TO_LOWER(message) LIKE "*creating*"
+    AND @timestamp >= NOW() - 4 hours
+| DISSECT message "[%{actor}] [%{datacenter}] [%{taskid}] [Creating %{vm} on %{placement}]"
+| WHERE vm IS NOT NULL
+| STATS vms_created = COUNT(*), vm_list = VALUES(vm), first_seen = MIN(@timestamp), last_seen = MAX(@timestamp)
+    BY actor
+| SORT vms_created DESC
+| LIMIT 15
+]]>
+        </Query>
+      </Step>
+      <Step order="15" name="Finalize verdict">
+        <DecisionTree>
+        </DecisionTree>
+      </Step>
+    </Workflow>
+  </Investigation>
+  <ClassificationGuidance>
+    <TruePositive>
+      <Definition></Definition>
+    </TruePositive>
+    <FalsePositive>
+      <Definition></Definition>
+      <Indicators>
+        <Item>Authorised, change-controlled provisioning by a recognised admin - the dominant benign cause. Confirm against the change/rollout ticket and the naming convention, never assumed from the admin's name.</Item>
+        <Item>Automation / orchestration (a provisioning pipeline, template/DRS flow, or IaC tool) creating VMs on a schedule. Legitimate, but treated as misconfiguration until the automation identity is baselined and tagged (see section 6, section 13).</Item>
+        <Item>Backup / DR instantiation - Veeam instant-recovery, SureBackup, or replica power-on. The rule already excludes Veeam.Backup; a different backup/DR identity not covered by that exclusion can still fire and is benign once confirmed.</Item>
+        <Item>A creation attempt that failed - the task errored and no VM was registered. This is a *blocked action*, documented as such, never labelled "benign".</Item>
+        <Item>Non-backup creations are rare and bursty. The XML-era baseline recorded 5 non-backup creations in 7 days, in provisioning batches by admin accounts. A single, off-hours VM by an account that does not routinely provision stands out sharply against that baseline.</Item>
+        <Item>The actor renders in two forms. A named admin appears as NBIRQ\&lt;user&gt; on task/login-client lines (e.g. User NBIRQ\Wahab.Admin@127.0.0.1 logged in as VMware vim-java 1.0) and as &lt;user&gt;@NBIRQ.COM on the SSO line that carries the source IP (e.g. Successful login Wahab.Admin@NBIRQ.COM from 10.11.18.4 ... in SSO). Key actor pivots on the bare username so both match. Real admins observed live include Wahab.Admin, karrar.admin, and Ahmed.Adminnnnnn.</Item>
+        <Item>host.name is the vCenter appliance, not the new VM or its host. Every record carries host.name = nx-vcsa01 and log.source.address = 10.11.150.206:40066 (the vCenter's log-shipping address). The target ESXi host is inside message; the actor's origin is the SSO-line IP, not log.source.address.</Item>
+        <Item>user.name is null on this dataset. All actor/VM/host entities are parsed from message; there is no structured actor field to key on.</Item>
+      </Indicators>
+    </FalsePositive>
+    <Misconfiguration>
+      <Definition></Definition>
+    </Misconfiguration>
+    <NeedsEscalation>
+      <Definition></Definition>
+    </NeedsEscalation>
+  </ClassificationGuidance>
+  <ResponseActions>
+    <Phase name="Containment">
+      <Action>Isolate and preserve the VM if a true_positive is confirmed: power it off and disconnect its network (preserve it for forensics - do not delete), so it cannot act while you investigate. On a shared cluster, coordinate with the virtualization team to avoid impacting neighbours.</Action>
+      <Action>Revoke the actor's vCenter access - disable the acting SSO/admin account, kill active sessions, and remove any SSH sessions opened (section 17.2).</Action>
+      <Action>Snapshot the VM's disk/state for forensics before any removal, and record its datastore path (section 15.10), network attachment, and configuration.</Action>
+      <Action>Perform changes only via the authorised, human-approved DEPLOY path; investigation itself is read-only.</Action>
+    </Phase>
+    <Phase name="Eradication">
+      <Action>Remove the rogue VM after forensic preservation, and remove any persistence the actor established (additional VMs, ESXi SSH access, unauthorised accounts/permissions - section 17.2/section 17.3).</Action>
+      <Action>Audit the vCenter permission model for changes the actor may have made, and revert unauthorised grants.</Action>
+      <Action>Hunt for peers: the same actor/source creating VMs elsewhere (section 17.1/section 17.5), and any data the rogue VM may have staged (its datastore/disk).</Action>
+      <Action>Remediate the access path that let the actor reach vCenter (stolen SSO credentials, exposed management interface, compromised jump host).</Action>
+    </Phase>
+    <Phase name="Recovery">
+      <Action>Confirm the environment is clean: no rogue VMs remain, the actor's account is contained and credentials rotated, and vCenter create privileges are restricted (least privilege / just-in-time).</Action>
+      <Action>Restore anything the incident disrupted (VMs powered off/removed in the same session - section 17.4) from known-good, immutable backups.</Action>
+      <Action>Return provisioning to normal only after section 22 closing criteria are met and monitoring confirms no further out-of-window creations recur.</Action>
+      <Action>Harden (see section 23): enforce change-controlled provisioning, tag automation identities, and alert on creation outside provisioning windows or by non-provisioning accounts.</Action>
+    </Phase>
+  </ResponseActions>
+  <Escalation>
+    <Trigger>Escalate to Tier 3 / Incident Response (and notify the customer) when any of the following hold:
+
+- The creating account is not a recognised provisioning admin, or logged in from an unexpected source (section 15.6/section 15.12), with no matching change record.
+- The VM is a lone, unexplained instance on an unusual placement (section 14.1/section 17.5), or the session mixed creation with destructive actions (section 17.4).
+- The actor also changed credentials/permissions or created additional VMs / opened SSH at the hypervisor tier (section 17.2/section 17.3) - consolidation of control.
+- Evidence is incomplete because of NBI's telemetry gaps (no guest-OS visibility) and the alert cannot be safely cleared - escalate as needs_escalation with the gaps named.</Trigger>
+    <To>SOC L2 / IR</To>
+  </Escalation>
+  <ClosureCriteria>
+    <Item>false_positive (authorised provisioning): a change/rollout ticket positively matches the exact $vm + $actor + time, from an expected source, in a coherent batch. Record the reference; scope any exception narrowly.</Item>
+    <Item>false_positive (proven-failed): the create task errored and no VM was registered; documented as a blocked action (never "benign").</Item>
+    <Item>misconfiguration: a recognised automation/orchestrator created the VM and was simply not baselined; the automation is baselined and tagged.</Item>
+    <Item>true_positive: an unauthorised / rogue VM is confirmed; the VM is preserved then removed, the actor contained, peers and the access path investigated, and no recurrence on monitoring.</Item>
+    <Item>needs_escalation: handed to Tier 3/IR with the specific evidence gaps documented.</Item>
+  </ClosureCriteria>
+  <Limitations>
+    <Item>All entities live in message. No structured user.name/VM/host field exists on logs-vsphere.log-*; host.name is the vCenter appliance and log.source.address is its shipping address. Parse with DISSECT on [actor] [datacenter] [taskid] [detail], and key actor pivots on the bare username (both NBIRQ\&lt;user&gt; and &lt;user&gt;@NBIRQ.COM forms).</Item>
+    <Item>The SSO line is the origin signal. The actor's source IP appears only in Successful login &lt;user&gt;@NBIRQ.COM from &lt;ip&gt; ... in SSO; the client/user agent (vim-java interactive vs vAPI/API-GW scripted) distinguishes human from automation. This is the fastest way to separate an expected admin from a foothold.</Item>
+    <Item>The datastore path is the file artifact. The raw vpxd provisioning/migration lines carry the VM's .vmx/vmfs path (section 15.10) - a clone of another VM's disk or an unusual datastore is high-signal, and it is the only "file" pivot this index supports.</Item>
+    <Item>The rogue VM's behaviour is invisible here. NBI has no guest-OS telemetry for the created VM; its process/network activity is not in this index. Do not wait for in-VM evidence - pivot on the actor's session and the perimeter (FortiGate) for the VM's outbound traffic during response.</Item>
+    <Item>Rare, bursty event. Non-backup creations were ≈5 in 7 days; a 0-row confirm query is normal. Anchor on the alert timestamp and widen via the vCenter task/event UI.</Item>
+    <Item>KB-worthy (persist to NBI customer scope): (1) logs-vsphere.log-* host.name≡nx-vcsa01 and log.source.address≡10.11.150.206:40066 are constants (vCenter appliance), not the VM/host/actor; (2) user.name is null - entities parsed from message; (3) named admins render as NBIRQ\&lt;user&gt; and &lt;user&gt;@NBIRQ.COM, source IP only in the SSO line; live admins include Wahab.Admin, karrar.admin, Ahmed.Adminnnnnn from 10.11.18.x; (4) the raw vpxd lines carry the VM .vmx/vmfs datastore path; (5) Veeam.Backup is the excluded backup identity. Observed live on 2026-08-17.</Item>
+  </Limitations>
+</Playbook>

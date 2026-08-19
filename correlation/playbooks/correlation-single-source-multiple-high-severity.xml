@@ -1,0 +1,362 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<Playbook xmlns="https://soc.example/playbooks" id="PB-correlation-single-source-multiple-high-severity" name="Correlation — Single Source Firing Multiple High-Severity Detections - SOC Playbook" version="3.0" status="Validated" classification="TLP:AMBER">
+  <Metadata>
+    <Owner>NBI SOC / Detection Engineering</Owner>
+    <LastUpdated>2026-08-19</LastUpdated>
+    <Severity default="critical">critical</Severity>
+    <Confidence default="Medium">Medium</Confidence>
+    <Category>Lateral Movement</Category>
+    <MitreAttack>
+      <Technique id="T1078.002"/>
+      <Technique id="T1078"/>
+      <Tactic id="TA0008"/>
+      <Tactic id="TA0007"/>
+      <Tactic id="TA0006"/>
+    </MitreAttack>
+    <References>
+      <Reference title="MITRE ATT&amp;CK - Valid Accounts: Domain Accounts (T1078.002)" url="https://attack.mitre.org/techniques/T1078/002/"/>
+      <Reference title="MITRE ATT&amp;CK - Lateral Movement tactic (TA0008)" url="https://attack.mitre.org/tactics/TA0008/"/>
+      <Reference title="MITRE ATT&amp;CK - Credential Access tactic (TA0006)" url="https://attack.mitre.org/tactics/TA0006/"/>
+      <Reference title="MITRE ATT&amp;CK - Discovery tactic (TA0007)" url="https://attack.mitre.org/tactics/TA0007/"/>
+      <Reference title="MITRE ATT&amp;CK - Enterprise tactics index" url="https://attack.mitre.org/tactics/enterprise/"/>
+      <Reference title="Elastic - ES|QL correlation across the alerts index (.internal.alerts-security.alerts-*)" url="https://www.elastic.co/guide/en/security/current/rules-ui-create.html"/>
+      <Reference title="Elastic - ES|QL language reference" url="https://www.elastic.co/guide/en/elasticsearch/reference/current/esql.html"/>
+      <Reference title="Elastic - Windows Security event reference (logon/audit codes)" url="https://www.elastic.co/docs/reference/integrations/system"/>
+    </References>
+  </Metadata>
+  <AlertContext>
+    <RuleName>Correlation — Single Source Firing Multiple High-Severity Detections</RuleName>
+    <RuleId>nbi-corr-multistage-attack-chain</RuleId>
+    <RuleType>esql</RuleType>
+    <Index>.internal.alerts-security.alerts-*</Index>
+    <TriggerLogic>The deployed rule is an ES|QL meta-correlation (verbatim from the rule definition; shown as the rule's stored ES|QL, which evaluates over a 24-hour rule-level lookback rather than an inline investigation window):
+
+
+
+Plain English: over the 24-hour lookback (from: now-24h, interval: 1h), group open high/critical alerts that carry a source.ip and a rule.name by source.ip, and fire for any source associated with ≥2 distinct rule names. total_alerts counts every contributing alert; rules lists the distinct rule names.
+
+Two caveats that shape triage:
+- The tactics column is populated from kibana.alert.rule.name, not an ATT&amp;CK-tactic field - a rule quirk. Treat it as a second copy of the rule names, and map each rule to its tactic manually (section 11).
+- Only alerts with a populated source.ip correlate. Host-local detections that carry no source.ip will not appear here and must be corroborated via the underlying behaviour (section 8).
+
+One-line Kibana KQL filter to list a source's contributing alerts in the Alerts view:</TriggerLogic>
+    <KeyAlertFields>source.ip, kibana.alert.rule.name, kibana.alert.severity, kibana.alert.workflow_status, process.entity_id, process.pid, process.parent.pid</KeyAlertFields>
+  </AlertContext>
+  <Inputs>
+    <Input name="$source_ip"/>
+    <Input name="$host"/>
+  </Inputs>
+  <ExecutiveSummary>
+    <Overview>This playbook drives triage and investigation of the Correlation - Single Source Firing Multiple High-Severity Detections analytic on NBI's Elastic Security deployment. It is a meta-correlation rule over the security alerts index: it fires when one source.ip is associated with two or more distinct high/critical-severity, non-closed detections in the lookback window.
+
+One entity tripping several independent analytics is how a multi-stage intrusion looks - reconnaissance, then credential access, then lateral movement from the same origin. It is also how a few legitimate high-activity systems look: the vulnerability scanner, an authentication aggregator, or a management server can each trip multiple analytics by design. The analyst's job is to decide whether the correlated activity is one coordinated intrusion (true_positive), a sanctioned high-activity source (false_positive - authorised), a noisy/misconfigured but benign source (misconfiguration), or unproven (needs_escalation) - by reading the actual story the fired rules tell and corroborating it in raw telemetry. Authorisation of any source (including any scanner such as ScanWave) is context to verify, never an automatic verdict - a scanner is investigated exactly as any other source.</Overview>
+    <BusinessImpact>An alert means: $source_ip is the common denominator across ≥2 distinct open high/critical detections. It does not by itself mean an intrusion succeeded - it means multiple independent analytics saw this origin. The investigative questions are:
+
+1. Are the fired rules genuinely independent stages (Discovery → Credential Access → Lateral Movement in time order), or several firings of one behaviour / two rules on the same event double-counting the picture?
+2. Did the underlying behaviour actually succeed (successful logons, admin-share access, real data movement), or was it probing/failed attempts?
+3. Is $source_ip a sanctioned high-activity source (scanner, auth aggregator, management/Citrix host) whose role explains broad multi-rule activity - confirmed against behaviour, not assumed?
+
+The verdict rests on whether the behaviours succeeded and were unauthorised, not merely on how many rules fired.</BusinessImpact>
+  </ExecutiveSummary>
+  <Investigation>
+    <Goal>Decide true_positive / false_positive / misconfiguration / needs_escalation for Correlation — Single Source Firing Multiple High-Severity Detections.</Goal>
+    <Workflow>
+      <Step order="1" name="Reproduce the correlation for the source (confirm the rule logic)">
+        <Purpose>Reproduce the correlation for the source (confirm the rule logic)</Purpose>
+        <Query platform="Elastic" language="ES|QL" id="Q-01">
+          <![CDATA[
+FROM .internal.alerts-security.alerts-*
+| WHERE @timestamp >= NOW() - 4 hours
+    AND source.ip == "$source_ip"
+    AND kibana.alert.rule.name IS NOT NULL
+    AND kibana.alert.severity IN ("high", "critical")
+    AND kibana.alert.workflow_status != "closed"
+| STATS distinct_rules = COUNT_DISTINCT(kibana.alert.rule.name), total_alerts = COUNT(*), rules = VALUES(kibana.alert.rule.name), first_seen = MIN(@timestamp), last_seen = MAX(@timestamp)
+| LIMIT 5
+]]>
+        </Query>
+      </Step>
+      <Step order="2" name="Corroborate the source in raw telemetry (authentication reality)">
+        <Purpose>Corroborate the source in raw telemetry (authentication reality)</Purpose>
+        <Query platform="Elastic" language="ES|QL" id="Q-02">
+          <![CDATA[
+FROM logs-system.security-*
+| WHERE @timestamp >= NOW() - 4 hours
+    AND source.ip == "$source_ip"
+    AND event.code IN ("4624", "4625", "4648", "4768", "4769", "5140", "5145")
+| STATS events = COUNT(*), hosts = COUNT_DISTINCT(host.name), accounts = COUNT_DISTINCT(winlog.event_data.TargetUserName) BY event.code
+| SORT events DESC
+| LIMIT 12
+]]>
+        </Query>
+      </Step>
+      <Step order="3" name="Entity pivoting">
+        <Purpose>Entity pivoting</Purpose>
+        <Query platform="Elastic" language="ES|QL" id="Q-03">
+          <![CDATA[
+FROM .internal.alerts-security.alerts-*
+| WHERE @timestamp >= NOW() - 4 hours
+    AND source.ip == "$source_ip"
+    AND kibana.alert.severity IN ("high", "critical")
+    AND kibana.alert.workflow_status != "closed"
+| STATS alerts = COUNT(*), first_seen = MIN(@timestamp), last_seen = MAX(@timestamp) BY kibana.alert.rule.name
+| SORT alerts DESC
+| LIMIT 25
+]]>
+        </Query>
+      </Step>
+      <Step order="4" name="Process investigation">
+        <Purpose>Process investigation</Purpose>
+        <Query platform="Elastic" language="ES|QL" id="Q-04">
+          <![CDATA[
+FROM logs-system.security-*
+| WHERE @timestamp >= NOW() - 4 hours
+    AND event.code == "4688"
+    AND host.name == "$host"
+| STATS executions = COUNT(*), users = COUNT_DISTINCT(user.name) BY process.name, process.parent.name
+| SORT executions DESC
+| LIMIT 40
+]]>
+        </Query>
+      </Step>
+      <Step order="5" name="Parent-Child process analysis">
+        <Purpose>Parent-Child process analysis</Purpose>
+        <Query platform="Elastic" language="ES|QL" id="Q-05">
+          <![CDATA[
+FROM logs-system.security-*
+| WHERE @timestamp >= NOW() - 4 hours
+    AND event.code == "4688"
+    AND host.name == "$host"
+| STATS executions = COUNT(*) BY process.parent.name, process.name
+| SORT executions ASC
+| LIMIT 40
+]]>
+        </Query>
+      </Step>
+      <Step order="6" name="User investigation">
+        <Purpose>User investigation</Purpose>
+        <Query platform="Elastic" language="ES|QL" id="Q-06">
+          <![CDATA[
+FROM logs-system.security-*
+| WHERE @timestamp >= NOW() - 4 hours
+    AND source.ip == "$source_ip"
+    AND event.code IN ("4624", "4625", "4648")
+| STATS events = COUNT(*), successes = COUNT(*) WHERE event.code == "4624", failures = COUNT(*) WHERE event.code == "4625" BY winlog.event_data.TargetUserName
+| SORT events DESC
+| LIMIT 40
+]]>
+        </Query>
+      </Step>
+      <Step order="7" name="Host investigation">
+        <Purpose>Host investigation</Purpose>
+        <Query platform="Elastic" language="ES|QL" id="Q-07">
+          <![CDATA[
+FROM logs-system.security-*
+| WHERE @timestamp >= NOW() - 4 hours
+    AND host.name == "$host"
+| STATS events = COUNT(*), accounts = COUNT_DISTINCT(winlog.event_data.TargetUserName), sources = COUNT_DISTINCT(source.ip) BY event.code
+| SORT events DESC
+| LIMIT 20
+]]>
+        </Query>
+      </Step>
+      <Step order="8" name="IP investigation">
+        <Purpose>IP investigation</Purpose>
+        <Query platform="Elastic" language="ES|QL" id="Q-08">
+          <![CDATA[
+FROM logs-system.security-*
+| WHERE @timestamp >= NOW() - 4 hours
+    AND source.ip == "$source_ip"
+| STATS events = COUNT(*), hosts = COUNT_DISTINCT(host.name), accounts = COUNT_DISTINCT(winlog.event_data.TargetUserName) BY event.code
+| SORT events DESC
+| LIMIT 20
+]]>
+        </Query>
+      </Step>
+      <Step order="9" name="File investigation">
+        <Purpose>File investigation</Purpose>
+        <Query platform="Elastic" language="ES|QL" id="Q-09">
+          <![CDATA[
+FROM logs-system.security-*
+| WHERE @timestamp >= NOW() - 4 hours
+    AND source.ip == "$source_ip"
+    AND event.code IN ("5140", "5145")
+| STATS accesses = COUNT(*), hosts = COUNT_DISTINCT(host.name) BY event.code, winlog.event_data.ShareName
+| SORT accesses DESC
+| LIMIT 30
+]]>
+        </Query>
+      </Step>
+      <Step order="10" name="Authentication investigation">
+        <Purpose>Authentication investigation</Purpose>
+        <Query platform="Elastic" language="ES|QL" id="Q-10">
+          <![CDATA[
+FROM logs-system.security-*
+| WHERE @timestamp >= NOW() - 4 hours
+    AND source.ip == "$source_ip"
+    AND event.code IN ("4624", "4625", "4648")
+| STATS events = COUNT(*), first_seen = MIN(@timestamp), last_seen = MAX(@timestamp) BY event.code, winlog.event_data.LogonType, host.name
+| SORT events DESC
+| LIMIT 30
+]]>
+        </Query>
+      </Step>
+      <Step order="11" name="Timeline Reconstruction">
+        <Purpose>Timeline Reconstruction</Purpose>
+        <Query platform="Elastic" language="ES|QL" id="Q-11">
+          <![CDATA[
+FROM logs-system.security-*
+| WHERE @timestamp >= NOW() - 4 hours
+    AND source.ip == "$source_ip"
+    AND event.code IN ("4624", "4625", "4648", "4768", "4769", "5145")
+| KEEP @timestamp, event.code, host.name, winlog.event_data.TargetUserName, winlog.event_data.LogonType
+| SORT @timestamp ASC
+| LIMIT 300
+]]>
+        </Query>
+      </Step>
+      <Step order="12" name="Lateral movement validation">
+        <Purpose>Lateral movement validation</Purpose>
+        <Query platform="Elastic" language="ES|QL" id="Q-12">
+          <![CDATA[
+FROM logs-system.security-*
+| WHERE @timestamp >= NOW() - 4 hours
+    AND source.ip == "$source_ip"
+    AND event.code IN ("4624", "4648", "4768", "4769", "5140", "5145")
+    AND host.name != "$host"
+| STATS events = COUNT(*) BY host.name, event.code
+| SORT events DESC
+| LIMIT 30
+]]>
+        </Query>
+      </Step>
+      <Step order="13" name="Persistence validation">
+        <Purpose>Persistence validation</Purpose>
+        <Query platform="Elastic" language="ES|QL" id="Q-13">
+          <![CDATA[
+FROM logs-system.security-*
+| WHERE @timestamp >= NOW() - 4 hours
+    AND host.name == "$host"
+    AND event.code IN ("7045", "4698", "4720")
+| STATS events = COUNT(*) BY event.code, winlog.event_data.TargetUserName
+| SORT events DESC
+| LIMIT 30
+]]>
+        </Query>
+      </Step>
+      <Step order="14" name="Privilege escalation validation">
+        <Purpose>Privilege escalation validation</Purpose>
+        <Query platform="Elastic" language="ES|QL" id="Q-14">
+          <![CDATA[
+FROM logs-system.security-*
+| WHERE @timestamp >= NOW() - 4 hours
+    AND event.code == "4672"
+    AND host.name == "$host"
+| STATS special_priv_logons = COUNT(*) BY winlog.event_data.TargetUserName
+| SORT special_priv_logons DESC
+| LIMIT 25
+]]>
+        </Query>
+      </Step>
+      <Step order="15" name="Defense evasion validation">
+        <Purpose>Defense evasion validation</Purpose>
+        <Query platform="Elastic" language="ES|QL" id="Q-15">
+          <![CDATA[
+FROM logs-system.security-*
+| WHERE @timestamp >= NOW() - 4 hours
+    AND host.name == "$host"
+    AND event.code IN ("1102", "4719")
+| STATS events = COUNT(*) BY event.code, winlog.event_data.SubjectUserName
+| SORT events DESC
+| LIMIT 20
+]]>
+        </Query>
+      </Step>
+      <Step order="16" name="Impact assessment">
+        <Purpose>Impact assessment</Purpose>
+        <Query platform="Elastic" language="ES|QL" id="Q-16">
+          <![CDATA[
+FROM logs-system.security-*
+| WHERE @timestamp >= NOW() - 4 hours
+    AND source.ip == "$source_ip"
+    AND event.code IN ("4624", "4625", "5140", "5145")
+| STATS count = COUNT(*), hosts = COUNT_DISTINCT(host.name), accounts = COUNT_DISTINCT(winlog.event_data.TargetUserName) BY event.code
+| SORT count DESC
+| LIMIT 12
+]]>
+        </Query>
+      </Step>
+      <Step order="17" name="Finalize verdict">
+        <DecisionTree>
+        </DecisionTree>
+      </Step>
+    </Workflow>
+  </Investigation>
+  <ClassificationGuidance>
+    <TruePositive>
+      <Definition></Definition>
+    </TruePositive>
+    <FalsePositive>
+      <Definition></Definition>
+      <Indicators>
+        <Item>Vulnerability scanners (e.g. ScanWave) - trip discovery, web-vuln, and enumeration analytics by design. Never auto-trusted: a scanner's alerts are investigated identically to any source; only after confirming the source, scope, and that no unexpected *success* is hidden in the mix is it closed as authorised.</Item>
+        <Item>Authentication aggregators / app / Citrix / RDS hosts - front many users and legitimately produce broad auth activity (in NBI, the 10.11.15.0/24, 10.11.101.0/24, 10.11.102.0/24 ranges). They can trip spray/brute-force analytics without an attack.</Item>
+        <Item>Management / monitoring servers - touch many hosts and accounts, tripping lateral-movement-shaped analytics.</Item>
+        <Item>Two rules on one behaviour - a single event matched by two overlapping analytics inflates distinct_rules without being two independent stages.</Item>
+        <Item>10.11.15.0/24 is app/Citrix / auth-aggregator space. The validated source 10.11.15.86 sits here and produced 78 failed + 13 successful logons across 44 distinct accounts against nim-dc-dbap01 in 4h, alongside a high *Bulk LDAP Directory Dump* alert. That profile is consistent with either a legitimate aggregator/app host or an account-spray-plus-LDAP-enumeration chain - exactly the ambiguity this playbook resolves. Confirm the host's role in known_infrastructure and check for unexpected successful compromise before closing as authorised.</Item>
+        <Item>The known auth-aggregator / VDI ranges (10.11.15.0/24, 10.11.101.0/24, 10.11.102.0/24) are documented high-activity space; sources here commonly trip identity analytics. That is a reason to verify role, not to auto-clear.</Item>
+        <Item>Not every alert carries source.ip. Host-local detections (many endpoint/process rules) will not correlate here; a "quiet" correlation view does not mean a host is uninvolved - corroborate via section 15.12/section 17.</Item>
+        <Item>No blanket allow-list. If a source is confirmed sanctioned high-activity, record it in known_infrastructure scoped to the exact host and role - never a broad exception.</Item>
+      </Indicators>
+    </FalsePositive>
+    <Misconfiguration>
+      <Definition></Definition>
+    </Misconfiguration>
+    <NeedsEscalation>
+      <Definition></Definition>
+    </NeedsEscalation>
+  </ClassificationGuidance>
+  <ResponseActions>
+    <Phase name="Containment">
+      <Action>If a coordinated intrusion is confirmed: treat as an active incident - isolate/network-contain $source_ip (block at the segment/firewall) and the host(s) it successfully accessed, coordinating to avoid dropping unrelated production if $source_ip is shared infrastructure.</Action>
+      <Action>Contain the implicated accounts - disable/reset accounts the source successfully authenticated as (section 15.4/section 15.12), prioritising any that received 4672 (section 17.3).</Action>
+      <Action>Pivot into each contributing behaviour's playbook for stage-specific containment (e.g. rotate service-account passwords for a Kerberoasting stage).</Action>
+      <Action>Preserve evidence - the contributing alerts, the raw corroboration, and the timeline - before remediation. Investigation is read-only; containment changes go via the authorised human-approved DEPLOY path.</Action>
+    </Phase>
+    <Phase name="Eradication">
+      <Action>Remove persistence found in section 17.2 (services, scheduled tasks, rogue accounts) on affected hosts.</Action>
+      <Action>Remediate each stage - rotate exposed credentials (service accounts, sprayed/guessed accounts), close the discovery exposure (e.g. restrict LDAP/enumeration where abused), and remove any attacker tooling on $host.</Action>
+      <Action>Remediate the initial-access vector that gave $source_ip its foothold, and hunt the same source/accounts across peers (section 17.1).</Action>
+    </Phase>
+    <Phase name="Recovery">
+      <Action>Reset credentials for every account the source successfully used, and any privileged accounts exposed on affected hosts (section 17.3).</Action>
+      <Action>Restore affected hosts from known-good images if persistence/tampering was extensive; otherwise validate eradication holds after reboot.</Action>
+      <Action>Return sources/accounts to service only after section 22 closing criteria are met and monitoring confirms the correlation does not recur.</Action>
+      <Action>Tune contributing analytics and keep known_infrastructure current so sanctioned high-activity sources are recognised while still being investigated on behaviour.</Action>
+    </Phase>
+  </ResponseActions>
+  <Escalation>
+    <Trigger>Escalate to Tier 3 / IR (and notify the customer) when any of the following hold:
+
+- Two or more genuinely independent tactics converge on one non-infrastructure source with corroborated success/impact (section 14.2/section 17.5) - this is the incident the rule exists to catch.
+- A source's account gains special privileges (section 17.3) or persistence is installed on a touched host (section 17.2).
+- Lateral movement to additional hosts is confirmed (section 17.1), especially toward domain controllers or Tier-0 systems.
+- Log clearing / audit tampering appears (section 17.4), or the source targets known_infrastructure/Tier-0 assets.
+- The story is ambiguous or corroboration is incomplete and the correlation cannot be safely cleared - escalate as needs_escalation with the specific gaps named.</Trigger>
+    <To>SOC L2 / IR</To>
+  </Escalation>
+  <ClosureCriteria>
+    <Item>true_positive: coordinated multi-stage intrusion confirmed (independent, ordered stages with corroborated success); source isolated, each contributing behaviour worked and contained, affected accounts/hosts remediated, incident documented.</Item>
+    <Item>false_positive (authorised): $source_ip confirmed as a documented scanner/aggregator/management source whose role matches the behaviour, with no unexpected successful compromise - documented; source recorded/kept in known_infrastructure.</Item>
+    <Item>false_positive (blocked): a hostile source whose correlated behaviours were positively proven to fail (probing/failed auth, no success/impact) - a blocked malicious attempt, documented, never "benign".</Item>
+    <Item>misconfiguration: a benign noisy source tripped analytics without attack behaviour - contributing rules tuned / source baselined.</Item>
+    <Item>needs_escalation: handed to Tier 3 with the contributing-rule list, raw corroboration, source-role status, and the specific gaps.</Item>
+  </ClosureCriteria>
+  <Limitations>
+    <Item>Count success, not rules. The alert proves *N rules fired from one IP*; the verdict depends on whether the underlying behaviour succeeded. The section 14.2/section 15.12/section 17.5 corroboration (4624 successes, 5140/5145 share access) is the whole discriminator - run it every time. KB-worthy (NBI): source-IP correlation must be adjudicated on raw success/impact, not distinct_rules.</Item>
+    <Item>The tactics column is not tactics. The deployed query fills tactics from kibana.alert.rule.name - map each rule to its ATT&amp;CK tactic manually. Worth a rule-tuning note to populate a real tactic field.</Item>
+    <Item>10.11.15.0/24 (and 10.11.101/102.0/24) are high-activity space. The validated source 10.11.15.86 (app/Citrix range) hit nim-dc-dbap01 with failed+successful logons across 44 accounts plus an LDAP-dump alert - the exact aggregator-vs-intrusion ambiguity this rule surfaces. Confirm role and rule out hidden success before closing authorised. KB-worthy (NBI): 10.11.15.86 → nim-dc-dbap01 broad-auth profile; aggregator ranges are documented high-activity, never auto-trusted.</Item>
+    <Item>Scanners (ScanWave) are investigated, not whitelisted. A scanner tripping several analytics is expected but must be confirmed on behaviour with no unexpected success - never auto-cleared.</Item>
+    <Item>source.ip gates correlation. Alerts without source.ip (host-local detections) don't appear here; a quiet correlation view is not proof a host is uninvolved - corroborate the behaviour. All observations live on 2026-08-17.</Item>
+  </Limitations>
+</Playbook>

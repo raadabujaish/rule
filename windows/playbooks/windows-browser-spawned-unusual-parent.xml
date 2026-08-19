@@ -1,0 +1,369 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<Playbook xmlns="https://soc.example/playbooks" id="PB-windows-browser-spawned-unusual-parent" name="Browser Process Spawned from an Unusual Parent [NBI-4688] - SOC Playbook" version="3.0" status="Validated" classification="TLP:AMBER">
+  <Metadata>
+    <Owner>NBI SOC / Detection Engineering</Owner>
+    <LastUpdated>2026-08-19</LastUpdated>
+    <Severity default="high">high</Severity>
+    <Confidence default="Medium">Medium</Confidence>
+    <Category>Collection</Category>
+    <MitreAttack>
+      <Technique id="T1185"/>
+      <Technique id="T1539"/>
+      <Tactic id="TA0009"/>
+    </MitreAttack>
+    <References>
+      <Reference title="MITRE ATT&amp;CK - Browser Session Hijacking (T1185)" url="https://attack.mitre.org/techniques/T1185/"/>
+      <Reference title="MITRE ATT&amp;CK - Steal Web Session Cookie (T1539)" url="https://attack.mitre.org/techniques/T1539/"/>
+      <Reference title="MITRE ATT&amp;CK - Collection tactic (TA0009)" url="https://attack.mitre.org/tactics/TA0009/"/>
+      <Reference title='Elastic Security - "Suspicious Browser Child Process" / browser-automation rule references' url="https://www.elastic.co/guide/en/security/current/prebuilt-rules.html"/>
+      <Reference title="Chrome DevTools Protocol - overview (remote debugging)" url="https://chromedevtools.github.io/devtools-protocol/"/>
+      <Reference title="Microsoft Learn - Microsoft Edge command-line / remote-debugging options" url="https://learn.microsoft.com/en-us/deployedge/microsoft-edge-policies"/>
+      <Reference title="WithSecure / F-Secure Labs - Detecting browser cookie theft via DevTools remote debugging" url="https://labs.withsecure.com/publications/"/>
+      <Reference title="Microsoft Learn - Command line process auditing (Event 4688 command-line GPO)" url="https://learn.microsoft.com/en-us/windows-server/identity/ad-ds/manage/component-updates/command-line-process-auditing"/>
+    </References>
+  </Metadata>
+  <AlertContext>
+    <RuleName>Browser Process Spawned from an Unusual Parent [NBI-4688]</RuleName>
+    <RuleId>nbi-b2-browser-process-spawned-from-an-unusual-parent</RuleId>
+    <RuleType>eql</RuleType>
+    <Index>logs-system.security-*</Index>
+    <TriggerLogic>The deployed rule is an EQL process-start query (faithful to the rule definition):
+
+
+
+Plain English: a Chrome/Edge process started with automation flags (headless, a CDP debugging port, or an off-screen debug window) from a parent that is not one of the recognised desktop launchers. On NBI's 4688 stream the automation flags are read from process.command_line, falling back to process.args via MV_CONCAT where command-line auditing is off (~50% of hosts).
+
+One-line Kibana KQL detection filter (for fast pivoting in Discover / Timeline):
+
+
+
+Why the flags matter: --remote-debugging-port opens a CDP endpoint that any local process can connect to and drive; combined with an off-screen --window-position=-2400,-2400 it runs the browser invisibly. --headless alone is used by both scrapers and attackers. The parent is the second half of the signal - a normal launcher is excluded, so what remains is a browser driven by something unusual.</TriggerLogic>
+    <KeyAlertFields>chrome.exe, msedge.exe, process.name, process.executable, process.parent.name, process.parent.executable, process.command_line, process.args, user.name, user.id, process.pid, process.parent.pid</KeyAlertFields>
+  </AlertContext>
+  <Inputs>
+    <Input name="$host"/>
+    <Input name="$user"/>
+    <Input name="$parent"/>
+  </Inputs>
+  <ExecutiveSummary>
+    <Overview>This playbook drives triage and investigation of the Browser Process Spawned from an Unusual Parent detection on NBI's Elastic Security deployment. The rule fires on a Windows process start (Event 4688) for chrome.exe or msedge.exe whose command line indicates automation - a bare browser path with no user profile, --headless, or --remote-debugging-port=922x combined with an off-screen --window-position=-…,-… - and whose parent executable is not one of the normal launchers (explorer.exe, Program Files apps, rdpinit/sihost/RuntimeBroker/SECOCL64). In short: a browser started in a remotely-controllable/headless mode by something other than a normal desktop launcher.
+
+Remote debugging (the Chrome DevTools Protocol, CDP) lets whatever opened the port drive the browser, read the DOM of authenticated sessions, and dump cookies/tokens; a headless off-screen launch hides that from the user. This is a well-known Collection technique for stealing live web-session cookies (webmail, banking portals, cloud tenants) and for automated credential harvesting. The analyst decides whether a legitimate automation/RMM/test framework did this (false_positive - authorised), an attacker is hijacking browser sessions to steal tokens (true_positive), an unmanaged legitimate tool needs baselining (misconfiguration), or the evidence is insufficient (needs_escalation).</Overview>
+    <BusinessImpact>An alert means: on $host, the account $user started chrome.exe/msedge.exe with automation flags, and the launching parent $parent is not a recognised desktop launcher. What is and is not established:
+
+- Established: a browser was launched in an automatable/headless mode by an unusual parent - the *capability* for CDP-driven session access exists.
+- Not established on this index: whether the DevTools port was actually connected to and used to read cookies/DOM. NBI has no process-to-network (5156) telemetry, so the CDP connection and any egress cannot be confirmed from logs-system.security-* (see section 8).
+
+So the alert establishes intent/means, not confirmed exfiltration. The investigative questions are: is $parent a sanctioned automation framework or an attacker-controlled process, is the pattern sustained (a harvesting loop) or a one-off, and does the user hold access to sensitive web apps whose sessions would be worth stealing.</BusinessImpact>
+  </ExecutiveSummary>
+  <Investigation>
+    <Goal>Decide true_positive / false_positive / misconfiguration / needs_escalation for Browser Process Spawned from an Unusual Parent [NBI-4688].</Goal>
+    <Workflow>
+      <Step order="1" name="Confirm the automation launch and its parent">
+        <Purpose>Confirm the automation launch and its parent</Purpose>
+        <Query platform="Elastic" language="ES|QL" id="Q-01">
+          <![CDATA[
+FROM logs-system.security-*
+| WHERE event.code == "4688" AND host.name == "$host" AND process.name IN ("chrome.exe", "msedge.exe") AND @timestamp >= NOW() - 4 hours
+| EVAL cl = TO_LOWER(COALESCE(process.command_line, MV_CONCAT(process.args, " ")))
+| WHERE cl LIKE "*remote-debugging-port*" OR cl LIKE "*--headless*" OR cl LIKE "*window-position=-*"
+| KEEP @timestamp, user.name, process.name, process.parent.name, process.command_line
+| SORT @timestamp DESC
+| LIMIT 20
+]]>
+        </Query>
+      </Step>
+      <Step order="2" name="Scope the automation activity for the account">
+        <Purpose>Scope the automation activity for the account</Purpose>
+        <Query platform="Elastic" language="ES|QL" id="Q-02">
+          <![CDATA[
+FROM logs-system.security-*
+| WHERE event.code == "4688" AND host.name == "$host" AND user.name == "$user" AND process.name IN ("chrome.exe", "msedge.exe") AND @timestamp >= NOW() - 4 hours
+| EVAL cl = TO_LOWER(COALESCE(process.command_line, MV_CONCAT(process.args, " ")))
+| EVAL automated = CASE(cl LIKE "*remote-debugging-port*" OR cl LIKE "*--headless*", 1, 0)
+| STATS launches = COUNT(*), automated_launches = SUM(automated), parents = COUNT_DISTINCT(process.parent.name)
+| LIMIT 10
+]]>
+        </Query>
+      </Step>
+      <Step order="3" name="Entity pivoting">
+        <Purpose>Entity pivoting</Purpose>
+        <Query platform="Elastic" language="ES|QL" id="Q-03">
+          <![CDATA[
+FROM logs-system.security-*
+| WHERE @timestamp >= NOW() - 4 hours
+    AND event.code == "4688"
+    AND host.name == "$host" AND user.name == "$user"
+    AND process.name IN ("chrome.exe", "msedge.exe")
+| KEEP @timestamp, user.name, process.name, process.executable, process.parent.name, process.parent.executable, process.pid, process.parent.pid, process.command_line
+| SORT @timestamp DESC
+| LIMIT 50
+]]>
+        </Query>
+      </Step>
+      <Step order="4" name="Process investigation">
+        <Purpose>Process investigation</Purpose>
+        <Query platform="Elastic" language="ES|QL" id="Q-04">
+          <![CDATA[
+FROM logs-system.security-*
+| WHERE event.code == "4688" AND host.name == "$host" AND process.parent.name == "$parent" AND @timestamp >= NOW() - 4 hours
+| STATS spawned = COUNT(*), distinct_children = COUNT_DISTINCT(process.name), users = COUNT_DISTINCT(user.name) BY process.name
+| SORT spawned DESC
+| LIMIT 20
+]]>
+        </Query>
+      </Step>
+      <Step order="5" name="Parent-Child process analysis">
+        <Purpose>Parent-Child process analysis</Purpose>
+        <Query platform="Elastic" language="ES|QL" id="Q-05">
+          <![CDATA[
+FROM logs-system.security-*
+| WHERE @timestamp >= NOW() - 4 hours
+    AND event.code == "4688"
+    AND host.name == "$host"
+    AND (process.parent.name == "$parent" OR process.name == "$parent")
+| STATS executions = COUNT(*), first_seen = MIN(@timestamp), last_seen = MAX(@timestamp) BY process.parent.name, process.name
+| SORT executions DESC
+| LIMIT 30
+]]>
+        </Query>
+      </Step>
+      <Step order="6" name="User investigation">
+        <Purpose>User investigation</Purpose>
+        <Query platform="Elastic" language="ES|QL" id="Q-06">
+          <![CDATA[
+FROM logs-system.security-*
+| WHERE @timestamp >= NOW() - 4 hours
+    AND event.code == "4688"
+    AND user.name == "$user"
+| STATS executions = COUNT(*), distinct_procs = COUNT_DISTINCT(process.name), browsers = COUNT_DISTINCT(CASE(process.name IN ("chrome.exe","msedge.exe"), process.name, null)) BY host.name
+| SORT executions DESC
+| LIMIT 25
+]]>
+        </Query>
+      </Step>
+      <Step order="7" name="Host investigation">
+        <Purpose>Host investigation</Purpose>
+        <Query platform="Elastic" language="ES|QL" id="Q-07">
+          <![CDATA[
+FROM logs-system.security-*
+| WHERE @timestamp >= NOW() - 4 hours
+    AND event.code == "4688"
+    AND host.name == "$host"
+| STATS executions = COUNT(*), users = COUNT_DISTINCT(user.name) BY process.name, process.parent.name
+| SORT executions ASC
+| LIMIT 40
+]]>
+        </Query>
+      </Step>
+      <Step order="8" name="IP investigation">
+        <Purpose>IP investigation</Purpose>
+        <Query platform="Elastic" language="ES|QL" id="Q-08">
+          <![CDATA[
+FROM logs-system.security-*
+| WHERE @timestamp >= NOW() - 4 hours
+    AND event.code == "4624"
+    AND host.name == "$host" AND user.name == "$user"
+    AND source.ip IS NOT NULL
+| STATS logons = COUNT(*) BY source.ip, winlog.event_data.LogonType
+| SORT logons DESC
+| LIMIT 20
+]]>
+        </Query>
+      </Step>
+      <Step order="9" name="File investigation">
+        <Purpose>File investigation</Purpose>
+        <Query platform="Elastic" language="ES|QL" id="Q-09">
+          <![CDATA[
+FROM logs-system.security-*
+| WHERE @timestamp >= NOW() - 4 hours
+    AND event.code == "4688"
+    AND host.name == "$host" AND user.name == "$user"
+    AND process.name IN ("chrome.exe", "msedge.exe")
+| STATS executions = COUNT(*), first_seen = MIN(@timestamp), last_seen = MAX(@timestamp) BY process.name, process.executable
+| SORT executions DESC
+| LIMIT 30
+]]>
+        </Query>
+      </Step>
+      <Step order="10" name="Authentication investigation">
+        <Purpose>Authentication investigation</Purpose>
+        <Query platform="Elastic" language="ES|QL" id="Q-10">
+          <![CDATA[
+FROM logs-system.security-*
+| WHERE @timestamp >= NOW() - 4 hours
+    AND event.code IN ("4624", "4625", "4634", "4647")
+    AND host.name == "$host" AND user.name == "$user"
+| STATS events = COUNT(*), first_seen = MIN(@timestamp), last_seen = MAX(@timestamp) BY event.code, winlog.event_data.LogonType, source.ip
+| SORT events DESC
+| LIMIT 30
+]]>
+        </Query>
+      </Step>
+      <Step order="11" name="Timeline Reconstruction">
+        <Purpose>Timeline Reconstruction</Purpose>
+        <Query platform="Elastic" language="ES|QL" id="Q-11">
+          <![CDATA[
+FROM logs-system.security-*
+| WHERE @timestamp >= NOW() - 4 hours
+    AND event.code == "4688"
+    AND host.name == "$host" AND user.name == "$user"
+| KEEP @timestamp, process.parent.name, process.parent.pid, process.name, process.pid, process.executable, process.command_line
+| SORT @timestamp ASC
+| LIMIT 200
+]]>
+        </Query>
+      </Step>
+      <Step order="12" name="Lateral movement validation">
+        <Purpose>Lateral movement validation</Purpose>
+        <Query platform="Elastic" language="ES|QL" id="Q-12">
+          <![CDATA[
+FROM logs-system.security-*
+| WHERE @timestamp >= NOW() - 4 hours
+    AND event.code IN ("4624", "4648", "4768", "4769", "5140", "5145")
+    AND user.name == "$user"
+    AND host.name != "$host"
+| STATS events = COUNT(*), last_seen = MAX(@timestamp) BY host.name, event.code, winlog.event_data.LogonType
+| SORT events DESC
+| LIMIT 30
+]]>
+        </Query>
+      </Step>
+      <Step order="13" name="Persistence validation">
+        <Purpose>Persistence validation</Purpose>
+        <Query platform="Elastic" language="ES|QL" id="Q-13">
+          <![CDATA[
+FROM logs-system.security-*
+| WHERE @timestamp >= NOW() - 4 hours
+    AND host.name == "$host"
+    AND (
+        event.code IN ("7045", "4720", "4698")
+        OR (event.code == "4688" AND TO_LOWER(process.name) IN ("schtasks.exe", "sc.exe", "at.exe", "reg.exe", "powershell.exe", "wscript.exe", "cscript.exe", "mshta.exe"))
+    )
+| STATS events = COUNT(*), last_seen = MAX(@timestamp) BY event.code, process.name, user.name
+| SORT events DESC
+| LIMIT 40
+]]>
+        </Query>
+      </Step>
+      <Step order="14" name="Privilege escalation validation">
+        <Purpose>Privilege escalation validation</Purpose>
+        <Query platform="Elastic" language="ES|QL" id="Q-14">
+          <![CDATA[
+FROM logs-system.security-*
+| WHERE @timestamp >= NOW() - 4 hours
+    AND event.code == "4672"
+    AND host.name == "$host"
+| STATS special_priv_logons = COUNT(*) BY user.name
+| SORT special_priv_logons DESC
+| LIMIT 25
+]]>
+        </Query>
+      </Step>
+      <Step order="15" name="Defense evasion validation">
+        <Purpose>Defense evasion validation</Purpose>
+        <Query platform="Elastic" language="ES|QL" id="Q-15">
+          <![CDATA[
+FROM logs-system.security-*
+| WHERE @timestamp >= NOW() - 4 hours
+    AND host.name == "$host"
+    AND (
+        event.code IN ("1102", "4719")
+        OR (event.code == "4688" AND TO_LOWER(process.name) IN ("wevtutil.exe", "vssadmin.exe", "fsutil.exe", "cipher.exe", "sdelete.exe", "sdelete64.exe"))
+    )
+| STATS events = COUNT(*), last_seen = MAX(@timestamp) BY event.code, process.name, user.name
+| SORT events DESC
+| LIMIT 30
+]]>
+        </Query>
+      </Step>
+      <Step order="16" name="Impact assessment">
+        <Purpose>Impact assessment</Purpose>
+        <Query platform="Elastic" language="ES|QL" id="Q-16">
+          <![CDATA[
+FROM logs-system.security-*
+| WHERE @timestamp >= NOW() - 4 hours
+    AND event.code == "4688"
+    AND host.name == "$host"
+    AND process.parent.name == "$parent"
+| STATS spawned = COUNT(*), distinct_children = COUNT_DISTINCT(process.name), users = COUNT_DISTINCT(user.name), children = VALUES(process.name)
+| LIMIT 10
+]]>
+        </Query>
+      </Step>
+      <Step order="17" name="Finalize verdict">
+        <DecisionTree>
+        </DecisionTree>
+      </Step>
+    </Workflow>
+  </Investigation>
+  <ClassificationGuidance>
+    <TruePositive>
+      <Definition></Definition>
+    </TruePositive>
+    <FalsePositive>
+      <Definition></Definition>
+      <Indicators>
+        <Item>Sanctioned automation / RMM / QA frameworks that legitimately launch headless or remote-debug browsers (synthetic monitoring, UI test suites, PDF/report generation, web scraping for a business process). These are owned by a recognised toolchain and run on expected hosts/accounts - confirmed, not assumed.</Item>
+        <Item>Developer / power-user tooling that drives a headless browser for a genuine task (a personal script, a data-collection job). Benign in intent but often unmanaged (a misconfiguration to baseline, not an attack).</Item>
+        <Item>A launch positively proven to have failed - the browser errored out or the debugging port never opened, so no session was accessible - recorded as a blocked/failed attempt, never "benign".</Item>
+        <Item>The flagged combination is rare here. No automation-flag browser launch (remote-debugging/headless/off-screen) appeared in the validation window across the estate - so a firing is inherently notable and there is no noisy legitimate source to tune out.</Item>
+        <Item>The interactive browser tier is the jump/VDI hosts. chrome.exe/msedge.exe activity concentrates on nim-jump-apv02, nim-jump-apv22, nim-jump-apv03, and a few -st-/-kc- hosts under named interactive users (e.g. Sam.Rajendran, ITSS.Gnandhakumar, temenos.barathkumar). These carry real authenticated sessions worth stealing - which is exactly why an automation-mode launch here is high-value, and why the query must stay filtered to $user/$parent on a host that mixes many users' browser activity.</Item>
+        <Item>The benign launcher baseline is explorer.exe. On nim-jump-apv02, explorer.exe legitimately launches a coherent interactive toolchain (validated: WinSCP.exe, putty.exe, MobaXterm.exe, SelfServicePlugin.exe (Citrix), WinRAR.exe, notepad++.exe, firefox.exe) - and the initial msedge.exe launch. A parent that instead spawns script hosts or encoded PowerShell alongside the browser is the attacker shape.</Item>
+        <Item>No standing benign-true-positive allow-list. Do not exempt a host/user/parent off one alert; if sanctioned automation is confirmed, register the exact parent + host + account rather than whitelisting the browser broadly.</Item>
+      </Indicators>
+    </FalsePositive>
+    <Misconfiguration>
+      <Definition></Definition>
+    </Misconfiguration>
+    <NeedsEscalation>
+      <Definition></Definition>
+    </NeedsEscalation>
+  </ClassificationGuidance>
+  <ResponseActions>
+    <Phase name="Containment">
+      <Action>Isolate $host (network-contain / quarantine) to stop ongoing CDP-driven collection and any exfiltration. On a shared jump/VDI host, coordinate with IT to avoid dropping unrelated sessions unnecessarily, but prioritise containment.</Action>
+      <Action>Terminate the browser and $parent (and their process trees) to close the CDP session.</Action>
+      <Action>Invalidate and rotate the user's web and cloud sessions - force a global sign-out / token revocation for $user across the affected web apps (webmail, internal portals, cloud tenant) so any stolen cookies are dead, and require re-authentication (ideally with MFA re-challenge).</Action>
+      <Action>Preserve volatile evidence first where feasible: the running process tree, the browser command line/flags, and browser profile/cookie-store artefacts - NBI does not capture the CDP connection, so host-side capture is the only way to confirm what was read.</Action>
+      <Action>All containment changes go through the authorised human-approved DEPLOY path; investigation is read-only.</Action>
+    </Phase>
+    <Phase name="Eradication">
+      <Action>Remove the driving component: the $parent process/tooling and any persistence that re-launches it (section 17.2 - scheduled tasks, services, Run keys).</Action>
+      <Action>Remove any dropped/renamed browser binary identified via section 15.10 running from a user-writable path, and hunt the same image across peer jump/VDI hosts.</Action>
+      <Action>Rotate exposed secrets beyond web sessions - any credentials the user entered into the driven browser during the window should be treated as captured.</Action>
+      <Action>Remediate the initial-access vector that gave the attacker execution as $user on $host.</Action>
+    </Phase>
+    <Phase name="Recovery">
+      <Action>Re-issue clean sessions for $user after credential reset and session revocation; confirm MFA is enrolled and enforced on the sensitive web apps.</Action>
+      <Action>Validate host integrity - confirm no persistence or defence tampering remains (section 17.2, section 17.4) and that no automated-browser task recurs.</Action>
+      <Action>Return the host/account to service only after section 22 closing criteria are met and monitoring confirms no renewed automation-mode launches.</Action>
+      <Action>Recommend hardening: block or policy-restrict --remote-debugging-port on managed browsers, restrict who may run headless browsers on server/jump hosts, register legitimate automation so it is distinguishable, and enable command-line auditing on the jump/VDI tier so future launches expose their flags.</Action>
+    </Phase>
+  </ResponseActions>
+  <Escalation>
+    <Trigger>Escalate to Tier 3 / IR (and notify the identity team for session revocation) when any of the following hold:
+
+- A confirmed remote-debugging/headless launch by a non-automation parent (section 14.1/section 15.2), especially with an off-screen window.
+- A sustained automated-launch loop for $user (section 14.2), or the parent spawned script hosts / credential tooling (section 17.5).
+- $user holds access to banking/internal/cloud web apps whose sessions would be high-value, or evidence of cookie/session access is found in EDR/browser artefacts.
+- Lateral movement (section 17.1), persistence (section 17.2), or defence tampering (section 17.4) accompanies the launch.
+- The parent's legitimacy or whether the CDP port was used cannot be resolved from available telemetry - escalate as needs_escalation with the gap named.</Trigger>
+    <To>SOC L2 / IR</To>
+  </Escalation>
+  <ClosureCriteria>
+    <Item>true_positive: an attacker-driven headless/remote-debug browser was used (or positioned) to read authenticated sessions; $host isolated, browser/parent killed, user web/cloud sessions rotated, the CDP consumer identified and removed, incident documented.</Item>
+    <Item>false_positive (authorised): a documented automation/RMM/QA framework owns the launch on an expected host/account; confirmed with the owner and the parent registered.</Item>
+    <Item>false_positive (blocked/failed): the launch is positively proven to have failed (browser did not start / port never opened) with no session access; recorded as blocked, never "benign".</Item>
+    <Item>misconfiguration: a legitimate but unmanaged tool/personal script launched the browser this way with no malicious follow-on; registered or removed and the parent baselined.</Item>
+    <Item>needs_escalation: handed to SOC L2/IR with EDR/browser-artefact and proxy requests, and the specific evidence gaps documented.</Item>
+  </ClosureCriteria>
+  <Limitations>
+    <Item>The alert is means, not proof of exfiltration. NBI cannot see the CDP connection (no 5156). Establish the launch and the parent here; confirm whether cookies were actually read via EDR/browser artefacts and proxy logs. Never close as false positive on "no egress seen in Security logs" - that egress is not collected.</Item>
+    <Item>Flag weight: --remote-debugging-port + off-screen --window-position=-… is the strongest invisible-drive signal; --headless alone is used by benign scrapers too. Weigh the flag combination together with the parent.</Item>
+    <Item>Parent is the discriminator. A coherent automation/test toolchain vs a script host / LOLBin / unknown binary is the core TP/FP split - section 15.2 and section 15.3 answer it.</Item>
+    <Item>Command-line auditing is bimodal and often off on the jump/VDI tier - exactly where interactive sessions worth stealing live. Expect null flags on those hosts; lean on the parent, lineage, and image path, and pull EDR. Enabling the command-line GPO on the jump/workstation class is the highest-value hardening ask from this rule.</Item>
+    <Item>Evasion (design complementary analytics): an attacker can rename the browser binary, choose a non-negative window position, use a non-standard debugging port, or drive an already-running browser instance. Complement with detection of any process opening a local CDP port, browser cookie-store access monitoring, and proxy detection of anomalous automated fetches.</Item>
+    <Item>KB-worthy (persist to NBI customer scope): (1) automation-mode browser launches are rare estate-wide (none in the validation window); (2) interactive browser activity concentrates on nim-jump-apv02/-apv22/-apv03 under named users; (3) explorer.exe benign-launcher baseline on nim-jump-apv02 = WinSCP/putty/MobaXterm/Citrix SelfServicePlugin/WinRAR/notepad++/firefox; (4) no 5156 process-network telemetry on logs-system.security-*. Observed live 2026-08-19.</Item>
+  </Limitations>
+</Playbook>

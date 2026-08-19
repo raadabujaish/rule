@@ -1,0 +1,449 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<Playbook xmlns="https://soc.example/playbooks" id="PB-linux-at-batch-job-scheduling" name="Linux — at/batch Job Scheduling (Persistence) - SOC Playbook" version="3.0" status="Validated" classification="TLP:AMBER">
+  <Metadata>
+    <Owner>NBI SOC / Detection Engineering</Owner>
+    <LastUpdated>2026-08-19</LastUpdated>
+    <Severity default="Medium">Medium</Severity>
+    <Confidence default="Medium">Medium</Confidence>
+    <Category>Persistence</Category>
+    <MitreAttack>
+      <Technique id="T1053.002"/>
+      <Technique id="T1053"/>
+      <Tactic id="TA0003"/>
+      <Tactic id="TA0002"/>
+    </MitreAttack>
+    <References>
+      <Reference title="MITRE ATT&amp;CK - Scheduled Task/Job: At (T1053.002)" url="https://attack.mitre.org/techniques/T1053/002/"/>
+      <Reference title="MITRE ATT&amp;CK - Persistence tactic (TA0003)" url="https://attack.mitre.org/tactics/TA0003/"/>
+      <Reference title="MITRE ATT&amp;CK - Execution tactic (TA0002)" url="https://attack.mitre.org/tactics/TA0002/"/>
+      <Reference title="man7.org - at(1) / batch (queue jobs for later execution)" url="https://man7.org/linux/man-pages/man1/at.1.html"/>
+      <Reference title="man7.org - atd(8) (the at job daemon)" url="https://man7.org/linux/man-pages/man8/atd.8.html"/>
+      <Reference title="man7.org - at.allow(5) / at.deny (access control)" url="https://man7.org/linux/man-pages/man5/at.allow.5.html"/>
+      <Reference title="Elastic - Auditd Manager integration (fields and setup)" url="https://docs.elastic.co/integrations/auditd_manager"/>
+      <Reference title="Elastic ES|QL - language reference (functions incl. MV_CONCAT)" url="https://www.elastic.co/guide/en/elasticsearch/reference/current/esql.html"/>
+    </References>
+  </Metadata>
+  <AlertContext>
+    <RuleName>Linux — at/batch Job Scheduling (Persistence)</RuleName>
+    <RuleId>nbi-lnx-at-persistence</RuleId>
+    <RuleType>query</RuleType>
+    <Index>logs-auditd.log-*</Index>
+    <TriggerLogic>The deployed rule is a KQL match query over Linux auditd process telemetry, matching on the scheduler binary name only.
+
+One-line Kibana KQL detection filter (for fast pivoting in Discover / Timeline):
+
+
+
+Plain English: any process execution on a Linux host where the image name is at or batch. Because these binaries have an effectively zero baseline across NBI's Linux fleet (no execution observed in the trailing 30 days; cron/anacron are the routine schedulers here), any invocation stands out and warrants reading the queued command. The queued command itself is entered on the scheduler's standard input and stored in the at spool, so it is not always present in the process arguments - full recovery may require reading the job on the host (at -c) or inspecting /var/spool/at.
+
+Every runnable investigation query below is ES|QL over the _query API (NBI is Elastic Security), keyed on the alert entity and bounded to @timestamp &gt;= NOW() - 4 hours.</TriggerLogic>
+    <KeyAlertFields>source.ip, user.name, event.action, process.name, process.executable, process.args, process.working_directory, process.pid, process.parent.pid, user.id, user.effective.id, process.parent.executable</KeyAlertFields>
+  </AlertContext>
+  <Inputs>
+    <Input name="$host"/>
+    <Input name="$user"/>
+    <Input name="$source_ip"/>
+    <Input name="$suspicious_pid"/>
+  </Inputs>
+  <ExecutiveSummary>
+    <Overview>This playbook drives triage and investigation of the Linux - at/batch Job Scheduling (Persistence) detection on NBI's Elastic Security deployment. The rule fires when a Linux execve records a process.name of at or batch. at queues a one-off job to run at a chosen time; batch queues a job to run when system load allows. Both are handled by the atd daemon and are a lighter-weight persistence and delayed-execution mechanism than cron - useful to an attacker for a single timed payload, a delayed call-back that outlives the current shell, or scheduling under a compromised account.
+
+The rule matches the binary name; whether the scheduled job is benign or malicious is in the queued command. The analyst's job is to recover the schedule and command, catch the job executing via atd, check for parallel persistence by the same actor, and classify the alert as true_positive, false_positive (authorised OR proven-failed), misconfiguration, or needs_escalation - with evidence attached.</Overview>
+    <BusinessImpact>An alert means: on $host, the at or batch scheduler ran, queuing a job for later execution. What that signifies depends on the schedule and the queued command:
+
+- at now + 1 minute (or any near-future time) is typical of a delayed call-back that outlives the current interactive shell - the attacker schedules the job, drops the session, and the payload fires moments later with no shell attached to trace back.
+- at -f /tmp/job (or a job file under /tmp, /dev/shm, or a web path) points to a queued script worth recovering.
+- batch defers until system load drops - quieter, and useful for blending a payload into normal batch windows.
+
+The alert captures the *scheduling*; the investigation recovers the *queued command* (from the arguments where present, otherwise from the host's at spool) and determines whether it has *fired* (via atd-driven execution). The decisive facts are the schedule (near-future vs a normal maintenance time), the content (attacker script from a temp/web path vs a routine command), and whether the same actor set up parallel persistence through cron or systemd timers at the same time.</BusinessImpact>
+  </ExecutiveSummary>
+  <Investigation>
+    <Goal>Decide true_positive / false_positive / misconfiguration / needs_escalation for Linux — at/batch Job Scheduling (Persistence).</Goal>
+    <Workflow>
+      <Step order="1" name="Reproduce the rule estate-wide (confirm the detection logic)">
+        <Purpose>Reproduce the rule estate-wide (confirm the detection logic)</Purpose>
+        <Query platform="Elastic" language="ES|QL" id="Q-01">
+          <![CDATA[
+FROM logs-auditd.log-*,logs-auditd_manager.auditd-*
+| WHERE @timestamp >= NOW() - 4 hours
+    AND event.category == "process"
+    AND process.name IN ("at","batch")
+| EVAL argline = MV_CONCAT(process.args, " ")
+| KEEP @timestamp, host.name, user.name, user.id, process.executable, argline, process.working_directory
+| SORT @timestamp DESC
+| LIMIT 100
+]]>
+        </Query>
+      </Step>
+      <Step order="2" name="Confirm on the alert host - recover the scheduling command and time spec">
+        <Purpose>Confirm on the alert host - recover the scheduling command and time spec</Purpose>
+        <Query platform="Elastic" language="ES|QL" id="Q-02">
+          <![CDATA[
+FROM logs-auditd.log-*,logs-auditd_manager.auditd-*
+| WHERE event.category=="process" AND host.name=="$host"
+    AND process.name IN ("at","batch")
+    AND @timestamp >= NOW() - 4 hours
+| EVAL argline = MV_CONCAT(process.args, " ")
+| KEEP @timestamp, host.name, user.name, user.id, process.executable, argline, process.working_directory
+| SORT @timestamp DESC
+| LIMIT 50
+]]>
+        </Query>
+      </Step>
+      <Step order="3" name="Entity pivoting">
+        <Purpose>Entity pivoting</Purpose>
+        <Query platform="Elastic" language="ES|QL" id="Q-03">
+          <![CDATA[
+FROM logs-auditd.log-*,logs-auditd_manager.auditd-*
+| WHERE @timestamp >= NOW() - 4 hours
+    AND event.category == "process"
+    AND host.name == "$host"
+    AND process.name IN ("at","batch")
+| EVAL argline = MV_CONCAT(process.args, " ")
+| KEEP @timestamp, host.name, user.id, user.effective.id, process.executable, argline, process.pid, process.parent.pid, process.working_directory
+| SORT @timestamp DESC
+| LIMIT 50
+]]>
+        </Query>
+      </Step>
+      <Step order="4" name="Process investigation">
+        <Purpose>Process investigation</Purpose>
+        <Query platform="Elastic" language="ES|QL" id="Q-04">
+          <![CDATA[
+FROM logs-auditd.log-*,logs-auditd_manager.auditd-*
+| WHERE @timestamp >= NOW() - 4 hours
+    AND event.category == "process"
+    AND process.name IN ("at","batch","atd")
+| STATS execs = COUNT(*), hosts = COUNT_DISTINCT(host.name), users = COUNT_DISTINCT(user.id) BY process.name, process.executable
+| SORT execs DESC
+| LIMIT 25
+]]>
+        </Query>
+      </Step>
+      <Step order="5" name="Process investigation">
+        <Purpose>Process investigation</Purpose>
+        <Query platform="Elastic" language="ES|QL" id="Q-05">
+          <![CDATA[
+FROM logs-auditd.log-*,logs-auditd_manager.auditd-*
+| WHERE @timestamp >= NOW() - 4 hours
+    AND event.category == "process"
+    AND host.name == "$host"
+    AND process.name IN ("at","batch")
+    AND process.args IS NOT NULL
+| EVAL arguments = MV_CONCAT(process.args, " ")
+| KEEP @timestamp, host.name, user.id, process.executable, arguments, process.working_directory
+| SORT @timestamp DESC
+| LIMIT 50
+]]>
+        </Query>
+      </Step>
+      <Step order="6" name="Parent-Child process analysis">
+        <Purpose>Parent-Child process analysis</Purpose>
+        <Query platform="Elastic" language="ES|QL" id="Q-06">
+          <![CDATA[
+FROM logs-auditd.log-*,logs-auditd_manager.auditd-*
+| WHERE @timestamp >= NOW() - 4 hours
+    AND event.category == "process"
+    AND host.name == "$host"
+    AND user.name == "$user"
+| STATS execs = COUNT(*), distinct_children = COUNT_DISTINCT(process.name) BY process.parent.pid
+| SORT execs DESC
+| LIMIT 40
+]]>
+        </Query>
+      </Step>
+      <Step order="7" name="Parent-Child process analysis">
+        <Purpose>Parent-Child process analysis</Purpose>
+        <Query platform="Elastic" language="ES|QL" id="Q-07">
+          <![CDATA[
+FROM logs-auditd.log-*,logs-auditd_manager.auditd-*
+| WHERE @timestamp >= NOW() - 4 hours
+    AND event.category == "process"
+    AND host.name == "$host"
+    AND process.parent.pid == $suspicious_pid
+| EVAL argline = MV_CONCAT(process.args, " ")
+| KEEP @timestamp, user.id, process.parent.pid, process.name, process.pid, process.executable, argline, process.working_directory
+| SORT @timestamp ASC
+| LIMIT 100
+]]>
+        </Query>
+      </Step>
+      <Step order="8" name="User investigation">
+        <Purpose>User investigation</Purpose>
+        <Query platform="Elastic" language="ES|QL" id="Q-08">
+          <![CDATA[
+FROM logs-auditd.log-*,logs-auditd_manager.auditd-*
+| WHERE @timestamp >= NOW() - 4 hours
+    AND event.category == "process"
+    AND host.name == "$host"
+    AND user.name == "$user"
+| STATS execs = COUNT(*) BY process.name, user.id, user.effective.id
+| SORT execs DESC
+| LIMIT 25
+]]>
+        </Query>
+      </Step>
+      <Step order="9" name="User investigation">
+        <Purpose>User investigation</Purpose>
+        <Query platform="Elastic" language="ES|QL" id="Q-09">
+          <![CDATA[
+FROM logs-auditd.log-*,logs-auditd_manager.auditd-*
+| WHERE @timestamp >= NOW() - 4 hours
+    AND event.category == "process"
+    AND user.name == "$user"
+| STATS execs = COUNT(*), distinct_procs = COUNT_DISTINCT(process.name) BY host.name
+| SORT execs DESC
+| LIMIT 20
+]]>
+        </Query>
+      </Step>
+      <Step order="10" name="Host investigation">
+        <Purpose>Host investigation</Purpose>
+        <Query platform="Elastic" language="ES|QL" id="Q-10">
+          <![CDATA[
+FROM logs-auditd.log-*,logs-auditd_manager.auditd-*
+| WHERE @timestamp >= NOW() - 4 hours
+    AND event.category == "process"
+    AND host.name == "$host"
+| STATS execs = COUNT(*), users = COUNT_DISTINCT(user.id) BY process.name
+| SORT execs ASC
+| LIMIT 40
+]]>
+        </Query>
+      </Step>
+      <Step order="11" name="IP investigation">
+        <Purpose>IP investigation</Purpose>
+        <Query platform="Elastic" language="ES|QL" id="Q-11">
+          <![CDATA[
+FROM logs-system.auth-*
+| WHERE @timestamp >= NOW() - 4 hours
+    AND host.name == "$host"
+    AND user.name == "$user"
+    AND source.ip IS NOT NULL
+| STATS logons = COUNT(*) BY source.ip, event.action
+| SORT logons DESC
+| LIMIT 20
+]]>
+        </Query>
+      </Step>
+      <Step order="12" name="File investigation">
+        <Purpose>File investigation</Purpose>
+        <Query platform="Elastic" language="ES|QL" id="Q-12">
+          <![CDATA[
+FROM logs-auditd.log-*,logs-auditd_manager.auditd-*
+| WHERE @timestamp >= NOW() - 4 hours
+    AND event.category == "process"
+    AND host.name == "$host"
+    AND (process.name IN ("at","batch","atd")
+         OR process.working_directory LIKE "*/spool/at*"
+         OR process.working_directory LIKE "*/spool/cron*")
+| EVAL argline = MV_CONCAT(process.args, " ")
+| STATS execs = COUNT(*), first_seen = MIN(@timestamp), last_seen = MAX(@timestamp) BY process.name, process.executable, process.working_directory
+| SORT execs DESC
+| LIMIT 30
+]]>
+        </Query>
+      </Step>
+      <Step order="13" name="Authentication investigation">
+        <Purpose>Authentication investigation</Purpose>
+        <Query platform="Elastic" language="ES|QL" id="Q-13">
+          <![CDATA[
+FROM logs-system.auth-*
+| WHERE @timestamp >= NOW() - 4 hours
+    AND host.name == "$host"
+    AND user.name == "$user"
+| STATS events = COUNT(*), first_seen = MIN(@timestamp), last_seen = MAX(@timestamp) BY event.action, source.ip, process.name
+| SORT events DESC
+| LIMIT 30
+]]>
+        </Query>
+      </Step>
+      <Step order="14" name="Timeline Reconstruction">
+        <Purpose>Timeline Reconstruction</Purpose>
+        <Query platform="Elastic" language="ES|QL" id="Q-14">
+          <![CDATA[
+FROM logs-auditd.log-*,logs-auditd_manager.auditd-*
+| WHERE @timestamp >= NOW() - 4 hours
+    AND event.category == "process"
+    AND host.name == "$host"
+    AND user.name == "$user"
+| EVAL argline = MV_CONCAT(process.args, " ")
+| KEEP @timestamp, process.parent.pid, process.pid, process.name, process.executable, argline, user.id
+| SORT @timestamp ASC
+| LIMIT 200
+]]>
+        </Query>
+      </Step>
+      <Step order="15" name="Lateral movement validation">
+        <Purpose>Lateral movement validation</Purpose>
+        <Query platform="Elastic" language="ES|QL" id="Q-15">
+          <![CDATA[
+FROM logs-system.auth-*
+| WHERE @timestamp >= NOW() - 4 hours
+    AND (user.name == "$user" OR source.ip == "$source_ip")
+    AND host.name != "$host"
+    AND source.ip IS NOT NULL
+| STATS events = COUNT(*) BY host.name, source.ip, user.name, event.action
+| SORT events DESC
+| LIMIT 30
+]]>
+        </Query>
+      </Step>
+      <Step order="16" name="Persistence validation">
+        <Purpose>Persistence validation</Purpose>
+        <Query platform="Elastic" language="ES|QL" id="Q-16">
+          <![CDATA[
+FROM logs-auditd.log-*,logs-auditd_manager.auditd-*
+| WHERE event.category=="process" AND host.name=="$host"
+    AND (process.name IN ("atd","cron","crond")
+         OR process.working_directory LIKE "*/spool/at*"
+         OR process.working_directory LIKE "*/spool/cron*")
+    AND @timestamp >= NOW() - 4 hours
+| EVAL argline = MV_CONCAT(process.args, " ")
+| KEEP @timestamp, process.name, process.executable, argline, user.name, user.id, process.working_directory
+| SORT @timestamp DESC
+| LIMIT 40
+]]>
+        </Query>
+      </Step>
+      <Step order="17" name="Persistence validation">
+        <Purpose>Persistence validation</Purpose>
+        <Query platform="Elastic" language="ES|QL" id="Q-17">
+          <![CDATA[
+FROM logs-auditd.log-*,logs-auditd_manager.auditd-*
+| WHERE event.category=="process" AND host.name=="$host" AND user.name=="$user"
+    AND process.name IN ("at","batch","crontab","systemctl","systemd-run")
+    AND @timestamp >= NOW() - 4 hours
+| EVAL argline = MV_CONCAT(process.args, " ")
+| KEEP @timestamp, process.name, argline, user.id
+| SORT @timestamp DESC
+| LIMIT 30
+]]>
+        </Query>
+      </Step>
+      <Step order="18" name="Privilege escalation validation">
+        <Purpose>Privilege escalation validation</Purpose>
+        <Query platform="Elastic" language="ES|QL" id="Q-18">
+          <![CDATA[
+FROM logs-auditd.log-*,logs-auditd_manager.auditd-*
+| WHERE @timestamp >= NOW() - 4 hours
+    AND event.category == "process"
+    AND host.name == "$host"
+    AND process.name IN ("sudo","su","pkexec","doas","setuid")
+| EVAL argline = MV_CONCAT(process.args, " ")
+| KEEP @timestamp, user.name, user.id, user.effective.id, process.name, argline
+| SORT @timestamp DESC
+| LIMIT 30
+]]>
+        </Query>
+      </Step>
+      <Step order="19" name="Defense evasion validation">
+        <Purpose>Defense evasion validation</Purpose>
+        <Query platform="Elastic" language="ES|QL" id="Q-19">
+          <![CDATA[
+FROM logs-auditd.log-*,logs-auditd_manager.auditd-*
+| WHERE @timestamp >= NOW() - 4 hours
+    AND event.category == "process"
+    AND host.name == "$host"
+    AND process.name IN ("shred","truncate","auditctl","journalctl","rm","unlink","chattr")
+| EVAL argline = MV_CONCAT(process.args, " ")
+| KEEP @timestamp, process.name, argline, user.id
+| SORT @timestamp DESC
+| LIMIT 30
+]]>
+        </Query>
+      </Step>
+      <Step order="20" name="Impact assessment">
+        <Purpose>Impact assessment</Purpose>
+        <Query platform="Elastic" language="ES|QL" id="Q-20">
+          <![CDATA[
+FROM logs-auditd.log-*,logs-auditd_manager.auditd-*
+| WHERE @timestamp >= NOW() - 4 hours
+    AND event.category == "process"
+    AND host.name == "$host"
+    AND (process.working_directory LIKE "*/spool/at*" OR process.working_directory LIKE "*/spool/cron*")
+| EVAL argline = MV_CONCAT(process.args, " ")
+| KEEP @timestamp, process.name, process.executable, argline, user.id, process.working_directory
+| SORT @timestamp DESC
+| LIMIT 40
+]]>
+        </Query>
+      </Step>
+      <Step order="21" name="Finalize verdict">
+        <DecisionTree>
+        </DecisionTree>
+      </Step>
+    </Workflow>
+  </Investigation>
+  <ClassificationGuidance>
+    <TruePositive>
+      <Definition></Definition>
+    </TruePositive>
+    <FalsePositive>
+      <Definition></Definition>
+      <Indicators>
+        <Item>Authorised one-off maintenance. An administrator legitimately schedules a single deferred task (a delayed restart, a timed cleanup) via at.</Item>
+        <Item>Recognised automation deferring work. A management or deployment tool that queues a batch job to run when load allows.</Item>
+        <Item>Administrator / red-team / purple-team exercises deliberately exercising at-based persistence. These are authorised malicious-technique execution and must be confirmed against a change ticket or exercise ROE before classifying as false_positive (blocked/authorised), never dismissed on sight.</Item>
+        <Item>True zero baseline for at/batch/atd. No at/batch execution across the fleet in the trailing 30 days, and 0 in the live 4-hour window on the busiest node. The routine scheduler on the PAM/PostgreSQL container nodes is anacron/run-parts (seen live), and crond on the devops Kubernetes masters/workers and the app nodes - not at. An at/batch invocation therefore has no legitimate baseline to hide in.</Item>
+        <Item>The actor is almost always root, and user.name is frequently null. On the busiest Linux hosts, process activity runs overwhelmingly as root (user.id == 0) and most auditd process documents carry a null user.name. Corroborate the actor with user.id/user.effective.id; do not read a null user.name as "no actor".</Item>
+        <Item>The queued command may be invisible in the event. at reads the payload from stdin into the spool, so the process event often shows only the time spec. Recover the command on-host (at -c, /var/spool/at) - the absence of the command in argline is expected, not reassuring.</Item>
+        <Item>No historical NBI benign-true-positive is on record for this rule. No environment-specific allow-list applies. Do not create a blanket exception off a single alert; scope any exception to an exact account + command + schedule + change reference.</Item>
+      </Indicators>
+    </FalsePositive>
+    <Misconfiguration>
+      <Definition></Definition>
+    </Misconfiguration>
+    <NeedsEscalation>
+      <Definition></Definition>
+    </NeedsEscalation>
+  </ClassificationGuidance>
+  <ResponseActions>
+    <Phase name="Containment">
+      <Action>Recover and remove the queued job. Via the platform team, read the job back on-host (at -c &lt;job&gt;) and remove it (atrm), preserving a copy for evidence first.</Action>
+      <Action>Remove any parallel persistence found in section 17.2b (rogue crontab entries, systemd units/timers) before they re-establish access.</Action>
+      <Action>Isolate $host (network-contain / quarantine) if a true_positive is confirmed, especially if the job has fired or a call-back is expected. On a shared container node, coordinate with the platform team to protect co-located workloads.</Action>
+      <Action>Preserve the process tree of any fired payload (section 17.5, section 15.3b) and its network call-back for evidence.</Action>
+      <Action>Deploy/confirm changes only via the authorised human-approved DEPLOY path; investigation itself is read-only.</Action>
+    </Phase>
+    <Phase name="Eradication">
+      <Action>Delete the at job and its spool file, and any dropped job-file/payload identified via section 15.10 (working-directory path).</Action>
+      <Action>Remove parallel cron/timer/.bashrc persistence by the same actor (section 17.2b) and audit the account's crontab and systemd units.</Action>
+      <Action>Identify the payload and its call-back and block the endpoint at egress if the job established C2.</Action>
+      <Action>Run a host IR sweep and hunt for the same scheduling trick and payload across peers, especially any host $user/$source_ip touched (section 15.4b, section 17.1).</Action>
+      <Action>Remediate the initial-access vector that gave the actor the foothold to schedule the job.</Action>
+    </Phase>
+    <Phase name="Recovery">
+      <Action>Rotate credentials and keys exposed on $host during the compromised window - the scheduling account, service accounts, and any SSH keys; if this is a PAM/DB node, treat vaulted secrets as potentially exposed and rotate on priority.</Action>
+      <Action>Restore $host from a known-good image if the payload made extensive changes; otherwise validate that job removal and eradication hold after reboot and that atd starts clean.</Action>
+      <Action>Return the host/account to service only after section 22 closing criteria are met and monitoring confirms no re-scheduled job recurs.</Action>
+      <Action>Harden (section 23): restrict at via at.allow/at.deny (or disable atd where unused), monitor at/batch scheduling and atd-spawned children, and reconcile scheduled jobs against an approved inventory.</Action>
+    </Phase>
+  </ResponseActions>
+  <Escalation>
+    <Trigger>Escalate to Tier 3 / Incident Response (and notify the customer) when any of the following hold:
+
+- The queued job runs attacker-controlled content from a temp/web path, or the schedule is a near-future call-back (section 14.2/section 15.1).
+- The job has fired - an atd-spawned payload tree is present (section 17.2a) - or a network call-back is expected.
+- Parallel persistence by the same actor is present (section 17.2b), indicating a deliberate multi-mechanism foothold.
+- The scheduling account is a service/application identity, or lateral movement from $host/$source_ip is observed (section 17.1).
+- Evidence is incomplete because the queued command cannot be recovered and execution/authorisation cannot be established - escalate as needs_escalation (on-host at -c) with the gaps named.</Trigger>
+    <To>SOC L2 / IR</To>
+  </Escalation>
+  <ClosureCriteria>
+    <Item>false_positive (authorised): a change/task record positively matches the exact account + command + schedule. Record the reference. Do not create a broad exception; if warranted, scope it to the exact account + command.</Item>
+    <Item>false_positive (proven-failed attempt): the scheduling was positively proven to have failed (atd disabled / queue rejected), so nothing was scheduled - documented as a blocked attempt, never "benign".</Item>
+    <Item>misconfiguration: a legitimate deferred task used at/batch with benign content and no parallel persistence, simply not yet baselined; document and baseline it.</Item>
+    <Item>true_positive: attacker persistence/delayed execution confirmed; queued job and any parallel persistence removed, payload and call-back identified, $host contained, scope of $user/$source_ip/peers established, initial access hunted, no re-scheduled recurrence on monitoring.</Item>
+    <Item>needs_escalation: handed to Tier 3/IR with the specific evidence gaps documented.</Item>
+  </ClosureCriteria>
+  <Limitations>
+    <Item>Zero baseline = high fidelity. at/batch/atd do not appear in NBI's Linux process telemetry over 30 days or in the live 4-hour window; the routine scheduler here is cron/anacron. When this rule fires, believe it and recover the queued command.</Item>
+    <Item>The command hides on stdin. The most important content - the queued command - is in the at spool, not the process arguments. Do not conclude "benign" from an empty argline; escalate for on-host at -c//var/spool/at.</Item>
+    <Item>A job not yet fired is not reassurance. Delayed execution is the whole point; section 17.2a may be empty simply because the scheduled time has not arrived. Recover the schedule and content instead of waiting.</Item>
+    <Item>user.name is unreliable; user.id/user.effective.id are not. The actor on the busy nodes is root with a null user.name. Never read a null name as "no actor".</Item>
+    <Item>No parent path → PID lineage. With process.parent.executable/.name unpopulated, reconstruct trees with process.parent.pid/process.pid and the spool working directory (section 15.3, section 17.2a), corroborating with timing.</Item>
+    <Item>The rule is name-based and evadable. Persistence does not require at/batch - cron, systemd timers/services, .bashrc/profile hooks, udev rules, or an SSH key all persist without it. Complementary signal: monitor crontab and cron.d/cron.daily writes, systemd unit/timer creation, and shell-init/udev modifications, and correlate atd-spawned children with network call-backs so a delayed payload is caught when it fires.</Item>
+    <Item>KB-worthy (persist to NBI customer scope): (1) at/batch/atd zero-baseline over 4h fleet-wide and 30d; (2) routine scheduling on the PAM nodes is anacron/run-parts, crond on devops/app nodes; (3) actor on the busy nodes = root, user.name largely null; (4) logs-system.auth-* carries SSH source.ip for session origin; (5) the queued at command is spool/stdin-only, not in process.args. All observed live on 2026-08-17.</Item>
+  </Limitations>
+</Playbook>

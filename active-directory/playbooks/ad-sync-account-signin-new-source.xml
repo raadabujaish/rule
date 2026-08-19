@@ -1,0 +1,358 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<Playbook xmlns="https://soc.example/playbooks" id="PB-ad-sync-account-signin-new-source" name="AD — Directory Sync Account Sign-In From New Source - SOC Playbook" version="3.0" status="Validated" classification="TLP:AMBER">
+  <Metadata>
+    <Owner>NBI SOC / Detection Engineering</Owner>
+    <LastUpdated>2026-08-19</LastUpdated>
+    <Severity default="high">high</Severity>
+    <Confidence default="Medium">Medium</Confidence>
+    <Category>Credential Access</Category>
+    <MitreAttack>
+      <Technique id="T1003"/>
+      <Technique id="T1003.006"/>
+      <Technique id="T1078"/>
+      <Technique id="T1078.002"/>
+      <Tactic id="TA0006"/>
+    </MitreAttack>
+    <References>
+      <Reference title="MITRE ATT&amp;CK - OS Credential Dumping: DCSync (T1003.006)" url="https://attack.mitre.org/techniques/T1003/006/"/>
+      <Reference title="MITRE ATT&amp;CK - Valid Accounts: Domain Accounts (T1078.002)" url="https://attack.mitre.org/techniques/T1078/002/"/>
+      <Reference title="MITRE ATT&amp;CK - Credential Access tactic (TA0006)" url="https://attack.mitre.org/tactics/TA0006/"/>
+      <Reference title="The Hacker Recipes - DCSync" url="https://www.thehacker.recipes/a-d/movement/credentials/dumping/dcsync"/>
+      <Reference title="ADSecurity (Sean Metcalf) - Mimikatz DCSync / directory replication abuse" url="https://adsecurity.org/?p=1729"/>
+      <Reference title="AADInternals - Azure AD Connect / MSOL_ credential extraction (Get-AADIntSyncCredentials)" url="https://aadinternals.com/post/adsync/"/>
+      <Reference title="Microsoft Learn - Azure AD Connect accounts and permissions (the sync account)" url="https://learn.microsoft.com/en-us/entra/identity/hybrid/connect/reference-connect-accounts-permissions"/>
+      <Reference title="Microsoft Learn - Event 4662 (an operation was performed on an object) and replication rights" url="https://learn.microsoft.com/en-us/windows/security/threat-protection/auditing/event-4662"/>
+      <Reference title="Microsoft Learn - Event 4624 (an account was successfully logged on) and logon types" url="https://learn.microsoft.com/en-us/windows/security/threat-protection/auditing/event-4624"/>
+    </References>
+  </Metadata>
+  <AlertContext>
+    <RuleName>AD — Directory Sync Account Sign-In From New Source</RuleName>
+    <RuleId>nbi-ad-t1003_006-sync-account-origin-novelty</RuleId>
+    <RuleType>new_terms</RuleType>
+    <Index>logs-system.security*</Index>
+    <TriggerLogic>The deployed rule is a New Terms rule keyed on source.ip for the sync account's successful authentications. Its one-line Kibana KQL detection filter (for fast pivoting in Discover / Timeline) is:
+
+
+
+Plain English: a 4624 logon or 4768 TGT request for the AAD Connect sync account, from a source IP not previously seen for that account in the New Terms lookback window. The event names the account (winlog.event_data.TargetUserName → $target_user), the novel source (source.ip → $source_ip), the logon type (winlog.event_data.LogonType), and the target DC (host.name).
+
+The behavioural idea: the sync account has an extremely narrow, stable origin - proven on NBI, it authenticates from exactly one source (10.11.18.16), type 3 only. Any deviation is either a sanctioned server change or the theft of the most powerful replication credential in the environment. Because the account's *normal* behaviour already includes continuous secret replication, watching the origin is the highest-value cheap signal available.
+
+Key limitation (see section 8): 4662 replication events carry no source IP, so the actual secret-pull cannot be tied directly to $source_ip. The verdict rests on the nature of the new</TriggerLogic>
+    <KeyAlertFields>source.ip, host.name</KeyAlertFields>
+  </AlertContext>
+  <Inputs>
+    <Input name="$target_user"/>
+    <Input name="$source_ip"/>
+  </Inputs>
+  <ExecutiveSummary>
+    <Overview>This playbook drives triage and investigation of the AD - Directory Sync Account Sign-In From New Source detection on NBI's Elastic Security deployment. The rule is a New Terms analytic that fires the first time the Azure AD Connect synchronization account authenticates (Event 4624 logon or 4768 Kerberos TGT) from a source.ip it has never used before.
+
+That account is Tier-0 and uniquely dangerous: it is the one identity legitimately granted DS-Replication-Get-Changes-All - the right to replicate directory secrets (password hashes, krbtgt, everything). It is the standing, authorised equivalent of DCSync. If this credential is stolen and reused from an attacker-controlled host, the attacker can extract every secret in the domain from wherever they hold it. This detection is the companion to the DCSync analytics: it does not watch the replication itself (which is normal for this account) but watches where the secret-capable credential authenticates from.
+
+The analyst's job is to decide, with evidence, whether the new source is a documented AAD Connect server migration/rebuild (false_positive - authorised), an attacker reusing the stolen sync credential from an unauthorised host (true_positive - theft of a domain-secret-capable credential), a legitimate-but-unbaselined infrastructure change (misconfiguration), or unprovable with the telemetry at hand (needs_escalation). Given the blast radius, the default posture is treat as theft until a documented migration is positively proven.</Overview>
+    <BusinessImpact>An alert means: the AAD Connect sync account $target_user successfully authenticated from $source_ip, a source it has not used before.
+
+What is already established:
+
+- The authentication succeeded (4624 is a successful logon; 4768 a granted TGT). The credential was valid and accepted.
+- The source is novel for this Tier-0 account. Relative to its own tightly-bounded history, $source_ip is first-seen.
+- The account can replicate all domain secrets - this is standing, so the *capability* is not in question, only whether it is now being wielded from an unauthorised place.
+
+What is not yet established - the investigation:
+
+- Is $source_ip a sanctioned AAD Connect server (a documented migration/rebuild) or a workstation / human-operated / unexpected host (credential theft)?
+- Is the logon type expected - a service account should present type 3 (network) to a DC; a type 2/10 (interactive/RDP) logon by the sync account is anomalous and signals hands-on use of a stolen credential.
+- Is the account actively replicating secrets right now (section 17.5) - exposure context that raises urgency if the source is unauthorised.</BusinessImpact>
+  </ExecutiveSummary>
+  <Investigation>
+    <Goal>Decide true_positive / false_positive / misconfiguration / needs_escalation for AD — Directory Sync Account Sign-In From New Source.</Goal>
+    <Workflow>
+      <Step order="1" name="Confirm the sync-account sign-in from the new source (reused verbatim from the validated v2 playbook, INV-01)">
+        <Purpose>Confirm the sync-account sign-in from the new source (reused verbatim from the validated v2 playbook, INV-01)</Purpose>
+        <Query platform="Elastic" language="ES|QL" id="Q-01">
+          <![CDATA[
+FROM logs-system.security-*
+| WHERE winlog.event_data.TargetUserName == "$target_user" AND source.ip == "$source_ip"
+    AND event.code IN ("4624","4768")
+    AND @timestamp >= NOW() - 2 hours
+| STATS logons = COUNT(*)
+    BY winlog.event_data.LogonType, host.name
+| SORT logons DESC
+| LIMIT 10
+]]>
+        </Query>
+      </Step>
+      <Step order="2" name="Characterise the new source (reused verbatim from the validated v2 playbook, INV-03)">
+        <Purpose>Characterise the new source (reused verbatim from the validated v2 playbook, INV-03)</Purpose>
+        <Query platform="Elastic" language="ES|QL" id="Q-02">
+          <![CDATA[
+FROM logs-system.security-*
+| WHERE source.ip == "$source_ip"
+    AND @timestamp >= NOW() - 2 hours
+| STATS events = COUNT(*)
+    BY event.code, winlog.event_data.TargetUserName
+| SORT events DESC
+| LIMIT 20
+]]>
+        </Query>
+      </Step>
+      <Step order="3" name="Entity pivoting">
+        <Purpose>Entity pivoting</Purpose>
+        <Query platform="Elastic" language="ES|QL" id="Q-03">
+          <![CDATA[
+FROM logs-system.security*
+| WHERE @timestamp >= NOW() - 4 hours
+    AND event.code IN ("4624", "4768")
+    AND winlog.event_data.TargetUserName == "$target_user"
+    AND source.ip == "$source_ip"
+| KEEP @timestamp, event.code, host.name, winlog.event_data.TargetUserName, winlog.event_data.LogonType, source.ip
+| SORT @timestamp DESC
+| LIMIT 50
+]]>
+        </Query>
+      </Step>
+      <Step order="4" name="Process investigation">
+        <Purpose>Process investigation</Purpose>
+        <Query platform="Elastic" language="ES|QL" id="Q-04">
+          <![CDATA[
+FROM logs-system.security*
+| WHERE @timestamp >= NOW() - 4 hours
+    AND event.code == "4688"
+    AND user.name == "$target_user"
+| STATS executions = COUNT(*), first_seen = MIN(@timestamp), last_seen = MAX(@timestamp) BY host.name, process.name, process.parent.name
+| SORT executions DESC
+| LIMIT 40
+]]>
+        </Query>
+      </Step>
+      <Step order="5" name="Parent-Child process analysis">
+        <Purpose>Parent-Child process analysis</Purpose>
+        <Query platform="Elastic" language="ES|QL" id="Q-05">
+          <![CDATA[
+FROM logs-system.security*
+| WHERE @timestamp >= NOW() - 4 hours
+    AND event.code == "4688"
+    AND user.name == "$target_user"
+| KEEP @timestamp, host.name, process.parent.name, process.parent.pid, process.name, process.pid, process.executable
+| SORT @timestamp ASC
+| LIMIT 100
+]]>
+        </Query>
+      </Step>
+      <Step order="6" name="User investigation">
+        <Purpose>User investigation</Purpose>
+        <Query platform="Elastic" language="ES|QL" id="Q-06">
+          <![CDATA[
+FROM logs-system.security*
+| WHERE @timestamp >= NOW() - 4 hours
+    AND event.code IN ("4624", "4768")
+    AND winlog.event_data.TargetUserName == "$target_user"
+| STATS logons = COUNT(*), distinct_sources = COUNT_DISTINCT(source.ip) BY host.name, winlog.event_data.LogonType
+| SORT logons DESC
+| LIMIT 25
+]]>
+        </Query>
+      </Step>
+      <Step order="7" name="Host investigation">
+        <Purpose>Host investigation</Purpose>
+        <Query platform="Elastic" language="ES|QL" id="Q-07">
+          <![CDATA[
+FROM logs-system.security*
+| WHERE @timestamp >= NOW() - 4 hours
+    AND event.code IN ("4624", "4768")
+    AND winlog.event_data.TargetUserName == "$target_user"
+| STATS logons = COUNT(*), distinct_sources = COUNT_DISTINCT(source.ip) BY host.name
+| SORT logons DESC
+| LIMIT 20
+]]>
+        </Query>
+      </Step>
+      <Step order="8" name="IP investigation">
+        <Purpose>IP investigation</Purpose>
+        <Query platform="Elastic" language="ES|QL" id="Q-08">
+          <![CDATA[
+FROM logs-system.security*
+| WHERE @timestamp >= NOW() - 4 hours
+    AND source.ip == "$source_ip"
+| STATS events = COUNT(*), distinct_hosts = COUNT_DISTINCT(host.name) BY winlog.event_data.TargetUserName, event.code
+| SORT events DESC
+| LIMIT 30
+]]>
+        </Query>
+      </Step>
+      <Step order="9" name="Authentication investigation">
+        <Purpose>Authentication investigation</Purpose>
+        <Query platform="Elastic" language="ES|QL" id="Q-09">
+          <![CDATA[
+FROM logs-system.security*
+| WHERE @timestamp >= NOW() - 4 hours
+    AND event.code IN ("4624", "4625", "4768", "4769", "4776")
+    AND winlog.event_data.TargetUserName == "$target_user"
+| STATS events = COUNT(*), distinct_hosts = COUNT_DISTINCT(host.name), distinct_sources = COUNT_DISTINCT(source.ip) BY event.code, winlog.event_data.LogonType
+| SORT events DESC
+| LIMIT 30
+]]>
+        </Query>
+      </Step>
+      <Step order="10" name="Timeline Reconstruction">
+        <Purpose>Timeline Reconstruction</Purpose>
+        <Query platform="Elastic" language="ES|QL" id="Q-10">
+          <![CDATA[
+FROM logs-system.security*
+| WHERE @timestamp >= NOW() - 4 hours
+    AND event.code IN ("4624", "4625", "4634", "4647", "4768", "4672")
+    AND winlog.event_data.TargetUserName == "$target_user"
+| KEEP @timestamp, event.code, winlog.event_data.LogonType, source.ip, host.name
+| SORT @timestamp ASC
+| LIMIT 200
+]]>
+        </Query>
+      </Step>
+      <Step order="11" name="Lateral movement validation">
+        <Purpose>Lateral movement validation</Purpose>
+        <Query platform="Elastic" language="ES|QL" id="Q-11">
+          <![CDATA[
+FROM logs-system.security*
+| WHERE @timestamp >= NOW() - 4 hours
+    AND event.code IN ("4624", "4648", "4768", "4769")
+    AND winlog.event_data.TargetUserName == "$target_user"
+| STATS events = COUNT(*), distinct_sources = COUNT_DISTINCT(source.ip) BY host.name, event.code, winlog.event_data.LogonType
+| SORT events DESC
+| LIMIT 30
+]]>
+        </Query>
+      </Step>
+      <Step order="12" name="Persistence validation">
+        <Purpose>Persistence validation</Purpose>
+        <Query platform="Elastic" language="ES|QL" id="Q-12">
+          <![CDATA[
+FROM logs-system.security*
+| WHERE @timestamp >= NOW() - 4 hours
+    AND winlog.event_data.SubjectUserName == "$target_user"
+    AND event.code IN ("5136", "5137", "4720", "4728", "4732", "7045")
+| STATS events = COUNT(*) BY event.code, host.name
+| SORT events DESC
+| LIMIT 30
+]]>
+        </Query>
+      </Step>
+      <Step order="13" name="Privilege escalation validation">
+        <Purpose>Privilege escalation validation</Purpose>
+        <Query platform="Elastic" language="ES|QL" id="Q-13">
+          <![CDATA[
+FROM logs-system.security*
+| WHERE @timestamp >= NOW() - 4 hours
+    AND event.code == "4672"
+    AND winlog.event_data.SubjectUserName == "$target_user"
+| STATS special_priv_logons = COUNT(*) BY host.name
+| SORT special_priv_logons DESC
+| LIMIT 20
+]]>
+        </Query>
+      </Step>
+      <Step order="14" name="Defense evasion validation">
+        <Purpose>Defense evasion validation</Purpose>
+        <Query platform="Elastic" language="ES|QL" id="Q-14">
+          <![CDATA[
+FROM logs-system.security*
+| WHERE @timestamp >= NOW() - 4 hours
+    AND event.code IN ("1102", "4719")
+    AND winlog.event_data.SubjectUserName == "$target_user"
+| STATS events = COUNT(*) BY event.code, host.name
+| SORT events DESC
+| LIMIT 20
+]]>
+        </Query>
+      </Step>
+      <Step order="15" name="Impact assessment">
+        <Purpose>Impact assessment</Purpose>
+        <Query platform="Elastic" language="ES|QL" id="Q-15">
+          <![CDATA[
+FROM logs-system.security-*
+| WHERE winlog.event_data.SubjectUserName == "$target_user" AND event.code == "4662"
+    AND @timestamp >= NOW() - 2 hours
+| STATS events = COUNT(*),
+        secret_right = COUNT(CASE(winlog.event_data.Properties LIKE "*1131f6ad*", 1, null))
+    BY host.name
+| SORT events DESC
+| LIMIT 10
+]]>
+        </Query>
+      </Step>
+      <Step order="16" name="Finalize verdict">
+        <DecisionTree>
+        </DecisionTree>
+      </Step>
+    </Workflow>
+  </Investigation>
+  <ClassificationGuidance>
+    <TruePositive>
+      <Definition></Definition>
+    </TruePositive>
+    <FalsePositive>
+      <Definition></Definition>
+      <Indicators>
+        <Item>AAD Connect server migration / rebuild / re-IP. The single most common benign cause: the sync server is moved, rebuilt, or re-addressed, so the account legitimately authenticates from a new IP. Authorised only if a change record covers it.</Item>
+        <Item>AAD Connect staging server activation / HA pair. Bringing a staging server into active mode, or a second sync server, introduces a new legitimate origin.</Item>
+        <Item>Planned infrastructure change (new NAT/egress, subnet move) that alters the source address the sync server presents, without any change to the account's behaviour.</Item>
+        <Item>The sync account has a single, stable origin. MSOL_cb8d5eb8df87 authenticated 739 × 4624 and 160 × 4768 from exactly one source, 10.11.18.16, type 3 only, in a 4-hour window. 10.11.18.16 sits in NBI's 10.11.18.x management tier and is the sanctioned AAD Connect server. This tight baseline is what makes the rule high-fidelity: there is no second legitimate origin to tune out.</Item>
+        <Item>The account is genuinely, continuously replicating secrets. On nim-dc-dbap01 it produced 177 × 4662 with 118 carrying the 1131f6ad… Get-Changes-All right in a 2-hour window - normal AAD Connect operation. This means the exposure is always live: if the credential is stolen, the attacker inherits an actively-replicating, secret-capable identity. Do not treat the presence of Get-Changes-All as the anomaly (section 17.5) - it is the standing state.</Item>
+        <Item>10.11.18.1 also appears (4648 explicit-credential logons). The account shows a small number of 4648 from 10.11.18.1 - internal AAD Connect / management-tier behaviour, not a novel *interactive network* source. Reconcile any additional 10.11.18.x origin against the documented sync/management infrastructure; a source outside that tier is the high-signal case.</Item>
+        <Item>No standing allow-list beyond the documented sync server ships with this rule. Maintain an accurate list of AAD Connect server IP(s) so authorised migrations are recognised and true theft stands out. Do not exempt a source off one alert; if warranted, update the canonical sync origin only after the AD/Identity team confirms.</Item>
+      </Indicators>
+    </FalsePositive>
+    <Misconfiguration>
+      <Definition></Definition>
+    </Misconfiguration>
+    <NeedsEscalation>
+      <Definition></Definition>
+    </NeedsEscalation>
+  </ClassificationGuidance>
+  <ResponseActions>
+    <Phase name="Containment">
+      <Action>Rotate the sync-account credential immediately if the source is unauthorised or the logon is interactive - this is the primary containment for theft of this identity. Coordinate with the AAD Connect / Identity team so synchronization is re-established with a fresh secret and the reversibly-stored password on the sync server is refreshed.</Action>
+      <Action>Treat directory secrets as exposed. Because this account can DCSync, a confirmed compromise means every credential may be stolen: initiate the DCSync/domain-compromise response, including rotating krbtgt twice (with the required replication interval between rotations) to invalidate Golden Tickets.</Action>
+      <Action>Isolate and hunt $source_ip. If it is a human-operated/attacker host, network-contain it and preserve it for forensics; if it is the AAD Connect server itself, treat that Tier-0 host as compromised.</Action>
+      <Action>Preserve volatile evidence first where feasible (the source host's memory/process list, the AAD Connect server's config/LocalDB and the recoverable MSOL_ credential, the DCs' security logs) - NBI does not collect the theft step, so host-side capture is the only route to it.</Action>
+      <Action>Deploy/confirm changes only via the authorised human-approved DEPLOY path; investigation itself is read-only.</Action>
+    </Phase>
+    <Phase name="Eradication">
+      <Action>Complete the domain-secret rotation. Following the DCSync playbook: rotate krbtgt (twice), rotate privileged and service-account credentials that may have been replicated, and review for forged tickets and rogue persistence created with the stolen secrets.</Action>
+      <Action>Rebuild or fully remediate the compromised host - the AAD Connect server (if that is the source or was compromised) or the attacker foothold - and re-provision AAD Connect with a clean sync account.</Action>
+      <Action>Remove any persistence the account created (section 17.2): rogue accounts, privileged-group additions, directory backdoors (key credentials, ACLs), and services on affected hosts.</Action>
+      <Action>Close the theft vector: how was the credential obtained (sync-server compromise, config/LSASS extraction, backup)? Harden or rebuild that path so it cannot be re-stolen.</Action>
+    </Phase>
+    <Phase name="Recovery">
+      <Action>Restore synchronization with the rotated credential and confirm AAD Connect operates normally from its sanctioned server only.</Action>
+      <Action>Validate domain integrity before standing down: replication health, no rogue krbtgt/Golden-Ticket artefacts, no residual privileged persistence, and the sync account authenticating from its documented origin alone.</Action>
+      <Action>Return to service only after section 22 closing criteria are met and monitoring confirms the sync account does not authenticate from any non-sanctioned source.</Action>
+      <Action>Harden: restrict the sync account with logon restrictions (allowed source host only), protect the AAD Connect server as a Tier-0 asset, monitor the account's authentication origins continuously, and add the complementary analytics (interactive-logon-by-sync-account and anomalous-4662-volume) so reuse from a known IP or a slow attacker is still caught.</Action>
+    </Phase>
+  </ResponseActions>
+  <Escalation>
+    <Trigger>Escalate to IR / the Tier-0 team (and notify the customer) - treating directory secrets as exposed - when any of the following hold:
+
+- $source_ip is not on the documented AAD Connect server list (a workstation, human-operated, or unexpected host) - this alone is a domain-integrity incident.
+- The sign-in is type 2/10 (interactive/RDP) by the sync account (section 14.1).
+- The account broadened its targets or sources (section 17.1 / section 15.4), created/altered accounts or directory objects (section 17.2), or its session cleared logs (section 17.4).
+- The account is actively replicating secrets (section 17.5 - always true on NBI) *and* the source is unauthorised: assume the full directory is at risk and invoke krbtgt rotation.
+- Evidence is incomplete because of NBI's telemetry gaps (4662 has no source IP; the theft step is not collected) and the alert cannot be safely cleared - escala</Trigger>
+    <To>SOC L2 / IR</To>
+  </Escalation>
+  <ClosureCriteria>
+    <Item>false_positive (authorised): a change record positively matches $source_ip to a planned AAD Connect migration/rebuild/HA activation, the sign-in shows the expected server/network (type-3) pattern, and the source presents only sanctioned sync activity. Record the reference and update the canonical sync origin. Do not create a blanket source allow; update the documented sync-server list precisely.</Item>
+    <Item>false_positive (blocked/authorised): a positively-proven authorised use (e.g. a sanctioned Tier-0 exercise under ROE) documented as authorised - never "benign".</Item>
+    <Item>misconfiguration: a legitimate new/rebuilt sync host the account uses that was simply not yet in the baseline (stale-baseline); update known_infrastructure. No attacker involvement.</Item>
+    <Item>true_positive: sync-credential theft confirmed; credential rotated, krbtgt rotated (twice), source host contained, directory replication and domain integrity reviewed, persistence removed, and no recurrence on monitoring.</Item>
+    <Item>needs_escalation: handed to AD/Identity + IR with INV-01/INV-02/INV-03 and the documented AAD Connect server IP(s) documented; the account treated as high-risk until cleared.</Item>
+  </ClosureCriteria>
+  <Limitations>
+    <Item>One source, one job - that is the whole detection. The sync account's baseline is extraordinarily tight (validated: 10.11.18.16, type 3 only). There is nothing legitimate to tune out beyond documented sync servers, so a novel source is high-fidelity - cross-reference the documented AAD Connect IP(s) first.</Item>
+    <Item>Logon type is the second discriminator. Type 3 to a DC is normal; type 2/10 by the sync account is anomalous regardless of source and signals hands-on use of a stolen credential.</Item>
+    <Item>Get-Changes-All is standing exposure, not the anomaly. The account continuously replicates secrets (validated: 118 Get-Changes-All 4662 in 2h) - do not treat its presence as the finding. It sets urgency: with the credential stolen, the full directory can be pulled *now*. And 4662 has no source IP, so it is exposure context, never attribution.</Item>
+    <Item>The credential is reversibly stored on the sync server. That server is a Tier-0 crown jewel; the MSOL_ password is recoverable there by design (Get-AADIntSyncCredentials), which is why theft of this identity is a realistic, high-impact path - protect and monitor that host accordingly.</Item>
+    <Item>Confirmed compromise = DCSync response. Treat a true_positive as domain compromise: rotate the sync credential, rotate krbtgt twice, and review for Golden Tickets and rogue persistence.</Item>
+    <Item>KB-worthy (persist to NBI customer scope): (1) MSOL_cb8d5eb8df87 = the live AAD Connect sync account; baseline origin 10.11.18.16, type 3 only; (2) it actively exercises Get-Changes-All on nim-dc-dbap01 (secret-replication exposure is standing); (3) Properties on 4662 carries 1131f6ad… (Get-Changes-All) - the DCSync-right marker; (4) 4662 has no source IP (exposure, not attribution). All observed live on 2026-08-17.</Item>
+  </Limitations>
+</Playbook>

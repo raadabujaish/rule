@@ -1,0 +1,67 @@
+{
+  "name": "AD — Object Security Descriptor Modified (DACL backdoor)",
+  "tags": [
+    "NBI-ActiveDirectory",
+    "Phase3",
+    "AD-5136",
+    "QA-remediation"
+  ],
+  "interval": "5m",
+  "enabled": true,
+  "description": "Detects modification of the nTSecurityDescriptor (DACL) on an Active Directory object. Attackers grant themselves rights such as DCSync (Replicating Directory Changes), GenericAll, or WriteDACL to establish stealthy, ACL-based persistence and escalation. Note: AdminSDHolder propagation legitimately rewrites descriptors on protected objects — correlate the subject and target.",
+  "risk_score": 73,
+  "severity": "high",
+  "note": "## Investigation\n1. `SubjectUserName` = who changed the ACL; `ObjectDN` = the object whose rights changed.\n2. Rule out AdminSDHolder/SYSTEM propagation. Human-driven descriptor changes on Tier-0 objects (domain root, AdminSDHolder, privileged groups) are the concern.\n## Response\nInspect the granted ACE; if a backdoor right was added, remove it and investigate the subject.",
+  "output_index": "",
+  "investigation_fields": {
+    "field_names": [
+      "winlog.event_data.SubjectUserName",
+      "winlog.event_data.ObjectDN",
+      "winlog.event_data.AttributeLDAPDisplayName",
+      "winlog.event_data.AttributeValue",
+      "host.name"
+    ]
+  },
+  "author": [
+    "raadabujaish"
+  ],
+  "false_positives": [],
+  "from": "now-9m",
+  "rule_id": "nbi-ad-acl-backdoor",
+  "max_signals": 100,
+  "risk_score_mapping": [],
+  "severity_mapping": [],
+  "threat": [
+    {
+      "framework": "MITRE ATT&CK",
+      "tactic": {
+        "id": "TA0004",
+        "name": "Privilege Escalation",
+        "reference": "https://attack.mitre.org/tactics/TA0004/"
+      },
+      "technique": [
+        {
+          "id": "T1098",
+          "name": "Account Manipulation",
+          "reference": "https://attack.mitre.org/techniques/T1098/"
+        }
+      ]
+    }
+  ],
+  "to": "now",
+  "references": [
+    "https://attack.mitre.org/techniques/T1098/"
+  ],
+  "version": 1,
+  "exceptions_list": [],
+  "related_integrations": [],
+  "required_fields": [],
+  "setup": "",
+  "type": "query",
+  "language": "kuery",
+  "index": [
+    "logs-system.security-*"
+  ],
+  "query": "event.code:\"5136\" and winlog.event_data.AttributeLDAPDisplayName:\"nTSecurityDescriptor\" and not winlog.event_data.SubjectUserName:\"SYSTEM\"",
+  "actions": []
+}

@@ -1,0 +1,399 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<Playbook xmlns="https://soc.example/playbooks" id="PB-windows-powershell-encoded-command" name="Malicious PowerShell Process - Encoded Command - SOC Playbook" version="3.0" status="Validated" classification="TLP:AMBER">
+  <Metadata>
+    <Owner>NBI SOC / Detection Engineering</Owner>
+    <LastUpdated>2026-08-19</LastUpdated>
+    <Severity default="High">High</Severity>
+    <Confidence default="Medium">Medium</Confidence>
+    <Category>Execution</Category>
+    <MitreAttack>
+      <Technique id="T1059.001"/>
+      <Technique id="T1059"/>
+      <Technique id="T1027"/>
+      <Tactic id="TA0002"/>
+      <Tactic id="TA0005"/>
+    </MitreAttack>
+    <References>
+      <Reference title="MITRE ATT&amp;CK - Command and Scripting Interpreter: PowerShell (T1059.001)" url="https://attack.mitre.org/techniques/T1059/001/"/>
+      <Reference title="MITRE ATT&amp;CK - Obfuscated Files or Information (T1027)" url="https://attack.mitre.org/techniques/T1027/"/>
+      <Reference title="MITRE ATT&amp;CK - Execution tactic (TA0002)" url="https://attack.mitre.org/tactics/TA0002/"/>
+      <Reference title="MITRE ATT&amp;CK - Defense Evasion tactic (TA0005)" url="https://attack.mitre.org/tactics/TA0005/"/>
+      <Reference title="Elastic Security - Malicious PowerShell / Encoded Command detection rules" url="https://github.com/elastic/detection-rules"/>
+      <Reference title="Microsoft Learn - about_PowerShell_Logging / Script Block Logging (Event 4104)" url="https://learn.microsoft.com/en-us/powershell/module/microsoft.powershell.core/about/about_logging_windows"/>
+      <Reference title="Microsoft Learn - powershell.exe -EncodedCommand parameter" url="https://learn.microsoft.com/en-us/powershell/module/microsoft.powershell.core/about/about_powershell_exe"/>
+      <Reference title="Red Canary - Obfuscated / encoded PowerShell detection guidance" url="https://redcanary.com/threat-detection-report/techniques/powershell/"/>
+      <Reference title="Microsoft Learn - Command line process auditing (Event 4688 command-line GPO)" url="https://learn.microsoft.com/en-us/windows-server/identity/ad-ds/manage/component-updates/command-line-process-auditing"/>
+    </References>
+  </Metadata>
+  <AlertContext>
+    <RuleName>Malicious PowerShell Process - Encoded Command</RuleName>
+    <RuleId>d009cbed-d0ed-4f30-a177-bca2f5bbee67</RuleId>
+    <RuleType>query</RuleType>
+    <Index>logs-system.security-*</Index>
+    <TriggerLogic>The deployed rule is a KQL (query) rule on logs-system.security-*:
+
+
+
+Plain English: a powershell.exe process creation whose arguments include an encoded-command switch. On NBI this is anchored to Event 4688; the switch is matched against process.args (multivalued) and, equivalently, process.command_line.
+
+The Base64 blob itself is not decodable in-query - copy it from the command line and decode it offline, or (better on NBI) recover the *already-decoded* script from the PowerShell script-block log (logs-windows.powershell-*, Event 4104), which logs the plaintext PowerShell regardless of the -EncodedCommand wrapper (section 15.2b). Command-line capture on 4688 is ~50% populated estate-wide (higher on the automation tier), so the script-block log is the durable corroborator.</TriggerLogic>
+    <KeyAlertFields>powershell.exe, powershell.file.script_block_text, process.name, process.executable, process.parent.name, user.name, process.command_line, process.args, host.name</KeyAlertFields>
+  </AlertContext>
+  <Inputs>
+    <Input name="$host"/>
+    <Input name="$user"/>
+  </Inputs>
+  <ExecutiveSummary>
+    <Overview>This playbook drives triage and investigation of the Malicious PowerShell Process - Encoded Command detection on NBI's Elastic Security deployment. The rule fires on a powershell.exe process (Windows Security 4688) started with an encoded-command argument (-EncodedCommand or its -enc/-e abbreviations). The -EncodedCommand switch runs a Base64-encoded PowerShell payload, hiding the actual command from casual inspection - a hallmark of obfuscated, defence-evading execution, though it is also used by some legitimate automation and management tooling.
+
+The decision turns on who/what launched it (an automation orchestrator vs a document/script-host/service parent), whether the encoded workload is steady machine automation or a novel human one-off, and whether it spawned follow-on tooling. Verdicts: obfuscated malicious execution (true_positive), authorised automation or a positively-blocked attempt (false_positive - the latter documented as blocked-malicious, never "benign"), a legitimate product not yet baselined (misconfiguration), or undecodable/unattributable (needs_escalation). On NBI the decoded payload is recoverable from the PowerShell script-block log (section 15.2b) - the single most decisive artifact for this rule.</Overview>
+    <BusinessImpact>An alert means: on $host, $user launched PowerShell with a Base64-encoded command. Encoding is a legitimate PowerShell feature (it safely passes complex scripts as a single argument) - and it is equally a favoured way for attackers to smuggle download-and-execute cradles, in-memory loaders, and post-exploitation one-liners past shallow inspection.
+
+Encoding conceals *intent*, not *outcome* - the command ran (or attempted to). What it means depends on:
+
+- Lineage - an orchestration/management parent (python.exe, an RMM agent, services.exe, SCCM) hosting encoded PowerShell is typically automation; an Office/wscript/mshta/browser parent is a delivery chain and highly suspicious.
+- Cadence - a high, evenly-spread count under one machine/service account with a stable parent is the automation fingerprint; a small burst under an interactive account, a novel parent, or a first-time occurrence for that user is worth pursuing.
+- Decoded payload - IEX, DownloadString/DownloadData, FromBase64String, gzip/deflate inflation, -nop -w hidden, or [Reflection.Assembly]::Load in the decoded text is hostile; benign automation decodes to mundane management commands.
+- Follow-on - post-exploitation chil</BusinessImpact>
+  </ExecutiveSummary>
+  <Investigation>
+    <Goal>Decide true_positive / false_positive / misconfiguration / needs_escalation for Malicious PowerShell Process - Encoded Command.</Goal>
+    <Workflow>
+      <Step order="1" name="Reproduce the rule estate-wide (confirm the detection logic)">
+        <Purpose>Reproduce the rule estate-wide (confirm the detection logic)</Purpose>
+        <Query platform="Elastic" language="ES|QL" id="Q-01">
+          <![CDATA[
+FROM logs-system.security-*
+| WHERE @timestamp >= NOW() - 4 hours
+    AND event.code == "4688" AND TO_LOWER(process.name) == "powershell.exe"
+| EVAL cl = TO_LOWER(CONCAT(COALESCE(process.command_line, ""), " ", COALESCE(MV_CONCAT(process.args, " "), "")))
+| WHERE cl LIKE "*encodedcommand*" OR cl LIKE "*-enc *" OR cl LIKE "* -e *"
+| STATS execs = COUNT(*), hosts = COUNT_DISTINCT(host.name), users = COUNT_DISTINCT(user.name) BY process.parent.name
+| SORT execs DESC
+| LIMIT 25
+]]>
+        </Query>
+      </Step>
+      <Step order="2" name="Confirm on the alert host: encoded invocations and their launcher">
+        <Purpose>Confirm on the alert host: encoded invocations and their launcher</Purpose>
+        <Query platform="Elastic" language="ES|QL" id="Q-02">
+          <![CDATA[
+FROM logs-system.security-*
+| WHERE event.code == "4688" AND process.name == "powershell.exe"
+    AND host.name == "$host" AND user.name == "$user"
+    AND (process.command_line LIKE "*EncodedCommand*" OR process.command_line LIKE "*-enc *"
+         OR process.command_line LIKE "* -e *")
+    AND @timestamp >= NOW() - 4 hours
+| STATS execs = COUNT(*), sample_cmds = VALUES(process.command_line)
+    BY process.parent.name
+| SORT execs DESC
+| LIMIT 15
+]]>
+        </Query>
+      </Step>
+      <Step order="3" name="Entity pivoting">
+        <Purpose>Entity pivoting</Purpose>
+        <Query platform="Elastic" language="ES|QL" id="Q-03">
+          <![CDATA[
+FROM logs-system.security-*
+| WHERE @timestamp >= NOW() - 4 hours
+    AND event.code == "4688" AND TO_LOWER(process.name) == "powershell.exe"
+    AND host.name == "$host" AND user.name == "$user"
+    AND (process.command_line LIKE "*EncodedCommand*" OR process.command_line LIKE "*-enc *" OR process.command_line LIKE "* -e *")
+| KEEP @timestamp, process.parent.name, process.command_line, process.pid, process.parent.pid
+| SORT @timestamp DESC
+| LIMIT 50
+]]>
+        </Query>
+      </Step>
+      <Step order="4" name="Process investigation">
+        <Purpose>Process investigation</Purpose>
+        <Query platform="Elastic" language="ES|QL" id="Q-04">
+          <![CDATA[
+FROM logs-system.security-*
+| WHERE event.code == "4688" AND process.name == "powershell.exe"
+    AND host.name == "$host"
+    AND (process.command_line LIKE "*EncodedCommand*" OR process.command_line LIKE "*-enc *")
+    AND @timestamp >= NOW() - 4 hours
+| STATS execs = COUNT(*), parents = COUNT_DISTINCT(process.parent.name),
+        users = COUNT_DISTINCT(user.name), buckets = COUNT_DISTINCT(DATE_TRUNC(15 minutes, @timestamp))
+    BY user.name
+| SORT execs DESC
+| LIMIT 15
+]]>
+        </Query>
+      </Step>
+      <Step order="5" name="Process investigation">
+        <Purpose>Process investigation</Purpose>
+        <Query platform="Elastic" language="ES|QL" id="Q-05">
+          <![CDATA[
+FROM logs-windows.powershell*
+| WHERE @timestamp >= NOW() - 4 hours
+    AND event.code == "4104" AND host.name == "$host"
+    AND (TO_LOWER(powershell.file.script_block_text) LIKE "*iex*"
+         OR TO_LOWER(powershell.file.script_block_text) LIKE "*invoke-expression*"
+         OR TO_LOWER(powershell.file.script_block_text) LIKE "*downloadstring*"
+         OR TO_LOWER(powershell.file.script_block_text) LIKE "*downloaddata*"
+         OR TO_LOWER(powershell.file.script_block_text) LIKE "*frombase64string*"
+         OR TO_LOWER(powershell.file.script_block_text) LIKE "*reflection.assembly*"
+         OR TO_LOWER(powershell.file.script_block_text) LIKE "*-w hidden*")
+| KEEP @timestamp, host.name, powershell.file.script_block_text
+| SORT @timestamp DESC
+| LIMIT 20
+]]>
+        </Query>
+      </Step>
+      <Step order="6" name="Parent-Child process analysis">
+        <Purpose>Parent-Child process analysis</Purpose>
+        <Query platform="Elastic" language="ES|QL" id="Q-06">
+          <![CDATA[
+FROM logs-system.security-*
+| WHERE event.code == "4688" AND process.parent.name == "powershell.exe"
+    AND host.name == "$host" AND @timestamp >= NOW() - 4 hours
+| STATS spawns = COUNT(*), children = VALUES(process.name)
+    BY user.name
+| SORT spawns DESC
+| LIMIT 15
+]]>
+        </Query>
+      </Step>
+      <Step order="7" name="User investigation">
+        <Purpose>User investigation</Purpose>
+        <Query platform="Elastic" language="ES|QL" id="Q-07">
+          <![CDATA[
+FROM logs-system.security-*
+| WHERE @timestamp >= NOW() - 4 hours
+    AND event.code == "4688" AND user.name == "$user"
+| STATS executions = COUNT(*), distinct_procs = COUNT_DISTINCT(process.name) BY host.name
+| SORT executions DESC
+| LIMIT 20
+]]>
+        </Query>
+      </Step>
+      <Step order="8" name="Host investigation">
+        <Purpose>Host investigation</Purpose>
+        <Query platform="Elastic" language="ES|QL" id="Q-08">
+          <![CDATA[
+FROM logs-system.security-*
+| WHERE @timestamp >= NOW() - 4 hours
+    AND event.code == "4688" AND TO_LOWER(process.name) == "powershell.exe"
+    AND host.name == "$host"
+| STATS executions = COUNT(*), users = COUNT_DISTINCT(user.name) BY process.parent.name
+| SORT executions DESC
+| LIMIT 30
+]]>
+        </Query>
+      </Step>
+      <Step order="9" name="IP investigation">
+        <Purpose>IP investigation</Purpose>
+        <Query platform="Elastic" language="ES|QL" id="Q-09">
+          <![CDATA[
+FROM logs-system.security-*
+| WHERE @timestamp >= NOW() - 4 hours
+    AND event.code == "4624"
+    AND host.name == "$host" AND user.name == "$user"
+    AND source.ip IS NOT NULL
+| STATS logons = COUNT(*) BY source.ip, winlog.event_data.LogonType
+| SORT logons DESC
+| LIMIT 20
+]]>
+        </Query>
+      </Step>
+      <Step order="10" name="File investigation">
+        <Purpose>File investigation</Purpose>
+        <Query platform="Elastic" language="ES|QL" id="Q-10">
+          <![CDATA[
+FROM logs-system.security-*
+| WHERE event.code == "4688" AND host.name == "$host" AND @timestamp >= NOW() - 4 hours
+    AND (process.executable LIKE "*Temp*" OR process.executable LIKE "*AppData*"
+         OR process.executable LIKE "*Downloads*" OR process.executable LIKE "*Public*"
+         OR process.parent.name == "powershell.exe")
+| STATS spawns = COUNT(*), procs = VALUES(process.name), first_seen = MIN(@timestamp), last_seen = MAX(@timestamp)
+    BY process.parent.name, user.name
+| SORT spawns DESC
+| LIMIT 20
+]]>
+        </Query>
+      </Step>
+      <Step order="11" name="Authentication investigation">
+        <Purpose>Authentication investigation</Purpose>
+        <Query platform="Elastic" language="ES|QL" id="Q-11">
+          <![CDATA[
+FROM logs-system.security-*
+| WHERE @timestamp >= NOW() - 4 hours
+    AND event.code IN ("4624", "4625", "4634", "4647")
+    AND host.name == "$host" AND user.name == "$user"
+| STATS events = COUNT(*), first_seen = MIN(@timestamp), last_seen = MAX(@timestamp) BY event.code, winlog.event_data.LogonType, source.ip
+| SORT events DESC
+| LIMIT 30
+]]>
+        </Query>
+      </Step>
+      <Step order="12" name="Timeline Reconstruction">
+        <Purpose>Timeline Reconstruction</Purpose>
+        <Query platform="Elastic" language="ES|QL" id="Q-12">
+          <![CDATA[
+FROM logs-system.security-*
+| WHERE @timestamp >= NOW() - 4 hours
+    AND event.code == "4688" AND host.name == "$host" AND user.name == "$user"
+| KEEP @timestamp, process.parent.name, process.parent.pid, process.name, process.pid, process.executable
+| SORT @timestamp ASC
+| LIMIT 200
+]]>
+        </Query>
+      </Step>
+      <Step order="13" name="Lateral movement validation">
+        <Purpose>Lateral movement validation</Purpose>
+        <Query platform="Elastic" language="ES|QL" id="Q-13">
+          <![CDATA[
+FROM logs-system.security-*
+| WHERE @timestamp >= NOW() - 4 hours
+    AND event.code IN ("4624", "4648", "4768", "4769", "5140")
+    AND user.name == "$user"
+    AND host.name != "$host"
+| STATS events = COUNT(*) BY host.name, event.code, winlog.event_data.LogonType
+| SORT events DESC
+| LIMIT 30
+]]>
+        </Query>
+      </Step>
+      <Step order="14" name="Persistence validation">
+        <Purpose>Persistence validation</Purpose>
+        <Query platform="Elastic" language="ES|QL" id="Q-14">
+          <![CDATA[
+FROM logs-system.security-*
+| WHERE @timestamp >= NOW() - 4 hours
+    AND host.name == "$host"
+    AND (
+        (event.code == "4688" AND TO_LOWER(process.name) IN ("schtasks.exe", "reg.exe", "sc.exe", "at.exe", "wscript.exe", "cscript.exe", "rundll32.exe", "mshta.exe"))
+        OR event.code == "7045"
+        OR event.code == "4720"
+        OR event.code == "4698"
+    )
+| STATS events = COUNT(*) BY event.code, process.name, user.name
+| SORT events DESC
+| LIMIT 40
+]]>
+        </Query>
+      </Step>
+      <Step order="15" name="Privilege escalation validation">
+        <Purpose>Privilege escalation validation</Purpose>
+        <Query platform="Elastic" language="ES|QL" id="Q-15">
+          <![CDATA[
+FROM logs-system.security-*
+| WHERE @timestamp >= NOW() - 4 hours
+    AND event.code == "4672" AND host.name == "$host"
+| STATS special_priv_logons = COUNT(*) BY user.name
+| SORT special_priv_logons DESC
+| LIMIT 25
+]]>
+        </Query>
+      </Step>
+      <Step order="16" name="Defense evasion validation">
+        <Purpose>Defense evasion validation</Purpose>
+        <Query platform="Elastic" language="ES|QL" id="Q-16">
+          <![CDATA[
+FROM logs-system.security-*
+| WHERE @timestamp >= NOW() - 4 hours
+    AND host.name == "$host"
+    AND (
+        (event.code == "4688" AND TO_LOWER(process.name) IN ("wevtutil.exe", "fsutil.exe", "vssadmin.exe", "wmic.exe", "cipher.exe", "sdelete.exe", "sdelete64.exe"))
+        OR event.code == "1102"
+        OR event.code == "4719"
+    )
+| STATS events = COUNT(*) BY event.code, process.name, user.name
+| SORT events DESC
+| LIMIT 30
+]]>
+        </Query>
+      </Step>
+      <Step order="17" name="Impact assessment">
+        <Purpose>Impact assessment</Purpose>
+        <Query platform="Elastic" language="ES|QL" id="Q-17">
+          <![CDATA[
+FROM logs-system.security-*
+| WHERE event.code == "4688" AND process.parent.name == "powershell.exe"
+    AND host.name == "$host" AND @timestamp >= NOW() - 4 hours
+| STATS spawns = COUNT(*), distinct_children = COUNT_DISTINCT(process.name), children = VALUES(process.name)
+    BY user.name
+| SORT spawns DESC
+| LIMIT 15
+]]>
+        </Query>
+      </Step>
+      <Step order="18" name="Finalize verdict">
+        <DecisionTree>
+        </DecisionTree>
+      </Step>
+    </Workflow>
+  </Investigation>
+  <ClassificationGuidance>
+    <TruePositive>
+      <Definition></Definition>
+    </TruePositive>
+    <FalsePositive>
+      <Definition></Definition>
+      <Indicators>
+        <Item>Sanctioned automation and management tooling that legitimately uses -EncodedCommand - orchestration frameworks, RMM agents, SCCM/DSC, and installer wrappers. On NBI this is the *dominant* volume (see section 6). Confirm the parent, the cadence, and a benign decoded payload - authorisation proven, not assumed.</Item>
+        <Item>Scheduled/service automation that wraps PowerShell in encoded form as packaged behaviour and simply has not been baselined.</Item>
+        <Item>Administrator or red/purple-team testing of encoded execution - authorised malicious-technique execution, classified false_positive (blocked/authorised) only against a ticket or ROE, never dismissed on sight.</Item>
+        <Item>Encoded PowerShell has a large, benign automation baseline. ~561 encoded-command executions/4h estate-wide are dominated by machine accounts NIM-ST-APV10$/NIM-ST-APV11$ under a python.exe parent - a steady orchestration workload (the validated sample decodes to mundane commands like tzutil /g and Get-ItemProperty …TimeZoneInformation). This is the noise to characterise and set aside; the interactive/human-launched encoded command is the higher-signal minority.</Item>
+        <Item>Cadence and account type separate automation from a human one-off. A high, evenly-spread count under one machine account (…$) with one stable parent and many time-buckets touched is automation; a small burst under an interactive user, a novel parent, or a first-time occurrence is the pattern to pursue (section 15.2a).</Item>
+        <Item>The decoded payload is recoverable on the automation tier. logs-windows.powershell-* 4104 is live (~1.1k/4h on nim-st-apv10/-apv11) and logs the plaintext script; key it on host.name (its user.name is SYSTEM, connected_user.name null). Confirm 4104 collection on the specific alert host before relying on it - coverage may be narrower off the automation tier.</Item>
+        <Item>No historical NBI benign-true-positive is on record for this rule beyond the known automation. Do not blanket-except; scope any exception to the exact parent + account + decoded workload after a documented authorised cause.</Item>
+      </Indicators>
+    </FalsePositive>
+    <Misconfiguration>
+      <Definition></Definition>
+    </Misconfiguration>
+    <NeedsEscalation>
+      <Definition></Definition>
+    </NeedsEscalation>
+  </ClassificationGuidance>
+  <ResponseActions>
+    <Phase name="Containment">
+      <Action>Isolate $host (network-contain / quarantine) if a true_positive is confirmed, to stop the decoded payload's C2 and any post-execution activity.</Action>
+      <Action>Capture the decoded script (section 15.2b / offline decode) and any dropped artifact for analysis before eradication.</Action>
+      <Action>Terminate the PowerShell process and its children (section 17.5) if the host cannot yet be isolated.</Action>
+      <Action>Suspend/disable $user and reset its credentials (section 20) if the account is implicated; for a machine/service account, coordinate with the owning automation team rather than breaking a legitimate service blindly.</Action>
+      <Action>Block any C2 URL/domain/IP extracted from the decoded payload at the proxy/firewall. Deploy changes only via the authorised human-approved DEPLOY path; investigation itself is read-only.</Action>
+    </Phase>
+    <Phase name="Eradication">
+      <Action>Remove implants/persistence discovered in section 17.2 (services, scheduled tasks, Run keys, rogue accounts) and any payload the decoded script dropped/loaded (section 15.10).</Action>
+      <Action>Block the C2/delivery infrastructure (URL, domain, IP) across the proxy/firewall and endpoints; add any payload hash to endpoint blocklists once computed (section 15.9).</Action>
+      <Action>Run a full anti-malware / EDR scan on $host and hunt the same decoded markers, parent, and C2 across peers, especially hosts $user reached (section 15.4, section 17.1).</Action>
+      <Action>Remediate the initial-access vector that placed the foothold from which the encoded command ran.</Action>
+    </Phase>
+    <Phase name="Recovery">
+      <Action>Reset $user's credentials and any exposed on $host during the window; if privileged accounts logged on there (section 17.3), rotate those too.</Action>
+      <Action>Restore $host from a known-good image if implants or tampering were extensive; otherwise validate eradication holds after reboot.</Action>
+      <Action>Return the host/account to service only after section 22 closing criteria are met and monitoring confirms no recurrence of the hostile encoded pattern or C2.</Action>
+      <Action>Recommend hardening (section 23): enable PowerShell Script Block Logging (4104) and Constrained Language Mode where feasible, restrict PowerShell for non-admins via AppLocker/WDAC, ensure command-line auditing estate-wide, and baseline sanctioned encoded-command automation so novel use stands out.</Action>
+    </Phase>
+  </ResponseActions>
+  <Escalation>
+    <Trigger>Escalate to Tier 3 / Incident Response (and notify the customer) when any of the following hold:
+
+- The decoded payload is hostile (IEX/DownloadString/FromBase64String/reflective load - section 15.2b), or the parent is a delivery chain (Office/wscript/mshta/browser - section 14.2/section 15.1).
+- Post-exploitation children are present (section 17.5), or persistence (section 17.2) / lateral movement (section 17.1) / privilege escalation (section 17.3) is observed.
+- Log clearing / shadow-copy deletion appears (section 17.4), or the host is a server/DC/privileged workstation.
+- The blob cannot be decoded and no 4104 script-block exists for the host, leaving intent unresolved - escalate as needs_escalation with the gaps named.</Trigger>
+    <To>SOC L2 / IR</To>
+  </Escalation>
+  <ClosureCriteria>
+    <Item>false_positive (authorised): the orchestration parent, steady single-account cadence, machine-account identity, and a benign decoded payload are all positively confirmed as sanctioned automation for this exact $host + $user + time. Record the reference; scope any exception to that exact tuple.</Item>
+    <Item>false_positive (blocked-malicious): the encoded execution was positively proven prevented by EDR/AV with no follow-on; documented as blocked-malicious, never "benign" - still hunt the delivery vector.</Item>
+    <Item>misconfiguration: a legitimate product/agent wraps PowerShell in -EncodedCommand and simply was not baselined; baseline the tool/parent and prefer a non-encoded invocation where feasible.</Item>
+    <Item>true_positive: obfuscated malicious execution confirmed (hostile decoded payload / delivery-chain parent / post-exploitation children); containment/eradication/recovery completed, scope established, C2 blocked, and no residual persistence or recurrence.</Item>
+    <Item>needs_escalation: handed to Tier 3/IR with the specific evidence gaps documented.</Item>
+  </ClosureCriteria>
+  <Limitations>
+    <Item>Decode before you decide. The parent and cadence steer triage, but the decoded payload (section 15.2b, or offline) is the decisive artifact - IEX/DownloadString/FromBase64String/reflective-load/-w hidden is hostile; mundane management commands are benign automation.</Item>
+    <Item>NBI has a large, real encoded-command baseline. ~561/4h estate-wide, dominated by NIM-ST-APV10$/NIM-ST-APV11$ under python.exe. Characterise cadence and account type (section 15.2a) to set the automation aside without dismissing the human minority.</Item>
+    <Item>The script-block log recovers what the blob hides. logs-windows.powershell-* 4104 logs the plaintext script; key it on host.name (its user.name is SYSTEM, connected_user.name null). script_block_text is a wildcard field → TO_LOWER(...) LIKE, never MATCH. Confirm 4104 is collected on the alert host before treating an empty result as reassuring.</Item>
+    <Item>The rule is switch-bound; evasion is easy. -e/-ec abbreviations, split/concatenated blobs, stdin piping, or pwsh.exe (PowerShell 7) weaken it. The script-block/AMSI angle (section 15.2b) and a complementary decoded-content analytic cover these; a null section 14.2 never clears the host.</Item>
+    <Item>winlog.event_data.TargetUserName is null on 4688 - key process/user pivots on user.name; machine accounts end in $.</Item>
+    <Item>In-memory and network are invisible here. Reflective loads and C2 leave few 4688 traces and no in-index network; recover the decoded script and any artifact host-side, and enrich extracted URLs/IPs externally.</Item>
+    <Item>KB-worthy (persist to NBI customer scope): (1) encoded-command baseline ~561/4h dominated by NIM-ST-APV10$/NIM-ST-APV11$ under python.exe (decodes to tzutil/Get-ItemProperty automation); (2) logs-windows.powershell-* 4104 ~1.1k/4h on those hosts, script_block_text wildcard, connected_user.name null → key on host; (3) process.command_line/args ~50% bimodal (higher on automation tier); (4) winlog.event_data.TargetUserName null on 4688. Observed live 2026-08-19.</Item>
+  </Limitations>
+</Playbook>

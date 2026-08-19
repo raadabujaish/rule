@@ -1,0 +1,44 @@
+{
+  "name": "Non-Admin Edited a Security-enabled Group",
+  "tags": [],
+  "interval": "5m",
+  "enabled": true,
+  "description": "Detects non-admin users modifying security groups",
+  "risk_score": 73,
+  "severity": "high",
+  "license": "",
+  "output_index": "",
+  "meta": {
+    "kibana_siem_app_url": "https://nbi.scanwave.local:8008/app/security"
+  },
+  "investigation_fields": {
+    "field_names": [
+      "winlog.event_data.SubjectUserName",
+      "winlog.event_data.MemberName",
+      "winlog.event_data.TargetUserName",
+      "winlog.event_data.TargetSid",
+      "host.name"
+    ]
+  },
+  "author": [],
+  "false_positives": [],
+  "from": "now-15m",
+  "rule_id": "61ece333-1a2c-48c0-b06b-50a8c3dbf30b",
+  "max_signals": 100,
+  "risk_score_mapping": [],
+  "severity_mapping": [],
+  "threat": [],
+  "to": "now",
+  "references": [],
+  "version": 1,
+  "exceptions_list": [],
+  "related_integrations": [],
+  "required_fields": [],
+  "setup": "",
+  "type": "query",
+  "language": "kuery",
+  "data_view_id": "logs-*",
+  "query": "(event.code : \"4728\" OR event.code : \"4729\" OR event.code : \"4730\") AND NOT (user.name : *admin* OR *ADMIN*)",
+  "filters": [],
+  "actions": []
+}

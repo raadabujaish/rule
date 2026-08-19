@@ -1,0 +1,79 @@
+{
+  "name": "MS SQL — Server Audit Disabled, Altered or Dropped",
+  "tags": [
+    "NBI-Database",
+    "Phase3",
+    "MS-SQL-Server"
+  ],
+  "interval": "5m",
+  "enabled": true,
+  "description": "Detects modification, disabling (STATE = OFF) or dropping of a SQL Server Audit or Audit Specification — a defence-evasion step to blind database monitoring before or during an attack.",
+  "risk_score": 80,
+  "severity": "high",
+  "note": "## Investigation\n1. Read the statement to see whether the audit was turned OFF, altered or dropped, and by whom.\n2. Correlate with activity immediately after (the attacker may have blinded logging to act).\n## Response\nRe-enable the audit, and investigate all activity from the actor around the change window.",
+  "output_index": "",
+  "investigation_fields": {
+    "field_names": [
+      "sqlserver.audit.statement",
+      "sqlserver.audit.server_principal_name",
+      "sqlserver.audit.session_server_principal_name",
+      "sqlserver.audit.database_name",
+      "sqlserver.audit.client_ip",
+      "sqlserver.audit.application_name",
+      "sqlserver.audit.host_name",
+      "event.action",
+      "host.name",
+      "user.name"
+    ]
+  },
+  "author": [
+    "raadabujaish"
+  ],
+  "false_positives": [],
+  "from": "now-9m",
+  "rule_id": "nbi-sql-audit-tampering",
+  "max_signals": 100,
+  "risk_score_mapping": [],
+  "severity_mapping": [],
+  "threat": [
+    {
+      "framework": "MITRE ATT&CK",
+      "tactic": {
+        "id": "TA0005",
+        "name": "Defense Evasion",
+        "reference": "https://attack.mitre.org/tactics/TA0005/"
+      },
+      "technique": [
+        {
+          "id": "T1562",
+          "name": "Impair Defenses",
+          "reference": "https://attack.mitre.org/techniques/T1562/",
+          "subtechnique": [
+            {
+              "id": "T1562.008",
+              "name": "Disable or Modify Cloud Logs",
+              "reference": "https://attack.mitre.org/techniques/T1562/008/"
+            }
+          ]
+        }
+      ]
+    }
+  ],
+  "to": "now",
+  "references": [
+    "https://attack.mitre.org/",
+    "https://learn.microsoft.com/en-us/sql/relational-databases/security/auditing/"
+  ],
+  "version": 1,
+  "exceptions_list": [],
+  "related_integrations": [],
+  "required_fields": [],
+  "setup": "",
+  "type": "query",
+  "language": "kuery",
+  "index": [
+    "logs-microsoft_sqlserver.audit-*"
+  ],
+  "query": "sqlserver.audit.statement:(\"ALTER SERVER AUDIT\" or \"DROP SERVER AUDIT\" or \"ALTER SERVER AUDIT SPECIFICATION\" or \"ALTER DATABASE AUDIT SPECIFICATION\")",
+  "actions": []
+}

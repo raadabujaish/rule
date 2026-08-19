@@ -1,0 +1,44 @@
+{
+  "name": "Lockbit 3.0 Ransomware",
+  "tags": [],
+  "interval": "5m",
+  "enabled": true,
+  "description": "Detects indicators of Lockbit 3.0 ransomware",
+  "risk_score": 100,
+  "severity": "critical",
+  "license": "",
+  "output_index": "",
+  "meta": {
+    "kibana_siem_app_url": "https://nbi.scanwave.local:8008/app/security"
+  },
+  "investigation_fields": {
+    "field_names": [
+      "user.name",
+      "process.name",
+      "process.parent.name",
+      "process.command_line",
+      "host.name"
+    ]
+  },
+  "author": [],
+  "false_positives": [],
+  "from": "now-15m",
+  "rule_id": "2abde34a-e809-4af4-a3ef-783d82eff693",
+  "max_signals": 100,
+  "risk_score_mapping": [],
+  "severity_mapping": [],
+  "threat": [],
+  "to": "now",
+  "references": [],
+  "version": 1,
+  "exceptions_list": [],
+  "related_integrations": [],
+  "required_fields": [],
+  "setup": "",
+  "type": "query",
+  "language": "kuery",
+  "data_view_id": "logs-*",
+  "query": "process.args : \"*lockbit*\" OR file.extension : \".lockbit\" OR process.name : \"*conti*\"",
+  "filters": [],
+  "actions": []
+}

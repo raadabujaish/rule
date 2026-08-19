@@ -1,0 +1,348 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<Playbook xmlns="https://soc.example/playbooks" id="PB-fortiweb-idor-sequential-enumeration" name="FortiWeb — IDOR Sequential ID Enumeration - SOC Playbook" version="3.0" status="Validated" classification="TLP:AMBER">
+  <Metadata>
+    <Owner>NBI SOC / Detection Engineering</Owner>
+    <LastUpdated>2026-08-19</LastUpdated>
+    <Severity default="High">High</Severity>
+    <Confidence default="Medium">Medium</Confidence>
+    <Category>Initial Access</Category>
+    <MitreAttack>
+      <Technique id="T1190"/>
+      <Technique id="T1119"/>
+      <Tactic id="TA0001"/>
+      <Tactic id="TA0009"/>
+    </MitreAttack>
+    <References>
+      <Reference title="MITRE ATT&amp;CK - Exploit Public-Facing Application (T1190)" url="https://attack.mitre.org/techniques/T1190/"/>
+      <Reference title="MITRE ATT&amp;CK - Automated Collection (T1119)" url="https://attack.mitre.org/techniques/T1119/"/>
+      <Reference title="MITRE ATT&amp;CK - Initial Access tactic (TA0001)" url="https://attack.mitre.org/tactics/TA0001/"/>
+      <Reference title="MITRE ATT&amp;CK - Collection tactic (TA0009)" url="https://attack.mitre.org/tactics/TA0009/"/>
+      <Reference title="OWASP API Security Top 10 - API1:2023 Broken Object Level Authorization (BOLA / IDOR)" url="https://owasp.org/API-Security/editions/2023/en/0xa1-broken-object-level-authorization/"/>
+      <Reference title="OWASP Web Security Testing Guide - Testing for Insecure Direct Object References" url="https://owasp.org/www-project-web-security-testing-guide/latest/4-Web_Application_Security_Testing/05-Authorization_Testing/04-Testing_for_Insecure_Direct_Object_References"/>
+      <Reference title="Fortinet FortiWeb - Administration Guide (traffic/attack logs, X-Forwarded-For)" url="https://docs.fortinet.com/document/fortiweb/latest/administration-guide"/>
+      <Reference title="Elastic - ES|QL reference (RLIKE, SPLIT, MV_FIRST, COUNT_DISTINCT, CASE)" url="https://www.elastic.co/guide/en/elasticsearch/reference/current/esql.html"/>
+    </References>
+  </Metadata>
+  <AlertContext>
+    <RuleName>FortiWeb — IDOR Sequential ID Enumeration</RuleName>
+    <RuleId>raad-14-idor-sequential-enumeration</RuleId>
+    <RuleType>esql</RuleType>
+    <Index>logs-tcp.generic-*</Index>
+    <TriggerLogic>The deployed rule is an ES|QL analytic over FortiWeb traffic logs. In plain English, for each grouping of (data.original_src, data.http_host, endpoint) where:
+
+- the URL carries a numeric object id (data.http_url matches =NNN with three or more digits), and
+- the endpoint is not an rb_ cache-buster path (those carry random tokens, not object IDs),
+
+it counts the number of distinct id-bearing URLs and fires when one grouping reaches 20 or more distinct IDs in the window. It also pre-computes success (retcode &lt; 400) and forbidden (401/403/404), so the enforcement outcome travels with the alert.
+
+One-line Kibana KQL pivot filter (Discover; not the analytic itself):
+
+
+
+Live adaptation (NBI): the FortiWeb data stream is logs-tcp.generic-*; queries below are scoped there. The de-proxy is genuine on this estate - x_forwarded_for is a live ES|QL column (99.3% populated on traffic logs) carrying the true client behind the shared edge, so COALESCE(TRIM(MV_FIRST(SPLIT(x_forwarded_for, ","))), data.src) resolves the real enumerator.</TriggerLogic>
+    <KeyAlertFields>data.original_src, data.src, data.http_host, data.http_url, data.http_retcode, data.http_method</KeyAlertFields>
+  </AlertContext>
+  <Inputs>
+    <Input name="$src"/>
+    <Input name="$host"/>
+    <Input name="$endpoint"/>
+  </Inputs>
+  <ExecutiveSummary>
+    <Overview>This playbook drives triage and investigation of the FortiWeb - IDOR Sequential ID Enumeration detection on NBI's Elastic Security deployment. The rule fires when one source walks many distinct numeric object IDs on a single banking endpoint - the footprint of Insecure Direct Object Reference (IDOR) harvesting, where an attacker increments an id value to read records belonging to other customers.
+
+The decisive questions the analyst must answer are: (1) is this one real client systematically pulling objects (true_positive - data exposure), or is the distinct-ID count an artefact of many customers behind a shared proxy each reading their own record (misconfiguration / false_positive - rule over-aggregation); and (2) did the application actually return the objects (broken access control) or deny them (401/403/404 - the control held, a blocked malicious attempt). Because the alert source is a shared reverse-proxy/SNAT address, the real client must be resolved from x_forwarded_for before any verdict. The outcome is one of true_positive / false_positive / misconfiguration / needs_escalation.</Overview>
+    <BusinessImpact>An alert means: behind the proxy address $src, requests to $host$endpoint walked 20+ distinct numeric object IDs in the window. That pattern *can* be a single actor harvesting other customers' records - but on this estate it can equally be the sum of many legitimate customers each reading their own account behind one shared proxy IP (data.original_src).
+
+IDOR only *succeeds* if the application returns the objects. If the app enforces object-level authorisation it answers 401/403/404 and nothing leaks. So the alert is a prompt to (1) de-proxy the aggregated source into real clients, (2) find whether one real client swept a wide ID range, and (3) read whether those requests were served (2xx) or denied. The alert source is never the attacker - it is a proxy.</BusinessImpact>
+  </ExecutiveSummary>
+  <Investigation>
+    <Goal>Decide true_positive / false_positive / misconfiguration / needs_escalation for FortiWeb — IDOR Sequential ID Enumeration.</Goal>
+    <Workflow>
+      <Step order="1" name="Enumeration shape and authorisation outcome (confirm the alert)">
+        <Purpose>Enumeration shape and authorisation outcome (confirm the alert)</Purpose>
+        <Query platform="Elastic" language="ES|QL" id="Q-01">
+          <![CDATA[
+FROM logs-tcp.generic-*
+| WHERE @timestamp >= NOW() - 2 hours AND data.type == "traffic"
+    AND data.original_src == "$src" AND data.http_host == "$host"
+    AND data.http_url IS NOT NULL AND data.http_url RLIKE ".*=[0-9][0-9][0-9]+.*"
+| EVAL endpoint = MV_FIRST(SPLIT(data.http_url, "?")), rc = TO_INTEGER(data.http_retcode)
+| WHERE endpoint == "$endpoint"
+| STATS distinct_ids = COUNT_DISTINCT(data.http_url), attempts = COUNT(*),
+        success = SUM(CASE(rc < 400, 1, 0)), forbidden = SUM(CASE(rc == 401 OR rc == 403 OR rc == 404, 1, 0))
+| LIMIT 5
+]]>
+        </Query>
+      </Step>
+      <Step order="2" name="List the id-bearing URLs walked (see the range)">
+        <Purpose>List the id-bearing URLs walked (see the range)</Purpose>
+        <Query platform="Elastic" language="ES|QL" id="Q-02">
+          <![CDATA[
+FROM logs-tcp.generic-*
+| WHERE @timestamp >= NOW() - 2 hours AND data.type == "traffic"
+    AND data.original_src == "$src" AND data.http_host == "$host"
+    AND data.http_url RLIKE ".*=[0-9][0-9][0-9]+.*"
+| EVAL endpoint = MV_FIRST(SPLIT(data.http_url, "?")), rc = TO_INTEGER(data.http_retcode)
+| WHERE endpoint == "$endpoint"
+| STATS attempts = COUNT(*), served = SUM(CASE(rc >= 200 AND rc < 300, 1, 0)) BY data.http_url
+| SORT attempts DESC
+| LIMIT 40
+]]>
+        </Query>
+      </Step>
+      <Step order="3" name="Entity pivoting">
+        <Purpose>Entity pivoting</Purpose>
+        <Query platform="Elastic" language="ES|QL" id="Q-03">
+          <![CDATA[
+FROM logs-tcp.generic-*
+| WHERE @timestamp >= NOW() - 2 hours AND data.type == "traffic"
+    AND data.original_src == "$src" AND data.http_host == "$host"
+    AND data.http_url RLIKE ".*=[0-9][0-9][0-9]+.*"
+| EVAL real_client = COALESCE(TRIM(MV_FIRST(SPLIT(x_forwarded_for, ","))), data.src),
+       endpoint = MV_FIRST(SPLIT(data.http_url, "?"))
+| KEEP @timestamp, real_client, data.src, endpoint, data.http_url, data.http_method, data.http_retcode
+| SORT @timestamp DESC
+| LIMIT 50
+]]>
+        </Query>
+      </Step>
+      <Step order="4" name="Process investigation">
+        <Purpose>Process investigation</Purpose>
+        <Query platform="Elastic" language="ES|QL" id="Q-04">
+          <![CDATA[
+FROM logs-tcp.generic-*
+| WHERE @timestamp >= NOW() - 2 hours AND data.type == "traffic"
+    AND data.original_src == "$src" AND data.http_host == "$host"
+    AND data.http_url RLIKE ".*=[0-9][0-9][0-9]+.*"
+| EVAL real_client = COALESCE(TRIM(MV_FIRST(SPLIT(x_forwarded_for, ","))), data.src)
+| STATS ids = COUNT_DISTINCT(data.http_url), reqs = COUNT(*) BY real_client, data.http_agent
+| SORT ids DESC
+| LIMIT 20
+]]>
+        </Query>
+      </Step>
+      <Step order="5" name="Host investigation">
+        <Purpose>Host investigation</Purpose>
+        <Query platform="Elastic" language="ES|QL" id="Q-05">
+          <![CDATA[
+FROM logs-tcp.generic-*
+| WHERE @timestamp >= NOW() - 2 hours AND data.type == "traffic"
+    AND data.http_host == "$host"
+    AND data.http_url RLIKE ".*=[0-9][0-9][0-9]+.*"
+| EVAL endpoint = MV_FIRST(SPLIT(data.http_url, "?"))
+| WHERE NOT endpoint LIKE "*rb_*"
+| STATS distinct_ids = COUNT_DISTINCT(data.http_url), reqs = COUNT(*), clients = COUNT_DISTINCT(data.original_src)
+    BY endpoint
+| SORT distinct_ids DESC
+| LIMIT 20
+]]>
+        </Query>
+      </Step>
+      <Step order="6" name="IP investigation">
+        <Purpose>IP investigation</Purpose>
+        <Query platform="Elastic" language="ES|QL" id="Q-06">
+          <![CDATA[
+FROM logs-tcp.generic-*
+| WHERE @timestamp >= NOW() - 2 hours AND data.type == "traffic"
+    AND data.original_src == "$src" AND data.http_host == "$host"
+    AND data.http_url RLIKE ".*=[0-9][0-9][0-9]+.*"
+| EVAL endpoint = MV_FIRST(SPLIT(data.http_url, "?")), rc = TO_INTEGER(data.http_retcode),
+       real_client = COALESCE(TRIM(MV_FIRST(SPLIT(x_forwarded_for, ","))), data.src)
+| WHERE endpoint == "$endpoint"
+| STATS distinct_ids = COUNT_DISTINCT(data.http_url), attempts = COUNT(*),
+        ok2xx = SUM(CASE(rc >= 200 AND rc < 300, 1, 0)), denied = SUM(CASE(rc == 401 OR rc == 403 OR rc == 404, 1, 0))
+    BY real_client
+| SORT distinct_ids DESC
+| LIMIT 15
+]]>
+        </Query>
+      </Step>
+      <Step order="7" name="IP investigation">
+        <Purpose>IP investigation</Purpose>
+        <Query platform="Elastic" language="ES|QL" id="Q-07">
+          <![CDATA[
+FROM logs-tcp.generic-*
+| WHERE @timestamp >= NOW() - 2 hours AND data.type == "traffic"
+    AND data.original_src == "$src" AND data.http_host == "$host"
+    AND data.http_url RLIKE ".*=[0-9][0-9][0-9]+.*"
+| EVAL real_client = COALESCE(TRIM(MV_FIRST(SPLIT(x_forwarded_for, ","))), data.src),
+       endpoint = MV_FIRST(SPLIT(data.http_url, "?")), rc = TO_INTEGER(data.http_retcode)
+| STATS distinct_ids = COUNT_DISTINCT(data.http_url), endpoints = COUNT_DISTINCT(endpoint),
+        ok2xx = SUM(CASE(rc >= 200 AND rc < 300, 1, 0)), denied = SUM(CASE(rc == 401 OR rc == 403 OR rc == 404, 1, 0))
+    BY real_client
+| SORT ok2xx DESC
+| LIMIT 15
+]]>
+        </Query>
+      </Step>
+      <Step order="8" name="Domain investigation">
+        <Purpose>Domain investigation</Purpose>
+        <Query platform="Elastic" language="ES|QL" id="Q-08">
+          <![CDATA[
+FROM logs-tcp.generic-*
+| WHERE @timestamp >= NOW() - 2 hours AND data.type == "traffic"
+    AND data.original_src == "$src"
+    AND data.http_url RLIKE ".*=[0-9][0-9][0-9]+.*"
+| EVAL real_client = COALESCE(TRIM(MV_FIRST(SPLIT(x_forwarded_for, ","))), data.src)
+| STATS distinct_ids = COUNT_DISTINCT(data.http_url), reqs = COUNT(*) BY data.http_host, real_client
+| SORT distinct_ids DESC
+| LIMIT 20
+]]>
+        </Query>
+      </Step>
+      <Step order="9" name="URL investigation">
+        <Purpose>URL investigation</Purpose>
+        <Query platform="Elastic" language="ES|QL" id="Q-09">
+          <![CDATA[
+FROM logs-tcp.generic-*
+| WHERE @timestamp >= NOW() - 2 hours AND data.type == "traffic"
+    AND data.original_src == "$src" AND data.http_host == "$host"
+    AND data.http_url RLIKE ".*=[0-9][0-9][0-9]+.*"
+| EVAL endpoint = MV_FIRST(SPLIT(data.http_url, "?")), rc = TO_INTEGER(data.http_retcode)
+| WHERE NOT endpoint LIKE "*rb_*"
+| STATS distinct_ids = COUNT_DISTINCT(data.http_url), attempts = COUNT(*),
+        ok2xx = SUM(CASE(rc >= 200 AND rc < 300, 1, 0))
+    BY endpoint
+| SORT distinct_ids DESC
+| LIMIT 20
+]]>
+        </Query>
+      </Step>
+      <Step order="10" name="Timeline Reconstruction">
+        <Purpose>Timeline Reconstruction</Purpose>
+        <Query platform="Elastic" language="ES|QL" id="Q-10">
+          <![CDATA[
+FROM logs-tcp.generic-*
+| WHERE @timestamp >= NOW() - 2 hours AND data.type == "traffic"
+    AND data.original_src == "$src" AND data.http_host == "$host"
+    AND data.http_url RLIKE ".*=[0-9][0-9][0-9]+.*"
+| EVAL real_client = COALESCE(TRIM(MV_FIRST(SPLIT(x_forwarded_for, ","))), data.src)
+| KEEP @timestamp, real_client, data.http_url, data.http_method, data.http_retcode
+| SORT @timestamp ASC
+| LIMIT 200
+]]>
+        </Query>
+      </Step>
+      <Step order="11" name="Lateral movement validation">
+        <Purpose>Lateral movement validation</Purpose>
+        <Query platform="Elastic" language="ES|QL" id="Q-11">
+          <![CDATA[
+FROM logs-tcp.generic-*
+| WHERE @timestamp >= NOW() - 4 hours AND data.type == "traffic"
+    AND data.http_host == "$host"
+    AND data.http_url RLIKE ".*=[0-9][0-9][0-9]+.*"
+| EVAL real_client = COALESCE(TRIM(MV_FIRST(SPLIT(x_forwarded_for, ","))), data.src),
+       endpoint = MV_FIRST(SPLIT(data.http_url, "?"))
+| WHERE NOT endpoint LIKE "*rb_*"
+| STATS distinct_ids = COUNT_DISTINCT(data.http_url), endpoints = COUNT_DISTINCT(endpoint) BY real_client
+| SORT endpoints DESC, distinct_ids DESC
+| LIMIT 20
+]]>
+        </Query>
+      </Step>
+      <Step order="12" name="Defense evasion validation">
+        <Purpose>Defense evasion validation</Purpose>
+        <Query platform="Elastic" language="ES|QL" id="Q-12">
+          <![CDATA[
+FROM logs-tcp.generic-*
+| WHERE @timestamp >= NOW() - 4 hours AND data.type == "traffic"
+    AND data.original_src == "$src" AND data.http_host == "$host"
+    AND data.http_url RLIKE ".*=[0-9][0-9][0-9]+.*"
+| EVAL real_client = COALESCE(TRIM(MV_FIRST(SPLIT(x_forwarded_for, ","))), data.src),
+       endpoint = MV_FIRST(SPLIT(data.http_url, "?"))
+| WHERE endpoint == "$endpoint"
+| STATS distinct_ids = COUNT_DISTINCT(data.http_url) BY real_client
+| SORT distinct_ids DESC
+| LIMIT 25
+]]>
+        </Query>
+      </Step>
+      <Step order="13" name="Impact assessment">
+        <Purpose>Impact assessment</Purpose>
+        <Query platform="Elastic" language="ES|QL" id="Q-13">
+          <![CDATA[
+FROM logs-tcp.generic-*
+| WHERE @timestamp >= NOW() - 2 hours AND data.type == "traffic"
+    AND data.original_src == "$src" AND data.http_host == "$host"
+    AND data.http_url RLIKE ".*=[0-9][0-9][0-9]+.*"
+| EVAL rc = TO_INTEGER(data.http_retcode)
+| STATS objects_returned = SUM(CASE(rc >= 200 AND rc < 300, 1, 0)),
+        distinct_ids = COUNT_DISTINCT(data.http_url),
+        denied = SUM(CASE(rc == 401 OR rc == 403 OR rc == 404, 1, 0))
+| LIMIT 5
+]]>
+        </Query>
+      </Step>
+      <Step order="14" name="Finalize verdict">
+        <DecisionTree>
+        </DecisionTree>
+      </Step>
+    </Workflow>
+  </Investigation>
+  <ClassificationGuidance>
+    <TruePositive>
+      <Definition></Definition>
+    </TruePositive>
+    <FalsePositive>
+      <Definition></Definition>
+      <Indicators>
+        <Item>Proxy over-aggregation of normal usage - the dominant benign cause on NBI: dozens of real customers, each reading their own account IDs, are combined by the shared data.original_src into a count that crosses 20. This is a rule-attribution artefact, not an attack.</Item>
+        <Item>Legitimate batch / partner integrations that pull many records by ID on a schedule (reconciliation, statement generation) and are simply not baselined.</Item>
+        <Item>Authorised testers running IDOR checks against the portal - authorised, but confirm from source and schedule.</Item>
+        <Item>rb_ cache-buster paths - already excluded by the rule (their random tokens are not object IDs); a match on a real id-bearing endpoint is what matters.</Item>
+        <Item>The shared proxy fronts many clients. data.original_src == data.src in 100% of records, and each edge address (159.60.162.x, 159.60.170.x, 185.56.154.x) fronts hundreds of real x_forwarded_for clients. The 20-distinct-ID threshold is therefore reachable purely by aggregated multi-customer traffic - de-proxy is mandatory before judging.</Item>
+        <Item>The banking id-bearing endpoints are busy and legitimate. On businessonline.nbi.iq in 4h: /corporate/restportal/GetFavoriteAccount ≈ 217 distinct IDs, /corporate/restportal/getAccountId ≈ 101, /corporate/restportal/getCurrentAccountDetail ≈ 101, /corporate/restportal/chartBalances ≈ 110 - all hit by many users. High distinct-ID counts at the proxy level are expected; the question is always per real client.</Item>
+        <Item>rb_ cache-buster noise is real - /corporate/rb_&lt;guid&gt; shows ~1,941 "distinct" values in 4h, but these are cache-busting tokens, not object IDs; the rule correctly excludes rb_. Do not treat an rb_ match as enumeration.</Item>
+        <Item>No historical NBI benign-true-positive is recorded for this rule. Do not create a per-source exception off one alert; if warranted, scope it to the exact real client (x_forwarded_for) + endpoint, and recommend re-keying the detection to x_forwarded_for.</Item>
+      </Indicators>
+    </FalsePositive>
+    <Misconfiguration>
+      <Definition></Definition>
+    </Misconfiguration>
+    <NeedsEscalation>
+      <Definition></Definition>
+    </NeedsEscalation>
+  </ClassificationGuidance>
+  <ResponseActions>
+    <Phase name="Containment">
+      <Action>Block the de-proxied real client (the x_forwarded_for enumerator from section 15.6, not the shared proxy $src - blocking $src drops legitimate customers) at the WAF/edge once a single-client harvest is confirmed.</Action>
+      <Action>Rate-limit the id-bearing endpoints (getAccountId, GetFavoriteAccount, …) as an immediate brake while the application fix is prepared.</Action>
+      <Action>Preserve evidence first: capture section 14/section 15.6/section 16 results - the real client, the ID range, the served-vs-denied counts, the object count returned - and attach to the alert before any change.</Action>
+      <Action>All blocks/rate-limits are applied only via the authorised, human-approved change path; investigation is read-only.</Action>
+    </Phase>
+    <Phase name="Eradication">
+      <Action>Have the application owner enforce object-level authorisation on the affected endpoint(s) so a session can only retrieve its own objects - the root-cause fix (broken access control).</Action>
+      <Action>Enumerate the returned IDs (section 15.6b) and, with the app owner, map them to owning customers to determine which customers' records were disclosed.</Action>
+      <Action>Hunt for the same walk from other real clients / behind other proxies (the actor may have rotated XFF or edge) using section 17.4 and section 17.1 across the estate.</Action>
+    </Phase>
+    <Phase name="Recovery">
+      <Action>Replace guessable sequential IDs with unpredictable/opaque references, and add per-endpoint rate-limiting, so enumeration is both harder and slower.</Action>
+      <Action>Re-key the detection to x_forwarded_for (the real client) to remove proxy over-aggregation and make future alerts directly attributable.</Action>
+      <Action>Return to normal monitoring only after section 22 closing criteria are met and the object-level authorisation fix is verified in production.</Action>
+      <Action>Trigger the data-protection / breach-notification review if other customers' records were confirmed returned.</Action>
+    </Phase>
+  </ResponseActions>
+  <Escalation>
+    <Trigger>Escalate to SOC L2 / IR and the application owner (and data-protection) when any hold:
+
+- A single de-proxied real client retrieved (2xx) objects across an ID range beyond its own records on a customer-facing banking host (section 15.6b) - the core true_positive.
+- The client widened across multiple id-bearing endpoints / vhosts (section 17.1, section 15.7) - systematic collection.
+- Evidence of a fragmented sweep rotating XFF values to stay under the threshold (section 17.4).
+- Object ownership cannot be determined from web logs and the walk cannot be safely cleared - needs_escalation for app-owner confirmation.</Trigger>
+    <To>SOC L2 / IR</To>
+  </Escalation>
+  <ClosureCriteria>
+    <Item>true_positive: one real client harvested objects the app returned across a range beyond its own records; client blocked, object-level authorisation fixed, exposed records enumerated and reported, detection re-keyed to the real client, incident documented.</Item>
+    <Item>false_positive (blocked enumeration): the walk was positively denied (401/403/404 dominant) - access control held; documented as blocked-malicious (never "benign").</Item>
+    <Item>false_positive (proxy over-aggregation) / misconfiguration: the distinct-ID count was the sum of many real clients each reading their own IDs, or an unbaselined legitimate integration; recommend re-keying to x_forwarded_for and/or baseline the integration.</Item>
+    <Item>needs_escalation: handed to the app owner to map returned IDs to owning customers.</Item>
+  </ClosureCriteria>
+  <Limitations>
+    <Item>The alert source is never the attacker. data.original_src == data.src is a shared proxy fronting hundreds of clients; the enumerator is the x_forwarded_for real client. De-proxy (section 15.6) before every verdict - this is the single most common way this alert is mis-triaged.</Item>
+    <Item>Proxy over-aggregation is the top benign cause. Busy id-bearing endpoints (GetFavoriteAccount ~217 distinct IDs/4h, getAccountId ~101) are hit by many customers; the 20-distinct-ID threshold is reachable without any attacker. One-client dominance is the discriminator.</Item>
+    <Item>rb_ cache-busters are excluded for good reason - /corporate/rb_&lt;guid&gt; shows ~1,941 pseudo-distinct values/4h that are tokens, not object IDs; never treat them as enumeration.</Item>
+    <Item>Web logs cannot prove object ownership. A high ok2xx across a wide ID range is *suspicious*, but only the app owner can confirm the returned IDs belong to other customers - hence needs_escalation is a legitimate, common outcome.</Item>
+    <Item>Evasion is cheap: stay under 20 IDs/window, slow the walk, rotate XFF behind the same proxy, or use opaque IDs. Durable coverage needs per-real-client rate baselining and application-side access-control monitoring, not a single distinct-ID threshold (section 17.4).</Item>
+    <Item>KB-worthy (persist to NBI customer scope): (1) data.original_src/data.src = shared proxy, real client only in x_forwarded_for (99.3% on traffic); (2) id-bearing banking endpoints on businessonline.nbi.iq: getAccountId, GetFavoriteAccount, getCurrentAccountDetail, chartBalances, checkAttachment; (3) rb_&lt;guid&gt; cache-buster paths must be excluded. Observed live 2026-08-19.</Item>
+  </Limitations>
+</Playbook>

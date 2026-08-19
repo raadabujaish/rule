@@ -1,0 +1,407 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<Playbook xmlns="https://soc.example/playbooks" id="PB-linux-pkexec-execution" name="Linux — pkexec Execution (PwnKit / Local Privilege Escalation) - SOC Playbook" version="3.0" status="Validated" classification="TLP:AMBER">
+  <Metadata>
+    <Owner>NBI SOC / Detection Engineering</Owner>
+    <LastUpdated>2026-08-19</LastUpdated>
+    <Severity default="high">high</Severity>
+    <Confidence default="Medium">Medium</Confidence>
+    <Category>Privilege Escalation</Category>
+    <MitreAttack>
+      <Technique id="T1548"/>
+      <Technique id="T1068"/>
+      <Tactic id="TA0004"/>
+    </MitreAttack>
+    <References>
+      <Reference title="MITRE ATT&amp;CK - Abuse Elevation Control Mechanism (T1548)" url="https://attack.mitre.org/techniques/T1548/"/>
+      <Reference title="MITRE ATT&amp;CK - Exploitation for Privilege Escalation (T1068)" url="https://attack.mitre.org/techniques/T1068/"/>
+      <Reference title="MITRE ATT&amp;CK - Privilege Escalation tactic (TA0004)" url="https://attack.mitre.org/tactics/TA0004/"/>
+      <Reference title="NVD - CVE-2021-4034 (PwnKit, Polkit pkexec local privilege escalation)" url="https://nvd.nist.gov/vuln/detail/CVE-2021-4034"/>
+      <Reference title="Qualys Security Advisory - &quot;PwnKit: Local Privilege Escalation in polkit's pkexec (CVE-2021-4034)&quot;" url="https://blog.qualys.com/vulnerabilities-threat-research/2022/01/25/pwnkit-local-privilege-escalation-vulnerability-discovered-in-polkits-pkexec-cve-2021-4034"/>
+      <Reference title="Red Hat - CVE-2021-4034 advisory and mitigation" url="https://access.redhat.com/security/cve/cve-2021-4034"/>
+      <Reference title="Elastic Security - Linux auditd integration (process telemetry fields)" url="https://www.elastic.co/docs/reference/integrations/auditd_manager"/>
+      <Reference title="freedesktop.org - polkit / pkexec manual" url="https://www.freedesktop.org/software/polkit/docs/latest/pkexec.1.html"/>
+    </References>
+  </Metadata>
+  <AlertContext>
+    <RuleName>Linux — pkexec Execution (PwnKit / Local Privilege Escalation)</RuleName>
+    <RuleId>nbi-lnx-pkexec-privesc</RuleId>
+    <RuleType>query</RuleType>
+    <Index>logs-auditd_manager.auditd-*</Index>
+    <TriggerLogic>The deployed rule is an Elastic query-type rule (KQL) over Linux auditd process telemetry. Its behavioural core is a single name match on the process-execution event:
+
+One-line Kibana KQL detection filter (for fast pivoting in Discover / Timeline):
+
+
+
+Plain English: any process execution on a Linux host where the executed image is pkexec. The rule deliberately matches on the binary name alone, because the difference between a normal elevation and exploitation is not in the fact of execution - it is in the *arguments*, the *privilege transition*, and the *outcome*, none of which a name-only detection can adjudicate. That adjudication is the entire point of this playbook.
+
+Two shapes to hold in mind while reading the telemetry:
+
+- Normal elevation: pkexec carries a real command in its argument vector (for example pkexec /usr/bin/systemctl restart a-service), argc is two or more, it originates from an expected admin/automation context, the real user.id is an authorised operator, and the outcome is success under Polkit policy.
+- PwnKit exploitation: the opposite - an empty or degenerate argument vector (argc of zero or one, sometimes with no readable command), frequently launched from</TriggerLogic>
+    <KeyAlertFields>event.action, event.outcome, source.ip, process.name, process.executable, process.pid, process.parent.pid, user.id, user.effective.id, process.args, process.working_directory, user.name</KeyAlertFields>
+  </AlertContext>
+  <Inputs>
+    <Input name="$host"/>
+    <Input name="$user"/>
+    <Input name="$source_ip"/>
+    <Input name="$pid"/>
+  </Inputs>
+  <ExecutiveSummary>
+    <Overview>This playbook drives triage and investigation of the Linux - pkexec Execution (PwnKit / Local Privilege Escalation) detection on NBI's Elastic Security deployment. The rule fires when an execve recorded by Linux auditd (event.category == "process") has a process.name of pkexec. pkexec is the Polkit setuid-root helper that runs a command as another user (root by default) subject to Polkit authorisation policy. It is legitimately used for governed privilege elevation, but because it is setuid-root it is also the vehicle for PwnKit (CVE-2021-4034): an exploit that invokes pkexec with an empty or malformed argument vector corrupts its environment handling and hands any local account a root shell.
+
+The analyst's job is to decide, quickly and defensibly, whether a given pkexec execution on $host is local privilege-escalation exploitation, an authorised policy-governed elevation, a benign-but-unbaselined use, or unprovable with the available telemetry - and to classify the alert as true_positive, false_positive, misconfiguration, or needs_escalation with evidence attached. The decision rests on three things that auditd *can* show: the argument vector and its shape, the real-versus-effective user id transition and outcome, and what the newly-root actor did next.</Overview>
+    <BusinessImpact>pkexec is part of Polkit (formerly PolicyKit). It is installed setuid-root so that an unprivileged caller can ask Polkit to run a specific command as another user under a defined authorisation policy. That setuid bit is exactly what makes CVE-2021-4034 devastating: the flaw is a memory-corruption bug in how pkexec re-reads its own argument and environment vectors. When pkexec is invoked with argc == 0, out-of-bounds handling lets an attacker inject an attacker-controlled environment variable that Polkit then executes as root, with no authentication and no Polkit rule required. It is trivially exploitable on any unpatched host and works from *any* local account.
+
+An alert therefore means: on $host, the setuid-root pkexec binary executed. By itself that is a routine, sometimes-legitimate event - which is why the rule is a starting point, not a verdict. The investigative questions are precise and answerable from auditd: *what was the argument vector's shape* (section 14/section 15.1), *did a non-root real id reach effective root and did the call succeed* (section 14.2/section 17.3), and *what did the resulting context do* (section 15.4/section 17.5). A degenerate vector + a non-root→r</BusinessImpact>
+  </ExecutiveSummary>
+  <Investigation>
+    <Goal>Decide true_positive / false_positive / misconfiguration / needs_escalation for Linux — pkexec Execution (PwnKit / Local Privilege Escalation).</Goal>
+    <Workflow>
+      <Step order="1" name="Reproduce the rule estate-wide (confirm the detection logic)">
+        <Purpose>Reproduce the rule estate-wide (confirm the detection logic)</Purpose>
+        <Query platform="Elastic" language="ES|QL" id="Q-01">
+          <![CDATA[
+FROM logs-auditd.log-*,logs-auditd_manager.auditd-*
+| WHERE @timestamp >= NOW() - 4 hours
+    AND event.category == "process" AND process.name == "pkexec"
+| KEEP @timestamp, host.name, user.name, user.id, user.effective.id, process.executable, process.working_directory, event.outcome
+| SORT @timestamp DESC
+| LIMIT 100
+]]>
+        </Query>
+      </Step>
+      <Step order="2" name="Confirm the privilege transition and outcome on the alert host (INV-02)">
+        <Purpose>Confirm the privilege transition and outcome on the alert host (INV-02)</Purpose>
+        <Query platform="Elastic" language="ES|QL" id="Q-02">
+          <![CDATA[
+FROM logs-auditd.log-*,logs-auditd_manager.auditd-*
+| WHERE event.category=="process" AND host.name=="$host"
+    AND process.name=="pkexec"
+    AND @timestamp >= NOW() - 4 hours
+| STATS attempts=COUNT(*), outcomes=VALUES(event.outcome) BY user.name, user.id, user.effective.id, host.name
+| SORT attempts DESC
+| LIMIT 20
+]]>
+        </Query>
+      </Step>
+      <Step order="3" name="Entity pivoting">
+        <Purpose>Entity pivoting</Purpose>
+        <Query platform="Elastic" language="ES|QL" id="Q-03">
+          <![CDATA[
+FROM logs-auditd.log-*,logs-auditd_manager.auditd-*
+| WHERE event.category=="process" AND host.name=="$host"
+    AND process.name=="pkexec"
+    AND @timestamp >= NOW() - 4 hours
+| EVAL argline = MV_CONCAT(process.args, " "), argc = MV_COUNT(process.args)
+| KEEP @timestamp, host.name, user.name, user.id, user.effective.id, process.executable, argline, argc, process.working_directory
+| SORT @timestamp DESC
+| LIMIT 50
+]]>
+        </Query>
+      </Step>
+      <Step order="4" name="Process investigation">
+        <Purpose>Process investigation</Purpose>
+        <Query platform="Elastic" language="ES|QL" id="Q-04">
+          <![CDATA[
+FROM logs-auditd.log-*,logs-auditd_manager.auditd-*
+| WHERE @timestamp >= NOW() - 4 hours
+    AND event.category == "process" AND process.name == "pkexec"
+| STATS executions = COUNT(*), hosts = COUNT_DISTINCT(host.name), outcomes = VALUES(event.outcome) BY process.executable, user.id, user.effective.id
+| SORT executions DESC
+| LIMIT 50
+]]>
+        </Query>
+      </Step>
+      <Step order="5" name="Process investigation">
+        <Purpose>Process investigation</Purpose>
+        <Query platform="Elastic" language="ES|QL" id="Q-05">
+          <![CDATA[
+FROM logs-auditd.log-*,logs-auditd_manager.auditd-*
+| WHERE @timestamp >= NOW() - 4 hours
+    AND event.category == "process" AND host.name == "$host" AND process.name == "pkexec"
+| STATS executions = COUNT(*) BY auditd.data.syscall, auditd.result, event.outcome
+| SORT executions DESC
+| LIMIT 20
+]]>
+        </Query>
+      </Step>
+      <Step order="6" name="Parent-Child process analysis">
+        <Purpose>Parent-Child process analysis</Purpose>
+        <Query platform="Elastic" language="ES|QL" id="Q-06">
+          <![CDATA[
+FROM logs-auditd.log-*,logs-auditd_manager.auditd-*
+| WHERE @timestamp >= NOW() - 4 hours
+    AND event.category == "process" AND host.name == "$host" AND process.name == "pkexec"
+| KEEP @timestamp, user.id, user.effective.id, process.pid, process.parent.pid, process.executable, process.working_directory
+| SORT @timestamp DESC
+| LIMIT 50
+]]>
+        </Query>
+      </Step>
+      <Step order="7" name="Parent-Child process analysis">
+        <Purpose>Parent-Child process analysis</Purpose>
+        <Query platform="Elastic" language="ES|QL" id="Q-07">
+          <![CDATA[
+FROM logs-auditd.log-*,logs-auditd_manager.auditd-*
+| WHERE @timestamp >= NOW() - 4 hours
+    AND event.category == "process" AND host.name == "$host"
+    AND process.parent.pid == $pid
+| KEEP @timestamp, user.id, user.effective.id, process.parent.pid, process.pid, process.name, process.executable, process.working_directory
+| SORT @timestamp ASC
+| LIMIT 100
+]]>
+        </Query>
+      </Step>
+      <Step order="8" name="User investigation">
+        <Purpose>User investigation</Purpose>
+        <Query platform="Elastic" language="ES|QL" id="Q-08">
+          <![CDATA[
+FROM logs-auditd.log-*,logs-auditd_manager.auditd-*
+| WHERE @timestamp >= NOW() - 4 hours
+    AND event.category == "process" AND user.name == "$user"
+| STATS executions = COUNT(*), distinct_procs = COUNT_DISTINCT(process.name), euids = VALUES(user.effective.id) BY host.name
+| SORT executions DESC
+| LIMIT 20
+]]>
+        </Query>
+      </Step>
+      <Step order="9" name="Host investigation">
+        <Purpose>Host investigation</Purpose>
+        <Query platform="Elastic" language="ES|QL" id="Q-09">
+          <![CDATA[
+FROM logs-auditd.log-*,logs-auditd_manager.auditd-*
+| WHERE @timestamp >= NOW() - 4 hours
+    AND event.category == "process" AND host.name == "$host"
+| STATS executions = COUNT(*), users = COUNT_DISTINCT(user.id) BY process.name, user.effective.id
+| SORT executions ASC
+| LIMIT 40
+]]>
+        </Query>
+      </Step>
+      <Step order="10" name="IP investigation">
+        <Purpose>IP investigation</Purpose>
+        <Query platform="Elastic" language="ES|QL" id="Q-10">
+          <![CDATA[
+FROM logs-system.auth-*
+| WHERE @timestamp >= NOW() - 4 hours
+    AND host.name == "$host" AND user.name == "$user" AND source.ip IS NOT NULL
+| STATS logins = COUNT(*) BY source.ip, event.action, event.outcome
+| SORT logins DESC
+| LIMIT 20
+]]>
+        </Query>
+      </Step>
+      <Step order="11" name="IP investigation">
+        <Purpose>IP investigation</Purpose>
+        <Query platform="Elastic" language="ES|QL" id="Q-11">
+          <![CDATA[
+FROM logs-system.auth-*
+| WHERE @timestamp >= NOW() - 4 hours
+    AND source.ip == "$source_ip"
+| STATS logins = COUNT(*) BY user.name, host.name, event.action
+| SORT logins DESC
+| LIMIT 25
+]]>
+        </Query>
+      </Step>
+      <Step order="12" name="File investigation">
+        <Purpose>File investigation</Purpose>
+        <Query platform="Elastic" language="ES|QL" id="Q-12">
+          <![CDATA[
+FROM logs-auditd.log-*,logs-auditd_manager.auditd-*
+| WHERE @timestamp >= NOW() - 4 hours
+    AND event.category == "process" AND host.name == "$host" AND process.name == "pkexec"
+| STATS executions = COUNT(*), first_seen = MIN(@timestamp), last_seen = MAX(@timestamp) BY process.executable, process.working_directory
+| SORT executions DESC
+| LIMIT 30
+]]>
+        </Query>
+      </Step>
+      <Step order="13" name="File investigation">
+        <Purpose>File investigation</Purpose>
+        <Query platform="Elastic" language="ES|QL" id="Q-13">
+          <![CDATA[
+FROM logs-auditd.log-*,logs-auditd_manager.auditd-*
+| WHERE @timestamp >= NOW() - 4 hours
+    AND event.category == "process" AND host.name == "$host"
+    AND (STARTS_WITH(process.working_directory, "/tmp") OR STARTS_WITH(process.working_directory, "/dev/shm"))
+| STATS executions = COUNT(*) BY process.name, process.executable, process.working_directory, user.id, user.effective.id
+| SORT executions DESC
+| LIMIT 30
+]]>
+        </Query>
+      </Step>
+      <Step order="14" name="Authentication investigation">
+        <Purpose>Authentication investigation</Purpose>
+        <Query platform="Elastic" language="ES|QL" id="Q-14">
+          <![CDATA[
+FROM logs-system.auth-*
+| WHERE @timestamp >= NOW() - 4 hours
+    AND host.name == "$host" AND user.name == "$user"
+| STATS events = COUNT(*), first_seen = MIN(@timestamp), last_seen = MAX(@timestamp) BY event.action, event.outcome, source.ip
+| SORT events DESC
+| LIMIT 30
+]]>
+        </Query>
+      </Step>
+      <Step order="15" name="Timeline Reconstruction">
+        <Purpose>Timeline Reconstruction</Purpose>
+        <Query platform="Elastic" language="ES|QL" id="Q-15">
+          <![CDATA[
+FROM logs-auditd.log-*,logs-auditd_manager.auditd-*
+| WHERE @timestamp >= NOW() - 4 hours
+    AND event.category == "process" AND host.name == "$host" AND user.name == "$user"
+| KEEP @timestamp, user.id, user.effective.id, process.parent.pid, process.pid, process.name, process.executable, process.working_directory
+| SORT @timestamp ASC
+| LIMIT 200
+]]>
+        </Query>
+      </Step>
+      <Step order="16" name="Lateral movement validation">
+        <Purpose>Lateral movement validation</Purpose>
+        <Query platform="Elastic" language="ES|QL" id="Q-16">
+          <![CDATA[
+FROM logs-system.auth-*
+| WHERE @timestamp >= NOW() - 4 hours
+    AND user.name == "$user" AND event.action == "ssh_login"
+| STATS logins = COUNT(*) BY host.name, source.ip, event.outcome
+| SORT logins DESC
+| LIMIT 30
+]]>
+        </Query>
+      </Step>
+      <Step order="17" name="Persistence validation">
+        <Purpose>Persistence validation</Purpose>
+        <Query platform="Elastic" language="ES|QL" id="Q-17">
+          <![CDATA[
+FROM logs-auditd.log-*,logs-auditd_manager.auditd-*
+| WHERE @timestamp >= NOW() - 4 hours
+    AND event.category == "process" AND host.name == "$host"
+    AND process.name IN ("useradd", "usermod", "chpasswd", "passwd", "crontab", "at", "systemctl", "systemd-run")
+| STATS executions = COUNT(*), euids = VALUES(user.effective.id) BY process.name, user.id
+| SORT executions DESC
+| LIMIT 40
+]]>
+        </Query>
+      </Step>
+      <Step order="18" name="Privilege escalation validation">
+        <Purpose>Privilege escalation validation</Purpose>
+        <Query platform="Elastic" language="ES|QL" id="Q-18">
+          <![CDATA[
+FROM logs-auditd.log-*,logs-auditd_manager.auditd-*
+| WHERE @timestamp >= NOW() - 4 hours
+    AND event.category == "process" AND host.name == "$host"
+    AND user.id != "0" AND user.effective.id == "0"
+| STATS transitions = COUNT(*), procs = VALUES(process.name) BY user.name, user.id, user.effective.id
+| SORT transitions DESC
+| LIMIT 25
+]]>
+        </Query>
+      </Step>
+      <Step order="19" name="Defense evasion validation">
+        <Purpose>Defense evasion validation</Purpose>
+        <Query platform="Elastic" language="ES|QL" id="Q-19">
+          <![CDATA[
+FROM logs-auditd.log-*,logs-auditd_manager.auditd-*
+| WHERE @timestamp >= NOW() - 4 hours
+    AND event.category == "process" AND host.name == "$host"
+    AND process.name IN ("setenforce", "auditctl", "semodule", "chattr", "shred", "truncate", "systemctl", "service")
+| STATS executions = COUNT(*), euids = VALUES(user.effective.id) BY process.name, user.id
+| SORT executions DESC
+| LIMIT 40
+]]>
+        </Query>
+      </Step>
+      <Step order="20" name="Impact assessment">
+        <Purpose>Impact assessment</Purpose>
+        <Query platform="Elastic" language="ES|QL" id="Q-20">
+          <![CDATA[
+FROM logs-auditd.log-*,logs-auditd_manager.auditd-*
+| WHERE event.category=="process" AND host.name=="$host" AND user.name=="$user"
+    AND @timestamp >= NOW() - 2 hours
+| STATS execs=COUNT(*) BY process.name, user.id, user.effective.id
+| SORT execs DESC
+| LIMIT 25
+]]>
+        </Query>
+      </Step>
+      <Step order="21" name="Finalize verdict">
+        <DecisionTree>
+        </DecisionTree>
+      </Step>
+    </Workflow>
+  </Investigation>
+  <ClassificationGuidance>
+    <TruePositive>
+      <Definition></Definition>
+    </TruePositive>
+    <FalsePositive>
+      <Definition></Definition>
+      <Indicators>
+        <Item>Authorised policy-governed elevation. Administrators and automation legitimately run pkexec &lt;real command&gt; where Polkit policy permits it. These carry a real command (argc &gt;= 2), come from an expected identity/context, and succeed under policy. They are *authorised*, not "benign accidents" - confirm against the operator or the automation owner.</Item>
+        <Item>Desktop/management tooling on interactive hosts. GUI-adjacent stacks and some management agents shell out through pkexec for a specific privileged action. Rare on server-class Linux, more plausible on any host carrying interactive sessions.</Item>
+        <Item>Configuration-management or packaging runs that elevate a specific step through Polkit rather than sudo. Recurring, consistent, real-command invocations from a known automation account.</Item>
+        <Item>Red-team / purple-team exercises deliberately running the PwnKit technique. These are not benign - they are authorised malicious-technique execution and must be matched to a change ticket or exercise ROE before being closed as false_positive (blocked/authorised), never dismissed on sight.</Item>
+        <Item>pkexec has a zero baseline on NBI. Over a 4-hour window across every Linux host reporting to logs-auditd_manager.auditd-* / logs-auditd.log-*, pkexec executed 0 times. The Linux estate that reports process telemetry is server-side and automation-driven - the busiest hosts (nim-pam-dbv07, nim-pam-dbv06) are dominated by Deep Security agent activity (/var/opt/ds_agent), shell/ps/awk/pgrep monitoring loops, and container runtime (podman/conmon/runc). There is no legitimate pkexec "noise" to tune out, so any firing is a strong anomaly.</Item>
+        <Item>The genuine elevation path in this estate is sudo, not pkexec. The one live non-root→root pattern observed is fadir (uid 1004) using sudo to reach effective id 0 on the DevOps master hosts (nim-devops-master01/02/03), plus grub2-set-bootflag running with the setuid transition. That is the shape of *authorised* elevation here - and notably it is not pkexec. So a pkexec execution is doubly anomalous: it is both rare *and* off the estate's normal elevation path.</Item>
+        <Item>No historical NBI benign-true-positive is on record for this rule. There is no environment-specific allow-list to apply. Do not create a blanket exception for a host or account off a single alert; scope any exception to an exact process.executable + argument shape + user.id + host, and only after a documented authorised cause and a confirmed Polkit patch level.</Item>
+      </Indicators>
+    </FalsePositive>
+    <Misconfiguration>
+      <Definition></Definition>
+    </Misconfiguration>
+    <NeedsEscalation>
+      <Definition></Definition>
+    </NeedsEscalation>
+  </ClassificationGuidance>
+  <ResponseActions>
+    <Phase name="Containment">
+      <Action>Isolate $host (network-contain / quarantine) if a true_positive is confirmed, to stop post-elevation activity. Treat the host as root-compromised - once PwnKit yields root, every credential and secret on the host is exposed.</Action>
+      <Action>Suspend or terminate $user's sessions on $host and disable the account pending investigation if the account context is implicated; plan credential rotation (section 20).</Action>
+      <Action>Terminate the elevated context and its descendants ($pid tree from section 15.3b / section 17.5) if the host cannot yet be isolated.</Action>
+      <Action>Preserve volatile evidence first where feasible - running process list, /proc of the elevated context, the exploit stub under /tmp//dev/shm (section 15.10), and the auditd EXECVE/SYSCALL records - before rebuilding.</Action>
+      <Action>Deploy/confirm changes only via the authorised human-approved DEPLOY path; investigation itself is read-only.</Action>
+    </Phase>
+    <Phase name="Eradication">
+      <Action>Patch Polkit against CVE-2021-4034 on $host immediately, and confirm the patch level fleet-wide (section 20). Where pkexec is unused, consider removing its setuid bit (chmod 0755 /usr/bin/pkexec) as a defence-in-depth measure.</Action>
+      <Action>Remove the persistence discovered in section 17.2 (rogue accounts, credential changes, cron/at jobs, services/timers) and any dropped tooling identified via section 15.10 (process.executable / staging directory).</Action>
+      <Action>Revert defence-tampering found in section 17.4 - re-enable SELinux enforcing mode, restore auditd, and re-apply any disabled controls.</Action>
+      <Action>Run a full anti-malware / rootkit scan on $host and hunt for the same exploit stub and follow-on pattern across peer hosts, especially any host $user/$source_ip touched (section 15.4, section 17.1).</Action>
+      <Action>Remediate the initial-access vector that gave the attacker the non-privileged foothold from which they ran the exploit.</Action>
+    </Phase>
+    <Phase name="Recovery">
+      <Action>Reset $user's credentials and rotate every secret exposed on $host during the root window - service-account keys, SSH host and user keys, tokens, and any credential readable by root. On a PAM/database host, treat stored secrets as compromised.</Action>
+      <Action>Confirm Polkit is patched on $host and across the Linux fleet before returning the host to service; record the package version as evidence.</Action>
+      <Action>Restore $host from a known-good image if persistence or tampering was extensive; otherwise validate that all eradication actions hold after reboot and that SELinux/auditd are enforcing.</Action>
+      <Action>Return the host/account to service only after section 22 closing criteria are met and monitoring confirms no recurrence of pkexec executions or unexplained non-root→root transitions.</Action>
+      <Action>Recommend estate hardening (section 23): fleet-wide Polkit patch verification and monitoring of pkexec argument vectors and non-root→effective-root transitions on servers.</Action>
+    </Phase>
+  </ResponseActions>
+  <Escalation>
+    <Trigger>Escalate to Tier 3 / Incident Response (and notify the customer) when any of the following hold:
+
+- section 14.2/section 15.1 show an empty/degenerate pkexec vector with a non-root→effective-root transition and a success outcome - this alone warrants IR (root gained).
+- The elevated context ran account-manipulation, credential-access, persistence, or defence-tampering tooling (section 17.2, section 17.4, section 17.5), or root-level follow-on is otherwise evident.
+- Lateral movement from $host/$user is observed (section 17.1), especially toward PAM/database or DevOps-control hosts.
+- SELinux disablement or auditd tampering appears (section 17.4), or the acting account is a service/automation identity.
+- Evidence is incomplete because of NBI's telemetry gaps (no readable parent image, sparse effective-id, no hashes/network) and the alert cannot be safely cleared - escalate as needs_escala</Trigger>
+    <To>SOC L2 / IR</To>
+  </Escalation>
+  <ClosureCriteria>
+    <Item>false_positive (authorised): an operator, automation owner, change ticket, or sanctioned red/purple-team ROE is positively matched to the exact pkexec execution (process.executable + argument shape + user.id + $host + time), and Polkit is confirmed patched. Record the reference. Scope any exception narrowly; never blanket-except a host or account.</Item>
+    <Item>false_positive (blocked): an exploitation attempt positively proven to have failed - a degenerate vector with a failure/denied outcome and no root follow-on. Documented as a blocked malicious attempt, never "benign"; confirm Polkit patched and investigate the source account/host.</Item>
+    <Item>misconfiguration: a legitimate app/admin tool used pkexec with a real command and was simply not yet baselined - normal privilege model, no hostile follow-on. Baseline it; patch Polkit regardless.</Item>
+    <Item>true_positive: unauthorised escalation to root confirmed; host treated as root-compromised; containment/eradication/recovery completed, Polkit patched, scope of $user/$host/peers established, and no residual persistence or recurrence on monitoring.</Item>
+    <Item>needs_escalation: handed to Tier 3/IR and the Linux platform team with the specific evidence gaps documented.</Item>
+  </ClosureCriteria>
+  <Limitations>
+    <Item>Zero baseline = high fidelity. pkexec does not appear in NBI's 4-hour Linux process telemetry (0 executions estate-wide). There is nothing legitimate to tune out, so this rule should be near-silent; when it fires, believe it and read the argument vector.</Item>
+    <Item>The estate elevates with sudo, not pkexec. The one live non-root→root pattern is fadir (uid 1004) via sudo/grub2-set-bootflag on the DevOps master hosts. A pkexec execution is therefore doubly off-baseline - rare *and* off the normal elevation path. Use section 17.3 (any non-root→effective-root transition) as the decisive discriminator; it also catches variants that avoid the empty-vector tell.</Item>
+    <Item>Parent is PID-only; no command line. process.parent.name/process.parent.executable and process.command_line do not exist on NBI auditd (verified). Reconstruct lineage by pivoting process.parent.pid to process.pid and read the command from process.args via MV_CONCAT; lean on process.working_directory for the /tmp//dev/shm tell.</Item>
+    <Item>user.name is ~32% populated; user.effective.id ~60%. Lead with user.id/user.effective.id, not user.name. An absent effective id is a visibility gap, not proof of no escalation - do not clear an alert merely because the transition field is null.</Item>
+    <Item>source.ip is a shared bastion. A single jump/bastion egress (validated example 10.11.30.1) fronts many logins across the DevOps masters. Never treat source.ip as an individual identifier; correlate IP + user + host.</Item>
+    <Item>Patch state is the real fix. Whatever the verdict, confirm Polkit is patched against CVE-2021-4034 on $host and fleet-wide; an unpatched pkexec is a standing root-for-anyone primitive.</Item>
+    <Item>KB-worthy (persist to NBI customer scope): (1) pkexec zero-baseline over 4h on the combined auditd streams; (2) auditd parent fields absent → parent-by-PID only, and process.command_line absent; (3) user.name ~32% / user.effective.id ~60% population on process events; (4) estate elevation path is sudo (fadir uid 1004→0 on nim-devops-master0x); (5) 10.11.30.1 = shared bastion source across DevOps hosts. All observed live on 2026-08-17.</Item>
+  </Limitations>
+</Playbook>

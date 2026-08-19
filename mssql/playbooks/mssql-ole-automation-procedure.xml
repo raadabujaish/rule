@@ -1,0 +1,368 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<Playbook xmlns="https://soc.example/playbooks" id="PB-mssql-ole-automation-procedure" name="MS SQL — OLE Automation Procedure Execution - SOC Playbook" version="3.0" status="Validated" classification="TLP:AMBER">
+  <Metadata>
+    <Owner>NBI SOC / Detection Engineering</Owner>
+    <LastUpdated>2026-08-19</LastUpdated>
+    <Severity default="High">High</Severity>
+    <Confidence default="Medium">Medium</Confidence>
+    <Category>Execution</Category>
+    <MitreAttack>
+      <Technique id="T1059.003"/>
+      <Technique id="T1059"/>
+      <Technique id="T1505.001"/>
+      <Technique id="T1505"/>
+      <Technique id="T1190"/>
+      <Tactic id="TA0002"/>
+    </MitreAttack>
+    <References>
+      <Reference title="MITRE ATT&amp;CK - Server Software Component: SQL Stored Procedures (T1505.001)" url="https://attack.mitre.org/techniques/T1505/001/"/>
+      <Reference title="MITRE ATT&amp;CK - Command and Scripting Interpreter: Windows Command Shell (T1059.003)" url="https://attack.mitre.org/techniques/T1059/003/"/>
+      <Reference title="MITRE ATT&amp;CK - Exploit Public-Facing Application (T1190)" url="https://attack.mitre.org/techniques/T1190/"/>
+      <Reference title="MITRE ATT&amp;CK - Execution tactic (TA0002)" url="https://attack.mitre.org/tactics/TA0002/"/>
+      <Reference title="Microsoft Learn - OLE Automation Procedures Server Configuration Option" url="https://learn.microsoft.com/en-us/sql/database-engine/configure-windows/ole-automation-procedures-server-configuration-option"/>
+      <Reference title="Microsoft Learn - sp_OACreate (OLE Automation)" url="https://learn.microsoft.com/en-us/sql/relational-databases/system-stored-procedures/sp-oacreate-transact-sql"/>
+      <Reference title="Microsoft Learn - SQL Server Audit (Database Engine)" url="https://learn.microsoft.com/en-us/sql/relational-databases/security/auditing/sql-server-audit-database-engine"/>
+      <Reference title="MITRE ATT&amp;CK - T1190/T1505 SQL Server abuse context (Data Sources, SQL)" url="https://attack.mitre.org/datasources/"/>
+      <Reference title="NetSPI - Executing OS commands through MSSQL (OLE automation &amp; xp_cmdshell)" url="https://www.netspi.com/blog/technical-blog/network-penetration-testing/executing-smb-relay-attacks-via-sql-server/"/>
+      <Reference title="Elastic Security - SQL Server audit integration (fields reference)" url="https://www.elastic.co/docs/reference/integrations/microsoft_sqlserver"/>
+    </References>
+  </Metadata>
+  <AlertContext>
+    <RuleName>MS SQL — OLE Automation Procedure Execution</RuleName>
+    <RuleId>nbi-sql-ole-automation</RuleId>
+    <RuleType>query</RuleType>
+    <Index>logs-microsoft_sqlserver.audit-*</Index>
+    <TriggerLogic>The deployed rule is an Elastic query rule over the SQL Server audit data stream. It fires when sqlserver.audit.statement contains any of the three OLE Automation procedures. One-line Kibana KQL detection filter (for fast pivoting in Discover / Timeline):
+
+
+
+Plain English: any audited SQL statement that names sp_OACreate, sp_OAMethod, or sp_OAGetProperty. These are the create-object / call-method / read-property triad of the OLE Automation API surface exposed inside SQL Server. sp_OACreate('WScript.Shell', @obj OUT) instantiates a COM object; sp_OAMethod(@obj, 'Run', ..., @cmd) invokes a method on it; sp_OAGetProperty reads a property (often used to capture command output). Because the SQL audit statement is matched case-insensitively on the procedure name, obfuscation of surrounding whitespace/casing does not evade the anchor - but see section 17.4/section 24 for the split-across-sessions evasion.
+
+Why this is high-severity by design: OLE Automation Procedures are disabled by default in SQL Server. Their appearance in an audited statement means either the feature was deliberately enabled for a real integration, or an attacker enabled it (sp_configure 'Ole Automation Procedures', 1</TriggerLogic>
+    <KeyAlertFields>event.action, sqlserver.audit.session_server_principal_name, sqlserver.audit.server_principal_name, sqlserver.audit.statement, sqlserver.audit.client_ip, sqlserver.audit.database_name, sqlserver.audit.application_name, sqlserver.audit.succeeded, sqlserver.audit.object_name, host.name, process.name, process.executable</KeyAlertFields>
+  </AlertContext>
+  <Inputs>
+    <Input name="$principal"/>
+    <Input name="$client_ip"/>
+    <Input name="$host"/>
+    <Input name="$database"/>
+  </Inputs>
+  <ExecutiveSummary>
+    <Overview>This playbook drives triage and investigation of the MS SQL - OLE Automation Procedure Execution detection on NBI's Elastic Security deployment. The rule fires when a SQL Server audit statement references an OLE Automation stored procedure - sp_OACreate, sp_OAMethod, or sp_OAGetProperty - i.e. code that instantiates arbitrary COM/OLE objects inside the SQL Server engine. OLE automation is an xp_cmdshell-alternative route from the database into the operating system: depending on the ProgID instantiated, it can run shell commands (WScript.Shell), read and write files (Scripting.FileSystemObject), or make outbound network connections (MSXML2.XMLHTTP / WinHTTP / ADODB.Stream) under the SQL Server service account.
+
+The analyst's job is to decide, quickly and defensibly, whether this OLE use is a sanctioned application/integration that legitimately instantiates a known COM object, or database-driven OS action - most often the outcome of SQL injection escalating to code execution, or a hands-on-keyboard operator on a compromised instance - and to classify the alert as true_positive, false_positive, misconfiguration, or needs_escalation with evidence attached. The COM object and method being invoked is the primary intent signal.</Overview>
+    <BusinessImpact>An alert means: on $host, principal $principal (from client $client_ip) executed a statement that instantiated or drove a COM/OLE object from inside SQL Server. That is not a "possible" signal - the procedure was invoked. What remains uncertain is (a) which COM object, which determines capability (shell vs file vs network), (b) whether the call succeeded (sqlserver.audit.succeeded), and (c) whether the principal/client is an authorised integration or an injection pivot.
+
+On NBI, session_server_principal_name is the authoritative acting identity (server_principal_name is null estate-wide - see section 8). The statement text (sqlserver.audit.statement) carries the ProgID and method and is the single most important field to recover: WScript.Shell/Shell.Application with Run/Exec = OS command execution; Scripting.FileSystemObject = file read/write (config theft, webshell drop); MSXML2.XMLHTTP/WinHTTP/ADODB.Stream = download/exfil. A documented in-house integration typically uses one specific, known object; shell/download objects, or a burst of varied objects, are abuse.</BusinessImpact>
+  </ExecutiveSummary>
+  <Investigation>
+    <Goal>Decide true_positive / false_positive / misconfiguration / needs_escalation for MS SQL — OLE Automation Procedure Execution.</Goal>
+    <Workflow>
+      <Step order="1" name="Recover the OLE statements for this principal (confirm the alert)">
+        <Purpose>Recover the OLE statements for this principal (confirm the alert)</Purpose>
+        <Query platform="Elastic" language="ES|QL" id="Q-01">
+          <![CDATA[
+FROM logs-microsoft_sqlserver.audit-*
+| WHERE sqlserver.audit.session_server_principal_name == "$principal"
+    AND (sqlserver.audit.statement LIKE "*sp_oacreate*"
+         OR sqlserver.audit.statement LIKE "*sp_oamethod*"
+         OR sqlserver.audit.statement LIKE "*sp_oagetproperty*")
+    AND @timestamp >= NOW() - 2 hours
+| STATS execs = COUNT(*), statements = VALUES(sqlserver.audit.statement)
+    BY sqlserver.audit.client_ip, sqlserver.audit.database_name, host.name
+| SORT execs DESC
+| LIMIT 10
+]]>
+        </Query>
+      </Step>
+      <Step order="2" name="Enable-then-run and sensitive-operation breadth (INV-02)">
+        <Purpose>Enable-then-run and sensitive-operation breadth (INV-02)</Purpose>
+        <Query platform="Elastic" language="ES|QL" id="Q-02">
+          <![CDATA[
+FROM logs-microsoft_sqlserver.audit-*
+| WHERE sqlserver.audit.session_server_principal_name == "$principal"
+    AND @timestamp >= NOW() - 2 hours
+| EVAL sensitive = CASE(
+      sqlserver.audit.statement LIKE "*sp_configure*" OR sqlserver.audit.statement LIKE "*RECONFIGURE*"
+        OR sqlserver.audit.statement LIKE "*sp_oa*" OR sqlserver.audit.statement LIKE "*xp_cmdshell*", 1, 0)
+| STATS total = COUNT(*), sensitive_ops = SUM(sensitive), clients = COUNT_DISTINCT(sqlserver.audit.client_ip)
+    BY sqlserver.audit.database_name
+| SORT sensitive_ops DESC
+| LIMIT 10
+]]>
+        </Query>
+      </Step>
+      <Step order="3" name="Confirm on the alert host (all principals using OLE)">
+        <Purpose>Confirm on the alert host (all principals using OLE)</Purpose>
+        <Query platform="Elastic" language="ES|QL" id="Q-03">
+          <![CDATA[
+FROM logs-microsoft_sqlserver.audit-*
+| WHERE host.name == "$host" AND event.action == "execute-stored-proc-or-function"
+    AND (sqlserver.audit.statement LIKE "*sp_oacreate*"
+         OR sqlserver.audit.statement LIKE "*sp_oamethod*"
+         OR sqlserver.audit.statement LIKE "*sp_oagetproperty*")
+    AND @timestamp >= NOW() - 4 hours
+| STATS execs = COUNT(*), statements = VALUES(sqlserver.audit.statement)
+    BY sqlserver.audit.session_server_principal_name, sqlserver.audit.client_ip, sqlserver.audit.database_name
+| SORT execs DESC
+| LIMIT 20
+]]>
+        </Query>
+      </Step>
+      <Step order="4" name="Entity pivoting">
+        <Purpose>Entity pivoting</Purpose>
+        <Query platform="Elastic" language="ES|QL" id="Q-04">
+          <![CDATA[
+FROM logs-microsoft_sqlserver.audit-*
+| WHERE sqlserver.audit.session_server_principal_name == "$principal"
+    AND @timestamp >= NOW() - 4 hours
+| STATS statements = COUNT(*), first_seen = MIN(@timestamp), last_seen = MAX(@timestamp)
+    BY sqlserver.audit.client_ip, host.name, sqlserver.audit.database_name, event.action
+| SORT statements DESC
+| LIMIT 30
+]]>
+        </Query>
+      </Step>
+      <Step order="5" name="Process investigation">
+        <Purpose>Process investigation</Purpose>
+        <Query platform="Elastic" language="ES|QL" id="Q-05">
+          <![CDATA[
+FROM logs-microsoft_sqlserver.audit-*
+| WHERE sqlserver.audit.session_server_principal_name == "$principal"
+    AND @timestamp >= NOW() - 4 hours
+| STATS statements = COUNT(*), dbs = COUNT_DISTINCT(sqlserver.audit.database_name)
+    BY sqlserver.audit.application_name, event.action
+| SORT statements DESC
+| LIMIT 20
+]]>
+        </Query>
+      </Step>
+      <Step order="6" name="User investigation">
+        <Purpose>User investigation</Purpose>
+        <Query platform="Elastic" language="ES|QL" id="Q-06">
+          <![CDATA[
+FROM logs-microsoft_sqlserver.audit-*
+| WHERE sqlserver.audit.session_server_principal_name == "$principal"
+    AND @timestamp >= NOW() - 4 hours
+| STATS statements = COUNT(*), hosts = COUNT_DISTINCT(host.name), clients = COUNT_DISTINCT(sqlserver.audit.client_ip)
+    BY sqlserver.audit.database_name
+| SORT statements DESC
+| LIMIT 25
+]]>
+        </Query>
+      </Step>
+      <Step order="7" name="Host investigation">
+        <Purpose>Host investigation</Purpose>
+        <Query platform="Elastic" language="ES|QL" id="Q-07">
+          <![CDATA[
+FROM logs-microsoft_sqlserver.audit-*
+| WHERE host.name == "$host"
+    AND @timestamp >= NOW() - 2 hours
+| STATS statements = COUNT(*), principals = COUNT_DISTINCT(sqlserver.audit.session_server_principal_name), clients = COUNT_DISTINCT(sqlserver.audit.client_ip)
+    BY event.action
+| SORT statements DESC
+| LIMIT 15
+]]>
+        </Query>
+      </Step>
+      <Step order="8" name="IP investigation">
+        <Purpose>IP investigation</Purpose>
+        <Query platform="Elastic" language="ES|QL" id="Q-08">
+          <![CDATA[
+FROM logs-microsoft_sqlserver.audit-*
+| WHERE sqlserver.audit.client_ip == "$client_ip"
+    AND @timestamp >= NOW() - 2 hours
+| STATS statements = COUNT(*), principals = COUNT_DISTINCT(sqlserver.audit.session_server_principal_name),
+        dbs = COUNT_DISTINCT(sqlserver.audit.database_name)
+    BY host.name
+| SORT statements DESC
+| LIMIT 10
+]]>
+        </Query>
+      </Step>
+      <Step order="9" name="Authentication investigation">
+        <Purpose>Authentication investigation</Purpose>
+        <Query platform="Elastic" language="ES|QL" id="Q-09">
+          <![CDATA[
+FROM logs-microsoft_sqlserver.audit-*
+| WHERE sqlserver.audit.client_ip == "$client_ip"
+    AND event.action IN ("login-succeeded", "login-failed")
+    AND @timestamp >= NOW() - 4 hours
+| STATS logins = COUNT(*), first_seen = MIN(@timestamp), last_seen = MAX(@timestamp)
+    BY event.action, sqlserver.audit.session_server_principal_name, user.name, host.name
+| SORT logins DESC
+| LIMIT 20
+]]>
+        </Query>
+      </Step>
+      <Step order="10" name="Timeline Reconstruction">
+        <Purpose>Timeline Reconstruction</Purpose>
+        <Query platform="Elastic" language="ES|QL" id="Q-10">
+          <![CDATA[
+FROM logs-microsoft_sqlserver.audit-*
+| WHERE sqlserver.audit.session_server_principal_name == "$principal"
+    AND host.name == "$host"
+    AND @timestamp >= NOW() - 4 hours
+| KEEP @timestamp, sqlserver.audit.client_ip, sqlserver.audit.database_name, event.action, sqlserver.audit.succeeded, sqlserver.audit.statement
+| SORT @timestamp ASC
+| LIMIT 200
+]]>
+        </Query>
+      </Step>
+      <Step order="11" name="Lateral movement validation">
+        <Purpose>Lateral movement validation</Purpose>
+        <Query platform="Elastic" language="ES|QL" id="Q-11">
+          <![CDATA[
+FROM logs-microsoft_sqlserver.audit-*
+| WHERE sqlserver.audit.session_server_principal_name == "$principal"
+    AND @timestamp >= NOW() - 4 hours
+    AND (host.name != "$host"
+         OR sqlserver.audit.statement LIKE "*addlinkedserver*"
+         OR sqlserver.audit.statement LIKE "*openquery*"
+         OR sqlserver.audit.statement LIKE "*openrowset*")
+| STATS statements = COUNT(*), actions = VALUES(event.action) BY host.name, sqlserver.audit.database_name
+| SORT statements DESC
+| LIMIT 25
+]]>
+        </Query>
+      </Step>
+      <Step order="12" name="Persistence validation">
+        <Purpose>Persistence validation</Purpose>
+        <Query platform="Elastic" language="ES|QL" id="Q-12">
+          <![CDATA[
+FROM logs-microsoft_sqlserver.audit-*
+| WHERE sqlserver.audit.session_server_principal_name == "$principal"
+    AND @timestamp >= NOW() - 4 hours
+    AND (sqlserver.audit.statement LIKE "*create login*" OR sqlserver.audit.statement LIKE "*create user*"
+         OR sqlserver.audit.statement LIKE "*sp_addsrvrolemember*" OR sqlserver.audit.statement LIKE "*add member*"
+         OR sqlserver.audit.statement LIKE "*create assembly*" OR sqlserver.audit.statement LIKE "*sp_addlinkedserver*"
+         OR sqlserver.audit.statement LIKE "*sp_add_job*" OR sqlserver.audit.statement LIKE "*xp_cmdshell*")
+| STATS hits = COUNT(*), statements = VALUES(sqlserver.audit.statement) BY sqlserver.audit.database_name, event.action
+| SORT hits DESC
+| LIMIT 25
+]]>
+        </Query>
+      </Step>
+      <Step order="13" name="Privilege escalation validation">
+        <Purpose>Privilege escalation validation</Purpose>
+        <Query platform="Elastic" language="ES|QL" id="Q-13">
+          <![CDATA[
+FROM logs-microsoft_sqlserver.audit-*
+| WHERE sqlserver.audit.session_server_principal_name == "$principal"
+    AND @timestamp >= NOW() - 4 hours
+    AND (sqlserver.audit.statement LIKE "*sp_configure*" OR sqlserver.audit.statement LIKE "*reconfigure*"
+         OR sqlserver.audit.statement LIKE "*ole automation*" OR sqlserver.audit.statement LIKE "*advanced options*"
+         OR sqlserver.audit.statement LIKE "*sysadmin*" OR sqlserver.audit.statement LIKE "*add member*")
+| STATS hits = COUNT(*), statements = VALUES(sqlserver.audit.statement) BY sqlserver.audit.database_name, sqlserver.audit.succeeded
+| SORT hits DESC
+| LIMIT 25
+]]>
+        </Query>
+      </Step>
+      <Step order="14" name="Defense evasion validation">
+        <Purpose>Defense evasion validation</Purpose>
+        <Query platform="Elastic" language="ES|QL" id="Q-14">
+          <![CDATA[
+FROM logs-microsoft_sqlserver.audit-*
+| WHERE sqlserver.audit.session_server_principal_name == "$principal"
+    AND @timestamp >= NOW() - 4 hours
+    AND (sqlserver.audit.statement LIKE "*server audit*" OR sqlserver.audit.statement LIKE "*audit specification*"
+         OR sqlserver.audit.statement LIKE "*state = off*" OR sqlserver.audit.statement LIKE "*state=off*"
+         OR sqlserver.audit.statement LIKE "*drop audit*")
+| STATS hits = COUNT(*), statements = VALUES(sqlserver.audit.statement) BY event.action, sqlserver.audit.succeeded
+| SORT hits DESC
+| LIMIT 25
+]]>
+        </Query>
+      </Step>
+      <Step order="15" name="Impact assessment">
+        <Purpose>Impact assessment</Purpose>
+        <Query platform="Elastic" language="ES|QL" id="Q-15">
+          <![CDATA[
+FROM logs-microsoft_sqlserver.audit-*
+| WHERE sqlserver.audit.session_server_principal_name == "$principal"
+    AND @timestamp >= NOW() - 4 hours
+| STATS statements = COUNT(*), databases = COUNT_DISTINCT(sqlserver.audit.database_name),
+        hosts = COUNT_DISTINCT(host.name), total_rows = SUM(sqlserver.audit.affected_rows)
+    BY event.action
+| SORT statements DESC
+| LIMIT 20
+]]>
+        </Query>
+      </Step>
+      <Step order="16" name="Finalize verdict">
+        <DecisionTree>
+        </DecisionTree>
+      </Step>
+    </Workflow>
+  </Investigation>
+  <ClassificationGuidance>
+    <TruePositive>
+      <Definition></Definition>
+    </TruePositive>
+    <FalsePositive>
+      <Definition></Definition>
+      <Indicators>
+        <Item>Legacy in-house integrations that genuinely use OLE Automation. Some older application/ETL routines instantiate a specific COM object (e.g. a file-transfer or spreadsheet component) by design. These are authorised, not benign-by-default: confirm the principal, the exact object, and a change/owner record before classifying as false_positive.</Item>
+        <Item>DBA maintenance scripts that use sp_OACreate for a narrow administrative purpose (e.g. reading a directory listing). Rare, and should be tied to a named DBA principal from an admin host under change control.</Item>
+        <Item>A proven-blocked attempt. If OLE Automation Procedures are disabled and the sp_OACreate call errored (sqlserver.audit.succeeded = "False" / an sqlserver.audit.error.* on the row) with no object action, that is a blocked malicious attempt - documented as such, never "benign".</Item>
+        <Item>NBI's SQL audit volume is overwhelmingly a single application workload, not OLE. The dominant principal App_admin (client 10.11.44.1, host nim-kta-dbv01) drives millions of select/insert/sp_executesql statements per hour against the Kofax/Tungsten TotalAgility platform (TotalAgility, TotalAgility_Reporting, TotalAgility_Documents) via .Net SqlClient Data Provider. None of that normal workload uses sp_OA*. So an OLE Automation statement is not part of the observed baseline for this principal - its appearance is anomalous.</Item>
+        <Item>Principal case-variants are the same identity. App_admin, app_admin, and APP_ADMIN all appear; treat them as one application principal when scoping, but remember ES|QL == is case-sensitive, so pivot on the exact alerted casing and, where needed, corroborate with TO_LOWER().</Item>
+        <Item>No historical NBI benign OLE integration is on record for this rule. There is no environment-specific allow-list to apply. Do not create a blanket exception off one alert; scope any exception to the exact principal + client + database + COM object, and only after a documented authorised cause.</Item>
+      </Indicators>
+    </FalsePositive>
+    <Misconfiguration>
+      <Definition></Definition>
+    </Misconfiguration>
+    <NeedsEscalation>
+      <Definition></Definition>
+    </NeedsEscalation>
+  </ClassificationGuidance>
+  <ResponseActions>
+    <Phase name="Containment">
+      <Action>Isolate $host from egress if a shell/download OLE object succeeded - the OLE call runs under the SQL service account and may have staged tooling, a webshell, or an outbound channel. Coordinate with the DBA team so a business-critical instance is contained without avoidable outage, but prioritise stopping post-execution activity.</Action>
+      <Action>Treat the SQL Server service account as compromised if OLE executed successfully. It typically has local privileges on the DB host and possibly network reach; scope its access ahead of rotation (section 20).</Action>
+      <Action>Suspend/disable $principal (the SQL login) pending investigation if it is implicated, and block $client_ip at the application/network tier if it is an injection pivot. For an application principal, coordinate with the app owner - disabling it may take the application offline, which for an active RCE is the correct trade-off.</Action>
+      <Action>Preserve volatile evidence host-side first: the SQL error log, the OLE object's OS-side artifacts (dropped files, spawned processes, network connections), and the current sp_configure state - none of which is in Elastic. Capture before you remediate.</Action>
+      <Action>Deploy/confirm changes only via the authorised human-approved DEPLOY path; investigation itself is read-only.</Action>
+    </Phase>
+    <Phase name="Eradication">
+      <Action>Disable OLE Automation Procedures (sp_configure 'Ole Automation Procedures', 0; RECONFIGURE;) unless a documented, owner-confirmed integration requires it - and if it does, constrain that integration to a dedicated least-privilege principal.</Action>
+      <Action>Remove attacker artifacts identified host-side: files written via Scripting.FileSystemObject, downloaded tooling, and any persistence surfaced in section 17.2 (new logins/users, CLR assemblies, linked servers, Agent jobs, re-enabled xp_cmdshell).</Action>
+      <Action>Remediate the initial-access vector. If $client_ip is an application server and the principal is an app login, parameterise/patch the SQL-injection point in the application and remove excess privilege (an app login should not be sysadmin).</Action>
+      <Action>Hunt the same pattern across peers - other DB hosts $principal touched (section 17.1) and any instance sharing the service account - for OLE use, dropped payloads, and persistence.</Action>
+    </Phase>
+    <Phase name="Recovery">
+      <Action>Rotate the SQL Server service account and any credentials reachable from $host during the OLE window; if the account is shared across instances, rotate estate-wide and review for exposure.</Action>
+      <Action>Reset $principal's credentials and re-scope its permissions to least privilege (remove sysadmin/CONTROL SERVER from application logins).</Action>
+      <Action>Restore $host from known-good backup if file-drop/persistence was extensive; otherwise validate that eradication holds after a service restart and that OLE is confirmed disabled.</Action>
+      <Action>Return to service only after section 22 closing criteria are met and monitoring confirms no recurrence of sp_OA* from the principal/client.</Action>
+      <Action>Recommend hardening (section 23): keep OLE Automation Procedures and xp_cmdshell disabled, and protect the SQL Server Audit that produced this alert (see the sibling audit-tampering playbook).</Action>
+    </Phase>
+  </ResponseActions>
+  <Escalation>
+    <Trigger>Escalate to Tier 3 / Incident Response (and notify the customer) when any of the following hold:
+
+- A shell or download COM object was instantiated and the call succeeded (section 14.1) - database-driven OS execution; page IR.
+- Enable-then-run is confirmed: sp_configure turned OLE on immediately before the sp_OA* calls (section 14.2 / section 17.3), especially by an application principal.
+- $client_ip is an application server and $principal an application login (section 15.6) - the SQL-injection-to-RCE shape.
+- Follow-on persistence, linked-server/lateral reach, or audit/defence tampering is present (section 17.1/section 17.2/section 17.4).
+- Evidence is incomplete because the OS-side effect is not collected on NBI and the alert cannot be safely cleared - escalate as needs_escalation with the gap named.</Trigger>
+    <To>SOC L2 / IR</To>
+  </Escalation>
+  <ClosureCriteria>
+    <Item>false_positive (authorised integration): a documented, owner-confirmed in-house integration using a specific expected COM object is positively matched to this exact $principal + $client_ip + $database + time. Record the reference. Scope any exception narrowly (principal + client + object); never a blanket allow.</Item>
+    <Item>false_positive (blocked malicious attempt): the audit proves the sp_OACreate failed with OLE disabled and no OS action; documented as a blocked attempt (never "benign"), with the principal/client still investigated for the source.</Item>
+    <Item>misconfiguration: a recognised automated job uses OLE and was simply not baselined; baseline it and raise the hardening action to remove OLE.</Item>
+    <Item>true_positive: unauthorised OLE-driven OS action confirmed; containment/eradication/recovery completed, scope of principal/client/peers established, and no residual persistence or recurrence on monitoring.</Item>
+    <Item>needs_escalation: handed to Tier 3/IR with the specific gaps (truncated statement, unverifiable OS-side effect) documented.</Item>
+  </ClosureCriteria>
+  <Limitations>
+    <Item>The COM object is the whole case. Everything downstream (severity, containment scope, IR trigger) turns on what section 14.1 recovers from sqlserver.audit.statement. Read it first; if it is truncated/null, that alone is grounds to pull the raw record before deciding.</Item>
+    <Item>Key every statement LIKE on the principal. On this ~2.5M-doc/hour index, session_server_principal_name == "$principal" narrows to a small set (the uppercase APP_ADMIN variant is ~5k docs/4h) so the leading-wildcard LIKE is cheap; a host-only or client-only LIKE times out / circuit-breaks (verified live) - pre-filter those by event.action == "execute-stored-proc-or-function" as in section 14.3.</Item>
+    <Item>session_server_principal_name is authoritative; server_principal_name is null estate-wide. Never key on the latter. On login-failed, the *attempted* login is in user.name and the principal fields are null.</Item>
+    <Item>Elastic sees the call, not the consequence. SQL Audit records the OLE statement but not the shell/file/network action it performed - those DB hosts have no Sysmon/EDR/file/network telemetry in NBI. Recover the OS-side effect host-side; an empty Elastic result never proves the call was harmless.</Item>
+    <Item>OLE has no legitimate baseline in NBI's SQL workload. The dominant App_admin/TotalAgility traffic is select/insert/sp_executesql only. Any sp_OA* is off-baseline by construction - treat it as real until an authorised integration is proven.</Item>
+    <Item>KB-worthy (persist to NBI customer scope): (1) logs-microsoft_sqlserver.audit-* ≈2.5M docs/hour, dominated by App_admin@10.11.44.1→nim-kta-dbv01 (Kofax/Tungsten TotalAgility); (2) server_principal_name null estate-wide, use session_server_principal_name; (3) process.*/file.*/hash/URL/DNS/email all 0-populated on SQL audit; (4) host/client-only leading-wildcard LIKE circuit-breaks - key on principal or pre-filter by event.action. All observed live 2026-08-19.</Item>
+  </Limitations>
+</Playbook>

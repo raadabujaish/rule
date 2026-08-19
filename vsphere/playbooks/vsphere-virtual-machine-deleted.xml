@@ -1,0 +1,370 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<Playbook xmlns="https://soc.example/playbooks" id="PB-vsphere-virtual-machine-deleted" name="VMware vSphere — Virtual Machine Deleted (non-backup) - SOC Playbook" version="3.0" status="Validated" classification="TLP:AMBER">
+  <Metadata>
+    <Owner>NBI SOC / Detection Engineering</Owner>
+    <LastUpdated>2026-08-19</LastUpdated>
+    <Severity default="High">High</Severity>
+    <Confidence default="Medium">Medium</Confidence>
+    <Category>Impact</Category>
+    <MitreAttack>
+      <Technique id="T1485"/>
+      <Technique id="T1078"/>
+      <Tactic id="TA0040"/>
+    </MitreAttack>
+    <References>
+      <Reference title="MITRE ATT&amp;CK - Data Destruction (T1485)" url="https://attack.mitre.org/techniques/T1485/"/>
+      <Reference title="MITRE ATT&amp;CK - Valid Accounts (T1078)" url="https://attack.mitre.org/techniques/T1078/"/>
+      <Reference title="MITRE ATT&amp;CK - Impact tactic (TA0040)" url="https://attack.mitre.org/tactics/TA0040/"/>
+      <Reference title="Elastic - vSphere integration (vpxd/vCenter log fields, event.dataset vsphere.log)" url="https://www.elastic.co/docs/reference/integrations/vsphere"/>
+      <Reference title="VMware - vSphere Security (delete privileges and VM lifecycle controls)" url="https://techdocs.broadcom.com/us/en/vmware-cis/vsphere/vsphere/8-0/vsphere-security-8-0.html"/>
+      <Reference title="Mandiant / Google Cloud - ESXi/vSphere ransomware and destructive-action defence" url="https://cloud.google.com/blog/topics/threat-intelligence/esxi-hypervisors-detection-hardening"/>
+      <Reference title="CISA - #StopRansomware guidance (destruction / backup-integrity considerations)" url="https://www.cisa.gov/stopransomware"/>
+    </References>
+  </Metadata>
+  <AlertContext>
+    <RuleName>VMware vSphere — Virtual Machine Deleted (non-backup)</RuleName>
+    <RuleId>nbi-vsphere-vm-deleted</RuleId>
+    <RuleType>query</RuleType>
+    <Index>logs-vsphere.log-*</Index>
+    <TriggerLogic>The deployed rule is a query rule over the vCenter log stream. Its detection logic reduces to:
+
+
+
+One-line Kibana-KQL detection filter (for fast pivoting in Discover / Timeline):
+
+
+
+Plain English: a non-backup VM-removal event. In NBI the removal line renders as [NBIRQ\&lt;actor&gt;] [NBI-Datacenter] [&lt;taskid&gt;] [Removed &lt;VM&gt; on &lt;ESXi host&gt; from NBI-Datacenter], so the actor, the VM name, and the ESXi host are all inside message. The Veeam.Backup exclusion removes the backup product's own transient instant-recovery/SureBackup VM teardown (frequent, benign); every other removing identity is in scope. The investigation parses message with ES|QL DISSECT on the [actor] [datacenter] [taskid] [detail] structure. ScanWave or any scanner-driven removal is investigated identically and never auto-trusted.</TriggerLogic>
+    <KeyAlertFields>event.dataset, vsphere.log, host.name, log.source.address, user.name, process.name</KeyAlertFields>
+  </AlertContext>
+  <Inputs>
+    <Input name="$vm"/>
+    <Input name="$actor"/>
+    <Input name="$esxi"/>
+    <Input name="$source_ip"/>
+  </Inputs>
+  <ExecutiveSummary>
+    <Overview>This playbook drives triage and investigation of the Virtual Machine Deleted (non-backup) detection on NBI's Elastic Security deployment. The rule fires when a vCenter vpxd event records that a VM was removed from NBI-Datacenter by a non-backup identity - the free-text message contains Removed and from NBI-Datacenter and is not a Veeam.Backup task.
+
+Legitimate decommissioning at NBI follows an orderly workflow: the VM is powered off, renamed with a -NISD-&lt;ticket&gt; / Deleted tag, and only then removed - so a removal that follows that pattern is routine housekeeping. But VM deletion is also a destructive-impact action: an attacker (or a compromised admin) can destroy a production system, wipe evidence, or remove a security appliance to blind monitoring - all from the vCenter tier and without touching the guest OS. Mass deletion is a ransomware / destruction end-game.
+
+The analyst's job is to decide whether this deletion is an authorised, orderly decommission (false_positive), a destructive / unauthorised removal (true_positive), a legitimate-but-unbaselined automation (misconfiguration), or unprovable from available data (needs_escalation) - driven by whether $vm went through the decommission workflow, who the actor is and from where, and whether this is one deletion or part of mass destruction.</Overview>
+    <BusinessImpact>An alert means: a non-backup identity ($actor) removed a virtual machine ($vm) on an ESXi host ($esxi) from NBI-Datacenter inventory. Removing a VM from vCenter deletes the inventory registration and, for a "Delete from disk", the VM's files on the datastore - instantly and from a single control plane, without touching the guest OS. Because the action is destructive:
+
+- a production/database VM removal is an immediate outage and potential data-loss event;
+- a security/logging/monitoring VM removal is defence evasion that blinds the SOC;
+- several removals in quick succession is a mass-destruction pattern (a ransomware/impact end-game).
+
+The alert does not say whether the deletion was orderly or destructive - it says a VM was removed by a non-backup hand. The investigation decides whether the decommission workflow was followed, who did it and from where, and how wide the destruction is.</BusinessImpact>
+  </ExecutiveSummary>
+  <Investigation>
+    <Goal>Decide true_positive / false_positive / misconfiguration / needs_escalation for VMware vSphere — Virtual Machine Deleted (non-backup).</Goal>
+    <Workflow>
+      <Step order="1" name="Confirm the removal - actor, VM and host (reused from the deployed playbook, verbatim)">
+        <Purpose>Confirm the removal - actor, VM and host (reused from the deployed playbook, verbatim)</Purpose>
+        <Query platform="Elastic" language="ES|QL" id="Q-01">
+          <![CDATA[
+FROM logs-vsphere.log-*
+| WHERE event.dataset == "vsphere.log"
+    AND message LIKE "*$vm*"
+    AND TO_LOWER(message) LIKE "*removed*"
+    AND @timestamp >= NOW() - 2 hours
+| DISSECT message "[%{actor}] [%{datacenter}] [%{taskid}] [%{detail}]"
+| WHERE detail IS NOT NULL
+| KEEP @timestamp, actor, taskid, detail, log.source.address
+| SORT @timestamp DESC
+| LIMIT 15
+]]>
+        </Query>
+      </Step>
+      <Step order="2" name="Did the VM go through the orderly decommission workflow (reused from the deployed playbook, verbatim)">
+        <Purpose>Did the VM go through the orderly decommission workflow (reused from the deployed playbook, verbatim)</Purpose>
+        <Query platform="Elastic" language="ES|QL" id="Q-02">
+          <![CDATA[
+FROM logs-vsphere.log-*
+| WHERE event.dataset == "vsphere.log"
+    AND message LIKE "*$vm*"
+    AND @timestamp >= NOW() - 2 hours
+| DISSECT message "[%{actor}] [%{datacenter}] [%{taskid}] [%{detail}]"
+| WHERE detail IS NOT NULL
+| KEEP @timestamp, actor, detail
+| SORT @timestamp ASC
+| LIMIT 40
+]]>
+        </Query>
+      </Step>
+      <Step order="3" name="Entity pivoting">
+        <Purpose>Entity pivoting</Purpose>
+        <Query platform="Elastic" language="ES|QL" id="Q-03">
+          <![CDATA[
+FROM logs-vsphere.log-*
+| WHERE event.dataset == "vsphere.log"
+    AND message LIKE "*$vm*"
+    AND @timestamp >= NOW() - 4 hours
+| DISSECT message "[%{actor}] [%{datacenter}] [%{taskid}] [%{detail}]"
+| WHERE detail IS NOT NULL
+| KEEP @timestamp, actor, taskid, detail
+| SORT @timestamp DESC
+| LIMIT 40
+]]>
+        </Query>
+      </Step>
+      <Step order="4" name="User investigation">
+        <Purpose>User investigation</Purpose>
+        <Query platform="Elastic" language="ES|QL" id="Q-04">
+          <![CDATA[
+FROM logs-vsphere.log-*
+| WHERE event.dataset == "vsphere.log"
+    AND message LIKE "*$actor*"
+    AND @timestamp >= NOW() - 4 hours
+| DISSECT message "[%{actor}] [%{datacenter}] [%{taskid}] [%{detail}]"
+| WHERE detail IS NOT NULL
+| STATS events = COUNT(*), details = VALUES(detail) BY actor
+| SORT events DESC
+| LIMIT 20
+]]>
+        </Query>
+      </Step>
+      <Step order="5" name="Host investigation">
+        <Purpose>Host investigation</Purpose>
+        <Query platform="Elastic" language="ES|QL" id="Q-05">
+          <![CDATA[
+FROM logs-vsphere.log-*
+| WHERE event.dataset == "vsphere.log"
+    AND message LIKE "*$esxi*"
+    AND @timestamp >= NOW() - 4 hours
+| KEEP @timestamp, message
+| SORT @timestamp DESC
+| LIMIT 40
+]]>
+        </Query>
+      </Step>
+      <Step order="6" name="IP investigation">
+        <Purpose>IP investigation</Purpose>
+        <Query platform="Elastic" language="ES|QL" id="Q-06">
+          <![CDATA[
+FROM logs-vsphere.log-*
+| WHERE event.dataset == "vsphere.log"
+    AND message LIKE "*$source_ip*"
+    AND TO_LOWER(message) LIKE "*login*"
+    AND @timestamp >= NOW() - 4 hours
+| DISSECT message "[%{actor}] [%{datacenter}] [%{taskid}] [%{detail}]"
+| WHERE detail IS NOT NULL
+| KEEP @timestamp, actor, detail
+| SORT @timestamp DESC
+| LIMIT 30
+]]>
+        </Query>
+      </Step>
+      <Step order="7" name="File investigation">
+        <Purpose>File investigation</Purpose>
+        <Query platform="Elastic" language="ES|QL" id="Q-07">
+          <![CDATA[
+FROM logs-vsphere.log-*
+| WHERE event.dataset == "vsphere.log"
+    AND message LIKE "*$vm*"
+    AND (TO_LOWER(message) LIKE "*.vmx*" OR TO_LOWER(message) LIKE "*vmfs*")
+    AND @timestamp >= NOW() - 4 hours
+| KEEP @timestamp, message
+| SORT @timestamp DESC
+| LIMIT 20
+]]>
+        </Query>
+      </Step>
+      <Step order="8" name="Authentication investigation">
+        <Purpose>Authentication investigation</Purpose>
+        <Query platform="Elastic" language="ES|QL" id="Q-08">
+          <![CDATA[
+FROM logs-vsphere.log-*
+| WHERE event.dataset == "vsphere.log"
+    AND message LIKE "*$actor*"
+    AND (TO_LOWER(message) LIKE "*login*" OR TO_LOWER(message) LIKE "*logged in*"
+         OR TO_LOWER(message) LIKE "*logged out*")
+    AND @timestamp >= NOW() - 4 hours
+| DISSECT message "[%{actor}] [%{datacenter}] [%{taskid}] [%{detail}]"
+| WHERE detail IS NOT NULL
+| KEEP @timestamp, actor, detail
+| SORT @timestamp DESC
+| LIMIT 30
+]]>
+        </Query>
+      </Step>
+      <Step order="9" name="Timeline Reconstruction">
+        <Purpose>Timeline Reconstruction</Purpose>
+        <Query platform="Elastic" language="ES|QL" id="Q-09">
+          <![CDATA[
+FROM logs-vsphere.log-*
+| WHERE event.dataset == "vsphere.log"
+    AND message LIKE "*$actor*"
+    AND @timestamp >= NOW() - 4 hours
+| DISSECT message "[%{actor}] [%{datacenter}] [%{taskid}] [%{detail}]"
+| WHERE detail IS NOT NULL
+| KEEP @timestamp, actor, taskid, detail
+| SORT @timestamp ASC
+| LIMIT 200
+]]>
+        </Query>
+      </Step>
+      <Step order="10" name="Lateral movement validation">
+        <Purpose>Lateral movement validation</Purpose>
+        <Query platform="Elastic" language="ES|QL" id="Q-10">
+          <![CDATA[
+FROM logs-vsphere.log-*
+| WHERE event.dataset == "vsphere.log"
+    AND message LIKE "*$actor*"
+    AND (TO_LOWER(message) LIKE "*ssh session was opened*" OR TO_LOWER(message) LIKE "*.nbirq.com*"
+         OR TO_LOWER(message) LIKE "*task:*")
+    AND @timestamp >= NOW() - 4 hours
+| DISSECT message "[%{actor}] [%{datacenter}] [%{taskid}] [%{detail}]"
+| WHERE detail IS NOT NULL
+| STATS events = COUNT(*), details = VALUES(detail) BY actor
+| SORT events DESC
+| LIMIT 20
+]]>
+        </Query>
+      </Step>
+      <Step order="11" name="Persistence validation">
+        <Purpose>Persistence validation</Purpose>
+        <Query platform="Elastic" language="ES|QL" id="Q-11">
+          <![CDATA[
+FROM logs-vsphere.log-*
+| WHERE event.dataset == "vsphere.log"
+    AND message LIKE "*$actor*"
+    AND (TO_LOWER(message) LIKE "*creating*" OR TO_LOWER(message) LIKE "*ssh session was opened*"
+         OR TO_LOWER(message) LIKE "*permission*" OR TO_LOWER(message) LIKE "*password was changed*")
+    AND @timestamp >= NOW() - 4 hours
+| DISSECT message "[%{actor}] [%{datacenter}] [%{taskid}] [%{detail}]"
+| WHERE detail IS NOT NULL
+| KEEP @timestamp, actor, detail
+| SORT @timestamp DESC
+| LIMIT 30
+]]>
+        </Query>
+      </Step>
+      <Step order="12" name="Privilege escalation validation">
+        <Purpose>Privilege escalation validation</Purpose>
+        <Query platform="Elastic" language="ES|QL" id="Q-12">
+          <![CDATA[
+FROM logs-vsphere.log-*
+| WHERE event.dataset == "vsphere.log"
+    AND message LIKE "*$actor*"
+    AND (TO_LOWER(message) LIKE "*password was changed*" OR TO_LOWER(message) LIKE "*permission*"
+         OR TO_LOWER(message) LIKE "*role*" OR TO_LOWER(message) LIKE "*added*")
+    AND @timestamp >= NOW() - 4 hours
+| DISSECT message "[%{actor}] [%{datacenter}] [%{taskid}] [%{detail}]"
+| WHERE detail IS NOT NULL
+| KEEP @timestamp, actor, detail
+| SORT @timestamp DESC
+| LIMIT 30
+]]>
+        </Query>
+      </Step>
+      <Step order="13" name="Defense evasion validation">
+        <Purpose>Defense evasion validation</Purpose>
+        <Query platform="Elastic" language="ES|QL" id="Q-13">
+          <![CDATA[
+FROM logs-vsphere.log-*
+| WHERE event.dataset == "vsphere.log"
+    AND message LIKE "*$actor*"
+    AND (TO_LOWER(message) LIKE "*removed*" OR TO_LOWER(message) LIKE "*powered off*"
+         OR TO_LOWER(message) LIKE "*is powered off*")
+    AND @timestamp >= NOW() - 4 hours
+| DISSECT message "[%{actor}] [%{datacenter}] [%{taskid}] [%{detail}]"
+| WHERE detail IS NOT NULL
+| KEEP @timestamp, actor, detail
+| SORT @timestamp DESC
+| LIMIT 40
+]]>
+        </Query>
+      </Step>
+      <Step order="14" name="Impact assessment">
+        <Purpose>Impact assessment</Purpose>
+        <Query platform="Elastic" language="ES|QL" id="Q-14">
+          <![CDATA[
+FROM logs-vsphere.log-*
+| WHERE event.dataset == "vsphere.log"
+    AND message LIKE "*$actor*"
+    AND (TO_LOWER(message) LIKE "*removed *" OR TO_LOWER(message) LIKE "*powered off*")
+    AND @timestamp >= NOW() - 4 hours
+| DISSECT message "[%{actor}] [%{datacenter}] [%{taskid}] [%{detail}]"
+| WHERE detail IS NOT NULL
+| STATS destructive_actions = COUNT(*), details = VALUES(detail) BY actor
+| SORT destructive_actions DESC
+| LIMIT 15
+]]>
+        </Query>
+      </Step>
+      <Step order="15" name="Finalize verdict">
+        <DecisionTree>
+        </DecisionTree>
+      </Step>
+    </Workflow>
+  </Investigation>
+  <ClassificationGuidance>
+    <TruePositive>
+      <Definition></Definition>
+    </TruePositive>
+    <FalsePositive>
+      <Definition></Definition>
+      <Indicators>
+        <Item>Authorised orderly decommission - the dominant benign cause. The VM is powered off, renamed with a -NISD-&lt;ticket&gt; / Deleted tag, and then removed by a recognised admin under change control. Confirm against the ticket / NISD tag, never assumed from the admin's name.</Item>
+        <Item>Lifecycle automation (a decommission/orchestration tool) removing VMs on a schedule. Legitimate, but treated as misconfiguration until the automation identity is baselined and tagged (see section 6, section 13).</Item>
+        <Item>Backup / DR teardown - instant-recovery/SureBackup/replica cleanup. The rule already excludes Veeam.Backup; a different backup/DR identity not covered by that exclusion can still fire and is benign once confirmed.</Item>
+        <Item>A removal attempt that failed - the task errored and the VM remains in inventory. This is a *blocked action*, documented as such, never labelled "benign".</Item>
+        <Item>The orderly decommission workflow is the benign signature. The XML-era baseline recorded 23 non-backup removals in 30 days, mostly orderly decommissions of renamed/Deleted-tagged VMs by admins. The tell is the preceding sequence - ... is powered off → Renamed ... to &lt;VM&gt;-NISD-&lt;ticket&gt; ... Deleted → Removed .... A removal with no preceding power-off/rename in-window, or of a VM still running production traffic, is abrupt and the concern.</Item>
+        <Item>The actor renders in two forms. A named admin appears as NBIRQ\&lt;user&gt; on task lines and as &lt;user&gt;@NBIRQ.COM on the SSO line carrying the source IP (e.g. Successful login Wahab.Admin@NBIRQ.COM from 10.11.18.4 ... in SSO). Key actor pivots on the bare username. Real admins observed live include Wahab.Admin, karrar.admin, Ahmed.Adminnnnnn.</Item>
+        <Item>host.name is the vCenter appliance, not the deleted VM or its host. Every record carries host.name = nx-vcsa01 and log.source.address = 10.11.150.206:40066. The ESXi host is inside message; the actor's origin is the SSO-line IP, not log.source.address.</Item>
+        <Item>user.name is null on this dataset. All entities are parsed from message.</Item>
+      </Indicators>
+    </FalsePositive>
+    <Misconfiguration>
+      <Definition></Definition>
+    </Misconfiguration>
+    <NeedsEscalation>
+      <Definition></Definition>
+    </NeedsEscalation>
+  </ClassificationGuidance>
+  <ResponseActions>
+    <Phase name="Containment">
+      <Action>Preserve evidence and stop further destruction if a true_positive is confirmed: disable the acting SSO/admin account, kill active sessions, and remove any SSH sessions opened (section 17.2), so no further removals/power-offs can occur while you respond.</Action>
+      <Action>Freeze the datastore if a "Delete from disk" is in progress or suspected - coordinate with the virtualization/storage team to halt further file deletion and protect remaining VMs and any snapshots/replicas.</Action>
+      <Action>Confirm and protect backups of $vm and its peers immediately (out of band - backup inventory is not in this index); ensure the attacker cannot reach or delete them.</Action>
+      <Action>Perform changes only via the authorised, human-approved DEPLOY path; investigation itself is read-only.</Action>
+    </Phase>
+    <Phase name="Eradication">
+      <Action>Revoke the actor's access and rotate any credentials reachable from the compromised session; remove attacker persistence at the hypervisor tier (rogue accounts, ESXi SSH, unauthorised permissions - section 17.2/section 17.3).</Action>
+      <Action>Audit the vCenter permission model for changes the actor may have made, and revert unauthorised grants - especially any that would deny defenders recovery.</Action>
+      <Action>Hunt for the full destructive scope (section 17.5): every VM removed/powered off by the actor/source, and whether backups or replicas were removed first.</Action>
+      <Action>Remediate the access path that let the actor reach vCenter (stolen SSO credentials, exposed management interface, compromised jump host).</Action>
+    </Phase>
+    <Phase name="Recovery">
+      <Action>Recover the deleted VM(s) from backup - confirm an immutable backup exists (out of band), restore $vm and any other destroyed systems, and validate integrity before returning to service.</Action>
+      <Action>Restore availability for production/database and security/logging systems first; re-enable monitoring VMs so visibility is regained.</Action>
+      <Action>Return deletion capability to normal only after section 22 closing criteria are met - restrict vCenter delete privileges (least privilege / just-in-time / dual-authorisation for deletion) and confirm no further destruction recurs on monitoring.</Action>
+      <Action>Harden (see section 23): enforce change-controlled decommissioning, ensure immutable backups, and alert on mass or untagged deletions and on any security-VM removal.</Action>
+    </Phase>
+  </ResponseActions>
+  <Escalation>
+    <Trigger>Escalate to Tier 3 / Incident Response (and notify the customer), beginning backup recovery, when any of the following hold:
+
+- The removal is abrupt (no orderly power-off/rename - section 14.2) of a live production/database or security/logging VM.
+- Several VMs were removed/powered off in quick succession (mass destruction - section 17.5), or backups were removed first.
+- The actor logged in from an unexpected source (section 15.6/section 15.12), or also changed credentials/permissions (section 17.3).
+- Evidence is incomplete because of NBI's telemetry gaps (markers may predate the window; backup status not in this index) and the alert cannot be safely cleared - escalate as needs_escalation with the gaps named.</Trigger>
+    <To>SOC L2 / IR</To>
+  </Escalation>
+  <ClosureCriteria>
+    <Item>false_positive (authorised decommission): the full orderly workflow (power-off → -NISD-/Deleted rename → remove) by a recognised admin matches a change ticket. Record the ticket / NISD tag; scope any exception narrowly.</Item>
+    <Item>false_positive (proven-failed): the remove task errored and the VM remains in inventory; documented as a blocked action (never "benign").</Item>
+    <Item>misconfiguration: a recognised lifecycle-automation identity removed the VM and was simply not baselined; the automation is baselined and tagged.</Item>
+    <Item>true_positive: a destructive/unauthorised removal is confirmed; the VM is recovered from backup, the actor contained, the full destructive scope and the access path investigated, and no recurrence on monitoring.</Item>
+    <Item>needs_escalation: handed to Tier 3/IR with the specific evidence gaps documented.</Item>
+  </ClosureCriteria>
+  <Limitations>
+    <Item>All entities live in message. No structured user.name/VM/host field exists on logs-vsphere.log-*; host.name is the vCenter appliance and log.source.address is its shipping address. Parse with DISSECT on [actor] [datacenter] [taskid] [detail], and key actor pivots on the bare username (both NBIRQ\&lt;user&gt; and &lt;user&gt;@NBIRQ.COM).</Item>
+    <Item>Orderly-decommission markers are the discriminator - and they can predate the window. The benign signature is powered off → renamed -NISD-&lt;ticket&gt;/Deleted → removed. A short query window may miss earlier markers, making an orderly removal look abrupt; always widen via the vCenter task history before concluding destruction. Conversely, an attacker can pre-stage the Deleted rename to disguise destruction - reconcile the -NISD-&lt;ticket&gt; against a real change ticket, do not trust the tag alone.</Item>
+    <Item>The datastore path tells you recoverability. The raw vpxd .vmx/vmfs line (section 15.10) distinguishes an "unregister" (files retained) from a "Delete from disk" (files gone). Confirm an immutable backup exists out of band - backup inventory is not in this index.</Item>
+    <Item>Mass removal/power-off is the ransomware end-game. The single most urgent pivot is section 17.5 (destructive-footprint count). Several destructive actions in quick succession by one actor is paged and recovery is prepared immediately.</Item>
+    <Item>KB-worthy (persist to NBI customer scope): (1) logs-vsphere.log-* host.name≡nx-vcsa01 and log.source.address≡10.11.150.206:40066 are constants (vCenter appliance), not the VM/host/actor; (2) user.name is null - entities parsed from message; (3) the orderly decommission signature = power-off → -NISD-&lt;ticket&gt;/Deleted rename → remove; (4) named admins render as NBIRQ\&lt;user&gt; and &lt;user&gt;@NBIRQ.COM, source IP only in the SSO line; (5) Veeam.Backup is the excluded backup identity; the raw vpxd lines carry the VM .vmx/vmfs path. Observed live on 2026-08-17.</Item>
+  </Limitations>
+</Playbook>

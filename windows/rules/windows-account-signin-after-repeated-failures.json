@@ -1,0 +1,98 @@
+{
+  "name": "Windows — Account Sign-In Succeeded After Repeated Failures",
+  "tags": [
+    "NBI",
+    "Identity",
+    "Active Directory",
+    "Brute Force",
+    "Credential Access",
+    "class:correlation",
+    "PROPOSED"
+  ],
+  "interval": "1h",
+  "enabled": true,
+  "description": "The same source IP failed network sign-in (4625, type 3) for the SAME human account three or more times and then SUCCEEDED (4624, type 3) within 30 minutes — an account whose password was guessed/brute-forced from that origin. Machine accounts (*$) are excluded from THIS specific analytic because NBI telemetry demonstrated the observed fail->success pattern for machine accounts was recurring benign machine-account retry behaviour (e.g. NIM-PY-APV1$), while AD machine-account passwords are automatically managed high-entropy credentials; machine-account credential abuse remains covered by separate account/host-compromise analytics. The auth-aggregator infrastructure is also excluded. This is the compromise companion to the spray primary: it fires regardless of spray breadth, catching a targeted crack even against a single account. Ordered fail->fail->fail->success (EQL sequence) is required so a one-off typo-then-correct does not match.",
+  "risk_score": 73,
+  "severity": "high",
+  "note": "### Investigation — sign-in succeeded after repeated failures\n1. **WHO / TO WHAT** `winlog.event_data.TargetUserName` — the account that failed repeatedly then succeeded; `source.ip` the origin; `host.name` the target.\n2. **DID WHAT** >=3 failed network sign-ins then a success for the same account+source in 30m = likely a guessed/brute-forced password.\n3. **WHY suspicious** a legitimate user rarely fails 3+ times then succeeds; correlate with the spray primary (was this source also spraying other accounts?).\n4. **Escalate**: treat the account as potentially compromised — force a password reset, review what the account did after the success (4672/5140/5145, lateral movement). Rule out a known bad-password loop that finally synced (a service/scheduled task with a stale password).",
+  "license": "",
+  "output_index": "",
+  "meta": {
+    "kibana_siem_app_url": ""
+  },
+  "investigation_fields": {
+    "field_names": [
+      "source.ip",
+      "winlog.event_data.TargetUserName",
+      "host.name"
+    ]
+  },
+  "author": [],
+  "false_positives": [],
+  "from": "now-70m",
+  "rule_id": "nbi-auth-bruteforce-success",
+  "max_signals": 100,
+  "risk_score_mapping": [],
+  "severity_mapping": [],
+  "threat": [
+    {
+      "framework": "MITRE ATT&CK",
+      "tactic": {
+        "id": "TA0006",
+        "name": "Credential Access",
+        "reference": "https://attack.mitre.org/tactics/TA0006/"
+      },
+      "technique": [
+        {
+          "id": "T1110",
+          "name": "Brute Force",
+          "reference": "https://attack.mitre.org/techniques/T1110/",
+          "subtechnique": [
+            {
+              "id": "T1110.001",
+              "name": "Password Guessing",
+              "reference": "https://attack.mitre.org/techniques/T1110/001/"
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "framework": "MITRE ATT&CK",
+      "tactic": {
+        "id": "TA0008",
+        "name": "Lateral Movement",
+        "reference": "https://attack.mitre.org/tactics/TA0008/"
+      },
+      "technique": [
+        {
+          "id": "T1078",
+          "name": "Valid Accounts",
+          "reference": "https://attack.mitre.org/techniques/T1078/",
+          "subtechnique": [
+            {
+              "id": "T1078.002",
+              "name": "Domain Accounts",
+              "reference": "https://attack.mitre.org/techniques/T1078/002/"
+            }
+          ]
+        }
+      ]
+    }
+  ],
+  "to": "now",
+  "references": [],
+  "version": 1,
+  "exceptions_list": [],
+  "related_integrations": [],
+  "required_fields": [],
+  "setup": "",
+  "type": "eql",
+  "language": "eql",
+  "index": [
+    "logs-system.security-*"
+  ],
+  "query": "sequence by source.ip, winlog.event_data.TargetUserName with maxspan=30m\n  [ any where event.code == \"4625\" and winlog.event_data.LogonType == \"3\" and not winlog.event_data.TargetUserName like \"*$\" and winlog.event_data.TargetUserName != \"ANONYMOUS LOGON\" and not cidrMatch(source.ip, \"10.11.15.0/24\", \"10.11.101.0/24\", \"10.11.102.0/24\") ]\n  [ any where event.code == \"4625\" and winlog.event_data.LogonType == \"3\" ]\n  [ any where event.code == \"4625\" and winlog.event_data.LogonType == \"3\" ]\n  [ any where event.code == \"4624\" and winlog.event_data.LogonType == \"3\" ]",
+  "filters": [],
+  "actions": []
+}

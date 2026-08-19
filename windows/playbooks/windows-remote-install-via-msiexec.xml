@@ -1,0 +1,424 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<Playbook xmlns="https://soc.example/playbooks" id="PB-windows-remote-install-via-msiexec" name="Potential Remote Install via MsiExec [NBI-4688] - SOC Playbook" version="3.0" status="Validated" classification="TLP:AMBER">
+  <Metadata>
+    <Owner>NBI SOC / Detection Engineering</Owner>
+    <LastUpdated>2026-08-19</LastUpdated>
+    <Severity default="high">high</Severity>
+    <Confidence default="Medium">Medium</Confidence>
+    <Category>Defense Evasion</Category>
+    <MitreAttack>
+      <Technique id="T1218"/>
+      <Technique id="T1218.007"/>
+      <Technique id="T1105"/>
+      <Tactic id="TA0005"/>
+    </MitreAttack>
+    <References>
+      <Reference title="MITRE ATT&amp;CK - System Binary Proxy Execution: Msiexec (T1218.007)" url="https://attack.mitre.org/techniques/T1218/007/"/>
+      <Reference title="MITRE ATT&amp;CK - Ingress Tool Transfer (T1105)" url="https://attack.mitre.org/techniques/T1105/"/>
+      <Reference title="MITRE ATT&amp;CK - Defense Evasion tactic (TA0005)" url="https://attack.mitre.org/tactics/TA0005/"/>
+      <Reference title="LOLBAS - Msiexec.exe" url="https://lolbas-project.github.io/lolbas/Binaries/Msiexec/"/>
+      <Reference title='Elastic - Prebuilt rule "Msiexec Network Connection" / remote-install proxy execution reference' url="https://www.elastic.co/docs/reference/security/prebuilt-rules/rules/windows/defense_evasion_msiexec_network_connection"/>
+      <Reference title="Microsoft Learn - Msiexec.exe command-line options" url="https://learn.microsoft.com/en-us/windows/win32/msi/command-line-options"/>
+      <Reference title="Microsoft Learn - Command line process auditing (Event 4688 command-line GPO)" url="https://learn.microsoft.com/en-us/windows-server/identity/ad-ds/manage/component-updates/command-line-process-auditing"/>
+    </References>
+  </Metadata>
+  <AlertContext>
+    <RuleName>Potential Remote Install via MsiExec [NBI-4688]</RuleName>
+    <RuleId>nbi-b2-potential-remote-install-via-msiexec</RuleId>
+    <RuleType>eql</RuleType>
+    <Index>logs-system.security*</Index>
+    <TriggerLogic>The deployed rule is an EQL rule. Reconstructed from the deployed trigger logic, the detection is:
+
+
+
+Plain English: a quiet msiexec install from an HTTP(S) URL, launched by an interactive shell / script host / LOLBin, whose URL is not on the approved exclusion list. The remote fetch (*http*) plus the quiet flags (/qn etc.) plus a scripted parent is the proxy-install shape.
+
+One-line Kibana KQL detection filter (for fast pivoting in Discover / Timeline):
+
+
+
+The MSI download and its source are not in 4688 - the URL comes from the command line/args; corroborate the fetch via proxy/DNS/FortiGate (section 8, section 15.8).</TriggerLogic>
+    <KeyAlertFields>process.name, process.executable, msiexec.exe, process.parent.name, process.parent.executable, process.pid, process.parent.pid, process.entity_id, user.name, user.domain, process.command_line, process.args</KeyAlertFields>
+  </AlertContext>
+  <Inputs>
+    <Input name="$host"/>
+    <Input name="$user"/>
+    <Input name="$parent"/>
+    <Input name="$source_ip"/>
+  </Inputs>
+  <ExecutiveSummary>
+    <Overview>This playbook drives triage and investigation of the Potential Remote Install via MsiExec detection on NBI's Elastic Security deployment. The rule fires when msiexec.exe is invoked to install (/i or -i) from an HTTP(S) URL, quietly (/qn, -qn, /q, -q, /quiet), launched by a shell/scripting/LOLBin parent (sihost, explorer, cmd, wscript, mshta, powershell, wmiprvse, pcalua, forfiles, conhost) - while excluding a curated set of known-legitimate remote-install URLs (NinjaRMM, Zoom, AWS CLI, and specific enterprise config switches). In short: a silent MSI install pulled from a URL that is not on the approved list.
+
+msiexec.exe is a signed, trusted Windows installer, which makes msiexec /i http://.../x.msi /qn a favourite signed-binary proxy-execution and ingress technique - the attacker delivers and runs a payload as a quiet install, past application allow-listing, from a remote server. Legitimate silent remote installs also happen (RMM tools, enterprise deployment), which is why the rule already excludes known-good URLs. The analyst decides whether this installed an attacker package (true_positive), an authorised-but-unlisted legitimate deployment or a proven-failed install (false_positive), an unbaselined internal deployment source (misconfiguration), or an event whose URL/payload cannot be resolved (needs_escalation). The URL, the launching parent, and what the install executed decide it.</Overview>
+    <BusinessImpact>An alert means: on $host, $user ran msiexec.exe to silently install an MSI from an HTTP(S) URL that is not on the approved list, launched by $parent. It does not, by itself, prove the package was malicious - legitimate but unlisted deployments exist. The consequential questions:
+
+1. What is the URL? A raw IP, a non-corporate/newly-seen domain, a high port, or a random MSI name is attacker delivery; a recognised vendor/internal deployment URL (even if unlisted) may be authorised. The rule already carves out NinjaRMM/Zoom/AWS, so a hit is a URL outside those - verify the destination rather than assume.
+2. What is the parent ($parent)? A management/deployment context (an RMM agent, an approved deployment tool) leans authorised; a script host (wscript/mshta/powershell), forfiles, pcalua, or wmiprvse - especially alongside other LOLBins or encoded PowerShell - leans malicious proxy execution; an Office/browser ancestor points to phishing-driven delivery.
+3. What did the install execute? A custom-action child of msiexec (a script host, a dropped .exe from Temp/AppData) or a new binary from a non-standard path shortly after is a payload that ran; a quiet install that only lays down files</BusinessImpact>
+  </ExecutiveSummary>
+  <Investigation>
+    <Goal>Decide true_positive / false_positive / misconfiguration / needs_escalation for Potential Remote Install via MsiExec [NBI-4688].</Goal>
+    <Workflow>
+      <Step order="1" name="Reproduce the rule estate-wide (confirm the detection logic)">
+        <Purpose>Reproduce the rule estate-wide (confirm the detection logic)</Purpose>
+        <Query platform="Elastic" language="ES|QL" id="Q-01">
+          <![CDATA[
+FROM logs-system.security*
+| WHERE @timestamp >= NOW() - 4 hours
+    AND event.code == "4688"
+    AND TO_LOWER(process.name) == "msiexec.exe"
+| EVAL cl = TO_LOWER(COALESCE(process.command_line, MV_CONCAT(process.args, " ")))
+| WHERE cl LIKE "*http*" AND (cl LIKE "*/i*" OR cl LIKE "*-i*") AND (cl LIKE "*/q*" OR cl LIKE "*-q*")
+| KEEP @timestamp, host.name, user.name, process.parent.name, process.command_line
+| SORT @timestamp DESC
+| LIMIT 100
+]]>
+        </Query>
+      </Step>
+      <Step order="2" name="Confirm the remote install and its URL on the alert host - reused from the deployed playbook">
+        <Purpose>Confirm the remote install and its URL on the alert host - reused from the deployed playbook</Purpose>
+        <Query platform="Elastic" language="ES|QL" id="Q-02">
+          <![CDATA[
+FROM logs-system.security*
+| WHERE event.code == "4688" AND host.name == "$host" AND TO_LOWER(process.name) == "msiexec.exe" AND @timestamp >= NOW() - 4 hours
+| EVAL cl = TO_LOWER(COALESCE(process.command_line, MV_CONCAT(process.args, " ")))
+| WHERE cl LIKE "*http*" AND (cl LIKE "*/i*" OR cl LIKE "*-i*") AND (cl LIKE "*/q*" OR cl LIKE "*-q*")
+| KEEP @timestamp, user.name, process.parent.name, process.command_line, process.args
+| SORT @timestamp DESC
+| LIMIT 20
+]]>
+        </Query>
+      </Step>
+      <Step order="3" name="Entity pivoting">
+        <Purpose>Entity pivoting</Purpose>
+        <Query platform="Elastic" language="ES|QL" id="Q-03">
+          <![CDATA[
+FROM logs-system.security*
+| WHERE @timestamp >= NOW() - 4 hours
+    AND event.code == "4688"
+    AND host.name == "$host"
+    AND TO_LOWER(process.name) == "msiexec.exe"
+| KEEP @timestamp, host.name, user.name, user.domain, process.command_line, process.parent.name, process.pid, process.parent.pid
+| SORT @timestamp DESC
+| LIMIT 50
+]]>
+        </Query>
+      </Step>
+      <Step order="4" name="Process investigation">
+        <Purpose>Process investigation</Purpose>
+        <Query platform="Elastic" language="ES|QL" id="Q-04">
+          <![CDATA[
+FROM logs-system.security*
+| WHERE event.code == "4688" AND host.name == "$host" AND process.parent.name == "$parent" AND @timestamp >= NOW() - 4 hours
+| STATS spawned = COUNT(*), users = COUNT_DISTINCT(user.name), distinct_children = COUNT_DISTINCT(process.name) BY process.name
+| SORT spawned DESC
+| LIMIT 20
+]]>
+        </Query>
+      </Step>
+      <Step order="5" name="Process investigation">
+        <Purpose>Process investigation</Purpose>
+        <Query platform="Elastic" language="ES|QL" id="Q-05">
+          <![CDATA[
+FROM logs-system.security*
+| WHERE @timestamp >= NOW() - 4 hours
+    AND event.code == "4688"
+    AND TO_LOWER(process.name) == "msiexec.exe"
+| STATS execs = COUNT(*), hosts = COUNT_DISTINCT(host.name), users = COUNT_DISTINCT(user.name) BY process.parent.name
+| SORT execs DESC
+| LIMIT 25
+]]>
+        </Query>
+      </Step>
+      <Step order="6" name="Parent-Child process analysis">
+        <Purpose>Parent-Child process analysis</Purpose>
+        <Query platform="Elastic" language="ES|QL" id="Q-06">
+          <![CDATA[
+FROM logs-system.security*
+| WHERE @timestamp >= NOW() - 4 hours
+    AND event.code == "4688"
+    AND host.name == "$host"
+    AND (TO_LOWER(process.parent.name) == "msiexec.exe" OR TO_LOWER(process.name) == "msiexec.exe")
+| KEEP @timestamp, user.name, process.parent.name, process.parent.pid, process.name, process.pid, process.executable
+| SORT @timestamp DESC
+| LIMIT 50
+]]>
+        </Query>
+      </Step>
+      <Step order="7" name="Parent-Child process analysis">
+        <Purpose>Parent-Child process analysis</Purpose>
+        <Query platform="Elastic" language="ES|QL" id="Q-07">
+          <![CDATA[
+FROM logs-system.security*
+| WHERE event.code == "4688" AND host.name == "$host" AND user.name == "$user" AND @timestamp >= NOW() - 4 hours
+| EVAL exe = TO_LOWER(process.executable)
+| WHERE TO_LOWER(process.parent.name) == "msiexec.exe" OR (NOT exe LIKE "*system32*" AND NOT exe LIKE "*syswow64*" AND NOT exe LIKE "*program files*" AND NOT exe LIKE "*windows*")
+| STATS execs = COUNT(*), first_seen = MIN(@timestamp), last_seen = MAX(@timestamp) BY process.name, process.executable, process.parent.name
+| SORT execs DESC
+| LIMIT 25
+]]>
+        </Query>
+      </Step>
+      <Step order="8" name="User investigation">
+        <Purpose>User investigation</Purpose>
+        <Query platform="Elastic" language="ES|QL" id="Q-08">
+          <![CDATA[
+FROM logs-system.security*
+| WHERE @timestamp >= NOW() - 4 hours
+    AND event.code == "4688"
+    AND user.name == "$user"
+| STATS executions = COUNT(*), distinct_procs = COUNT_DISTINCT(process.name) BY host.name
+| SORT executions DESC
+| LIMIT 20
+]]>
+        </Query>
+      </Step>
+      <Step order="9" name="Host investigation">
+        <Purpose>Host investigation</Purpose>
+        <Query platform="Elastic" language="ES|QL" id="Q-09">
+          <![CDATA[
+FROM logs-system.security*
+| WHERE @timestamp >= NOW() - 4 hours
+    AND event.code == "4688"
+    AND host.name == "$host"
+| STATS executions = COUNT(*), users = COUNT_DISTINCT(user.name) BY process.name, process.parent.name
+| SORT executions ASC
+| LIMIT 40
+]]>
+        </Query>
+      </Step>
+      <Step order="10" name="IP investigation">
+        <Purpose>IP investigation</Purpose>
+        <Query platform="Elastic" language="ES|QL" id="Q-10">
+          <![CDATA[
+FROM logs-system.security*
+| WHERE @timestamp >= NOW() - 4 hours
+    AND event.code == "4624"
+    AND host.name == "$host" AND user.name == "$user"
+    AND source.ip IS NOT NULL
+| STATS logons = COUNT(*) BY source.ip, winlog.event_data.LogonType
+| SORT logons DESC
+| LIMIT 20
+]]>
+        </Query>
+      </Step>
+      <Step order="11" name="IP investigation">
+        <Purpose>IP investigation</Purpose>
+        <Query platform="Elastic" language="ES|QL" id="Q-11">
+          <![CDATA[
+FROM logs-system.security*
+| WHERE @timestamp >= NOW() - 4 hours
+    AND event.code == "4624"
+    AND source.ip == "$source_ip"
+| STATS logons = COUNT(*) BY user.name, host.name, winlog.event_data.LogonType
+| SORT logons DESC
+| LIMIT 25
+]]>
+        </Query>
+      </Step>
+      <Step order="12" name="File investigation">
+        <Purpose>File investigation</Purpose>
+        <Query platform="Elastic" language="ES|QL" id="Q-12">
+          <![CDATA[
+FROM logs-system.security*
+| WHERE @timestamp >= NOW() - 4 hours
+    AND event.code == "4688"
+    AND host.name == "$host"
+    AND user.name == "$user"
+| EVAL exe = TO_LOWER(process.executable)
+| WHERE NOT exe LIKE "*system32*" AND NOT exe LIKE "*syswow64*" AND NOT exe LIKE "*program files*" AND NOT exe LIKE "*windows*"
+| STATS execs = COUNT(*), first_seen = MIN(@timestamp), last_seen = MAX(@timestamp) BY process.executable, process.parent.name
+| SORT execs DESC
+| LIMIT 30
+]]>
+        </Query>
+      </Step>
+      <Step order="13" name="Authentication investigation">
+        <Purpose>Authentication investigation</Purpose>
+        <Query platform="Elastic" language="ES|QL" id="Q-13">
+          <![CDATA[
+FROM logs-system.security*
+| WHERE @timestamp >= NOW() - 4 hours
+    AND event.code IN ("4624", "4625", "4634", "4647")
+    AND host.name == "$host" AND user.name == "$user"
+| STATS events = COUNT(*), first_seen = MIN(@timestamp), last_seen = MAX(@timestamp) BY event.code, winlog.event_data.LogonType, source.ip
+| SORT events DESC
+| LIMIT 30
+]]>
+        </Query>
+      </Step>
+      <Step order="14" name="Timeline Reconstruction">
+        <Purpose>Timeline Reconstruction</Purpose>
+        <Query platform="Elastic" language="ES|QL" id="Q-14">
+          <![CDATA[
+FROM logs-system.security*
+| WHERE @timestamp >= NOW() - 4 hours
+    AND event.code == "4688"
+    AND host.name == "$host"
+    AND user.name == "$user"
+| KEEP @timestamp, process.parent.name, process.parent.pid, process.name, process.pid, process.executable, process.command_line
+| SORT @timestamp ASC
+| LIMIT 200
+]]>
+        </Query>
+      </Step>
+      <Step order="15" name="Lateral movement validation">
+        <Purpose>Lateral movement validation</Purpose>
+        <Query platform="Elastic" language="ES|QL" id="Q-15">
+          <![CDATA[
+FROM logs-system.security*
+| WHERE @timestamp >= NOW() - 4 hours
+    AND event.code IN ("4624", "4648", "4768", "4769", "5140")
+    AND user.name == "$user"
+    AND host.name != "$host"
+| STATS events = COUNT(*) BY host.name, event.code, winlog.event_data.LogonType
+| SORT events DESC
+| LIMIT 30
+]]>
+        </Query>
+      </Step>
+      <Step order="16" name="Persistence validation">
+        <Purpose>Persistence validation</Purpose>
+        <Query platform="Elastic" language="ES|QL" id="Q-16">
+          <![CDATA[
+FROM logs-system.security*
+| WHERE @timestamp >= NOW() - 4 hours
+    AND host.name == "$host"
+    AND (
+        (event.code == "4688" AND TO_LOWER(process.name) IN ("schtasks.exe", "reg.exe", "sc.exe", "at.exe", "powershell.exe", "wscript.exe", "cscript.exe", "rundll32.exe", "mshta.exe"))
+        OR event.code == "7045"
+        OR event.code == "4720"
+        OR event.code == "4698"
+    )
+| STATS events = COUNT(*) BY event.code, process.name, user.name
+| SORT events DESC
+| LIMIT 40
+]]>
+        </Query>
+      </Step>
+      <Step order="17" name="Privilege escalation validation">
+        <Purpose>Privilege escalation validation</Purpose>
+        <Query platform="Elastic" language="ES|QL" id="Q-17">
+          <![CDATA[
+FROM logs-system.security*
+| WHERE @timestamp >= NOW() - 4 hours
+    AND event.code == "4672"
+    AND host.name == "$host"
+| STATS special_priv_logons = COUNT(*) BY user.name
+| SORT special_priv_logons DESC
+| LIMIT 25
+]]>
+        </Query>
+      </Step>
+      <Step order="18" name="Defense evasion validation">
+        <Purpose>Defense evasion validation</Purpose>
+        <Query platform="Elastic" language="ES|QL" id="Q-18">
+          <![CDATA[
+FROM logs-system.security*
+| WHERE @timestamp >= NOW() - 4 hours
+    AND host.name == "$host"
+    AND (
+        (event.code == "4688" AND TO_LOWER(process.name) IN ("wevtutil.exe", "fsutil.exe", "vssadmin.exe", "wmic.exe", "cipher.exe", "sdelete.exe", "sdelete64.exe"))
+        OR event.code == "1102"
+        OR event.code == "4719"
+    )
+| STATS events = COUNT(*) BY event.code, process.name, user.name
+| SORT events DESC
+| LIMIT 30
+]]>
+        </Query>
+      </Step>
+      <Step order="19" name="Impact assessment">
+        <Purpose>Impact assessment</Purpose>
+        <Query platform="Elastic" language="ES|QL" id="Q-19">
+          <![CDATA[
+FROM logs-system.security*
+| WHERE @timestamp >= NOW() - 4 hours
+    AND host.name == "$host"
+    AND event.code == "4688"
+    AND TO_LOWER(process.parent.name) == "msiexec.exe"
+| STATS children = COUNT(*), distinct_children = COUNT_DISTINCT(process.name) BY process.name, process.executable, user.name
+| SORT children DESC
+| LIMIT 30
+]]>
+        </Query>
+      </Step>
+      <Step order="20" name="Finalize verdict">
+        <DecisionTree>
+        </DecisionTree>
+      </Step>
+    </Workflow>
+  </Investigation>
+  <ClassificationGuidance>
+    <TruePositive>
+      <Definition></Definition>
+    </TruePositive>
+    <FalsePositive>
+      <Definition></Definition>
+      <Indicators>
+        <Item>RMM and enterprise deployment tools performing legitimate silent remote installs from URLs not on the exclusion list (the exclusion list is not exhaustive).</Item>
+        <Item>Internal software-deployment servers that push MSIs over HTTP(S) as packaged behaviour, under a management parent.</Item>
+        <Item>Vendor installers that chain a remote MSI during setup, under explorer.exe (a user double-clicking an installer) or a deployment agent.</Item>
+        <Item>Failed installs - an unreachable URL or MSI error where nothing was installed or run - which are recorded as a proven-failed attempt (a blocked attempt), never "benign".</Item>
+        <Item>msiexec.exe remote installs are rare in this estate. In the validated 4-hour window, no msiexec.exe executions were present on the 4688 stream at all. There is therefore no in-window baseline of legitimate remote installs to tune out - a real hit is a notable, per-URL-verified event.</Item>
+        <Item>The launching parent matters more than volume here. On the jump/VDI tier, explorer.exe and svchost/services are common parents; a script-host or LOLBin parent (wscript/mshta/powershell/forfiles/pcalua) driving msiexec from a URL is the intrusion shape and outranks an explorer-launched vendor installer.</Item>
+        <Item>The download source is invisible on-cluster. NBI has no process-to-network (5156) telemetry, so the MSI fetch and its server are not in logs-system.security* - the URL is read from the command line/args and corroborated via FortiGate/proxy (section 15.8).</Item>
+        <Item>Command-line capture is bimodal (section 8). The URL and flags may be present only in process.args, or absent, on the command-line-less tier - fold command_line + MV_CONCAT(process.args," ") and escalate for proxy logs where both are null.</Item>
+      </Indicators>
+    </FalsePositive>
+    <Misconfiguration>
+      <Definition></Definition>
+    </Misconfiguration>
+    <NeedsEscalation>
+      <Definition></Definition>
+    </NeedsEscalation>
+  </ClassificationGuidance>
+  <ResponseActions>
+    <Phase name="Containment">
+      <Action>Isolate $host (network-contain / quarantine) if a true_positive is confirmed, to stop the payload and sever any C2. On a shared jump/VDI host, coordinate with IT but prioritise containment.</Action>
+      <Action>Block the MSI URL / source host at the proxy/firewall (from section 14/section 15.8) to stop re-download.</Action>
+      <Action>Terminate the msiexec custom-action tree and any dropped binary (section 15.3b/section 17.5) if the host cannot yet be isolated.</Action>
+      <Action>Suspend or force-logoff $user's session and disable the account if implicated; reset its credentials (section 20).</Action>
+      <Action>Preserve volatile evidence first - the downloaded MSI, any dropped payload, and the running process list - before remediation.</Action>
+      <Action>Deploy/confirm changes only via the authorised human-approved DEPLOY path; investigation itself is read-only.</Action>
+    </Phase>
+    <Phase name="Eradication">
+      <Action>Remove the installed product and its persistence (section 17.2) - uninstall the malicious MSI, delete services/scheduled tasks/Run keys, and remove any dropped payload identified via section 15.10 (process.executable path).</Action>
+      <Action>Capture and analyse the MSI/payload (hash, custom actions) for scoping and IOC extraction; block the source at the proxy.</Action>
+      <Action>Run a full anti-malware / EDR scan on $host and hunt for the same MSI/URL/payload across peers, especially every host $user touched (section 15.4, section 17.1).</Action>
+      <Action>Remediate the initial-access vector that provided the foothold from which msiexec was driven.</Action>
+    </Phase>
+    <Phase name="Recovery">
+      <Action>Reset $user's password and any credentials accessible from $host during the install window; if privileged accounts logged on there (section 17.3), rotate those too.</Action>
+      <Action>Restore $host from a known-good image if the payload executed or persistence was extensive; otherwise validate eradication holds after reboot.</Action>
+      <Action>Return the host/account to service only after section 22 closing criteria are met and monitoring confirms no re-download from the source.</Action>
+      <Action>Recommend hardening (section 23): restrict msiexec remote installs by policy (allow only approved deployment sources), tighten egress, and keep the approved remote-install URL list current so legitimate deployments are distinguishable.</Action>
+    </Phase>
+  </ResponseActions>
+  <Escalation>
+    <Trigger>Escalate to Tier 3 / Incident Response (and notify the customer) when any of the following hold:
+
+- The MSI URL is suspicious/unrecognised (raw IP, newly-seen domain, high port, random MSI name).
+- The launching parent ($parent) is a script host / LOLBin (wscript/mshta/powershell/forfiles/pcalua/wmiprvse) or an Office/browser ancestor.
+- A payload executed - an msiexec custom-action child or a dropped binary from a non-standard path (section 15.3b, section 15.10, section 17.5) - or persistence was installed (section 17.2).
+- The install ran on a server/Tier-0 host, lateral movement follows (section 17.1), or defence-tampering appears (section 17.4).
+- The URL or whether a payload executed cannot be established from 4688 and the alert cannot be safely cleared - escalate as needs_escalation and pull proxy logs.</Trigger>
+    <To>SOC L2 / IR</To>
+  </Escalation>
+  <ClosureCriteria>
+    <Item>false_positive (authorised): the URL is a verified legitimate deployment/RMM source run by a management context; document and add the exact URL to the approved remote-install list.</Item>
+    <Item>false_positive (proven-failed): the install positively failed (URL unreachable / MSI error, nothing installed or run) - recorded as a blocked attempt, never "benign"; still check for follow-on.</Item>
+    <Item>misconfiguration: a legitimate internal deployment tool installs from a URL merely not on the exclusion list, with no payload behaviour; add the URL to the approved list.</Item>
+    <Item>true_positive: an attacker-controlled MSI was installed and executed a payload via signed-binary proxy execution; containment/eradication/recovery completed, source blocked, scope established, no residual persistence.</Item>
+    <Item>needs_escalation: handed to Tier 3/IR with the URL/payload gaps documented.</Item>
+  </ClosureCriteria>
+  <Limitations>
+    <Item>The URL decides it, and it lives in the command line. There is no web-telemetry index on NBI - read the URL from process.command_line/process.args (section 14) and corroborate the download in FortiGate/proxy (section 15.8). A raw IP / newly-seen domain / high port / random MSI name is the tell; a verified vendor/internal source is authorised.</Item>
+    <Item>The parent ($parent) ranks the case. A management/deployment parent leans authorised; a script host or LOLBin (wscript/mshta/powershell/forfiles/pcalua/wmiprvse) driving msiexec from a URL is the proxy-install shape.</Item>
+    <Item>Look for the payload, not just the install. msiexec custom-action children and non-standard-path binaries (section 15.3b/section 15.10/section 17.5) separate an executed payload (TP) from a benign file-drop deployment.</Item>
+    <Item>Absence is not safety here. msiexec remote installs were absent from the validated window, so the confirm queries return no in-window match - the rule fires on a real execution, and the download/source is invisible on-cluster regardless.</Item>
+    <Item>Command-line capture is bimodal. The URL/flags may be in process.args only, or absent, on the command-line-less tier - fold command_line + MV_CONCAT(process.args," ") and escalate for proxy logs where both are null.</Item>
+    <Item>source.ip is shared infrastructure. A single VDI/jump egress IP (validated example: 10.11.102.15) fronts many users; it shows the operator's inbound origin, not the MSI's download source. Correlate IP + user + host.</Item>
+    <Item>KB-worthy (persist to NBI customer scope): (1) no msiexec.exe executions on 4688 in-window over 4h (rule is low-volume/rare in this estate); (2) no process-to-network telemetry → MSI download/source not observable on-cluster; (3) command-line host-bimodality; (4) process.hash.* absent on 4688; (5) 10.11.102.15 = shared VDI/admin egress fronting nim-jump-apv02. Observed live 2026-08-19.</Item>
+  </Limitations>
+</Playbook>

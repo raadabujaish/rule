@@ -1,0 +1,371 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<Playbook xmlns="https://soc.example/playbooks" id="PB-oracle-database-user-altered" name="Oracle DB — Database User Altered (Password/Privilege Change) - SOC Playbook" version="3.0" status="Validated" classification="TLP:AMBER">
+  <Metadata>
+    <Owner>NBI SOC / Detection Engineering</Owner>
+    <LastUpdated>2026-08-19</LastUpdated>
+    <Severity default="Medium">Medium</Severity>
+    <Confidence default="Medium">Medium</Confidence>
+    <Category>Persistence</Category>
+    <MitreAttack>
+      <Technique id="T1098"/>
+      <Technique id="T1078"/>
+      <Technique id="T1548"/>
+      <Tactic id="TA0003"/>
+      <Tactic id="TA0004"/>
+    </MitreAttack>
+    <References>
+      <Reference title="MITRE ATT&amp;CK - Account Manipulation (T1098)" url="https://attack.mitre.org/techniques/T1098/"/>
+      <Reference title="MITRE ATT&amp;CK - Valid Accounts (T1078)" url="https://attack.mitre.org/techniques/T1078/"/>
+      <Reference title="MITRE ATT&amp;CK - Abuse Elevation Control Mechanism (T1548)" url="https://attack.mitre.org/techniques/T1548/"/>
+      <Reference title="MITRE ATT&amp;CK - Persistence tactic (TA0003)" url="https://attack.mitre.org/tactics/TA0003/"/>
+      <Reference title="MITRE ATT&amp;CK - Privilege Escalation tactic (TA0004)" url="https://attack.mitre.org/tactics/TA0004/"/>
+      <Reference title="Oracle - ALTER USER statement (SQL Language Reference)" url="https://docs.oracle.com/en/database/oracle/oracle-database/19/sqlrf/ALTER-USER.html"/>
+      <Reference title="Oracle - About Unified Auditing / UNIFIED_AUDIT_TRAIL" url="https://docs.oracle.com/en/database/oracle/oracle-database/19/dbseg/introduction-to-auditing.html"/>
+      <Reference title="Oracle - DBA_USERS view reference" url="https://docs.oracle.com/en/database/oracle/oracle-database/19/refrn/DBA_USERS.html"/>
+      <Reference title="Elastic - Oracle integration (audit data collection)" url="https://docs.elastic.co/integrations/oracle"/>
+      <Reference title="Elastic Security - ES|QL reference (STATS, VALUES, COUNT_DISTINCT)" url="https://www.elastic.co/guide/en/elasticsearch/reference/current/esql.html"/>
+    </References>
+  </Metadata>
+  <AlertContext>
+    <RuleName>Oracle DB — Database User Altered (Password/Privilege Change)</RuleName>
+    <RuleId>nbi-ora-alter-user</RuleId>
+    <RuleType>query</RuleType>
+    <Index>apps-*</Index>
+    <TriggerLogic>The deployed rule is a query (KQL) rule over apps-*. Its condition is simply the presence of an Oracle unified-audit record whose action is ALTER USER:
+
+One-line Kibana KQL detection filter (verbatim intent of the deployed rule):
+
+
+
+Plain English: any successful audit record for an ALTER USER statement fires the rule. The rule does not itself distinguish credential resets from unlocks or privilege changes - that distinction is made in investigation by reading SQL_TEXT. Because the record is written when the statement is *audited* (not necessarily when it succeeds), the investigation must also confirm the change actually took effect (a statement that errored on insufficient privilege is a blocked attempt, not an applied change).
+
+Faithful ES|QL confirmation of the same condition, scoped to the acting principal (live-tested, &lt;= 4h):</TriggerLogic>
+    <KeyAlertFields></KeyAlertFields>
+  </AlertContext>
+  <Inputs>
+    <Input name="$actor"/>
+  </Inputs>
+  <ExecutiveSummary>
+    <Overview>This playbook drives triage and investigation of the Oracle DB - Database User Altered detection on NBI's Elastic Security deployment. The rule fires on any Oracle unified-audit record with ACTION_NAME = ALTER USER. ALTER USER changes an existing database account - its authentication (IDENTIFIED BY = a credential reset), lock state (ACCOUNT LOCK/UNLOCK), assigned privileges/roles (DEFAULT ROLE), profile, or quotas. The exact change is in SQL_TEXT; the acting principal is DBUSERNAME / CURRENT_USER / OS_USERNAME; and the access path is CLIENT_PROGRAM_NAME / USERHOST / AUTHENTICATION_TYPE.
+
+ALTER USER is routine DBA work (password resets, unlocks, role assignment) - but it is also how an attacker with database privileges establishes persistence or escalates: resetting the credential of a privileged or dormant account to hijack it, unlocking a disabled account, or granting default roles. The analyst decides between authorised administration (false_positive), attacker account manipulation (true_positive), an un-baselined legitimate job (misconfiguration), or unproven (needs_escalation) - driven by *which* account was altered, *what* changed, *who* did it, and *from what access path*.</Overview>
+    <BusinessImpact>An alert means: an Oracle account was altered on one of NBI's database instances. The critical facts are not in the alert's DBUSERNAME (that is the *actor*) but inside SQL_TEXT (the *target* account and the exact change). Two readings:
+
+- Authorised administration - a recognised DBA reset a routine user's password, unlocked a locked-out account, or adjusted a role, from a database host under change control. This is ordinary and common.
+- Attacker account manipulation - a principal with database privileges reset the credential of a privileged or service schema (SYS, SYSTEM, a core-banking schema owner) to hijack it, unlocked a dormant account to reuse it, or granted default roles to escalate. Because Oracle underpins NBI's core-banking systems (T24/FTI/FCC and related instances), a hijacked or unlocked privileged Oracle account is durable access to financial data and transactions.
+
+The investigation resolves the reading from three facts: the altered account and change type (section 14.1/section 15.10), whether this is a lone change or a privileged spree (section 15.4/section 17), and the access path (section 15.2/section 15.5/section 15.12).</BusinessImpact>
+  </ExecutiveSummary>
+  <Investigation>
+    <Goal>Decide true_positive / false_positive / misconfiguration / needs_escalation for Oracle DB — Database User Altered (Password/Privilege Change).</Goal>
+    <Workflow>
+      <Step order="1" name="Detection Summary">
+        <Purpose>Detection Summary</Purpose>
+        <Query platform="Elastic" language="ES|QL" id="Q-01">
+          <![CDATA[
+FROM apps-*
+| WHERE @timestamp >= NOW() - 4 hours
+    AND ACTION_NAME == "ALTER USER" AND DBUSERNAME == "$actor"
+| KEEP @timestamp, type, DBUSERNAME, CURRENT_USER, OS_USERNAME, SQL_TEXT, CLIENT_PROGRAM_NAME, USERHOST, AUTHENTICATION_TYPE
+| SORT @timestamp DESC
+| LIMIT 50
+]]>
+        </Query>
+      </Step>
+      <Step order="2" name="Recover the account change (deployed ORA-INV-01, verbatim)">
+        <Purpose>Recover the account change (deployed ORA-INV-01, verbatim)</Purpose>
+        <Query platform="Elastic" language="ES|QL" id="Q-02">
+          <![CDATA[
+FROM apps-*
+| WHERE ACTION_NAME == "ALTER USER" AND DBUSERNAME == "$actor"
+    AND @timestamp >= NOW() - 4 hours
+| STATS events = COUNT(*), changes = VALUES(SQL_TEXT), actor_current = VALUES(CURRENT_USER),
+        actor_os = VALUES(OS_USERNAME), programs = VALUES(CLIENT_PROGRAM_NAME),
+        hosts = VALUES(USERHOST), auth = VALUES(AUTHENTICATION_TYPE)
+    BY type
+| SORT events DESC
+| LIMIT 10
+]]>
+        </Query>
+      </Step>
+      <Step order="3" name="Confirm the actor is live and privileged (context for an empty section 14.1)">
+        <Purpose>Confirm the actor is live and privileged (context for an empty section 14.1)</Purpose>
+        <Query platform="Elastic" language="ES|QL" id="Q-03">
+          <![CDATA[
+FROM apps-*
+| WHERE DBUSERNAME == "$actor"
+    AND ACTION_NAME IN ("ALTER USER","CREATE USER","DROP USER","GRANT","REVOKE","ALTER SYSTEM","CREATE ROLE")
+    AND @timestamp >= NOW() - 4 hours
+| STATS events = COUNT(*) BY ACTION_NAME, type
+| SORT events DESC
+| LIMIT 20
+]]>
+        </Query>
+      </Step>
+      <Step order="4" name="Entity pivoting">
+        <Purpose>Entity pivoting</Purpose>
+        <Query platform="Elastic" language="ES|QL" id="Q-04">
+          <![CDATA[
+FROM apps-*
+| WHERE @timestamp >= NOW() - 4 hours AND DBUSERNAME == "$actor"
+| STATS events = COUNT(*), first_seen = MIN(@timestamp), last_seen = MAX(@timestamp)
+    BY ACTION_NAME, type
+| SORT events DESC
+| LIMIT 30
+]]>
+        </Query>
+      </Step>
+      <Step order="5" name="Process investigation">
+        <Purpose>Process investigation</Purpose>
+        <Query platform="Elastic" language="ES|QL" id="Q-05">
+          <![CDATA[
+FROM apps-*
+| WHERE DBUSERNAME == "$actor"
+    AND ACTION_NAME IN ("ALTER USER","CREATE USER","DROP USER","GRANT","REVOKE","ALTER SYSTEM","CREATE ROLE")
+    AND @timestamp >= NOW() - 4 hours
+| STATS events = COUNT(*)
+    BY CLIENT_PROGRAM_NAME, USERHOST, AUTHENTICATION_TYPE
+| SORT events DESC
+| LIMIT 15
+]]>
+        </Query>
+      </Step>
+      <Step order="6" name="User investigation">
+        <Purpose>User investigation</Purpose>
+        <Query platform="Elastic" language="ES|QL" id="Q-06">
+          <![CDATA[
+FROM apps-*
+| WHERE DBUSERNAME == "$actor"
+    AND ACTION_NAME IN ("ALTER USER","CREATE USER","DROP USER","GRANT","REVOKE","ALTER SYSTEM","CREATE ROLE")
+    AND @timestamp >= NOW() - 4 hours
+| STATS events = COUNT(*), privileges = VALUES(SYSTEM_PRIVILEGE_USED)
+    BY ACTION_NAME
+| SORT events DESC
+| LIMIT 15
+]]>
+        </Query>
+      </Step>
+      <Step order="7" name="Host investigation">
+        <Purpose>Host investigation</Purpose>
+        <Query platform="Elastic" language="ES|QL" id="Q-07">
+          <![CDATA[
+FROM apps-*
+| WHERE DBUSERNAME == "$actor"
+    AND ACTION_NAME IN ("ALTER USER","CREATE USER","DROP USER","GRANT","REVOKE","ALTER SYSTEM","CREATE ROLE")
+    AND @timestamp >= NOW() - 4 hours
+| STATS events = COUNT(*), programs = VALUES(CLIENT_PROGRAM_NAME)
+    BY USERHOST, type
+| SORT events DESC
+| LIMIT 20
+]]>
+        </Query>
+      </Step>
+      <Step order="8" name="IP investigation">
+        <Purpose>IP investigation</Purpose>
+        <Query platform="Elastic" language="ES|QL" id="Q-08">
+          <![CDATA[
+FROM apps-*
+| WHERE DBUSERNAME == "$actor"
+    AND ACTION_NAME IN ("ALTER USER","CREATE USER","DROP USER","GRANT","REVOKE","ALTER SYSTEM","CREATE ROLE")
+    AND @timestamp >= NOW() - 4 hours
+| STATS events = COUNT(*), hosts = VALUES(TERMINAL_HOST_NAME)
+    BY TERMINAL_IP
+| SORT events DESC
+| LIMIT 20
+]]>
+        </Query>
+      </Step>
+      <Step order="9" name="File investigation">
+        <Purpose>File investigation</Purpose>
+        <Query platform="Elastic" language="ES|QL" id="Q-09">
+          <![CDATA[
+FROM apps-*
+| WHERE DBUSERNAME == "$actor"
+    AND ACTION_NAME IN ("ALTER USER","CREATE USER","GRANT","CREATE ROLE","ALTER SYSTEM")
+    AND @timestamp >= NOW() - 4 hours
+| STATS events = COUNT(*), statements = VALUES(SQL_TEXT)
+    BY ACTION_NAME, type
+| SORT events DESC
+| LIMIT 20
+]]>
+        </Query>
+      </Step>
+      <Step order="10" name="Authentication investigation">
+        <Purpose>Authentication investigation</Purpose>
+        <Query platform="Elastic" language="ES|QL" id="Q-10">
+          <![CDATA[
+FROM apps-*
+| WHERE DBUSERNAME == "$actor" AND ACTION_NAME == "LOGON"
+    AND @timestamp >= NOW() - 4 hours
+| STATS logons = COUNT(*), programs = VALUES(CLIENT_PROGRAM_NAME)
+    BY AUTHENTICATION_TYPE
+| SORT logons DESC
+| LIMIT 15
+]]>
+        </Query>
+      </Step>
+      <Step order="11" name="Timeline Reconstruction">
+        <Purpose>Timeline Reconstruction</Purpose>
+        <Query platform="Elastic" language="ES|QL" id="Q-11">
+          <![CDATA[
+FROM apps-*
+| WHERE @timestamp >= NOW() - 4 hours AND DBUSERNAME == "$actor"
+    AND ACTION_NAME IN ("ALTER USER","CREATE USER","DROP USER","GRANT","REVOKE","ALTER SYSTEM","CREATE ROLE","AUDIT","NOAUDIT")
+| KEEP @timestamp, type, ACTION_NAME, SQL_TEXT, CLIENT_PROGRAM_NAME, USERHOST, AUTHENTICATION_TYPE, SYSTEM_PRIVILEGE_USED
+| SORT @timestamp ASC
+| LIMIT 100
+]]>
+        </Query>
+      </Step>
+      <Step order="12" name="Lateral movement validation">
+        <Purpose>Lateral movement validation</Purpose>
+        <Query platform="Elastic" language="ES|QL" id="Q-12">
+          <![CDATA[
+FROM apps-*
+| WHERE DBUSERNAME == "$actor"
+    AND ACTION_NAME IN ("ALTER USER","CREATE USER","GRANT","REVOKE","ALTER SYSTEM","CREATE ROLE","SELECT")
+    AND @timestamp >= NOW() - 4 hours
+| STATS events = COUNT(*), actions = VALUES(ACTION_NAME), hosts = VALUES(USERHOST)
+    BY type
+| SORT events DESC
+| LIMIT 20
+]]>
+        </Query>
+      </Step>
+      <Step order="13" name="Persistence validation">
+        <Purpose>Persistence validation</Purpose>
+        <Query platform="Elastic" language="ES|QL" id="Q-13">
+          <![CDATA[
+FROM apps-*
+| WHERE DBUSERNAME == "$actor"
+    AND ACTION_NAME IN ("CREATE USER","GRANT","CREATE ROLE","ALTER USER")
+    AND @timestamp >= NOW() - 4 hours
+| STATS events = COUNT(*), statements = VALUES(SQL_TEXT)
+    BY ACTION_NAME, type
+| SORT events DESC
+| LIMIT 20
+]]>
+        </Query>
+      </Step>
+      <Step order="14" name="Privilege escalation validation">
+        <Purpose>Privilege escalation validation</Purpose>
+        <Query platform="Elastic" language="ES|QL" id="Q-14">
+          <![CDATA[
+FROM apps-*
+| WHERE DBUSERNAME == "$actor"
+    AND ACTION_NAME IN ("GRANT","ALTER USER","CREATE ROLE")
+    AND @timestamp >= NOW() - 4 hours
+| STATS events = COUNT(*), privileges = VALUES(SYSTEM_PRIVILEGE_USED), statements = VALUES(SQL_TEXT)
+    BY ACTION_NAME
+| SORT events DESC
+| LIMIT 20
+]]>
+        </Query>
+      </Step>
+      <Step order="15" name="Defense evasion validation">
+        <Purpose>Defense evasion validation</Purpose>
+        <Query platform="Elastic" language="ES|QL" id="Q-15">
+          <![CDATA[
+FROM apps-*
+| WHERE DBUSERNAME == "$actor"
+    AND ACTION_NAME IN ("NOAUDIT","AUDIT","ALTER SYSTEM")
+    AND @timestamp >= NOW() - 4 hours
+| STATS events = COUNT(*), statements = VALUES(SQL_TEXT)
+    BY ACTION_NAME, type
+| SORT events DESC
+| LIMIT 20
+]]>
+        </Query>
+      </Step>
+      <Step order="16" name="Impact assessment">
+        <Purpose>Impact assessment</Purpose>
+        <Query platform="Elastic" language="ES|QL" id="Q-16">
+          <![CDATA[
+FROM apps-*
+| WHERE DBUSERNAME == "$actor"
+    AND ACTION_NAME IN ("ALTER USER","CREATE USER","DROP USER","GRANT","REVOKE","ALTER SYSTEM","CREATE ROLE")
+    AND @timestamp >= NOW() - 4 hours
+| STATS priv_actions = COUNT(*), distinct_actions = COUNT_DISTINCT(ACTION_NAME),
+        instances = COUNT_DISTINCT(type)
+| LIMIT 5
+]]>
+        </Query>
+      </Step>
+      <Step order="17" name="Finalize verdict">
+        <DecisionTree>
+        </DecisionTree>
+      </Step>
+    </Workflow>
+  </Investigation>
+  <ClassificationGuidance>
+    <TruePositive>
+      <Definition></Definition>
+    </TruePositive>
+    <FalsePositive>
+      <Definition></Definition>
+      <Indicators>
+        <Item>Routine DBA maintenance - password resets for users who forgot credentials, unlocks after failed-login lockouts, role adjustments - performed by a recognised DBA from a database host under a change ticket. This is the dominant benign cause.</Item>
+        <Item>Automated provisioning / credential-rotation tooling that issues ALTER USER on a schedule (e.g. periodic service-account password rotation). Legitimate, but must be a *recognised* job on an *approved* path (see section 6).</Item>
+        <Item>Application-lifecycle scripts that alter application schema accounts during deployment or patching windows.</Item>
+        <Item>A positively proven-failed ALTER USER (insufficient privilege / error) - a *blocked attempt*, documented as such (never a bare "benign").</Item>
+        <Item>The DBA baseline is narrow and specific. Privileged Oracle actions on this estate come exclusively from SYS operating as OS user oracle, via sqlplus/rman on the database hosts (NIM-TFDDB01V, NIM-T24DB02V, NIM-TFDFCC-DB01V), under OS authentication (AUTHENTICATION_TYPE = (TYPE=(OS)) with a local PROTOCOL=beq bequeath connection from a link-local 169.254.x address). An ALTER USER matching this exact shape by SYS from a DB host is the expected administrative pattern - verify the change ticket, do not assume.</Item>
+        <Item>ALTER USER is genuinely rare here. It did not appear at all in the validation windows (24h showed only LOGON/LOGOFF/SELECT/ALTER SYSTEM/EXECUTE). So any firing is notable, and there is no noisy legitimate source to tune out. Empty query results are a window/ingestion artefact, not proof of safety - Oracle audit ingestion here is batched/bursty.</Item>
+        <Item>The instances are core-banking. type encodes the instance as DB_&lt;ip&gt;_&lt;app&gt; - live examples DB_10.12.39.12_T24 (T24 core banking), DB_10.11.55.8_FTI, DB_10.11.55.15_FCC. An ALTER USER on a core-banking schema owner is high-impact by definition.</Item>
+        <Item>**apps-* is very high volume** (LOGON/LOGOFF dominate - ~1.2M docs/4h estate-wide). Every query in this playbook is scoped by DBUSERNAME and/or a specific ACTION_NAME to stay performant; do not run unscoped aggregations over apps-*.</Item>
+      </Indicators>
+    </FalsePositive>
+    <Misconfiguration>
+      <Definition></Definition>
+    </Misconfiguration>
+    <NeedsEscalation>
+      <Definition></Definition>
+    </NeedsEscalation>
+  </ClassificationGuidance>
+  <ResponseActions>
+    <Phase name="Containment">
+      <Action>Secure the altered account (the target from SQL_TEXT): lock it and force a fresh credential under SOC/DBA control if the change was an unauthorised credential reset or unlock, so the attacker's set password no longer works.</Action>
+      <Action>Revert unauthorised privilege/role/unlock changes on the target (re-lock a maliciously unlocked account, revoke granted roles) in coordination with the DBA team.</Action>
+      <Action>Treat the acting account ($actor) as compromised if the change is unauthorised - rotate its credential and review its recent sessions across the affected instances.</Action>
+      <Action>Preserve evidence first: export the relevant UNIFIED_AUDIT_TRAIL rows and current DBA_USERS state for the target and actor before changes; NBI's Elastic copy is batched, so the authoritative record is in the database.</Action>
+      <Action>Coordinate with the core-banking application owner if a schema owner (T24/FTI/FCC) is affected, and make changes only via the authorised human-approved path; investigation is read-only.</Action>
+    </Phase>
+    <Phase name="Eradication">
+      <Action>Reset and reclaim the target account's credential (or disable it if unused), confirm its privileges/roles are back to the sanctioned set, and remove any new accounts the actor created (section 17.2).</Action>
+      <Action>Rotate the acting DBA/service credential and any credentials reachable from a compromised session; review for a LOGON-as-target follow-on (section 17.1) indicating the hijack was used.</Action>
+      <Action>Restore audit configuration if section 17.4 shows NOAUDIT/audit-parameter tampering, and re-enable the affected unified-audit policies.</Action>
+      <Action>Close the access vector: if the change arrived via an application/remote/password path (section 15.2/section 15.12), remediate the exposed application account or injection point that reached the database.</Action>
+    </Phase>
+    <Phase name="Recovery">
+      <Action>Return the account(s) to service only after credentials are reset under control, privileges are verified sanctioned, and no unauthorised LOGON as the target occurred.</Action>
+      <Action>Harden per the XML guidance: restrict ALTER USER / user-administration privileges to named DBAs, require OS-authenticated database-host access for account administration, alert on changes to privileged/service accounts, and review recent grants and unlocks across instances.</Action>
+      <Action>Baseline legitimate automation (provisioning/rotation jobs) so genuine attacker manipulation stands out, and confirm each job uses least privilege and an approved path.</Action>
+      <Action>Return to steady state only after section 22 closing criteria are met and monitoring shows no recurrence on the affected instances.</Action>
+    </Phase>
+  </ResponseActions>
+  <Escalation>
+    <Trigger>Escalate to SOC L2 / IR, the Oracle DBA team, and (if a schema owner is affected) the core-banking application owner, when any hold:
+
+- A credential reset or unlock of a privileged/service account (SYS, SYSTEM, a T24/FTI/FCC schema owner).
+- A privileged spree by $actor - CREATE USER/GRANT/CREATE ROLE clustered with the ALTER USER (section 17.2/section 17.3).
+- User administration arriving via an application/remote/password access path rather than the OS-auth DB-host baseline (section 15.2/section 15.12), or from an unexpected USERHOST/external TERMINAL_IP (section 15.5/section 15.6).
+- A LOGON as the altered account following the change (section 17.1), or audit tampering (section 17.4).
+- The target, change type, or authorisation cannot be determined from the available records - escalate as needs_escalation for the DBA to retrieve the audit record and DBA_USERS state. Empty != safe.</Trigger>
+    <To>SOC L2 / IR</To>
+  </Escalation>
+  <ClosureCriteria>
+    <Item>false_positive (authorised administration): a change ticket / baselined job is positively matched to the exact target + $actor + time, with a recognised DBA from a DB host under OS auth. Record the reference; do not create a broad exception.</Item>
+    <Item>false_positive (blocked attempt): the ALTER USER is positively proven to have failed (insufficient privilege / error) and did not take effect - documented as a blocked attempt, never "benign"; still investigate the actor and access path.</Item>
+    <Item>misconfiguration: a recognised automated provisioning/rotation job performed the change and was simply not baselined - baseline it, verify least privilege and an approved path.</Item>
+    <Item>true_positive: unauthorised account manipulation confirmed - privileged-target credential reset/unlock, spree, anomalous path, or a follow-on logon as the target; affected account secured, unauthorised changes reverted, acting account rotated, actor sessions and any created/granted accounts hunted across instances, incident documented.</Item>
+    <Item>needs_escalation: handed to L2/IR + DBA with the specific gap (missing SQL_TEXT, unresolved target, unattributable path) documented.</Item>
+  </ClosureCriteria>
+  <Limitations>
+    <Item>Read SQL_TEXT first - it holds the target and the change. DBUSERNAME is the *actor*; the *altered account* and the verb (IDENTIFIED BY / ACCOUNT UNLOCK / DEFAULT ROLE) are inside SQL_TEXT. The whole verdict usually turns on that one field.</Item>
+    <Item>ALTER USER is rare on NBI; empty is a window artefact, not safety. It did not appear in the validation windows (24h showed only LOGON/LOGOFF/SELECT/ALTER SYSTEM/EXECUTE), and ingestion is batched - so section 14.1 legitimately returns zero. Confirm from the alert's own record and, if needed, the DBA's UNIFIED_AUDIT_TRAIL.</Item>
+    <Item>The DBA baseline is narrow: SYS as OS oracle, via sqlplus/rman on the DB hosts, OS auth (beq). Anything outside that shape - an app/JDBC program, a remote/password auth, an external TERMINAL_IP, an unexpected USERHOST - is the anomaly to chase. But a matching shape is a reason to *verify the ticket*, not to auto-clear.</Item>
+    <Item>TERMINAL_IP is null for the on-host baseline (local beq); a populated value = remote client = anomalous for user administration.</Item>
+    <Item>**apps-* is high-volume** (LOGON/LOGOFF dominate, ~1.2M/4h); always scope by DBUSERNAME and/or specific ACTION_NAME. Avoid unscoped VALUES(SQL_TEXT).</Item>
+    <Item>Mind the evasions: credential reset-then-reset-back, blending into the OS-auth DBA baseline from a compromised DBA account, or using CREATE USER/GRANT instead of ALTER USER. Complement with detections on CREATE USER/privileged GRANT, on ACCOUNT UNLOCK of dormant accounts, on any privileged action from a non-OS-auth/application path, and correlate a subsequent LOGON as the altered account.</Item>
+    <Item>KB-worthy (persist to NBI customer scope): (1) Oracle DBA baseline = SYS/OS oracle via sqlplus/rman on NIM-TFDDB01V/NIM-T24DB02V/NIM-TFDFCC-DB01V, OS-auth beq; (2) privileged actions in-window limited to ALTER SYSTEM (SYSDBA), ALTER USER rare/absent; (3) instances type = DB_10.12.39.12_T24, DB_10.11.55.8_FTI, DB_10.11.55.15_FCC (core banking); (4) TERMINAL_IP null on on-host beq; (5) target account lives in SQL_TEXT, not DBUSERNAME. All observed live 2026-08-19.</Item>
+  </Limitations>
+</Playbook>

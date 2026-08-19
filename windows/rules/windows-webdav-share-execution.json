@@ -1,0 +1,115 @@
+{
+  "name": "Suspicious Execution from a WebDav Share [NBI-4688]",
+  "tags": [
+    "Domain: Endpoint",
+    "OS: Windows",
+    "Use Case: Threat Detection",
+    "Tactic: Execution",
+    "Data Source: Elastic Endgame",
+    "Data Source: Elastic Defend",
+    "Data Source: Windows Security Event Logs",
+    "Data Source: Microsoft Defender for Endpoint",
+    "Data Source: Sysmon",
+    "Data Source: SentinelOne",
+    "Data Source: Crowdstrike",
+    "Resources: Investigation Guide",
+    "NBI-Recovered",
+    "Phase2-Batch2",
+    "Windows-4688",
+    "coverage:partial-29pct"
+  ],
+  "interval": "5m",
+  "enabled": true,
+  "description": "Identifies attempt to execute Windows scripts from a remote WebDav Share. Adversaries may abuse this method to evade dropping malicious files to victim file system.",
+  "risk_score": 73,
+  "severity": "high",
+  "note": "## Coverage\nThis rule runs on Windows Security 4688 process-creation events. Command-line-dependent conditions currently apply to hosts where command-line auditing is enabled.\n\n## Detection guidance\n## Triage and analysis\n\n### Investigating Suspicious Execution from a WebDav Share\n\n#### Possible investigation steps\n\n- Check if the remote webdav server is autorized by the organization.\n- Check all the downloaded files from the remote server and their content.\n- Investigate the process execution chain (parent process tree) to identify the initial vector.\n- Investigate other alerts associated with the user/host during the past 5 minutes.\n- Identify the user account that performed the action and whether it should perform this kind of action.\n- Identify the target computer and its role in the IT environment.\n- Investigate what commands were run, and assess whether this behavior is prevalent in the environment by looking for similar occurrences across hosts.\n\n### Response and remediation\n\n- Initiate the incident response process based on the outcome of the triage.\n- Isolate the involved hosts to prevent further post-compromise behavior.\n- Investigate credential exposure on systems compromised or used by the attacker to ensure all compromised accounts are identified. Reset passwords for these accounts and other potentially compromised credentials, such as email, business systems, and",
+  "output_index": "",
+  "investigation_fields": {
+    "field_names": [
+      "user.name",
+      "process.name",
+      "process.parent.name",
+      "process.command_line",
+      "host.name"
+    ]
+  },
+  "author": [
+    "raadabujaish"
+  ],
+  "false_positives": [
+    "Trusted webdav shares used to host trusted content."
+  ],
+  "from": "now-9m",
+  "rule_id": "nbi-b2-suspicious-execution-from-a-webdav-share",
+  "max_signals": 100,
+  "risk_score_mapping": [],
+  "severity_mapping": [],
+  "threat": [
+    {
+      "framework": "MITRE ATT&CK",
+      "tactic": {
+        "id": "TA0002",
+        "name": "Execution",
+        "reference": "https://attack.mitre.org/tactics/TA0002/"
+      },
+      "technique": [
+        {
+          "id": "T1204",
+          "name": "User Execution",
+          "reference": "https://attack.mitre.org/techniques/T1204/",
+          "subtechnique": [
+            {
+              "id": "T1204.002",
+              "name": "Malicious File",
+              "reference": "https://attack.mitre.org/techniques/T1204/002/"
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "framework": "MITRE ATT&CK",
+      "tactic": {
+        "id": "TA0008",
+        "name": "Lateral Movement",
+        "reference": "https://attack.mitre.org/tactics/TA0008/"
+      },
+      "technique": [
+        {
+          "id": "T1021",
+          "name": "Remote Services",
+          "reference": "https://attack.mitre.org/techniques/T1021/",
+          "subtechnique": [
+            {
+              "id": "T1021.002",
+              "name": "SMB/Windows Admin Shares",
+              "reference": "https://attack.mitre.org/techniques/T1021/002/"
+            }
+          ]
+        },
+        {
+          "id": "T1570",
+          "name": "Lateral Tool Transfer",
+          "reference": "https://attack.mitre.org/techniques/T1570/"
+        }
+      ]
+    }
+  ],
+  "to": "now",
+  "references": [
+    "https://www.elastic.co/guide/en/security/current/prebuilt-rules.html"
+  ],
+  "version": 1,
+  "exceptions_list": [],
+  "related_integrations": [],
+  "required_fields": [],
+  "setup": "",
+  "type": "eql",
+  "language": "eql",
+  "index": [
+    "logs-system.security-*"
+  ],
+  "query": "process where host.os.type == \"windows\" and event.type == \"start\" and\n process.name : (\"cmd.exe\", \"powershell.exe\", \"conhost.exe\", \"wscript.exe\", \"mshta.exe\", \"curl.exe\", \"msiexec.exe\", \"bitsadmin.exe\", \"net.exe\") and\n process.command_line : (\"*trycloudflare.com*\", \"*@SSL\\\\*\", \"*\\\\webdav\\\\*\", \"*\\\\DavWWWRoot\\\\*\", \"*\\\\\\\\*.*@8080\\\\*\", \"*\\\\\\\\*.*@80\\\\*\", \"*\\\\\\\\*.*@8443\\\\*\", \"*\\\\\\\\*.*@443\\\\*\") and\n not (process.name : \"cmd.exe\" and process.args : \"\\\\\\\\?\\\\UNC\\\\*.sharepoint.com@SSL\\\\DavWWWRoot\\\\*\")\n",
+  "actions": []
+}

@@ -1,0 +1,44 @@
+{
+  "name": "Create local admin accounts using net exe",
+  "tags": [],
+  "interval": "5m",
+  "enabled": true,
+  "description": "Detects net.exe command creating local administrator accounts",
+  "risk_score": 73,
+  "severity": "high",
+  "license": "",
+  "output_index": "",
+  "meta": {
+    "kibana_siem_app_url": "https://nbi.scanwave.local:8008/app/security"
+  },
+  "investigation_fields": {
+    "field_names": [
+      "user.name",
+      "process.name",
+      "process.parent.name",
+      "process.command_line",
+      "host.name"
+    ]
+  },
+  "author": [],
+  "false_positives": [],
+  "from": "now-15m",
+  "rule_id": "bca2dd02-bc4d-4435-a04f-dffc29b0d2c2",
+  "max_signals": 100,
+  "risk_score_mapping": [],
+  "severity_mapping": [],
+  "threat": [],
+  "to": "now",
+  "references": [],
+  "version": 1,
+  "exceptions_list": [],
+  "related_integrations": [],
+  "required_fields": [],
+  "setup": "",
+  "type": "query",
+  "language": "kuery",
+  "data_view_id": "logs-*",
+  "query": "process.name : \"net.exe\" AND process.args : (\"user\" OR \"localgroup\") AND process.args : (\"add\" OR \"/add\") AND process.args : (\"administrators\" OR \"/add*administrators\")",
+  "filters": [],
+  "actions": []
+}

@@ -1,0 +1,362 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<Playbook xmlns="https://soc.example/playbooks" id="PB-ad-service-privileged-account-novel-source" name="AD — Service/Privileged Account Logon from Novel Source - SOC Playbook" version="3.0" status="Validated" classification="TLP:AMBER">
+  <Metadata>
+    <Owner>NBI SOC / Detection Engineering</Owner>
+    <LastUpdated>2026-08-19</LastUpdated>
+    <Severity default="high">high</Severity>
+    <Confidence default="Medium">Medium</Confidence>
+    <Category>Lateral Movement</Category>
+    <MitreAttack>
+      <Technique id="T1078"/>
+      <Technique id="T1078.002"/>
+      <Technique id="T1550"/>
+      <Technique id="T1550.002"/>
+      <Tactic id="TA0008"/>
+    </MitreAttack>
+    <References>
+      <Reference title="MITRE ATT&amp;CK - Valid Accounts: Domain Accounts (T1078.002)" url="https://attack.mitre.org/techniques/T1078/002/"/>
+      <Reference title="MITRE ATT&amp;CK - Use Alternate Authentication Material: Pass the Hash (T1550.002)" url="https://attack.mitre.org/techniques/T1550/002/"/>
+      <Reference title="MITRE ATT&amp;CK - Lateral Movement tactic (TA0008)" url="https://attack.mitre.org/tactics/TA0008/"/>
+      <Reference title="Elastic Security - New Terms rule type reference" url="https://www.elastic.co/guide/en/security/current/rules-ui-create.html#create-new-terms-rule"/>
+      <Reference title="Microsoft Learn - Event 4624 (An account was successfully logged on) and logon types" url="https://learn.microsoft.com/en-us/windows/security/threat-protection/auditing/event-4624"/>
+      <Reference title="Microsoft Learn - Securing privileged access / service account hardening" url="https://learn.microsoft.com/en-us/security/privileged-access-workstations/overview"/>
+      <Reference title="Microsoft Learn - Group Managed Service Accounts (gMSA) overview" url="https://learn.microsoft.com/en-us/windows-server/security/group-managed-service-accounts/group-managed-service-accounts-overview"/>
+      <Reference title="MITRE ATT&amp;CK - T1078 Valid Accounts (parent technique)" url="https://attack.mitre.org/techniques/T1078/"/>
+    </References>
+  </Metadata>
+  <AlertContext>
+    <RuleName>AD — Service/Privileged Account Logon from Novel Source</RuleName>
+    <RuleId>nbi-corr-svc-account-new-source</RuleId>
+    <RuleType>new_terms</RuleType>
+    <Index>logs-system.security*</Index>
+    <TriggerLogic>The deployed rule is a New Terms rule keyed on the tuple (winlog.event_data.TargetUserName, source.ip) over successful interactive-network logons. Its underlying event filter (expressed as a one-line Kibana KQL detection filter for fast pivoting in Discover / Timeline) is:
+
+
+
+Plain English: a successful logon (event.code == "4624") that is network (type 3) or RemoteInteractive/RDP (type 10), where source.ip is present (excluding loopback ::1), and the target account name matches NBI's service/privileged naming patterns (monitoring/backup/SCCM/Citrix/Forti service accounts and *.admin/*.prod privileged identities). The New Terms engine emits one alert the first time a given (account, source.ip) combination appears in the lookback window; recurring pairs are suppressed as already-seen.
+
+The behavioural idea: service and privileged accounts normally authenticate from a small, stable set of source hosts (their application servers, management collectors, jump hosts). A brand-new source for such an account is the earliest network-visible signature of credential theft and reuse - an attacker who has captured a service/admin secret and is now replaying it from a foothold the account has ne</TriggerLogic>
+    <KeyAlertFields>source.ip, user.name, host.name</KeyAlertFields>
+  </AlertContext>
+  <Inputs>
+    <Input name="$target_username"/>
+    <Input name="$source_ip"/>
+    <Input name="$host"/>
+  </Inputs>
+  <ExecutiveSummary>
+    <Overview>This playbook drives triage and investigation of the AD - Service/Privileged Account Logon from Novel Source detection on NBI's Elastic Security deployment. The rule is a New Terms analytic that fires when an account matching NBI's service/privileged naming convention produces a successful network or RDP sign-in (Event 4624, logon type 3 or 10) from a source.ip it has never used before within the New Terms lookback window.
+
+The sign-in has already succeeded by the time the alert fires. The analyst's job is to decide, quickly and defensibly, whether the novel source is a legitimate/authorised host the account now uses (false_positive), an attacker reusing a stolen service or privileged credential from an unexpected host (true_positive), a stale-baseline artefact where a real but un-baselined infrastructure change looks novel (misconfiguration), or unprovable with the evidence at hand (needs_escalation) - and to attach the ES|QL evidence and entity values to the alert before closing.</Overview>
+    <BusinessImpact>An alert means: on $host, the service/privileged account $target_username successfully authenticated (4624, type 3 or 10) from $source_ip, and that (account, source.ip) pair had not been seen before in the New Terms window.
+
+Two facts are already established and are not in question:
+
+- The authentication succeeded. 4624 is a *successful* logon; this is not a failed-attempt (4625) signal. The credential was valid and accepted.
+- The source is novel for this account. The novelty is relative to the account's own history, not the estate - a source that is entirely normal for other users can still be brand-new for this specific service/privileged identity, and that is exactly the condition of interest.
+
+What is not yet established - and is the whole investigation - is *why* the source is new: an authorised deployment/migration that legitimately introduced a new server the account runs on, versus an attacker authenticating with a stolen service/admin credential from a host they control. Logon type is the first discriminator: a type 3 (network) logon to a server is the normal shape for a service account; a type 10 (RDP/RemoteInteractive) logon *by a service account* is anomalous almost re</BusinessImpact>
+  </ExecutiveSummary>
+  <Investigation>
+    <Goal>Decide true_positive / false_positive / misconfiguration / needs_escalation for AD — Service/Privileged Account Logon from Novel Source.</Goal>
+    <Workflow>
+      <Step order="1" name="Confirm the novel-source sign-in (reused verbatim from the validated v2 playbook, INV-01)">
+        <Purpose>Confirm the novel-source sign-in (reused verbatim from the validated v2 playbook, INV-01)</Purpose>
+        <Query platform="Elastic" language="ES|QL" id="Q-01">
+          <![CDATA[
+FROM logs-system.security-*
+| WHERE winlog.event_data.TargetUserName == "$target_username" AND source.ip == "$source_ip"
+    AND event.code == "4624"
+    AND @timestamp >= NOW() - 2 hours
+| STATS logons = COUNT(*) BY winlog.event_data.LogonType, host.name
+| SORT logons DESC
+| LIMIT 10
+]]>
+        </Query>
+      </Step>
+      <Step order="2" name="Characterise the new source (reused verbatim from the validated v2 playbook, INV-02)">
+        <Purpose>Characterise the new source (reused verbatim from the validated v2 playbook, INV-02)</Purpose>
+        <Query platform="Elastic" language="ES|QL" id="Q-02">
+          <![CDATA[
+FROM logs-system.security-*
+| WHERE source.ip == "$source_ip"
+    AND @timestamp >= NOW() - 2 hours
+| STATS events = COUNT(*) BY event.code, winlog.event_data.TargetUserName
+| SORT events DESC
+| LIMIT 15
+]]>
+        </Query>
+      </Step>
+      <Step order="3" name="Entity pivoting">
+        <Purpose>Entity pivoting</Purpose>
+        <Query platform="Elastic" language="ES|QL" id="Q-03">
+          <![CDATA[
+FROM logs-system.security*
+| WHERE @timestamp >= NOW() - 4 hours
+    AND event.code == "4624"
+    AND winlog.event_data.TargetUserName == "$target_username"
+    AND source.ip == "$source_ip"
+| KEEP @timestamp, host.name, winlog.event_data.TargetUserName, winlog.event_data.TargetDomainName, winlog.event_data.LogonType, source.ip, winlog.event_data.LogonProcessName
+| SORT @timestamp DESC
+| LIMIT 50
+]]>
+        </Query>
+      </Step>
+      <Step order="4" name="Process investigation">
+        <Purpose>Process investigation</Purpose>
+        <Query platform="Elastic" language="ES|QL" id="Q-04">
+          <![CDATA[
+FROM logs-system.security*
+| WHERE @timestamp >= NOW() - 4 hours
+    AND event.code == "4688"
+    AND host.name == "$host"
+    AND user.name == "$target_username"
+| STATS executions = COUNT(*), first_seen = MIN(@timestamp), last_seen = MAX(@timestamp) BY process.name, process.parent.name
+| SORT executions DESC
+| LIMIT 40
+]]>
+        </Query>
+      </Step>
+      <Step order="5" name="Parent-Child process analysis">
+        <Purpose>Parent-Child process analysis</Purpose>
+        <Query platform="Elastic" language="ES|QL" id="Q-05">
+          <![CDATA[
+FROM logs-system.security*
+| WHERE @timestamp >= NOW() - 4 hours
+    AND event.code == "4688"
+    AND host.name == "$host"
+    AND user.name == "$target_username"
+| KEEP @timestamp, process.parent.name, process.parent.pid, process.name, process.pid, process.executable
+| SORT @timestamp ASC
+| LIMIT 100
+]]>
+        </Query>
+      </Step>
+      <Step order="6" name="User investigation">
+        <Purpose>User investigation</Purpose>
+        <Query platform="Elastic" language="ES|QL" id="Q-06">
+          <![CDATA[
+FROM logs-system.security*
+| WHERE @timestamp >= NOW() - 4 hours
+    AND event.code == "4624"
+    AND winlog.event_data.TargetUserName == "$target_username"
+| STATS logons = COUNT(*), distinct_sources = COUNT_DISTINCT(source.ip) BY host.name, winlog.event_data.LogonType
+| SORT logons DESC
+| LIMIT 30
+]]>
+        </Query>
+      </Step>
+      <Step order="7" name="Host investigation">
+        <Purpose>Host investigation</Purpose>
+        <Query platform="Elastic" language="ES|QL" id="Q-07">
+          <![CDATA[
+FROM logs-system.security*
+| WHERE @timestamp >= NOW() - 4 hours
+    AND event.code == "4624"
+    AND host.name == "$host"
+    AND source.ip IS NOT NULL
+| STATS logons = COUNT(*), distinct_accounts = COUNT_DISTINCT(winlog.event_data.TargetUserName) BY source.ip
+| SORT logons DESC
+| LIMIT 30
+]]>
+        </Query>
+      </Step>
+      <Step order="8" name="IP investigation">
+        <Purpose>IP investigation</Purpose>
+        <Query platform="Elastic" language="ES|QL" id="Q-08">
+          <![CDATA[
+FROM logs-system.security*
+| WHERE @timestamp >= NOW() - 4 hours
+    AND event.code == "4624"
+    AND source.ip == "$source_ip"
+| STATS logons = COUNT(*), distinct_hosts = COUNT_DISTINCT(host.name) BY winlog.event_data.TargetUserName, winlog.event_data.LogonType
+| SORT logons DESC
+| LIMIT 30
+]]>
+        </Query>
+      </Step>
+      <Step order="9" name="Authentication investigation">
+        <Purpose>Authentication investigation</Purpose>
+        <Query platform="Elastic" language="ES|QL" id="Q-09">
+          <![CDATA[
+FROM logs-system.security*
+| WHERE @timestamp >= NOW() - 4 hours
+    AND event.code IN ("4624", "4625", "4768", "4769", "4776")
+    AND winlog.event_data.TargetUserName == "$target_username"
+| STATS events = COUNT(*), distinct_hosts = COUNT_DISTINCT(host.name), distinct_sources = COUNT_DISTINCT(source.ip) BY event.code, winlog.event_data.LogonType
+| SORT events DESC
+| LIMIT 30
+]]>
+        </Query>
+      </Step>
+      <Step order="10" name="Timeline Reconstruction">
+        <Purpose>Timeline Reconstruction</Purpose>
+        <Query platform="Elastic" language="ES|QL" id="Q-10">
+          <![CDATA[
+FROM logs-system.security*
+| WHERE @timestamp >= NOW() - 4 hours
+    AND event.code IN ("4624", "4625", "4634", "4647", "4672")
+    AND host.name == "$host"
+    AND winlog.event_data.TargetUserName == "$target_username"
+| KEEP @timestamp, event.code, winlog.event_data.LogonType, source.ip, winlog.event_data.TargetDomainName
+| SORT @timestamp ASC
+| LIMIT 200
+]]>
+        </Query>
+      </Step>
+      <Step order="11" name="Lateral movement validation">
+        <Purpose>Lateral movement validation</Purpose>
+        <Query platform="Elastic" language="ES|QL" id="Q-11">
+          <![CDATA[
+FROM logs-system.security*
+| WHERE @timestamp >= NOW() - 4 hours
+    AND event.code IN ("4624", "4648", "4768", "4769")
+    AND winlog.event_data.TargetUserName == "$target_username"
+    AND host.name != "$host"
+| STATS events = COUNT(*) BY host.name, event.code, winlog.event_data.LogonType
+| SORT events DESC
+| LIMIT 30
+]]>
+        </Query>
+      </Step>
+      <Step order="12" name="Persistence validation">
+        <Purpose>Persistence validation</Purpose>
+        <Query platform="Elastic" language="ES|QL" id="Q-12">
+          <![CDATA[
+FROM logs-system.security*
+| WHERE @timestamp >= NOW() - 4 hours
+    AND host.name == "$host"
+    AND (
+        (event.code == "4688" AND TO_LOWER(process.name) IN ("sc.exe", "schtasks.exe", "reg.exe", "at.exe", "powershell.exe", "psexesvc.exe", "wmic.exe"))
+        OR event.code == "7045"
+        OR event.code == "4720"
+        OR event.code == "4698"
+    )
+| STATS events = COUNT(*) BY event.code, process.name, user.name
+| SORT events DESC
+| LIMIT 40
+]]>
+        </Query>
+      </Step>
+      <Step order="13" name="Privilege escalation validation">
+        <Purpose>Privilege escalation validation</Purpose>
+        <Query platform="Elastic" language="ES|QL" id="Q-13">
+          <![CDATA[
+FROM logs-system.security*
+| WHERE @timestamp >= NOW() - 4 hours
+    AND event.code == "4672"
+    AND host.name == "$host"
+| STATS special_priv_logons = COUNT(*) BY winlog.event_data.SubjectUserName
+| SORT special_priv_logons DESC
+| LIMIT 25
+]]>
+        </Query>
+      </Step>
+      <Step order="14" name="Defense evasion validation">
+        <Purpose>Defense evasion validation</Purpose>
+        <Query platform="Elastic" language="ES|QL" id="Q-14">
+          <![CDATA[
+FROM logs-system.security*
+| WHERE @timestamp >= NOW() - 4 hours
+    AND host.name == "$host"
+    AND (
+        (event.code == "4688" AND TO_LOWER(process.name) IN ("wevtutil.exe", "vssadmin.exe", "fsutil.exe", "wmic.exe", "cipher.exe", "sdelete.exe", "sdelete64.exe"))
+        OR event.code == "1102"
+        OR event.code == "4719"
+    )
+| STATS events = COUNT(*) BY event.code, process.name, winlog.event_data.SubjectUserName
+| SORT events DESC
+| LIMIT 30
+]]>
+        </Query>
+      </Step>
+      <Step order="15" name="Impact assessment">
+        <Purpose>Impact assessment</Purpose>
+        <Query platform="Elastic" language="ES|QL" id="Q-15">
+          <![CDATA[
+FROM logs-system.security*
+| WHERE @timestamp >= NOW() - 4 hours
+    AND event.code IN ("5140", "5145", "4672")
+    AND winlog.event_data.SubjectUserName == "$target_username"
+| STATS events = COUNT(*), distinct_hosts = COUNT_DISTINCT(host.name) BY event.code, winlog.event_data.ShareName
+| SORT events DESC
+| LIMIT 30
+]]>
+        </Query>
+      </Step>
+      <Step order="16" name="Finalize verdict">
+        <DecisionTree>
+        </DecisionTree>
+      </Step>
+    </Workflow>
+  </Investigation>
+  <ClassificationGuidance>
+    <TruePositive>
+      <Definition></Definition>
+    </TruePositive>
+    <FalsePositive>
+      <Definition></Definition>
+      <Indicators>
+        <Item>Authorised new servers and migrations. A planned deployment, rebuild, or migration legitimately introduces a new host that a service account now runs on or authenticates from. The (account, source.ip) pair is genuinely first-seen but entirely authorised - provided there is a change record. This is the single most common benign cause.</Item>
+        <Item>Load-balanced / NAT / VDI egress churn. Where a service account's traffic egresses through a pool of source addresses (a new pool member, a re-IP, a new NAT gateway, a new Citrix/VDI node), a new source.ip appears without any change to the account's actual behaviour.</Item>
+        <Item>Monitoring / backup / management platforms scaling out. SolarWinds, ManageEngine, Veeam, SCCM and similar poll or back up many hosts; adding a new collector or backup proxy makes the platform's service account authenticate from a new source. High-fan-out service accounts (see section 6) are the usual benign hits.</Item>
+        <Item>Administrator break-glass from a new workstation. A *.admin account used from a newly-issued admin workstation or a different jump host produces a novel source. Legitimate, but must be confirmed against the admin's identity - never assumed.</Item>
+        <Item>A handful of service accounts are legitimately very high fan-out and will generate most benign hits. Solarwinds.Srv alone authenticated ~7,700 times across 22 hosts from 10.11.18.21 in a 3-hour window; CITRIX.NBI produced ~45,000 type-3 logons from the same collector; ManageEngine.Srv, Veeam.Backup and the *.admin operator accounts (karrar.admin, jamal.admin, SP.admin) are similarly broad. For these accounts, a *new* source is more likely a scaled-out collector/proxy than an attacker - but still requires the change record. Build the picture from source.ip *nature* (section 15.6), not from the account's overall busyness.</Item>
+        <Item>10.11.18.x is NBI's management/collector tier. Sources such as 10.11.18.21 (SolarWinds/Citrix collector), 10.11.18.10 (ManageEngine), and 10.11.18.49 (Veeam) front the monitoring and backup platforms and legitimately present *many* service accounts. A novel source inside this tier is usually infrastructure; a novel source that is a user workstation subnet or an unexpected/human-operated host presenting a service credential is the high-signal case.</Item>
+        <Item>source.ip is shared/collector infrastructure - a weak individual identifier. One collector address fronts many accounts. Never treat source.ip alone as "the attacker"; always correlate IP + account + host + logon type + follow-on.</Item>
+        <Item>No historical NBI benign-true-positive allow-list ships with this rule. Do not create a blanket exception for an account or source off a single alert. If an exception is warranted, scope it to the exact (account, source.ip) pair and only after a documented authorised cause.</Item>
+      </Indicators>
+    </FalsePositive>
+    <Misconfiguration>
+      <Definition></Definition>
+    </Misconfiguration>
+    <NeedsEscalation>
+      <Definition></Definition>
+    </NeedsEscalation>
+  </ClassificationGuidance>
+  <ResponseActions>
+    <Phase name="Containment">
+      <Action>Reset $target_username and revoke its sessions/tickets if stolen-credential reuse is confirmed - this is the primary containment for a valid-account attack. For a service account, coordinate the reset with the application owner to avoid an uncontrolled outage, but prioritise stopping the abuse; for a *.admin account, disable it pending investigation.</Action>
+      <Action>Isolate the source host ($source_ip) if it is a human-operated/attacker foothold, and any hosts the account reached during the window (section 17.1), to stop onward movement.</Action>
+      <Action>Force-logoff / terminate the account's sessions on $host and any hosts in section 17.1 if the account cannot yet be reset.</Action>
+      <Action>Preserve volatile evidence first where feasible (the source host's process list and network state, the account's active sessions/tickets) - NBI does not collect the credential-theft step, so host-side capture on the source is the only route to the initial-access artefact.</Action>
+      <Action>Deploy/confirm changes only via the authorised human-approved DEPLOY path; investigation itself is read-only.</Action>
+    </Phase>
+    <Phase name="Eradication">
+      <Action>Rotate the compromised secret everywhere it is used. A service credential is often embedded in scheduled tasks, service configs, connection strings, and scripts across many hosts - rotate all instances, not just the account password, or the attacker retains access and services break inconsistently.</Action>
+      <Action>Remove any persistence discovered in section 17.2 (services, scheduled tasks, Run keys, rogue accounts) on $host and on every host the account reached (section 17.1).</Action>
+      <Action>Hunt the same credential across the estate - repeat section 15.4 / section 17.1 over a wider window to find every host the account touched from the novel source, and scan those hosts for dropped tooling and persistence.</Action>
+      <Action>Remediate the initial-access / credential-theft vector on the source host ($source_ip): how did the attacker obtain the secret (hive dump, Kerberoast, plaintext in share/script)? Close it, or the credential will be re-stolen.</Action>
+    </Phase>
+    <Phase name="Recovery">
+      <Action>Restore the service to a known-good state after the secret is rotated everywhere: validate the application/service starts cleanly with the new credential and that dependent jobs succeed.</Action>
+      <Action>Restore any compromised host ($source_ip or reached hosts) from a known-good image if persistence or tampering was extensive; otherwise validate eradication holds after reboot.</Action>
+      <Action>Return the account/host to service only after section 22 closing criteria are met and monitoring confirms the novel-source condition does not recur.</Action>
+      <Action>Harden: apply logon restrictions to service/privileged accounts (allowed source hosts via Deny log on through Remote Desktop/Deny access from the network, or authentication silos), migrate service accounts to gMSA, and broker privileged access through a PAM so that credentials are never used directly from arbitrary sources. Update the known_infrastructure baseline so authorised sources are learned.</Action>
+    </Phase>
+  </ResponseActions>
+  <Escalation>
+    <Trigger>Escalate to Tier 3 / Incident Response (and notify the customer) when any of the following hold:
+
+- A service/privileged credential authenticated from a workstation / human-operated / unexpected source (not the collector tier) with no documented authorisation - this alone warrants IR.
+- The logon was type 10 (RDP) by a service account, or the account fanned out to multiple hosts after the novel source (section 17.1), especially toward domain controllers or Tier-0.
+- Admin-share access or special-privilege use appears on hosts the account does not normally touch (section 17.5, section 17.3), or persistence was installed (section 17.2).
+- Log clearing or audit-policy tampering appears (section 17.4), or the account is a directory-privileged identity (replication/DCSync-capable).
+- Evidence is incomplete because of NBI's telemetry gaps (no credential-theft visibility, unresolved source role</Trigger>
+    <To>SOC L2 / IR</To>
+  </Escalation>
+  <ClosureCriteria>
+    <Item>false_positive (authorised): a change ticket or CMDB record positively matches the exact (account, source.ip) to a planned deployment/migration/scale-out, the logon type/role is expected (section 14.1), and only expected follow-on is present (section 17.5). Record the reference. If an exception is warranted, scope it to the exact (account, source.ip) pair - never a blanket account/source allow.</Item>
+    <Item>false_positive (blocked/authorised): a positively-proven authorised use (e.g. a sanctioned red/purple-team exercise replaying the credential under ROE), documented as authorised - never "benign".</Item>
+    <Item>misconfiguration: a legitimate new/rebuilt host the account uses that was simply not yet in the baseline (stale-baseline); update known_infrastructure. No attacker involvement.</Item>
+    <Item>true_positive: stolen-credential reuse confirmed; the secret rotated everywhere, sessions/tickets revoked, source and reached hosts contained, scope established, and no residual persistence or recurrence on monitoring.</Item>
+    <Item>needs_escalation: handed to Tier 3 / IR / infrastructure owner with the specific evidence gaps documented.</Item>
+  </ClosureCriteria>
+  <Limitations>
+    <Item>Type is the fastest discriminator. Type 3 (network) to a server is normal for a service account; type 10 (RDP) by a service account is anomalous almost regardless of source - check winlog.event_data.LogonType first.</Item>
+    <Item>source.ip is collector/shared infrastructure. In NBI a single management address (validated: 10.11.18.21 fronts Solarwinds.Srv ~7.7k logons/22 hosts and CITRIX.NBI ~45k) presents many accounts. Never treat source.ip as an individual identifier; correlate IP + account + host + type + follow-on.</Item>
+    <Item>Key follow-on on SubjectUserName, not TargetUserName. On 4624 the acting account is TargetUserName and SubjectUserName is null; on 5140/5145/4672 the acting account is SubjectUserName. Using the wrong field silently returns nothing (validated live).</Item>
+    <Item>Novelty != malice, but absence != safety. New Terms flags first-seen pairs, most of which are benign infrastructure churn - yet NBI cannot see the credential theft, so a clean follow-on picture never *proves* benign. Decide on the source's role (CMDB) plus follow-on, not on the absence of evidence.</Item>
+    <Item>The complementary analytics matter. This rule catches the *first* novel source; reuse from an already-seen source, or an account outside the service/admin name pattern, will not fire. The NTLM fan-out and many-accounts-one-source correlation rules, plus 4672 / 5140-5145 follow-on, cover what this novelty rule misses - cite them when scoping.</Item>
+    <Item>KB-worthy (persist to NBI customer scope): (1) 10.11.18.x = management/collector tier fronting SolarWinds/Citrix/ManageEngine/Veeam service accounts; (2) Solarwinds.Srv/CITRIX.NBI = legitimate very-high-fan-out service accounts (expected benign novel-source hits on scale-out); (3) SubjectUserName null on 4624 but populated on 5140/5145/4672; (4) source.ip ~97% populated on type 3/10, null on type 2. All observed live on 2026-08-17.</Item>
+  </Limitations>
+</Playbook>

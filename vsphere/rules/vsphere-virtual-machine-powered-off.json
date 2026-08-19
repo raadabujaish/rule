@@ -1,0 +1,64 @@
+{
+  "name": "VMware vSphere — Virtual Machine Powered Off",
+  "tags": [
+    "NBI-Virtualization",
+    "Phase3",
+    "VMware-vSphere"
+  ],
+  "interval": "5m",
+  "enabled": true,
+  "description": "Detects a virtual machine being powered off in the NBI datacenter. The message names the actor, the VM and the ESXi host. Powering off a production or security VM removes its workload and monitoring — a potential availability-impact or attacker action to disable a defensive system. Routine maintenance is expected; correlate the actor and VM against change control.",
+  "risk_score": 47,
+  "severity": "medium",
+  "note": "## Investigation\n1. The `message` names the actor, VM and host. Confirm the shutdown was scheduled/authorised.\n2. Prioritise power-offs of production, database or security VMs, and any outside a maintenance window.\n## Response\nIf unauthorised, power the VM back on and investigate the actor account for compromise.",
+  "output_index": "",
+  "investigation_fields": {
+    "field_names": [
+      "message",
+      "host.name",
+      "log.source.address"
+    ]
+  },
+  "author": [
+    "raadabujaish"
+  ],
+  "false_positives": [],
+  "from": "now-9m",
+  "rule_id": "nbi-vsphere-vm-powered-off",
+  "max_signals": 100,
+  "risk_score_mapping": [],
+  "severity_mapping": [],
+  "threat": [
+    {
+      "framework": "MITRE ATT&CK",
+      "tactic": {
+        "id": "TA0040",
+        "name": "Impact",
+        "reference": "https://attack.mitre.org/tactics/TA0040/"
+      },
+      "technique": [
+        {
+          "id": "T1529",
+          "name": "System Shutdown/Reboot",
+          "reference": "https://attack.mitre.org/techniques/T1529/"
+        }
+      ]
+    }
+  ],
+  "to": "now",
+  "references": [
+    "https://attack.mitre.org/techniques/T1529/"
+  ],
+  "version": 1,
+  "exceptions_list": [],
+  "related_integrations": [],
+  "required_fields": [],
+  "setup": "",
+  "type": "query",
+  "language": "kuery",
+  "index": [
+    "logs-vsphere.log-*"
+  ],
+  "query": "event.dataset:\"vsphere.log\" and message:\"Powered Off\" and message:\"NBI-Datacenter\"",
+  "actions": []
+}

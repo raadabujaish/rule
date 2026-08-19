@@ -1,0 +1,70 @@
+{
+  "name": "Windows — Volume Shadow Copy / Backup Deletion (Ransomware Impact)",
+  "tags": [
+    "NBI-Endpoint",
+    "Phase3",
+    "Windows-Security"
+  ],
+  "interval": "5m",
+  "enabled": true,
+  "description": "Detects deletion of Volume Shadow Copies or backups and disabling of recovery — via vssadmin, wbadmin, wmic shadowcopy, bcdedit or diskshadow. This is a near-universal ransomware pre-encryption step to prevent recovery.",
+  "risk_score": 90,
+  "severity": "critical",
+  "note": "## Coverage\nDepends on process.command_line, populated on ~29% of Windows hosts today; coverage expands after the process-command-line auditing GPO.\n## Investigation\n1. `SubjectUserName` on `host.name` ran `process.command_line`.\n2. Legitimate backup software rarely deletes ALL shadows with ignore-failures flags.\n## Response\nTreat as active ransomware: isolate the host immediately, identify the parent process, and begin IR.",
+  "output_index": "",
+  "investigation_fields": {
+    "field_names": [
+      "process.name",
+      "process.parent.name",
+      "process.command_line",
+      "process.executable",
+      "winlog.event_data.ServiceName",
+      "winlog.event_data.ServiceFileName",
+      "winlog.event_data.SubjectUserName",
+      "user.name",
+      "host.name"
+    ]
+  },
+  "author": [
+    "raadabujaish"
+  ],
+  "false_positives": [],
+  "from": "now-9m",
+  "rule_id": "nbi-win-ransomware-shadow-delete",
+  "max_signals": 100,
+  "risk_score_mapping": [],
+  "severity_mapping": [],
+  "threat": [
+    {
+      "framework": "MITRE ATT&CK",
+      "tactic": {
+        "id": "TA0040",
+        "name": "Impact",
+        "reference": "https://attack.mitre.org/tactics/TA0040/"
+      },
+      "technique": [
+        {
+          "id": "T1490",
+          "name": "Inhibit System Recovery",
+          "reference": "https://attack.mitre.org/techniques/T1490/"
+        }
+      ]
+    }
+  ],
+  "to": "now",
+  "references": [
+    "https://attack.mitre.org/"
+  ],
+  "version": 1,
+  "exceptions_list": [],
+  "related_integrations": [],
+  "required_fields": [],
+  "setup": "",
+  "type": "query",
+  "language": "kuery",
+  "index": [
+    "logs-system.security-*"
+  ],
+  "query": "event.code:\"4688\" and process.name:(\"vssadmin.exe\" or \"wbadmin.exe\" or \"wmic.exe\" or \"bcdedit.exe\" or \"diskshadow.exe\") and process.command_line:(*delete* or *shadowcopy* or *shadows* or *recoveryenabled* or *ignoreallfailures*)",
+  "actions": []
+}

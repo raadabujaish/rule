@@ -1,0 +1,76 @@
+{
+  "name": "FortiGate — External Port Scan",
+  "tags": [
+    "raad",
+    "redteam-2026-05",
+    "phase-1",
+    "recon"
+  ],
+  "interval": "5m",
+  "enabled": true,
+  "description": "Fires when a single external source IP contacts 100+ distinct destination ports across the internet-facing attack surface within 10 minutes — vertical, horizontal, or block port scanning. The rule aggregates FortiGate/CEF firewall traffic per source.ip (excluding internal ranges) and classifies the scan, tracking how many connections were actually allowed versus blocked. Maps to ATT&CK Reconnaissance T1595.001 (Active Scanning: Scanning IP Blocks).",
+  "risk_score": 47,
+  "severity": "medium",
+  "note": "### Investigation\n1. Review scan_type, unique_ports, and unique_dst to characterize the scan (single-host vertical vs estate-wide horizontal).\n2. Focus on 'allowed' — connections the firewall accepted matter more than blocked noise; those ports/services are exposed.\n3. Check whether source.ip is a known/authorized scanner (Nessus/Qualys) or benign internet background scanning versus a targeted source.\n4. Correlate follow-on connection attempts or exploit signatures from the same source against the allowed ports.\n5. Escalate when a targeted source reaches allowed services on sensitive exposed hosts.\n\n### False positives / benign\nInternet background scanning is ubiquitous and mostly blocked; authorized scanners (Nessus/Qualys), cloud health probes, and CGNAT-shared sources also match. Distinguish by whether connections were allowed (exposure) versus all blocked (noise), whether the source is an authorized scanner, and whether the scan is followed by targeted interaction. Prioritize by the 'allowed' count rather than allowlisting sources — the problem is alert volume, so suppress via the allowed/targeted discriminator, not by muting scanners blindly.",
+  "license": "",
+  "output_index": "",
+  "meta": {
+    "kibana_siem_app_url": ""
+  },
+  "investigation_fields": {
+    "field_names": [
+      "source.ip",
+      "unique_ports",
+      "unique_dst",
+      "attempts",
+      "blocked",
+      "allowed"
+    ]
+  },
+  "author": [],
+  "false_positives": [
+    "Internal vulnerability scanners (Nessus, Qualys, Tenable.sc) hitting",
+    "Cloud health-check probes (e.g. AWS NLB/ALB) — typically hit a small",
+    "Legitimate user behind a CGNAT making many concurrent connections"
+  ],
+  "from": "now-10m",
+  "rule_id": "raad-01-port-scan",
+  "max_signals": 100,
+  "risk_score_mapping": [],
+  "severity_mapping": [],
+  "threat": [
+    {
+      "framework": "MITRE ATT&CK",
+      "tactic": {
+        "id": "TA0043",
+        "name": "Reconnaissance",
+        "reference": "https://attack.mitre.org/tactics/TA0043/"
+      },
+      "technique": [
+        {
+          "id": "T1595",
+          "name": "Active Scanning",
+          "reference": "https://attack.mitre.org/techniques/T1595/",
+          "subtechnique": [
+            {
+              "id": "T1595.001",
+              "name": "Scanning IP Blocks",
+              "reference": "https://attack.mitre.org/techniques/T1595/001/"
+            }
+          ]
+        }
+      ]
+    }
+  ],
+  "to": "now",
+  "references": [],
+  "version": 1,
+  "exceptions_list": [],
+  "related_integrations": [],
+  "required_fields": [],
+  "setup": "",
+  "type": "esql",
+  "language": "esql",
+  "query": "FROM logs-fortinet_fortigate.log-default,logs-cef.log-default\n| WHERE  @timestamp >= NOW() - 10 minutes\n    AND event.action IN (\"accept\", \"deny\", \"drop\", \"reset\")\n    AND source.ip IS NOT NULL\n    AND destination.ip IS NOT NULL\n    AND destination.port IS NOT NULL\n    AND NOT CIDR_MATCH(source.ip,\n        \"10.0.0.0/8\",\n        \"172.16.0.0/12\",\n        \"192.168.0.0/16\",\n        \"127.0.0.0/8\",\n        \"169.254.0.0/16\",\n        \"100.64.0.0/10\",\n        \"::1/128\",\n        \"fe80::/10\",\n        \"fc00::/7\")\n| STATS unique_ports = COUNT_DISTINCT(destination.port),\n        unique_dst   = COUNT_DISTINCT(destination.ip),\n        attempts     = COUNT(*),\n        blocked      = COUNT(*) WHERE event.action IN (\"deny\", \"drop\", \"reset\"),\n        allowed      = COUNT(*) WHERE event.action == \"accept\",\n        first_seen   = MIN(@timestamp),\n        last_seen    = MAX(@timestamp)\n        BY source.ip\n| WHERE unique_ports >= 100\n| EVAL ports_per_host = unique_ports / unique_dst,\n       scan_type = CASE(\n           unique_dst == 1, \"vertical\",\n           unique_ports / unique_dst < 5, \"horizontal\",\n           \"block\")\n| SORT unique_ports DESC\n| KEEP source.ip, scan_type, unique_ports, unique_dst, ports_per_host, attempts, allowed, blocked, first_seen, last_seen",
+  "actions": []
+}

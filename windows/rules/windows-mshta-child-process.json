@@ -1,0 +1,87 @@
+{
+  "name": "Suspicious Microsoft HTML Application Child Process [NBI-4688]",
+  "tags": [
+    "Domain: Endpoint",
+    "OS: Windows",
+    "Use Case: Threat Detection",
+    "Tactic: Defense Evasion",
+    "Data Source: Elastic Endgame",
+    "Data Source: Elastic Defend",
+    "Data Source: Windows Security Event Logs",
+    "Data Source: Microsoft Defender for Endpoint",
+    "Data Source: Sysmon",
+    "Data Source: SentinelOne",
+    "Data Source: Crowdstrike",
+    "Resources: Investigation Guide",
+    "NBI-Recovered",
+    "Phase2-Batch2",
+    "Windows-4688",
+    "coverage:full"
+  ],
+  "interval": "5m",
+  "enabled": true,
+  "description": "Identifies Mshta.exe spawning a suspicious child process. This may indicate adversarial activity, as Mshta is often leveraged by adversaries to execute malicious scripts and evade detection.",
+  "risk_score": 73,
+  "severity": "high",
+  "note": "## Detection guidance\n## Triage and analysis\n\n> **Disclaimer**:\n> This investigation guide was created using generative AI technology and has been reviewed to improve its accuracy and relevance. While every effort has been made to ensure its quality, we recommend validating the content and adapting it to suit your specific environment and operational needs.\n\n### Investigating Suspicious Microsoft HTML Application Child Process\n\nMshta.exe is a legitimate Windows utility used to execute Microsoft HTML Application (HTA) files. Adversaries exploit it to run malicious scripts, leveraging its trusted status to bypass security measures. The detection rule identifies suspicious network activity by Mshta.exe, excluding known benign processes, to flag potential threats. This approach helps in identifying unauthorized network connections indicative of malicious intent.\n\n### Possible investigation steps\n\n- Review the process tree to understand the parent-child relationship of mshta.exe, focusing on any unusual or unexpected parent processes that are not excluded by the rule, such as Microsoft.ConfigurationManagement.exe or known benign executables.\n- Analyze the command-line arguments used by mshta.exe to identify",
+  "output_index": "",
+  "investigation_fields": {
+    "field_names": [
+      "user.name",
+      "process.name",
+      "process.parent.name",
+      "process.command_line",
+      "host.name"
+    ]
+  },
+  "author": [
+    "raadabujaish"
+  ],
+  "false_positives": [],
+  "from": "now-9m",
+  "rule_id": "nbi-b2-suspicious-microsoft-html-application-child-proc",
+  "max_signals": 100,
+  "risk_score_mapping": [],
+  "severity_mapping": [],
+  "threat": [
+    {
+      "framework": "MITRE ATT&CK",
+      "tactic": {
+        "id": "TA0005",
+        "name": "Defense Evasion",
+        "reference": "https://attack.mitre.org/tactics/TA0005/"
+      },
+      "technique": [
+        {
+          "id": "T1218",
+          "name": "System Binary Proxy Execution",
+          "reference": "https://attack.mitre.org/techniques/T1218/",
+          "subtechnique": [
+            {
+              "id": "T1218.005",
+              "name": "Mshta",
+              "reference": "https://attack.mitre.org/techniques/T1218/005/"
+            }
+          ]
+        }
+      ]
+    }
+  ],
+  "to": "now",
+  "references": [
+    "https://lolbas-project.github.io/lolbas/Binaries/Mshta/",
+    "https://www.elastic.co/guide/en/security/current/prebuilt-rules.html"
+  ],
+  "version": 1,
+  "exceptions_list": [],
+  "related_integrations": [],
+  "required_fields": [],
+  "setup": "",
+  "type": "eql",
+  "language": "eql",
+  "index": [
+    "logs-system.security-*"
+  ],
+  "query": "process where host.os.type == \"windows\" and event.type == \"start\" and\n process.parent.name : \"mshta.exe\" and\n (\n  process.name : (\"cmd.exe\", \"powershell.exe\", \"certutil.exe\", \"bitsadmin.exe\", \"curl.exe\", \"msiexec.exe\", \"schtasks.exe\", \"reg.exe\", \"wscript.exe\", \"rundll32.exe\") or\n  process.executable : (\"C:\\\\Users\\\\*\\\\*.exe\", \"\\\\Device\\\\HarddiskVolume*\\\\Users\\\\*\\\\*.exe\")\n  )\n",
+  "actions": []
+}

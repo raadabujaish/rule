@@ -1,0 +1,75 @@
+{
+  "name": "Linux — pkexec Execution (PwnKit / Local Privilege Escalation)",
+  "tags": [
+    "NBI-Endpoint",
+    "Phase3",
+    "Linux-auditd"
+  ],
+  "interval": "5m",
+  "enabled": true,
+  "description": "Detects execution of pkexec, the setuid Polkit binary abused by PwnKit (CVE-2021-4034) and related local privilege-escalation exploits to obtain root. pkexec is not used by normal workloads on these servers (0 baseline).",
+  "risk_score": 73,
+  "severity": "high",
+  "note": "## Investigation\n1. `user.name` ran `process.executable` `process.args` on `host.name`.\n2. PwnKit exploitation often shows pkexec with empty/malformed argv and an unusual parent.\n## Response\nIf unexpected, isolate the host, patch Polkit, and hunt for root-level persistence.",
+  "output_index": "",
+  "investigation_fields": {
+    "field_names": [
+      "process.executable",
+      "process.args",
+      "process.name",
+      "process.parent.executable",
+      "user.name",
+      "host.name"
+    ]
+  },
+  "author": [
+    "raadabujaish"
+  ],
+  "false_positives": [],
+  "from": "now-9m",
+  "rule_id": "nbi-lnx-pkexec-privesc",
+  "max_signals": 100,
+  "risk_score_mapping": [],
+  "severity_mapping": [],
+  "threat": [
+    {
+      "framework": "MITRE ATT&CK",
+      "tactic": {
+        "id": "TA0004",
+        "name": "Privilege Escalation",
+        "reference": "https://attack.mitre.org/tactics/TA0004/"
+      },
+      "technique": [
+        {
+          "id": "T1548",
+          "name": "Abuse Elevation Control Mechanism",
+          "reference": "https://attack.mitre.org/techniques/T1548/",
+          "subtechnique": [
+            {
+              "id": "T1548.001",
+              "name": "Setuid and Setgid",
+              "reference": "https://attack.mitre.org/techniques/T1548/001/"
+            }
+          ]
+        }
+      ]
+    }
+  ],
+  "to": "now",
+  "references": [
+    "https://attack.mitre.org/"
+  ],
+  "version": 1,
+  "exceptions_list": [],
+  "related_integrations": [],
+  "required_fields": [],
+  "setup": "",
+  "type": "query",
+  "language": "kuery",
+  "index": [
+    "logs-auditd.log-*",
+    "logs-auditd_manager.auditd-*"
+  ],
+  "query": "event.category:\"process\" and process.name:\"pkexec\"",
+  "actions": []
+}

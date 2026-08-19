@@ -1,0 +1,72 @@
+{
+  "name": "Kaspersky — Endpoint Protection Agent Uninstalled",
+  "tags": [
+    "NBI-Endpoint",
+    "Phase3",
+    "Kaspersky-EDR"
+  ],
+  "interval": "5m",
+  "enabled": true,
+  "description": "Fires when Kaspersky reports KLNAG_EV_INV_APP_UNINSTALLED for one of its own protection components (Kaspersky Endpoint Security or Network Agent) — the security agent being removed from an endpoint. Removing EDR blinds monitoring and typically precedes further malicious activity on the host. The rule matches the Kaspersky uninstall event where the application name is a protection component. Maps to ATT&CK Defense Evasion T1562.001 (Impair Defenses: Disable or Modify Tools).",
+  "risk_score": 78,
+  "severity": "high",
+  "note": "### Investigation\n1. Identify the endpoint (destination.domain) and which component (message) was removed.\n2. Check for an approved decommission/reimage/migration change window covering the uninstall.\n3. Determine whether protection was reinstalled shortly after (legitimate migration) or the host went dark (evasion).\n4. Correlate host activity immediately after removal — new processes, logons, or the NOTCURED/infection signal — for what the blind window enabled.\n5. Escalate if there is no change record, especially on a server or privileged workstation.\n\n### False positives / benign\nSanctioned decommission, reimage, version migration, or IT uninstalling to reinstall all generate this event legitimately. Distinguish by a matching change record and whether the agent is reinstalled promptly on the same host, versus a standalone removal with no follow-up reinstall and subsequent unmonitored activity. Do not allowlist hosts — an attacker removes the agent on exactly the hosts IT also services; correlate to the change window instead.\n\n### Notes\nHighlighted-field enrichment pending: verify populated Kaspersky CEF carriers on the uninstall event slice; the initiating account is absent from this event (pivot to host 4688).",
+  "output_index": "",
+  "investigation_fields": {
+    "field_names": [
+      "cef.name",
+      "destination.domain",
+      "cef.extensions.destinationHostName",
+      "cef.extensions.deviceCustomString4"
+    ]
+  },
+  "author": [
+    "raadabujaish"
+  ],
+  "false_positives": [],
+  "from": "now-9m",
+  "rule_id": "nbi-ksc-protection-removed",
+  "max_signals": 100,
+  "risk_score_mapping": [],
+  "severity_mapping": [],
+  "threat": [
+    {
+      "framework": "MITRE ATT&CK",
+      "tactic": {
+        "id": "TA0005",
+        "name": "Defense Evasion",
+        "reference": "https://attack.mitre.org/tactics/TA0005/"
+      },
+      "technique": [
+        {
+          "id": "T1562",
+          "name": "Impair Defenses",
+          "reference": "https://attack.mitre.org/techniques/T1562/",
+          "subtechnique": [
+            {
+              "id": "T1562.001",
+              "name": "Disable or Modify Tools",
+              "reference": "https://attack.mitre.org/techniques/T1562/001/"
+            }
+          ]
+        }
+      ]
+    }
+  ],
+  "to": "now",
+  "references": [
+    "https://attack.mitre.org/"
+  ],
+  "version": 1,
+  "exceptions_list": [],
+  "related_integrations": [],
+  "required_fields": [],
+  "setup": "",
+  "type": "query",
+  "language": "kuery",
+  "index": [
+    "logs-cef.log-*"
+  ],
+  "query": "observer.vendor:\"KasperskyLab\" and event.code:\"KLNAG_EV_INV_APP_UNINSTALLED\" and cef.extensions.message:(\"Kaspersky\" or \"KES\" or \"Endpoint Security\" or \"Network Agent\")",
+  "actions": []
+}

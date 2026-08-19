@@ -1,0 +1,381 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<Playbook xmlns="https://soc.example/playbooks" id="PB-windows-audit-policy-changed-interactive-account" name="Windows — Audit Policy Changed by Interactive Account - SOC Playbook" version="3.0" status="Validated" classification="TLP:AMBER">
+  <Metadata>
+    <Owner>NBI SOC / Detection Engineering</Owner>
+    <LastUpdated>2026-08-19</LastUpdated>
+    <Severity default="high">high</Severity>
+    <Confidence default="Medium">Medium</Confidence>
+    <Category>Defense Evasion</Category>
+    <MitreAttack>
+      <Technique id="T1562"/>
+      <Technique id="T1562.002"/>
+      <Technique id="T1562.001"/>
+      <Technique id="T1070.001"/>
+      <Tactic id="TA0005"/>
+    </MitreAttack>
+    <References>
+      <Reference title="MITRE ATT&amp;CK - Impair Defenses: Disable Windows Event Logging (T1562.002)" url="https://attack.mitre.org/techniques/T1562/002/"/>
+      <Reference title="MITRE ATT&amp;CK - Impair Defenses: Disable or Modify Tools (T1562.001)" url="https://attack.mitre.org/techniques/T1562/001/"/>
+      <Reference title="MITRE ATT&amp;CK - Defense Evasion tactic (TA0005)" url="https://attack.mitre.org/tactics/TA0005/"/>
+      <Reference title="MITRE ATT&amp;CK - Indicator Removal: Clear Windows Event Logs (T1070.001)" url="https://attack.mitre.org/techniques/T1070/001/"/>
+      <Reference title="Microsoft Learn - Event 4719 (System audit policy was changed)" url="https://learn.microsoft.com/en-us/windows/security/threat-protection/auditing/event-4719"/>
+      <Reference title="Microsoft Learn - auditpol command reference" url="https://learn.microsoft.com/en-us/windows-server/administration/windows-commands/auditpol"/>
+      <Reference title="Microsoft Learn - Event 1102 (The audit log was cleared)" url="https://learn.microsoft.com/en-us/windows/security/threat-protection/auditing/event-1102"/>
+      <Reference title="Elastic Security - Detection rules reference (defense-evasion / audit-policy family)" url="https://www.elastic.co/guide/en/security/current/prebuilt-rules.html"/>
+    </References>
+  </Metadata>
+  <AlertContext>
+    <RuleName>Windows — Audit Policy Changed by Interactive Account</RuleName>
+    <RuleId>nbi-ad-audit-policy-tampering</RuleId>
+    <RuleType>query</RuleType>
+    <Index>logs-system.security-*</Index>
+    <TriggerLogic>The deployed rule is a query (KQL) analytic on Event 4719:
+
+
+
+Plain English: the Windows audit policy on a host was changed by an account that is not a machine or built-in service identity. The machine/service exclusions strip the constant background of OS and Group Policy servicing (which is exactly what the validation window contained), leaving only changes attributed to a human/interactive-style account - the anomaly worth investigating.
+
+The critical dimension the rule does not itself decode is direction: winlog.event_data.AuditPolicyChanges carries %%8448 (Success added), %%8449 (Success removed), %%8450 (Failure added), %%8451 (Failure removed); winlog.event_data.CategoryId (%%827x) names the subcategory. Removal of auditing (%%8449 / %%8451) is the defence-evasion signal; addition may be legitimate hardening. Reading those codes (section 14.1) is the first investigative act.</TriggerLogic>
+    <KeyAlertFields>auditpol.exe, event.code, process.name, process.parent.name, secedit.exe, process.command_line, process.args</KeyAlertFields>
+  </AlertContext>
+  <Inputs>
+    <Input name="$subject_user"/>
+    <Input name="$host"/>
+  </Inputs>
+  <ExecutiveSummary>
+    <Overview>This playbook drives triage and investigation of the Audit Policy Changed by Interactive Account detection on NBI's Elastic Security deployment. The rule is a query analytic that fires on Windows Security Event 4719 (System audit policy was changed) where winlog.event_data.SubjectUserName is not a machine account (does not end in $) and is not SYSTEM, LOCAL SERVICE, or NETWORK SERVICE - i.e. an interactive/human account changed the audit policy. Audit policy normally changes only through Group Policy under machine/SYSTEM context; a change attributed to an interactive account is unexpected, and when it removes auditing of a subcategory it is a classic Defense Evasion move to blind logging before credential theft, lateral movement, or destruction.
+
+The analyst decides whether this is unauthorised audit tampering (true_positive), an authorised administrative/hardening change (false_positive - authorised), a GPO/tooling artifact attributed to an interactive context (misconfiguration), or unproven (needs_escalation) - decided from *what* changed, *who* changed it, whether they had a genuine interactive session, and whether it clusters with other tampering.</Overview>
+    <BusinessImpact>An alert means: on $host, the account $subject_user - which is not a machine or built-in service identity - changed the system audit policy (Event 4719). What is established and what is not:
+
+- Established: an audit-policy change occurred and is attributed to a non-machine, non-service account.
+- Established after decoding (section 14.1): *which* subcategory changed and in *which direction* (added vs removed) - from AuditPolicyChanges + CategoryId.
+- Not established by the rule alone: whether the account had a genuine interactive session (a stolen token or a service identity misused can also appear as a non-machine subject), and whether the change was authorised.
+
+The concern is direction plus context: a removal of Success/Failure auditing by an interactive account with no change ticket, especially alongside a hands-on session or a log clear, is audit tampering that succeeded - it degrades exactly the evidence the SOC needs for the more damaging activity that typically follows.</BusinessImpact>
+  </ExecutiveSummary>
+  <Investigation>
+    <Goal>Decide true_positive / false_positive / misconfiguration / needs_escalation for Windows — Audit Policy Changed by Interactive Account.</Goal>
+    <Workflow>
+      <Step order="1" name="Recover what changed and in which direction">
+        <Purpose>Recover what changed and in which direction</Purpose>
+        <Query platform="Elastic" language="ES|QL" id="Q-01">
+          <![CDATA[
+FROM logs-system.security-*
+| WHERE event.code == "4719" AND host.name == "$host"
+    AND winlog.event_data.SubjectUserName == "$subject_user"
+    AND @timestamp >= NOW() - 4 hours
+| STATS changes = COUNT(*), first_seen = MIN(@timestamp), last_seen = MAX(@timestamp)
+    BY winlog.event_data.AuditPolicyChanges, winlog.event_data.CategoryId
+| SORT changes DESC
+| LIMIT 20
+]]>
+        </Query>
+      </Step>
+      <Step order="2" name="Isolated change or broader audit tampering">
+        <Purpose>Isolated change or broader audit tampering</Purpose>
+        <Query platform="Elastic" language="ES|QL" id="Q-02">
+          <![CDATA[
+FROM logs-system.security-*
+| WHERE host.name == "$host" AND event.code IN ("4719","1102","4907")
+    AND @timestamp >= NOW() - 4 hours
+| STATS events = COUNT(*), subjects = COUNT_DISTINCT(winlog.event_data.SubjectUserName),
+        last_seen = MAX(@timestamp) BY event.code
+| SORT events DESC
+| LIMIT 12
+]]>
+        </Query>
+      </Step>
+      <Step order="3" name="Entity pivoting">
+        <Purpose>Entity pivoting</Purpose>
+        <Query platform="Elastic" language="ES|QL" id="Q-03">
+          <![CDATA[
+FROM logs-system.security-*
+| WHERE host.name == "$host"
+    AND (winlog.event_data.SubjectUserName == "$subject_user" OR winlog.event_data.TargetUserName == "$subject_user")
+    AND event.code IN ("4624","4648","4688","4672")
+    AND @timestamp >= NOW() - 4 hours
+| STATS events = COUNT(*), last_seen = MAX(@timestamp)
+    BY event.code, winlog.event_data.LogonType
+| SORT events DESC
+| LIMIT 15
+]]>
+        </Query>
+      </Step>
+      <Step order="4" name="Process investigation">
+        <Purpose>Process investigation</Purpose>
+        <Query platform="Elastic" language="ES|QL" id="Q-04">
+          <![CDATA[
+FROM logs-system.security-*
+| WHERE @timestamp >= NOW() - 4 hours
+    AND event.code == "4688"
+    AND host.name == "$host"
+    AND winlog.event_data.SubjectUserName == "$subject_user"
+| STATS executions = COUNT(*), first_seen = MIN(@timestamp), last_seen = MAX(@timestamp) BY process.name, process.parent.name
+| SORT executions DESC
+| LIMIT 30
+]]>
+        </Query>
+      </Step>
+      <Step order="5" name="Parent-Child process analysis">
+        <Purpose>Parent-Child process analysis</Purpose>
+        <Query platform="Elastic" language="ES|QL" id="Q-05">
+          <![CDATA[
+FROM logs-system.security-*
+| WHERE @timestamp >= NOW() - 4 hours
+    AND event.code == "4688"
+    AND host.name == "$host"
+    AND winlog.event_data.SubjectUserName == "$subject_user"
+| STATS executions = COUNT(*) BY process.parent.name, process.parent.executable, process.name
+| SORT executions DESC
+| LIMIT 30
+]]>
+        </Query>
+      </Step>
+      <Step order="6" name="User investigation">
+        <Purpose>User investigation</Purpose>
+        <Query platform="Elastic" language="ES|QL" id="Q-06">
+          <![CDATA[
+FROM logs-system.security-*
+| WHERE @timestamp >= NOW() - 4 hours
+    AND winlog.event_data.SubjectUserName == "$subject_user"
+    AND event.code IN ("4719", "4688", "1102")
+| STATS events = COUNT(*), event_kinds = COUNT_DISTINCT(event.code) BY host.name, event.code
+| SORT events DESC
+| LIMIT 25
+]]>
+        </Query>
+      </Step>
+      <Step order="7" name="Host investigation">
+        <Purpose>Host investigation</Purpose>
+        <Query platform="Elastic" language="ES|QL" id="Q-07">
+          <![CDATA[
+FROM logs-system.security-*
+| WHERE @timestamp >= NOW() - 4 hours
+    AND event.code == "4719"
+    AND host.name == "$host"
+| STATS changes = COUNT(*), subcategories = COUNT_DISTINCT(winlog.event_data.CategoryId), last_seen = MAX(@timestamp) BY winlog.event_data.SubjectUserName
+| SORT changes DESC
+| LIMIT 25
+]]>
+        </Query>
+      </Step>
+      <Step order="8" name="IP investigation">
+        <Purpose>IP investigation</Purpose>
+        <Query platform="Elastic" language="ES|QL" id="Q-08">
+          <![CDATA[
+FROM logs-system.security-*
+| WHERE @timestamp >= NOW() - 4 hours
+    AND event.code == "4624"
+    AND host.name == "$host" AND winlog.event_data.TargetUserName == "$subject_user"
+    AND source.ip IS NOT NULL
+| STATS logons = COUNT(*) BY source.ip, winlog.event_data.LogonType
+| SORT logons DESC
+| LIMIT 20
+]]>
+        </Query>
+      </Step>
+      <Step order="9" name="File investigation">
+        <Purpose>File investigation</Purpose>
+        <Query platform="Elastic" language="ES|QL" id="Q-09">
+          <![CDATA[
+FROM logs-system.security-*
+| WHERE @timestamp >= NOW() - 4 hours
+    AND event.code == "4688"
+    AND host.name == "$host"
+    AND winlog.event_data.SubjectUserName == "$subject_user"
+    AND TO_LOWER(process.name) IN ("auditpol.exe", "secedit.exe", "gpupdate.exe", "reg.exe", "powershell.exe", "cmd.exe", "wmic.exe", "mmc.exe")
+| STATS executions = COUNT(*), first_seen = MIN(@timestamp), last_seen = MAX(@timestamp) BY process.name, process.executable
+| SORT executions DESC
+| LIMIT 30
+]]>
+        </Query>
+      </Step>
+      <Step order="10" name="Authentication investigation">
+        <Purpose>Authentication investigation</Purpose>
+        <Query platform="Elastic" language="ES|QL" id="Q-10">
+          <![CDATA[
+FROM logs-system.security-*
+| WHERE @timestamp >= NOW() - 4 hours
+    AND event.code IN ("4624", "4625", "4634", "4647", "4648")
+    AND host.name == "$host"
+    AND (winlog.event_data.TargetUserName == "$subject_user" OR winlog.event_data.SubjectUserName == "$subject_user")
+| STATS events = COUNT(*), first_seen = MIN(@timestamp), last_seen = MAX(@timestamp) BY event.code, winlog.event_data.LogonType, source.ip
+| SORT events DESC
+| LIMIT 30
+]]>
+        </Query>
+      </Step>
+      <Step order="11" name="Timeline Reconstruction">
+        <Purpose>Timeline Reconstruction</Purpose>
+        <Query platform="Elastic" language="ES|QL" id="Q-11">
+          <![CDATA[
+FROM logs-system.security-*
+| WHERE @timestamp >= NOW() - 4 hours
+    AND host.name == "$host"
+    AND (
+        (event.code IN ("4719","1102","4907"))
+        OR (event.code IN ("4624","4648","4688","4672") AND (winlog.event_data.SubjectUserName == "$subject_user" OR winlog.event_data.TargetUserName == "$subject_user"))
+    )
+| KEEP @timestamp, event.code, winlog.event_data.SubjectUserName, winlog.event_data.AuditPolicyChanges, winlog.event_data.CategoryId, winlog.event_data.LogonType, process.name
+| SORT @timestamp ASC
+| LIMIT 200
+]]>
+        </Query>
+      </Step>
+      <Step order="12" name="Lateral movement validation">
+        <Purpose>Lateral movement validation</Purpose>
+        <Query platform="Elastic" language="ES|QL" id="Q-12">
+          <![CDATA[
+FROM logs-system.security-*
+| WHERE @timestamp >= NOW() - 4 hours
+    AND event.code IN ("4624", "4648", "4768", "4769", "5140", "5145")
+    AND (winlog.event_data.TargetUserName == "$subject_user" OR winlog.event_data.SubjectUserName == "$subject_user")
+    AND host.name != "$host"
+| STATS events = COUNT(*), last_seen = MAX(@timestamp) BY host.name, event.code, winlog.event_data.LogonType
+| SORT events DESC
+| LIMIT 30
+]]>
+        </Query>
+      </Step>
+      <Step order="13" name="Persistence validation">
+        <Purpose>Persistence validation</Purpose>
+        <Query platform="Elastic" language="ES|QL" id="Q-13">
+          <![CDATA[
+FROM logs-system.security-*
+| WHERE @timestamp >= NOW() - 4 hours
+    AND host.name == "$host"
+    AND (
+        event.code IN ("7045", "4720", "4698")
+        OR (event.code == "4688" AND TO_LOWER(process.name) IN ("schtasks.exe", "sc.exe", "at.exe", "reg.exe", "powershell.exe"))
+    )
+| STATS events = COUNT(*), last_seen = MAX(@timestamp) BY event.code, process.name, winlog.event_data.SubjectUserName
+| SORT events DESC
+| LIMIT 40
+]]>
+        </Query>
+      </Step>
+      <Step order="14" name="Privilege escalation validation">
+        <Purpose>Privilege escalation validation</Purpose>
+        <Query platform="Elastic" language="ES|QL" id="Q-14">
+          <![CDATA[
+FROM logs-system.security-*
+| WHERE @timestamp >= NOW() - 4 hours
+    AND event.code == "4672"
+    AND host.name == "$host"
+| STATS special_priv_logons = COUNT(*) BY user.name
+| SORT special_priv_logons DESC
+| LIMIT 25
+]]>
+        </Query>
+      </Step>
+      <Step order="15" name="Defense evasion validation">
+        <Purpose>Defense evasion validation</Purpose>
+        <Query platform="Elastic" language="ES|QL" id="Q-15">
+          <![CDATA[
+FROM logs-system.security-*
+| WHERE @timestamp >= NOW() - 4 hours
+    AND host.name == "$host"
+    AND (
+        event.code IN ("4719", "1102", "4907")
+        OR (event.code == "4688" AND TO_LOWER(process.name) IN ("auditpol.exe", "wevtutil.exe", "vssadmin.exe", "fsutil.exe", "cipher.exe", "sdelete.exe"))
+    )
+| STATS events = COUNT(*), subjects = COUNT_DISTINCT(winlog.event_data.SubjectUserName), last_seen = MAX(@timestamp) BY event.code, process.name
+| SORT events DESC
+| LIMIT 30
+]]>
+        </Query>
+      </Step>
+      <Step order="16" name="Impact assessment">
+        <Purpose>Impact assessment</Purpose>
+        <Query platform="Elastic" language="ES|QL" id="Q-16">
+          <![CDATA[
+FROM logs-system.security-*
+| WHERE @timestamp >= NOW() - 4 hours
+    AND event.code == "4719"
+    AND host.name == "$host"
+    AND (winlog.event_data.AuditPolicyChanges LIKE "*8449*" OR winlog.event_data.AuditPolicyChanges LIKE "*8451*")
+| STATS removals = COUNT(*), last_seen = MAX(@timestamp) BY winlog.event_data.CategoryId, winlog.event_data.SubjectUserName
+| SORT removals DESC
+| LIMIT 25
+]]>
+        </Query>
+      </Step>
+      <Step order="17" name="Finalize verdict">
+        <DecisionTree>
+        </DecisionTree>
+      </Step>
+    </Workflow>
+  </Investigation>
+  <ClassificationGuidance>
+    <TruePositive>
+      <Definition></Definition>
+    </TruePositive>
+    <FalsePositive>
+      <Definition></Definition>
+      <Indicators>
+        <Item>Authorised hardening / administration. A recognised admin, under a change ticket, adds auditing or adjusts a subcategory as part of a baseline rollout. Additions with a documented owner are the common benign case - confirmed against change control, not assumed.</Item>
+        <Item>GPO / management-tooling artifact. A management tool or script applies audit policy under an interactive user context, producing a benign 4719 attributed to a non-machine account. An attribution artifact, not an attack.</Item>
+        <Item>Security-product / agent configuration that legitimately tunes audit subcategories during deployment or update.</Item>
+        <Item>A disable attempt proven blocked/reverted - e.g. GPO re-applies the intended policy immediately, so no coverage was actually lost - is recorded as a blocked malicious attempt, never "benign".</Item>
+        <Item>The entire 4719 baseline in the validation window was machine/service servicing. Hosts such as nim-fti-aptv01 (192 changes), nim-jump-apv03, nim-fti-apv01, nim-jump-aix02, and several -dbc-/-kta-/-sc- servers each emitted 62-192 4719 events, all under their own machine accounts (NIM-FTI-APTV01$, etc.). This is routine OS/GPO servicing and is entirely excluded by the rule. It establishes the baseline noise the rule strips - and means a genuine interactive-account firing is rare and inherently notable.</Item>
+        <Item>There is no benign interactive-account baseline on record. Because no interactive-account 4719 appeared in-window, NBI has no known-legitimate interactive audit-change pattern to tune out. Treat any real firing as unusual until an authorised cause is positively matched.</Item>
+        <Item>4907 (object SACL change) auditing may be off on some hosts, so the tamper-scope pivot (section 14.2 / section 17.4) can under-report clustering; absence of 4907 is not evidence of no tampering.</Item>
+        <Item>No standing allow-list. Do not exempt an account or host off one alert. Maintain a list of sanctioned admins and change windows so authorised changes are *recognised while still verified* - never encode an account exclusion an attacker could inherit.</Item>
+      </Indicators>
+    </FalsePositive>
+    <Misconfiguration>
+      <Definition></Definition>
+    </Misconfiguration>
+    <NeedsEscalation>
+      <Definition></Definition>
+    </NeedsEscalation>
+  </ClassificationGuidance>
+  <ResponseActions>
+    <Phase name="Containment">
+      <Action>Restore the audit policy immediately via GPO re-application or auditpol /restore, so the disabled subcategories resume logging and the visibility gap is closed. This is a DEPLOY action - human-approved.</Action>
+      <Action>Treat $subject_user as potentially compromised: suspend/force-logoff its session on $host, disable the account pending investigation, and reset its credentials (section 20).</Action>
+      <Action>Isolate $host if the tampering accompanies credential access, lateral movement, or a log clear, to stop the activity the actor was blinding.</Action>
+      <Action>Preserve evidence first, and critically ensure Security logs are forwarded off-host so on-host tampering (a subsequent 1102 clear) cannot erase what has already been collected.</Action>
+      <Action>All containment changes go through the authorised human-approved DEPLOY path; investigation is read-only.</Action>
+    </Phase>
+    <Phase name="Eradication">
+      <Action>Re-enforce audit policy centrally via GPO with tamper alerting so a local change cannot silently persist, and confirm the intended baseline is fully restored on $host.</Action>
+      <Action>Remove persistence established under reduced logging (section 17.2) and any rogue accounts/tasks/services.</Action>
+      <Action>Hunt the concealed activity: because auditing was down around the change, actively hunt credential access, lateral movement (section 17.1), and destruction on $host and peers rather than relying on the (degraded) logs.</Action>
+      <Action>Rotate credentials exposed on $host during the tampering window, including any privileged accounts that logged on there (section 17.3).</Action>
+    </Phase>
+    <Phase name="Recovery">
+      <Action>Reset $subject_user's credentials and re-enable the account only after eradication holds; if it turns out to be a service identity misused, coordinate with the owner.</Action>
+      <Action>Validate audit coverage by re-checking auditpol /get /category:* against the baseline on $host and confirming no residual removals remain (section 17.5).</Action>
+      <Action>Restore $host from known-good state if tampering was extensive; otherwise verify all eradication actions survive reboot.</Action>
+      <Action>Return to service only after section 22 closing criteria are met and monitoring confirms the audit policy does not drift again.</Action>
+      <Action>Recommend hardening: centrally enforced audit policy with change alerting, restricting who may modify local audit policy, and off-host log forwarding so evidence survives on-host tampering.</Action>
+    </Phase>
+  </ResponseActions>
+  <Escalation>
+    <Trigger>Escalate to Tier 3 / IR (and notify the AD/endpoint team) when any of the following hold:
+
+- Auditing was removed (%%8449/%%8451) by an unsanctioned interactive account (section 14.1).
+- The account had a hands-on session with admin tooling around the change (section 15.1/section 15.2), or does not hold the privileges that a legitimate change would require (section 17.3).
+- Tampering is clustered - multiple 4719 changes, a 1102 log clear, or 4907 SACL changes (section 14.2/section 17.4).
+- Credential access, persistence (section 17.2), or lateral movement (section 17.1) appears around the change.
+- Direction, session, or authorisation cannot be established - escalate as needs_escalation with the gap named.</Trigger>
+    <To>SOC L2 / IR</To>
+  </Escalation>
+  <ClosureCriteria>
+    <Item>true_positive: unauthorised audit tampering confirmed (a removal by an unsanctioned account, hands-on session, or clustered tampering / log clear); audit policy restored, account reset, concealed activity hunted and scoped, other affected hosts checked.</Item>
+    <Item>false_positive (authorised): a documented, authorised administrative/hardening change (typically an addition) by a recognised admin under change control, with no clustered tampering. Record the change reference.</Item>
+    <Item>false_positive (blocked malicious attempt): a disable attempt positively proven blocked/reverted with auditing intact; documented as blocked, never "benign".</Item>
+    <Item>misconfiguration: a benign GPO/management-tool artifact under an interactive context; documented, and the rule refined if the mechanism recurs.</Item>
+    <Item>needs_escalation: handed to AD/endpoint and change management with the direction/session/authorisation gaps documented.</Item>
+  </ClosureCriteria>
+  <Limitations>
+    <Item>Direction first, always. %%8449/%%8451 (removal) is the defence-evasion signal; %%8448/%%8450 (addition) is more often hardening. Decode AuditPolicyChanges before anything else - it is the fastest split between true_positive and authorised.</Item>
+    <Item>The NBI baseline is machine/service servicing. Validated live: all in-window 4719 on nim-fti-aptv01 and peers were machine-account (NIM-FTI-APTV01$) OS/GPO servicing, which the rule excludes. A named interactive subject is the whole point of the rule and is inherently notable - there is no benign interactive baseline to tune out.</Item>
+    <Item>Interactive attribution is not proof of a person. A stolen token or a misused service identity can also appear as a non-machine subject with only network/token logons. Use section 15.1/section 15.12 to confirm a real interactive (type 2/10) session before assuming hands-on.</Item>
+    <Item>4907 can be off on some hosts, so tamper-scope pivots may under-report; absence of 4907/clustering is not exoneration.</Item>
+    <Item>Evasion (design complementary analytics): an attacker can clear the Security log (1102) instead of changing policy, change policy under a machine/SYSTEM context (which this rule excludes), or use auditpol under a service token to dodge the interactive-account condition. Complement with 1102 log-clear alerting, machine-context audit-change heuristics, and off-host log forwarding so evidence survives.</Item>
+    <Item>KB-worthy (persist to NBI customer scope): (1) 4719 baseline is machine/service servicing across nim-fti-aptv01 (192/4h), nim-jump-apv03, nim-fti-apv01, nim-jump-aix02, nim-dbc-apv0x, nim-kta-apv02, nim-sc-apv02, nim-jump-apv04 - all machine accounts; (2) no interactive-account 4719 in-window (rule near-silent by design); (3) 4907 possibly disabled on some hosts. Observed live 2026-08-19.</Item>
+  </Limitations>
+</Playbook>

@@ -1,0 +1,323 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<Playbook xmlns="https://soc.example/playbooks" id="PB-windows-excessive-account-lockouts" name="Excessive User Account Lockouts - SOC Playbook" version="3.0" status="Validated" classification="TLP:AMBER">
+  <Metadata>
+    <Owner>NBI SOC / Detection Engineering</Owner>
+    <LastUpdated>2026-08-19</LastUpdated>
+    <Severity default="Medium">Medium</Severity>
+    <Confidence default="Medium">Medium</Confidence>
+    <Category>Credential Access</Category>
+    <MitreAttack>
+      <Technique id="T1110"/>
+      <Technique id="T1110.003"/>
+      <Tactic id="TA0006"/>
+    </MitreAttack>
+    <References>
+      <Reference title="MITRE ATT&amp;CK - Brute Force (T1110)" url="https://attack.mitre.org/techniques/T1110/"/>
+      <Reference title="MITRE ATT&amp;CK - Brute Force: Password Spraying (T1110.003)" url="https://attack.mitre.org/techniques/T1110/003/"/>
+      <Reference title="MITRE ATT&amp;CK - Credential Access tactic (TA0006)" url="https://attack.mitre.org/tactics/TA0006/"/>
+      <Reference title="Microsoft Learn - 4740: A user account was locked out" url="https://learn.microsoft.com/en-us/windows/security/threat-protection/auditing/event-4740"/>
+      <Reference title="Microsoft Learn - 4771: Kerberos pre-authentication failed" url="https://learn.microsoft.com/en-us/windows/security/threat-protection/auditing/event-4771"/>
+      <Reference title="Microsoft Learn - 4776: The domain controller attempted to validate the credentials for an account" url="https://learn.microsoft.com/en-us/windows/security/threat-protection/auditing/event-4776"/>
+      <Reference title="Microsoft Learn - Account lockout threshold policy" url="https://learn.microsoft.com/en-us/windows/security/threat-protection/security-policy-settings/account-lockout-threshold"/>
+      <Reference title="Microsoft - Troubleshooting account lockout (netlogon / caller computer)" url="https://learn.microsoft.com/en-us/troubleshoot/windows-server/active-directory/troubleshoot-account-lockout"/>
+    </References>
+  </Metadata>
+  <AlertContext>
+    <RuleName>Excessive User Account Lockouts</RuleName>
+    <RuleId>04ebef6e-21e4-4deb-be0a-0171d2710f53</RuleId>
+    <RuleType>esql</RuleType>
+    <Index>logs-system.security*</Index>
+    <TriggerLogic>Deployed logic (plain English): count 4740 lockout events, excluding machine and svc_* names, and alert when a single account exceeds 10 lockouts in the window. NBI field quirk (critical): on 4740 the ECS user.name is the Domain Controller machine account that logged the event, not the locked principal. The locked account is winlog.event_data.TargetUserName, and the originating machine (Caller Computer Name) is carried in winlog.event_data.TargetDomainName. The deployed rule aggregates by user.name (always the DC machine account) and excludes $-suffixed names, so it can under-count or mis-key; this playbook keys on the vendor-native fields.
+
+One-line Kibana KQL detection filter (for fast pivoting in Discover / Timeline):
+
+
+
+Why this is meaningful: a lockout only occurs after the account's bad-password count crosses the domain threshold, so &gt;10 lockouts in a short window is a sustained stream of failed authentications against one identity - worth resolving whether the source is a stale secret or an attacker.</TriggerLogic>
+    <KeyAlertFields>user.name, host.name, source.ip</KeyAlertFields>
+  </AlertContext>
+  <Inputs>
+    <Input name="$locked_user"/>
+    <Input name="$host"/>
+  </Inputs>
+  <ExecutiveSummary>
+    <Overview>This playbook drives triage and investigation of the Excessive User Account Lockouts detection on NBI's Elastic Security deployment. The rule runs ES|QL over Windows Security Event 4740 (a user account was locked out), excludes machine ($-suffixed) and svc_* names, counts lockouts per account, and fires when one account is locked out more than 10 times in the window. Repeated lockouts of the same account mean sustained bad-password attempts against it.
+
+Two very different causes produce this signal: a benign stale credential (a saved password on a phone, mapped drive, scheduled task, or service keeps retrying an old password after a reset) or a genuine attack (an actor guessing or spraying passwords). The analyst's job is to find the origin of the bad-password attempts and classify the alert as true_positive (guessing / spraying - a password spray if it spans many accounts), false_positive (an authorised source holding a stale secret, or an attempt positively proven blocked), misconfiguration (a broken configuration retrying an old password), or needs_escalation. The discriminators are how many distinct accounts are affected from the same origin, what the originating machine is, and the type and rhythm of the failed authentications.</Overview>
+    <BusinessImpact>An alert means: on Domain Controller $host, the account $locked_user was locked out repeatedly (more than ten times) in the window. The lockout is a *symptom* of many failed logons; the 4740 event itself names the locked principal (TargetUserName) and, usually, the origin machine (TargetDomainName / Caller Computer Name). The lockout does not tell you whether any attempt succeeded - that requires correlating 4624 (section 17.1/section 17.5).
+
+This maps to Credential Access / Brute Force. It is simultaneously a denial-of-service on the user (locked out of banking systems) and a possible credential-attack indicator; the investigation separates the two.</BusinessImpact>
+  </ExecutiveSummary>
+  <Investigation>
+    <Goal>Decide true_positive / false_positive / misconfiguration / needs_escalation for Excessive User Account Lockouts.</Goal>
+    <Workflow>
+      <Step order="1" name="Confirm the lockouts and locate the origin machine">
+        <Purpose>Confirm the lockouts and locate the origin machine</Purpose>
+        <Query platform="Elastic" language="ES|QL" id="Q-01">
+          <![CDATA[
+FROM logs-system.security*
+| WHERE event.code == "4740" AND winlog.event_data.TargetUserName == "$locked_user"
+    AND @timestamp >= NOW() - 4 hours
+| STATS lockouts = COUNT(*), origins = VALUES(winlog.event_data.TargetDomainName), dcs = VALUES(host.name), first_seen = MIN(@timestamp), last_seen = MAX(@timestamp)
+| LIMIT 10
+]]>
+        </Query>
+      </Step>
+      <Step order="2" name="Characterise the failed-authentication driver">
+        <Purpose>Characterise the failed-authentication driver</Purpose>
+        <Query platform="Elastic" language="ES|QL" id="Q-02">
+          <![CDATA[
+FROM logs-system.security*
+| WHERE event.code IN ("4625","4771","4776") AND winlog.event_data.TargetUserName == "$locked_user"
+    AND @timestamp >= NOW() - 4 hours
+| STATS fails = COUNT(*), wks = VALUES(winlog.event_data.WorkstationName), srcs = VALUES(source.ip), status = VALUES(winlog.event_data.Status)
+    BY event.code, winlog.event_data.LogonType
+| SORT fails DESC
+| LIMIT 20
+]]>
+        </Query>
+      </Step>
+      <Step order="3" name="Scope: one account or a spray across many">
+        <Purpose>Scope: one account or a spray across many</Purpose>
+        <Query platform="Elastic" language="ES|QL" id="Q-03">
+          <![CDATA[
+FROM logs-system.security*
+| WHERE event.code == "4740" AND host.name == "$host"
+    AND @timestamp >= NOW() - 4 hours
+| STATS lockouts = COUNT(*), locked_users = COUNT_DISTINCT(winlog.event_data.TargetUserName), users = VALUES(winlog.event_data.TargetUserName)
+    BY winlog.event_data.TargetDomainName
+| SORT lockouts DESC
+| LIMIT 20
+]]>
+        </Query>
+      </Step>
+      <Step order="4" name="Entity pivoting">
+        <Purpose>Entity pivoting</Purpose>
+        <Query platform="Elastic" language="ES|QL" id="Q-04">
+          <![CDATA[
+FROM logs-system.security*
+| WHERE @timestamp >= NOW() - 4 hours
+    AND event.code == "4740"
+    AND winlog.event_data.TargetUserName == "$locked_user"
+| KEEP @timestamp, host.name, winlog.event_data.TargetUserName, winlog.event_data.TargetDomainName, user.name
+| SORT @timestamp DESC
+| LIMIT 50
+]]>
+        </Query>
+      </Step>
+      <Step order="5" name="User investigation">
+        <Purpose>User investigation</Purpose>
+        <Query platform="Elastic" language="ES|QL" id="Q-05">
+          <![CDATA[
+FROM logs-system.security*
+| WHERE @timestamp >= NOW() - 4 hours
+    AND event.code IN ("4740","4771","4776","4625")
+    AND winlog.event_data.TargetUserName == "$locked_user"
+| STATS events = COUNT(*), origins = VALUES(winlog.event_data.TargetDomainName) BY host.name, event.code
+| SORT events DESC
+| LIMIT 25
+]]>
+        </Query>
+      </Step>
+      <Step order="6" name="Host investigation">
+        <Purpose>Host investigation</Purpose>
+        <Query platform="Elastic" language="ES|QL" id="Q-06">
+          <![CDATA[
+FROM logs-system.security*
+| WHERE @timestamp >= NOW() - 4 hours
+    AND event.code == "4740"
+    AND host.name == "$host"
+| STATS lockouts = COUNT(*), locked_users = COUNT_DISTINCT(winlog.event_data.TargetUserName) BY winlog.event_data.TargetDomainName
+| SORT locked_users DESC, lockouts DESC
+| LIMIT 30
+]]>
+        </Query>
+      </Step>
+      <Step order="7" name="IP investigation">
+        <Purpose>IP investigation</Purpose>
+        <Query platform="Elastic" language="ES|QL" id="Q-07">
+          <![CDATA[
+FROM logs-system.security*
+| WHERE @timestamp >= NOW() - 4 hours
+    AND event.code IN ("4771","4776","4625","4624")
+    AND winlog.event_data.TargetUserName == "$locked_user"
+    AND source.ip IS NOT NULL
+| STATS events = COUNT(*), first_seen = MIN(@timestamp), last_seen = MAX(@timestamp) BY source.ip, event.code
+| SORT events DESC
+| LIMIT 25
+]]>
+        </Query>
+      </Step>
+      <Step order="8" name="Authentication investigation">
+        <Purpose>Authentication investigation</Purpose>
+        <Query platform="Elastic" language="ES|QL" id="Q-08">
+          <![CDATA[
+FROM logs-system.security*
+| WHERE @timestamp >= NOW() - 4 hours
+    AND event.code IN ("4625","4771","4776","4624")
+    AND winlog.event_data.TargetUserName == "$locked_user"
+| STATS events = COUNT(*), srcs = VALUES(source.ip), first_seen = MIN(@timestamp), last_seen = MAX(@timestamp)
+    BY event.code, winlog.event_data.LogonType
+| SORT events DESC
+| LIMIT 30
+]]>
+        </Query>
+      </Step>
+      <Step order="9" name="Timeline Reconstruction">
+        <Purpose>Timeline Reconstruction</Purpose>
+        <Query platform="Elastic" language="ES|QL" id="Q-09">
+          <![CDATA[
+FROM logs-system.security*
+| WHERE @timestamp >= NOW() - 4 hours
+    AND event.code IN ("4740","4767","4771","4776","4625","4624","4724","4738")
+    AND (winlog.event_data.TargetUserName == "$locked_user" OR (event.code == "4740" AND host.name == "$host"))
+| KEEP @timestamp, host.name, event.code, winlog.event_data.TargetUserName, winlog.event_data.TargetDomainName, winlog.event_data.LogonType, source.ip
+| SORT @timestamp ASC
+| LIMIT 200
+]]>
+        </Query>
+      </Step>
+      <Step order="10" name="Lateral movement validation">
+        <Purpose>Lateral movement validation</Purpose>
+        <Query platform="Elastic" language="ES|QL" id="Q-10">
+          <![CDATA[
+FROM logs-system.security*
+| WHERE @timestamp >= NOW() - 4 hours
+    AND event.code == "4624"
+    AND winlog.event_data.TargetUserName == "$locked_user"
+| STATS logons = COUNT(*), srcs = VALUES(source.ip) BY host.name, winlog.event_data.LogonType
+| SORT logons DESC
+| LIMIT 25
+]]>
+        </Query>
+      </Step>
+      <Step order="11" name="Persistence validation">
+        <Purpose>Persistence validation</Purpose>
+        <Query platform="Elastic" language="ES|QL" id="Q-11">
+          <![CDATA[
+FROM logs-system.security*
+| WHERE @timestamp >= NOW() - 4 hours
+    AND host.name == "$host"
+    AND event.code IN ("4724","4738","4767","4720","4728","4732","4756")
+| STATS events = COUNT(*), first_seen = MIN(@timestamp), last_seen = MAX(@timestamp) BY event.code, user.name
+| SORT events DESC
+| LIMIT 30
+]]>
+        </Query>
+      </Step>
+      <Step order="12" name="Privilege escalation validation">
+        <Purpose>Privilege escalation validation</Purpose>
+        <Query platform="Elastic" language="ES|QL" id="Q-12">
+          <![CDATA[
+FROM logs-system.security*
+| WHERE @timestamp >= NOW() - 4 hours
+    AND event.code == "4672"
+    AND host.name == "$host"
+| STATS special_priv_logons = COUNT(*) BY user.name
+| SORT special_priv_logons DESC
+| LIMIT 30
+]]>
+        </Query>
+      </Step>
+      <Step order="13" name="Defense evasion validation">
+        <Purpose>Defense evasion validation</Purpose>
+        <Query platform="Elastic" language="ES|QL" id="Q-13">
+          <![CDATA[
+FROM logs-system.security*
+| WHERE @timestamp >= NOW() - 4 hours
+    AND host.name == "$host"
+    AND event.code IN ("1102","4719")
+| STATS events = COUNT(*), first_seen = MIN(@timestamp), last_seen = MAX(@timestamp) BY event.code, user.name
+| SORT events DESC
+| LIMIT 20
+]]>
+        </Query>
+      </Step>
+      <Step order="14" name="Impact assessment">
+        <Purpose>Impact assessment</Purpose>
+        <Query platform="Elastic" language="ES|QL" id="Q-14">
+          <![CDATA[
+FROM logs-system.security*
+| WHERE @timestamp >= NOW() - 4 hours
+    AND event.code == "4740"
+    AND host.name == "$host"
+| STATS total_lockouts = COUNT(*), distinct_accounts = COUNT_DISTINCT(winlog.event_data.TargetUserName), distinct_origins = COUNT_DISTINCT(winlog.event_data.TargetDomainName)
+| LIMIT 5
+]]>
+        </Query>
+      </Step>
+      <Step order="15" name="Finalize verdict">
+        <DecisionTree>
+        </DecisionTree>
+      </Step>
+    </Workflow>
+  </Investigation>
+  <ClassificationGuidance>
+    <TruePositive>
+      <Definition></Definition>
+    </TruePositive>
+    <FalsePositive>
+      <Definition></Definition>
+      <Indicators>
+        <Item>Stale cached credentials after a password change - the dominant benign cause. A saved password on a phone/mail client, a mapped drive, a scheduled task, or a Windows service on some machine keeps retrying the old password after a reset, driving repeated lockouts from a single stable origin against one account.</Item>
+        <Item>A service or automation account whose password was rotated in one place but not another, retrying at a steady low rate.</Item>
+        <Item>A shared kiosk/multi-user machine with a cached bad credential.</Item>
+        <Item>Stale credentials dominate the NBI lockout landscape. In the validated window the DC nim-dc2-dbap logged lockouts across many different origins, each locking only one to three accounts (e.g. origin NIM-DC-DBAP01 → 3 accounts, NIM-ECM-SCAN01 → 2, AMB-CUS-DK-HM → the alert account). That broad, low-per-origin spread is the fingerprint of stale-credential noise, not a single-origin spray. A single origin locking out many accounts would stand out sharply against it.</Item>
+        <Item>The alert account shows both failures and successes. Haneen.Muthana had 14 Kerberos pre-auth failures (4771) and 14 successful network logons (4624 type 3), including from 10.10.44.59 - the classic stale-credential-after-reset pattern where some sources still hold the old password (fail → lockout) while others authenticate with the new one. Confirm the origin and the reset before concluding.</Item>
+        <Item>Account-management activity corroborates. The DC showed 4767 (account unlocked) ×14, 4738 (account changed) ×4, 4724 (password reset) ×1 in-window - resets and unlocks are exactly what precede and follow stale-credential lockouts. A 4724 reset is a common trigger; an out-of-band 4724 by an attacker is a persistence concern (section 17.2).</Item>
+        <Item>No NBI benign-true-positive allow-list applies blindly. Resolve each case to its origin; do not blanket-exempt an account or origin off a single alert.</Item>
+      </Indicators>
+    </FalsePositive>
+    <Misconfiguration>
+      <Definition></Definition>
+    </Misconfiguration>
+    <NeedsEscalation>
+      <Definition></Definition>
+    </NeedsEscalation>
+  </ClassificationGuidance>
+  <ResponseActions>
+    <Phase name="Containment">
+      <Action>If it is a spray or a successful guess (true_positive): contain the origin host/source (the TargetDomainName machine or the source IPs from section 14.2/section 15.6) - network-isolate or block at the perimeter to stop the bad-password stream.</Action>
+      <Action>Protect the targeted account(s): if any account shows a successful 4624 amid the failures (section 17.1), reset it immediately and revoke active sessions/tickets; treat the credential as compromised.</Action>
+      <Action>For a multi-account spray: enumerate every account locked from the origin (section 14.3/section 15.5) and check each for a success; prioritise privileged/service accounts (section 17.3).</Action>
+      <Action>For a stale-credential case: no isolation needed - proceed to eradication (clear the stale secret). Coordinate an unlock (4767) with the account owner only after the retrying source is stopped, or it will re-lock.</Action>
+      <Action>Apply changes only via the authorised human-approved DEPLOY path; investigation is read-only.</Action>
+    </Phase>
+    <Phase name="Eradication">
+      <Action>Stale-credential / misconfiguration: identify and clear/update the stale cached credential on the origin machine - Credential Manager entries, mapped-drive passwords, scheduled-task and service passwords retrying the old secret after a reset. The lockouts stop when the last retrying secret is corrected.</Action>
+      <Action>Attack (spraying / successful guess): reset all affected credentials, remove any attacker-created accounts or unauthorised resets (section 17.2), and revoke sessions/Kerberos tickets; hunt for lateral movement from any account that succeeded (section 17.1).</Action>
+      <Action>Run a directory-wide check for other accounts targeted by the same origin/source and remediate each.</Action>
+    </Phase>
+    <Phase name="Recovery">
+      <Action>Unlock the account(s) and restore access after the retrying source is stopped (stale-credential) or the credential is reset and the session hunted (attack) - otherwise the account re-locks.</Action>
+      <Action>Verify no successful attacker logon persists (session/ticket revocation held) and monitor the account and origin for recurrence.</Action>
+      <Action>Return to service only after section 22 closing criteria are met.</Action>
+      <Action>Recommend hardening (section 23): smart lockout / MFA on exposed surfaces, a failed-authentication-rate analytic per source and per account (independent of lockout), and post-reset stale-credential sweeps.</Action>
+    </Phase>
+  </ResponseActions>
+  <Escalation>
+    <Trigger>Escalate to Tier 3 / IR and the AD team when any of the following hold:
+
+- One origin/source locks out multiple distinct accounts (section 14.3/section 15.5) - probable spray.
+- Any targeted account shows a successful 4624 amid the failures (section 17.1/section 17.5) - a valid credential is in play.
+- Privileged or service accounts are among the locked/targeted set (section 17.3).
+- Guessing-style failures from varied/external sources or a 4771 pre-auth storm (section 14.2/section 15.12).
+- The origin is null/unknown and no failed-auth driver can be tied to the lockouts - escalate as needs_escalation to pull the DC's netlogon / directory-service logs.</Trigger>
+    <To>SOC L2 / IR</To>
+  </Escalation>
+  <ClosureCriteria>
+    <Item>misconfiguration: a single stable origin retries an old password for one account (saved credential, mapped drive, scheduled task, service) with no cross-account spread; the stale secret is cleared/updated with the owner and lockouts stop.</Item>
+    <Item>false_positive (authorised): an authorised source holding a stale secret is confirmed with the owner (a hygiene issue), remediated; no compromise.</Item>
+    <Item>false_positive (proven-blocked): a genuine guessing attempt is positively proven blocked with no successful 4624 - documented as a blocked-malicious attempt, never "benign".</Item>
+    <Item>true_positive: guessing/spraying confirmed (multi-account, or a success amid failures); origin contained, targeted/privileged accounts protected and reset as needed, any successful session hunted, incident documented.</Item>
+    <Item>needs_escalation: null/unknown origin with no correlating driver - handed to Tier 3/AD with the gap named.</Item>
+  </ClosureCriteria>
+  <Limitations>
+    <Item>Always pivot on TargetUserName, never user.name. On 4740 the ECS user.name is the DC machine account - a hard NBI quirk. The locked principal is winlog.event_data.TargetUserName; the origin machine is winlog.event_data.TargetDomainName (Caller Computer Name). The deployed rule aggregates by user.name, so it can under-count / mis-key - this playbook corrects for it.</Item>
+    <Item>Origin is the anchor; failed-auth is corroboration. 4625/4771/4776 can be sparse or land on a different DC than the lockout, so a low failure count does not clear the alert; the 4740 origin is authoritative.</Item>
+    <Item>The success check is the whole ballgame. A 4624 amid the failures (section 17.1) turns a nuisance lockout into a confirmed credential compromise. In the validated sample the account both failed (4771) and succeeded (4624) from 10.10.44.59 - read as stale-credential-after-reset only after confirming the reset and the source; treat an unexplained success as compromise.</Item>
+    <Item>Spread separates spray from stale credential. One origin → many accounts = spray (escalate). Many origins → one account each = stale-credential noise (the validated NBI baseline on nim-dc2-dbap).</Item>
+    <Item>Evasion: an attacker can pace below the lockout threshold (low-and-slow spray), rotate source hosts, or target accounts with lockout disabled - none of which produce excessive lockouts. Complement with a failed-authentication-rate analytic per source and per account that does not depend on lockout.</Item>
+    <Item>KB-worthy (persist to NBI customer scope): (1) 4740 user.name = DC machine account quirk; locked principal = TargetUserName, origin = TargetDomainName; (2) nim-dc2-dbap lockout landscape = broad multi-origin stale-credential noise (&lt;=3 accounts/origin); (3) Haneen.Muthana mixed 4771-fail + 4624-success from 10.10.44.59 (stale-credential-after-reset signature); (4) DC account-mgmt in-window: 4767×14, 4738×4, 4724×1. All observed live on 2026-08-19.</Item>
+  </Limitations>
+</Playbook>

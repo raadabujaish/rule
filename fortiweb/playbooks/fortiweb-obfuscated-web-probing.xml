@@ -1,0 +1,340 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<Playbook xmlns="https://soc.example/playbooks" id="PB-fortiweb-obfuscated-web-probing" name="FortiWeb — Obfuscated Web Probing - SOC Playbook" version="3.0" status="Validated" classification="TLP:AMBER">
+  <Metadata>
+    <Owner>NBI SOC / Detection Engineering</Owner>
+    <LastUpdated>2026-08-19</LastUpdated>
+    <Severity default="Medium">Medium</Severity>
+    <Confidence default="Medium">Medium</Confidence>
+    <Category>Initial Access</Category>
+    <MitreAttack>
+      <Technique id="T1190"/>
+      <Technique id="T1027"/>
+      <Tactic id="TA0001"/>
+      <Tactic id="TA0005"/>
+    </MitreAttack>
+    <References>
+      <Reference title="MITRE ATT&amp;CK - Exploit Public-Facing Application (T1190)" url="https://attack.mitre.org/techniques/T1190/"/>
+      <Reference title="MITRE ATT&amp;CK - Obfuscated Files or Information (T1027)" url="https://attack.mitre.org/techniques/T1027/"/>
+      <Reference title="MITRE ATT&amp;CK - Defense Evasion tactic (TA0005)" url="https://attack.mitre.org/tactics/TA0005/"/>
+      <Reference title="OWASP - Web Security Testing Guide, Testing for Path Traversal" url="https://owasp.org/www-project-web-security-testing-guide/latest/4-Web_Application_Security_Testing/05-Authorization_Testing/01-Testing_Directory_Traversal_File_Include"/>
+      <Reference title="OWASP - WAF evasion / double-encoding &amp; canonicalisation" url="https://owasp.org/www-community/Double_Encoding"/>
+      <Reference title="Apache Log4Shell (CVE-2021-44228) - JNDI lookup RCE reference" url="https://logging.apache.org/log4j/2.x/security.html"/>
+      <Reference title="Fortinet FortiWeb - Administration Guide (decoding &amp; normalisation before inspection)" url="https://docs.fortinet.com/document/fortiweb/latest/administration-guide"/>
+      <Reference title="Elastic - ES|QL reference (CASE, TO_LOWER, CONCAT, LIKE, COALESCE)" url="https://www.elastic.co/guide/en/elasticsearch/reference/current/esql.html"/>
+    </References>
+  </Metadata>
+  <AlertContext>
+    <RuleName>FortiWeb — Obfuscated Web Probing</RuleName>
+    <RuleId>raad-05-encoded-payload-probe</RuleId>
+    <RuleType>esql</RuleType>
+    <Index>logs-tcp.generic-*</Index>
+    <TriggerLogic>The deployed rule is an ES|QL analytic that lowercases and concatenates the URL + user-agent + referer into one string and matches encoded/obfuscated attack markers:
+
+- Log4Shell: %24%7bjndi%3a / jndi:
+- Encoded / overlong / double-encoded traversal: %2e%2e%2f, ..%2f, %252e%252e%252f, ..%c0%af
+- Encoded SQLi: %75%6e%69%6f%6e (union), %73%65%6c%65%63%74 (select), %2527, %2520or%2520, %2f%2a
+- Encoded XSS: %3csvg, &lt;svg…onload, javascript%3a
+- Template injection: {{…}}, %7b%7b
+
+An actor deliberately encoding a payload to slip past signature inspection is the intent; the true attack class is hidden until decoded.
+
+One-line Kibana KQL pivot filter (Discover; illustrative markers):
+
+
+
+Live adaptation (NBI): the FortiWeb data stream is logs-tcp.generic-*; queries below are scoped there. De-proxy is genuine - x_forwarded_for (99.3% on traffic) carries the real encoder behind the shared edge, resolved via COALESCE(TRIM(MV_FIRST(SPLIT(x_forwarded_for, ","))), data.src).</TriggerLogic>
+    <KeyAlertFields>data.http_url, data.http_agent, data.http_refer, data.http_retcode, data.original_src, data.src</KeyAlertFields>
+  </AlertContext>
+  <Inputs>
+    <Input name="$src"/>
+    <Input name="$host"/>
+  </Inputs>
+  <ExecutiveSummary>
+    <Overview>This playbook drives triage and investigation of the FortiWeb - Obfuscated Web Probing detection on NBI's Elastic Security deployment. The rule fires when a request against an NBI web application carries a deliberately encoded / obfuscated payload - URL-encoded quotes and comments, encoded SQL keywords, encoded or overlong path traversal, template-injection braces, encoded script markers, or Log4Shell (jndi) - matched across the URL, user-agent, and referer.
+
+Obfuscation is an evasion technique (the true attack class is hidden until decoded), so the verdict turns on three things: (1) what attack class is hidden under the encoding (decode it), (2) whether the encoding actually evaded enforcement (the encoded request was processed with a 2xx/3xx rather than blocked), and (3) who the real client is behind the shared proxy. The outcome is one of true_positive / false_positive / misconfiguration / needs_escalation.</Overview>
+    <BusinessImpact>An alert means: a request from $src to $host carried a deliberately encoded/obfuscated payload in the URL, user-agent, or referer. The attacker percent-encodes (sometimes double-encodes or uses overlong UTF-8) an injection, traversal, template, or Log4Shell payload so a signature engine that inspects the raw string does not recognise it, while the application decodes and executes it.
+
+The alarming case is a processed (2xx/3xx) decoded traversal / Log4Shell / SQLi - the obfuscation likely defeated the WAF and the payload reached the app. A blocked (4xx) match, or a decode that turns out to be an incidental legitimate percent sequence, is not. Because $src is a shared CDN/SNAT edge, the real encoder is the x_forwarded_for client - de-proxy before attributing.</BusinessImpact>
+  </ExecutiveSummary>
+  <Investigation>
+    <Goal>Decide true_positive / false_positive / misconfiguration / needs_escalation for FortiWeb — Obfuscated Web Probing.</Goal>
+    <Workflow>
+      <Step order="1" name="Decode the hidden attack class (confirm the alert)">
+        <Purpose>Decode the hidden attack class (confirm the alert)</Purpose>
+        <Query platform="Elastic" language="ES|QL" id="Q-01">
+          <![CDATA[
+FROM logs-tcp.generic-*
+| WHERE @timestamp >= NOW() - 2 hours AND data.type == "traffic"
+    AND data.original_src == "$src" AND data.http_host == "$host" AND data.http_url IS NOT NULL
+| EVAL surf = TO_LOWER(CONCAT(COALESCE(data.http_url,"")," | ",COALESCE(data.http_agent,"")," | ",COALESCE(data.http_refer,""))),
+       rc = TO_INTEGER(data.http_retcode)
+| EVAL cls = CASE(
+      surf LIKE "*%24%7bjndi%3a*" OR surf LIKE "*jndi:*", "log4shell_jndi",
+      surf LIKE "*%2e%2e%2f*" OR surf LIKE "*..%2f*" OR surf LIKE "*%252e%252e%252f*" OR surf LIKE "*..%c0%af*", "encoded_traversal",
+      surf LIKE "*%75%6e%69%6f%6e*" OR surf LIKE "*%73%65%6c%65%63%74*" OR surf LIKE "*%2527*" OR surf LIKE "*%2520or%2520*" OR surf LIKE "*%2f%2a*", "encoded_sqli",
+      surf LIKE "*%3csvg*" OR surf LIKE "*<svg*onload*" OR surf LIKE "*javascript%3a*", "encoded_xss",
+      surf LIKE "*{{*}}*" OR surf LIKE "*%7b%7b*", "template_injection",
+      "other")
+| WHERE cls != "other"
+| STATS hits = COUNT(*), processed = SUM(CASE(rc >= 200 AND rc < 400, 1, 0)),
+        blocked = SUM(CASE(rc >= 400, 1, 0)), urls = VALUES(data.http_url)
+    BY cls
+| SORT hits DESC
+| LIMIT 20
+]]>
+        </Query>
+      </Step>
+      <Step order="2" name="Did the encoding evade enforcement (grade the evasion)">
+        <Purpose>Did the encoding evade enforcement (grade the evasion)</Purpose>
+        <Query platform="Elastic" language="ES|QL" id="Q-02">
+          <![CDATA[
+FROM logs-tcp.generic-*
+| WHERE @timestamp >= NOW() - 2 hours AND data.type == "traffic"
+    AND data.original_src == "$src" AND data.http_host == "$host" AND data.http_url IS NOT NULL
+| EVAL surf = TO_LOWER(CONCAT(COALESCE(data.http_url,"")," | ",COALESCE(data.http_agent,"")," | ",COALESCE(data.http_refer,""))),
+       rc = TO_INTEGER(data.http_retcode)
+| EVAL evasion = CASE(
+      surf LIKE "*%252e%252e%252f*" OR surf LIKE "*%252522*" OR surf LIKE "*%2525*", "double_encoded",
+      surf LIKE "*%c0%af*" OR surf LIKE "*%c1%9c*", "overlong_utf8",
+      surf LIKE "*%2527*" OR surf LIKE "*%2520or%2520*" OR surf LIKE "*%2f%2a*" OR surf LIKE "*%3csvg*" OR surf LIKE "*%2e%2e%2f*", "single_encoded",
+      "none")
+| WHERE evasion != "none"
+| STATS hits = COUNT(*), processed = SUM(CASE(rc >= 200 AND rc < 400, 1, 0)), blocked = SUM(CASE(rc >= 400, 1, 0))
+    BY evasion
+| SORT hits DESC
+| LIMIT 10
+]]>
+        </Query>
+      </Step>
+      <Step order="3" name="Entity pivoting">
+        <Purpose>Entity pivoting</Purpose>
+        <Query platform="Elastic" language="ES|QL" id="Q-03">
+          <![CDATA[
+FROM logs-tcp.generic-*
+| WHERE @timestamp >= NOW() - 2 hours AND data.type == "traffic"
+    AND data.original_src == "$src" AND data.http_host == "$host" AND data.http_url IS NOT NULL
+| EVAL real_client = COALESCE(TRIM(MV_FIRST(SPLIT(x_forwarded_for, ","))), data.src),
+       surf = TO_LOWER(CONCAT(COALESCE(data.http_url,"")," | ",COALESCE(data.http_agent,"")," | ",COALESCE(data.http_refer,"")))
+| KEEP @timestamp, real_client, data.http_method, data.http_url, data.http_agent, data.http_refer, data.http_retcode, surf
+| SORT @timestamp DESC
+| LIMIT 50
+]]>
+        </Query>
+      </Step>
+      <Step order="4" name="Process investigation">
+        <Purpose>Process investigation</Purpose>
+        <Query platform="Elastic" language="ES|QL" id="Q-04">
+          <![CDATA[
+FROM logs-tcp.generic-*
+| WHERE @timestamp >= NOW() - 2 hours AND data.type == "traffic"
+    AND data.original_src == "$src" AND data.http_host == "$host"
+| EVAL real_client = COALESCE(TRIM(MV_FIRST(SPLIT(x_forwarded_for, ","))), data.src)
+| STATS reqs = COUNT(*), urls = COUNT_DISTINCT(data.http_url) BY real_client, data.http_agent
+| SORT reqs DESC
+| LIMIT 20
+]]>
+        </Query>
+      </Step>
+      <Step order="5" name="Host investigation">
+        <Purpose>Host investigation</Purpose>
+        <Query platform="Elastic" language="ES|QL" id="Q-05">
+          <![CDATA[
+FROM logs-tcp.generic-*
+| WHERE @timestamp >= NOW() - 2 hours AND data.type == "traffic"
+    AND data.original_src == "$src" AND data.http_url IS NOT NULL
+| EVAL surf = TO_LOWER(CONCAT(COALESCE(data.http_url,"")," | ",COALESCE(data.http_agent,"")," | ",COALESCE(data.http_refer,""))),
+       encoded = CASE(surf LIKE "*%25*" OR surf LIKE "*%2e%2e*" OR surf LIKE "*jndi*" OR surf LIKE "*%7b%7b*", 1, 0)
+| STATS reqs = COUNT(*), encoded_hits = SUM(encoded), urls = COUNT_DISTINCT(data.http_url) BY data.http_host
+| SORT encoded_hits DESC
+| LIMIT 15
+]]>
+        </Query>
+      </Step>
+      <Step order="6" name="IP investigation">
+        <Purpose>IP investigation</Purpose>
+        <Query platform="Elastic" language="ES|QL" id="Q-06">
+          <![CDATA[
+FROM logs-tcp.generic-*
+| WHERE @timestamp >= NOW() - 2 hours AND data.type == "traffic"
+    AND data.original_src == "$src" AND data.http_host == "$host"
+| EVAL real_client = COALESCE(TRIM(MV_FIRST(SPLIT(x_forwarded_for, ","))), data.src)
+| STATS reqs = COUNT(*), urls = COUNT_DISTINCT(data.http_url),
+        distinct_referers = COUNT_DISTINCT(data.http_refer), agents = VALUES(data.http_agent)
+    BY real_client
+| SORT reqs DESC
+| LIMIT 10
+]]>
+        </Query>
+      </Step>
+      <Step order="7" name="Domain investigation">
+        <Purpose>Domain investigation</Purpose>
+        <Query platform="Elastic" language="ES|QL" id="Q-07">
+          <![CDATA[
+FROM logs-tcp.generic-*
+| WHERE @timestamp >= NOW() - 2 hours AND data.type == "traffic"
+    AND data.original_src == "$src"
+| EVAL real_client = COALESCE(TRIM(MV_FIRST(SPLIT(x_forwarded_for, ","))), data.src)
+| STATS reqs = COUNT(*), urls = COUNT_DISTINCT(data.http_url) BY data.http_host, real_client
+| SORT reqs DESC
+| LIMIT 20
+]]>
+        </Query>
+      </Step>
+      <Step order="8" name="URL investigation">
+        <Purpose>URL investigation</Purpose>
+        <Query platform="Elastic" language="ES|QL" id="Q-08">
+          <![CDATA[
+FROM logs-tcp.generic-*
+| WHERE @timestamp >= NOW() - 2 hours AND data.type == "traffic"
+    AND data.original_src == "$src" AND data.http_host == "$host" AND data.http_url IS NOT NULL
+    AND (data.http_url LIKE "*%2e%2e%2f*" OR data.http_url LIKE "*%252e%252e%252f*" OR data.http_url LIKE "*..%c0%af*"
+         OR data.http_url LIKE "*%2527*" OR data.http_url LIKE "*%75%6e%69%6f%6e*" OR data.http_url LIKE "*%2f%2a*"
+         OR data.http_url LIKE "*%24%7bjndi%3a*" OR data.http_url LIKE "*jndi:*" OR data.http_url LIKE "*%7b%7b*" OR data.http_url LIKE "*%3csvg*")
+| EVAL rc = TO_INTEGER(data.http_retcode)
+| STATS hits = COUNT(*), processed = SUM(CASE(rc >= 200 AND rc < 400, 1, 0)), blocked = SUM(CASE(rc >= 400, 1, 0))
+    BY data.http_url, data.http_method
+| SORT processed DESC, hits DESC
+| LIMIT 30
+]]>
+        </Query>
+      </Step>
+      <Step order="9" name="Timeline Reconstruction">
+        <Purpose>Timeline Reconstruction</Purpose>
+        <Query platform="Elastic" language="ES|QL" id="Q-09">
+          <![CDATA[
+FROM logs-tcp.generic-*
+| WHERE @timestamp >= NOW() - 2 hours AND data.type == "traffic"
+    AND data.original_src == "$src" AND data.http_host == "$host" AND data.http_url IS NOT NULL
+| EVAL real_client = COALESCE(TRIM(MV_FIRST(SPLIT(x_forwarded_for, ","))), data.src)
+| KEEP @timestamp, real_client, data.http_method, data.http_url, data.http_retcode, data.http_agent
+| SORT @timestamp ASC
+| LIMIT 200
+]]>
+        </Query>
+      </Step>
+      <Step order="10" name="Lateral movement validation">
+        <Purpose>Lateral movement validation</Purpose>
+        <Query platform="Elastic" language="ES|QL" id="Q-10">
+          <![CDATA[
+FROM logs-tcp.generic-*
+| WHERE @timestamp >= NOW() - 4 hours AND data.type == "traffic"
+    AND data.original_src == "$src" AND data.http_url IS NOT NULL
+| EVAL surf = TO_LOWER(CONCAT(COALESCE(data.http_url,"")," | ",COALESCE(data.http_refer,""))),
+       encoded = CASE(surf LIKE "*%2e%2e*" OR surf LIKE "*jndi*" OR surf LIKE "*%2527*" OR surf LIKE "*%7b%7b*" OR surf LIKE "*%252e*", 1, 0)
+| STATS encoded_hits = SUM(encoded), reqs = COUNT(*) BY data.http_host
+| SORT encoded_hits DESC
+| LIMIT 15
+]]>
+        </Query>
+      </Step>
+      <Step order="11" name="Defense evasion validation">
+        <Purpose>Defense evasion validation</Purpose>
+        <Query platform="Elastic" language="ES|QL" id="Q-11">
+          <![CDATA[
+FROM logs-tcp.generic-*
+| WHERE @timestamp >= NOW() - 4 hours AND data.type == "traffic"
+    AND data.original_src == "$src" AND data.http_host == "$host" AND data.http_url IS NOT NULL
+| EVAL surf = TO_LOWER(CONCAT(COALESCE(data.http_url,"")," | ",COALESCE(data.http_agent,"")," | ",COALESCE(data.http_refer,""))),
+       rc = TO_INTEGER(data.http_retcode)
+| EVAL evasion = CASE(
+      surf LIKE "*%252e%252e%252f*" OR surf LIKE "*%252522*" OR surf LIKE "*%2525*", "double_encoded",
+      surf LIKE "*%c0%af*" OR surf LIKE "*%c1%9c*", "overlong_utf8",
+      surf LIKE "*%2527*" OR surf LIKE "*%2f%2a*" OR surf LIKE "*%2e%2e%2f*", "single_encoded",
+      "none")
+| WHERE evasion != "none"
+| STATS hits = COUNT(*), processed = SUM(CASE(rc >= 200 AND rc < 400, 1, 0)) BY evasion
+| SORT hits DESC
+| LIMIT 10
+]]>
+        </Query>
+      </Step>
+      <Step order="12" name="Impact assessment">
+        <Purpose>Impact assessment</Purpose>
+        <Query platform="Elastic" language="ES|QL" id="Q-12">
+          <![CDATA[
+FROM logs-tcp.generic-*
+| WHERE @timestamp >= NOW() - 2 hours AND data.type == "traffic"
+    AND data.original_src == "$src" AND data.http_host == "$host" AND data.http_url IS NOT NULL
+| EVAL surf = TO_LOWER(CONCAT(COALESCE(data.http_url,"")," | ",COALESCE(data.http_refer,""))),
+       rc = TO_INTEGER(data.http_retcode),
+       encoded = CASE(surf LIKE "*%2e%2e*" OR surf LIKE "*jndi*" OR surf LIKE "*%2527*" OR surf LIKE "*%7b%7b*" OR surf LIKE "*%252e*", 1, 0)
+| WHERE encoded == 1
+| STATS encoded_reqs = COUNT(*), processed = SUM(CASE(rc >= 200 AND rc < 400, 1, 0)),
+        blocked = SUM(CASE(rc >= 400 AND rc < 500, 1, 0)), err5xx = SUM(CASE(rc >= 500, 1, 0))
+| LIMIT 5
+]]>
+        </Query>
+      </Step>
+      <Step order="13" name="Finalize verdict">
+        <DecisionTree>
+        </DecisionTree>
+      </Step>
+    </Workflow>
+  </Investigation>
+  <ClassificationGuidance>
+    <TruePositive>
+      <Definition></Definition>
+    </TruePositive>
+    <FalsePositive>
+      <Definition></Definition>
+      <Indicators>
+        <Item>Incidental percent-encoding in legitimate URLs/referers/values - ordinary applications URL-encode query values, and a benign encoded string can match a marker without being an attack. Decode and read it.</Item>
+        <Item>Applications that legitimately emit encoded content - an app that passes encoded referers or encoded query parameters can repeatedly trip the markers.</Item>
+        <Item>Authorised testers using an encoding fuzzer - authorised, confirmed from source and schedule.</Item>
+        <Item>Blocked obfuscated probes - a match that was rejected (4xx) is a blocked malicious attempt, documented as such, never "benign".</Item>
+        <Item>No genuine encoded-attack markers were present in the validation window - the decode query (section 14.1) returned 0 rows for the sample source. Incidental percent-encoding occurs in ordinary banking URLs/referers, so a match must be decoded and read, not assumed hostile.</Item>
+        <Item>The rule inspects only URL + user-agent + referer, and the full request packet (data.packet.*) is captured on only the sparse attack/packet-capture subset - a payload encoded into the body or an uncaptured header is simply not seen. An empty result is not proof of safety.</Item>
+        <Item>The alert source is a shared CDN/SNAT edge (185.56.154.x / 159.60.162.x / 159.60.170.x; data.src == data.original_src always). The real encoder is the x_forwarded_for client - de-proxy (section 15.6) before attributing an obfuscated probe to an actor.</Item>
+        <Item>No historical NBI benign-true-positive on record. If a benign app legitimately emits an encoded value that trips a marker, tune the marker (scope to the exact decoded value + client), do not blanket-except the source.</Item>
+      </Indicators>
+    </FalsePositive>
+    <Misconfiguration>
+      <Definition></Definition>
+    </Misconfiguration>
+    <NeedsEscalation>
+      <Definition></Definition>
+    </NeedsEscalation>
+  </ClassificationGuidance>
+  <ResponseActions>
+    <Phase name="Containment">
+      <Action>Block the de-proxied real encoder (the x_forwarded_for client from section 15.6, not the shared edge $src) at the WAF/edge once a processed dangerous payload is confirmed.</Action>
+      <Action>Enable decode-then-inspect / reject double-encoding on FortiWeb for the affected policy so the same evasion is caught, and confirm the encoded request is now blocked on retry.</Action>
+      <Action>Preserve evidence first: capture section 14.1 (decoded class), section 14.2 (evasion depth), section 15.8 (the encoded URLs), section 15.6 (real client) and attach the fully-decoded payload to the alert before any change.</Action>
+      <Action>All changes go through the authorised, human-approved change path; investigation is read-only.</Action>
+    </Phase>
+    <Phase name="Eradication">
+      <Action>Pivot to the decoded attack-class playbook (path traversal / SQLi / Log4Shell / XSS) and work that class's eradication for the confirmed payload.</Action>
+      <Action>Confirm the targeted component is patched for the decoded class (e.g. Log4Shell - the Log4j version; traversal - the canonicalisation flaw) and, if processed, treat the component as potentially exploited until the app/DB owner clears it.</Action>
+      <Action>Hunt for follow-on (web shell / outbound JNDI callback / file read) on the targeted application and host.</Action>
+    </Phase>
+    <Phase name="Recovery">
+      <Action>Enable full URL-decoding / normalisation before inspection on FortiWeb (decode fully, reject double/overlong encoding) and add application-side canonicalisation defences so a decoded payload cannot bypass checks.</Action>
+      <Action>Verify the change holds - re-test the encoded payload is blocked - and return the service to normal monitoring after section 22 closing criteria are met.</Action>
+      <Action>Feed the confirmed hostile real client to edge deny-lists / threat intel.</Action>
+    </Phase>
+  </ResponseActions>
+  <Escalation>
+    <Trigger>Escalate to SOC L2 / IR and the application owner (and patch team for Log4Shell/traversal) when any hold:
+
+- A dangerous decoded class (log4shell_jndi / encoded_traversal / encoded_sqli) was processed (2xx/3xx) on a banking host (section 14.1 / section 15.8).
+- Double/overlong encoding was processed (section 14.2 / section 17.4) - the encoding evaded enforcement.
+- Backend 5xx tied to an encoded payload (section 17.5) suggests it reached and disturbed the app.
+- The decoded intent or its backend effect cannot be established from web logs and the alert cannot be safely cleared - needs_escalation (decode fully; app/DB review).</Trigger>
+    <To>SOC L2 / IR</To>
+  </Escalation>
+  <ClosureCriteria>
+    <Item>true_positive: a dangerous decoded payload was processed via genuine evasion (double/overlong) from an unauthorised real client; real client blocked, decode-then-inspect enabled, decoded-class playbook worked and remediated, incident documented.</Item>
+    <Item>false_positive (blocked): the obfuscated probe was rejected (processed = 0, blocked &gt; 0) - a blocked malicious attempt, documented (never "benign").</Item>
+    <Item>false_positive (benign encoding) / misconfiguration: the match decoded to an incidental legitimate percent sequence, or a benign app legitimately emits encoded content - markers tuned / source baselined, or a documented authorised tester matched.</Item>
+    <Item>needs_escalation: processed but intent/effect unprovable from web logs - handed to the app/DB owner.</Item>
+  </ClosureCriteria>
+  <Limitations>
+    <Item>Decode first - severity is what is hidden. log4shell_jndi and encoded_traversal are RCE / arbitrary-file-read; encoded_sqli/encoded_xss inherit their class risk. Always read the actual urls value and decode it, rather than acting on the marker alone.</Item>
+    <Item>Evasion depth is the tell. double_encoded / overlong_utf8 that was processed is the strongest evidence the WAF was defeated (it decodes once, the app decodes fully). single_encoded is weaker and more often caught.</Item>
+    <Item>Empty != safe - the rule sees only 3 fields. It inspects URL + user-agent + referer; a payload in the body or an uncaptured header is invisible (full data.packet.* is only on the sparse attack subset). No decode hits does not clear the source.</Item>
+    <Item>De-proxy before attributing. data.src == data.original_src is a shared CDN/SNAT edge; the encoder is the x_forwarded_for client. Block/allow-list the real client, never the edge.</Item>
+    <Item>The marker list is finite - novel encodings (mixed-case percent, unicode normalisation, chunked/segmented payloads) defeat it. Durable coverage needs decode-then-inspect on the WAF plus the specific attack-class analytics and app-side canonicalisation monitoring (section 17.4).</Item>
+    <Item>KB-worthy (persist to NBI customer scope): (1) obfuscation rule inspects data.http_url + data.http_agent + data.http_refer only; full packet body not captured on traffic logs; (2) x_forwarded_for = real encoder (de-proxy), data.src/data.original_src = shared edge; (3) no genuine encoded-attack markers in the 2026-08-19 window (incidental percent-encoding is normal). Observed live 2026-08-19.</Item>
+  </Limitations>
+</Playbook>

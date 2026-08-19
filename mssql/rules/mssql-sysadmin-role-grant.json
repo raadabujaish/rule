@@ -1,0 +1,72 @@
+{
+  "name": "MS SQL — Server-Level Privilege Escalation (sysadmin role grant)",
+  "tags": [
+    "NBI-Database",
+    "Phase3",
+    "MS-SQL-Server"
+  ],
+  "interval": "5m",
+  "enabled": true,
+  "description": "Detects a login being added to a high-privilege SQL Server role (sysadmin/securityadmin/serveradmin) or granted CONTROL SERVER. This grants full or near-full control of the instance and its data.",
+  "risk_score": 80,
+  "severity": "high",
+  "note": "## Investigation\n1. `statement` shows the login being elevated and the actor.\n2. Confirm authorisation via change control.\n## Response\nRemove the grant if unauthorised; investigate the actor and the elevated login.",
+  "output_index": "",
+  "investigation_fields": {
+    "field_names": [
+      "sqlserver.audit.statement",
+      "sqlserver.audit.server_principal_name",
+      "sqlserver.audit.session_server_principal_name",
+      "sqlserver.audit.database_name",
+      "sqlserver.audit.client_ip",
+      "sqlserver.audit.application_name",
+      "sqlserver.audit.host_name",
+      "event.action",
+      "host.name",
+      "user.name"
+    ]
+  },
+  "author": [
+    "raadabujaish"
+  ],
+  "false_positives": [],
+  "from": "now-9m",
+  "rule_id": "nbi-sql-sysadmin-grant",
+  "max_signals": 100,
+  "risk_score_mapping": [],
+  "severity_mapping": [],
+  "threat": [
+    {
+      "framework": "MITRE ATT&CK",
+      "tactic": {
+        "id": "TA0004",
+        "name": "Privilege Escalation",
+        "reference": "https://attack.mitre.org/tactics/TA0004/"
+      },
+      "technique": [
+        {
+          "id": "T1078",
+          "name": "Valid Accounts",
+          "reference": "https://attack.mitre.org/techniques/T1078/"
+        }
+      ]
+    }
+  ],
+  "to": "now",
+  "references": [
+    "https://attack.mitre.org/",
+    "https://learn.microsoft.com/en-us/sql/relational-databases/security/auditing/"
+  ],
+  "version": 1,
+  "exceptions_list": [],
+  "related_integrations": [],
+  "required_fields": [],
+  "setup": "",
+  "type": "query",
+  "language": "kuery",
+  "index": [
+    "logs-microsoft_sqlserver.audit-*"
+  ],
+  "query": "sqlserver.audit.statement:(\"sp_addsrvrolemember\" or \"ALTER SERVER ROLE\") and sqlserver.audit.statement:(\"sysadmin\" or \"securityadmin\" or \"serveradmin\" or \"CONTROL SERVER\")",
+  "actions": []
+}

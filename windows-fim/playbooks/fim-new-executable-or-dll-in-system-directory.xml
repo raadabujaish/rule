@@ -1,0 +1,328 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<Playbook xmlns="https://soc.example/playbooks" id="PB-fim-new-executable-or-dll-in-system-directory" name="FIM — New Executable or DLL Created in a Windows System Directory - SOC Playbook" version="3.0" status="Validated" classification="TLP:AMBER">
+  <Metadata>
+    <Owner>NBI SOC / Detection Engineering</Owner>
+    <LastUpdated>2026-08-19</LastUpdated>
+    <Severity default="High">High</Severity>
+    <Confidence default="Medium">Medium</Confidence>
+    <Category>Defense Evasion</Category>
+    <MitreAttack>
+      <Technique id="T1036.005"/>
+      <Technique id="T1036"/>
+      <Technique id="T1574.002"/>
+      <Technique id="T1574"/>
+      <Technique id="T1105"/>
+      <Tactic id="TA0005"/>
+      <Tactic id="TA0002"/>
+    </MitreAttack>
+    <References>
+      <Reference title="MITRE ATT&amp;CK - Masquerading: Match Legitimate Name or Location (T1036.005)" url="https://attack.mitre.org/techniques/T1036/005/"/>
+      <Reference title="MITRE ATT&amp;CK - Hijack Execution Flow: DLL Side-Loading (T1574.002)" url="https://attack.mitre.org/techniques/T1574/002/"/>
+      <Reference title="MITRE ATT&amp;CK - Ingress Tool Transfer (T1105)" url="https://attack.mitre.org/techniques/T1105/"/>
+      <Reference title="MITRE ATT&amp;CK - Defense Evasion tactic (TA0005)" url="https://attack.mitre.org/tactics/TA0005/"/>
+      <Reference title="MITRE ATT&amp;CK - Execution tactic (TA0002)" url="https://attack.mitre.org/tactics/TA0002/"/>
+      <Reference title="Elastic - File Integrity Monitoring / auditbeat FIM (event.action, file.owner, file.hash)" url="https://www.elastic.co/guide/en/beats/auditbeat/current/auditbeat-module-file_integrity.html"/>
+      <Reference title="Microsoft Learn - Dynamic-Link Library Search Order (DLL side-loading background)" url="https://learn.microsoft.com/en-us/windows/win32/dlls/dynamic-link-library-search-order"/>
+      <Reference title="Microsoft Learn - Windows Security auditing (4688 process creation, 7045 service install)" url="https://learn.microsoft.com/en-us/windows/security/threat-protection/auditing/event-4688"/>
+    </References>
+  </Metadata>
+  <AlertContext>
+    <RuleName>FIM — New Executable or DLL Created in a Windows System Directory</RuleName>
+    <RuleId>nbi-fim-new-system-executable</RuleId>
+    <RuleType>query</RuleType>
+    <Index>logs-fim.event-*</Index>
+    <TriggerLogic>The deployed rule is an Elastic query rule over FIM events. The one-line Kibana-KQL detection filter:
+
+
+
+Plain English: a new .exe/.dll/.sys was written into a Windows system directory. Writing into a trusted system path is exactly how legitimate patching works - and also how an attacker masquerades a payload as a system component, stages a DLL side-load, or installs a malicious driver.
+
+The decision turns on who wrote it and in what context:
+
+- file.owner = NT SERVICE\TrustedInstaller or NT AUTHORITY\SYSTEM, arriving in a batch of such writes → Windows servicing (CBS / Windows Update) - the dominant benign cause.
+- file.owner = a user or application service account, or a lone create out of any servicing batch → the attacker-drop pattern.
+- Hash reputation (file.hash.sha1, when present) and a masquerading name/location (a system-sounding name in a slightly wrong path, or a DLL a trusted process will side-load) sharpen the verdict.</TriggerLogic>
+    <KeyAlertFields>event.action, file.extension, file.path, file.owner, file.hash.sha1, file.ctime, file.mtime, file.size, host.name, file.name, file.hash.sha256</KeyAlertFields>
+  </AlertContext>
+  <Inputs>
+    <Input name="$host"/>
+    <Input name="$file_path"/>
+  </Inputs>
+  <ExecutiveSummary>
+    <Overview>This playbook drives triage and investigation of the FIM - New Executable or DLL Created in a Windows System Directory detection on NBI's Elastic Security deployment. The rule fires on a File Integrity Monitoring event (event.dataset: "fim.event") with event.action: "created", file.extension in exe/dll/sys, and file.path inside a Windows system directory (System32, SysWOW64, or a \drivers\ path). A new executable or driver appearing in a trusted system location is either legitimate software servicing (Windows Update / CBS writing signed binaries as TrustedInstaller/SYSTEM) or an attacker planting a binary in a trusted directory to masquerade as a system file (T1036.005), set up DLL side-loading (T1574.002), or gain execution.
+
+Unlike the sibling deletion rule, file.extension is populated on created events, so this rule fires normally - and is dominated by legitimate servicing, which the investigation must separate from a genuine drop. The analyst's job is to decide: attacker-planted binary (true_positive), routine servicing / authorised install (false_positive - authorised, never "benign"), an unbaselined benign installer (misconfiguration), or unproven (needs_escalation). The owner of the new file, whether it arrived as part of a servicing batch, and its hash reputation are the discriminators.</Overview>
+    <BusinessImpact>An alert means: a new executable/DLL/driver was created in System32, SysWOW64, or a drivers path on $host. Because this fires on every such create, the base rate is high and servicing dominates - so the alert is not inherently malicious. What makes it actionable is a non-servicing owner, a lone create outside a patch burst, a masquerading name/path, or a malicious/unknown hash.
+
+A malicious binary in System32 that impersonates a system component or is side-loaded by a trusted process gives an attacker stealthy execution and persistence on a bank server - blending into the OS and evading name/location-based trust. Hence the rule is High.
+
+A crucial caveat governs the investigation: the FIM feed carries no acting user or process (both null - section 8), so *which process wrote the file* is not in this telemetry. The file.owner (present on creates) is the primary in-feed discriminator; deeper attribution (the writing process, the side-loading process) comes from correlating the host's Windows Security 4688 activity (logs-system.security*), which is rich on the FIM hosts.</BusinessImpact>
+  </ExecutiveSummary>
+  <Investigation>
+    <Goal>Decide true_positive / false_positive / misconfiguration / needs_escalation for FIM — New Executable or DLL Created in a Windows System Directory.</Goal>
+    <Workflow>
+      <Step order="1" name="Recover the new binary detail and its owner (verbatim FIMNEW-INV-01)">
+        <Purpose>Recover the new binary detail and its owner (verbatim FIMNEW-INV-01)</Purpose>
+        <Query platform="Elastic" language="ES|QL" id="Q-01">
+          <![CDATA[
+FROM logs-fim.event-*
+| WHERE event.action == "created" AND host.name == "$host" AND file.path == "$file_path"
+    AND @timestamp >= NOW() - 4 hours
+| KEEP @timestamp, file.path, file.owner, file.hash.sha1, file.ctime, file.mtime, file.size
+| SORT @timestamp DESC
+| LIMIT 10
+]]>
+        </Query>
+      </Step>
+      <Step order="2" name="Servicing batch or lone create (verbatim FIMNEW-INV-02)">
+        <Purpose>Servicing batch or lone create (verbatim FIMNEW-INV-02)</Purpose>
+        <Query platform="Elastic" language="ES|QL" id="Q-02">
+          <![CDATA[
+FROM logs-fim.event-*
+| WHERE event.action == "created" AND host.name == "$host"
+    AND file.extension IN ("exe", "dll", "sys")
+    AND (file.path LIKE "*System32*" OR file.path LIKE "*SysWOW64*" OR file.path LIKE "*drivers*")
+    AND @timestamp >= NOW() - 4 hours
+| STATS files = COUNT(*), first_seen = MIN(@timestamp), last_seen = MAX(@timestamp)
+    BY file.owner
+| SORT files DESC
+| LIMIT 15
+]]>
+        </Query>
+      </Step>
+      <Step order="3" name="Entity pivoting">
+        <Purpose>Entity pivoting</Purpose>
+        <Query platform="Elastic" language="ES|QL" id="Q-03">
+          <![CDATA[
+FROM logs-fim.event-*
+| WHERE event.action == "created" AND host.name == "$host"
+    AND file.extension IN ("exe", "dll", "sys")
+    AND (file.path LIKE "*System32*" OR file.path LIKE "*SysWOW64*" OR file.path LIKE "*drivers*")
+    AND @timestamp >= NOW() - 4 hours
+| KEEP @timestamp, file.path, file.owner, file.hash.sha1
+| SORT @timestamp DESC
+| LIMIT 30
+]]>
+        </Query>
+      </Step>
+      <Step order="4" name="Process investigation">
+        <Purpose>Process investigation</Purpose>
+        <Query platform="Elastic" language="ES|QL" id="Q-04">
+          <![CDATA[
+FROM logs-system.security*
+| WHERE @timestamp >= NOW() - 4 hours AND event.code == "4688"
+    AND host.name == "$host"
+    AND TO_LOWER(process.name) IN ("msiexec.exe", "tiworker.exe", "trustedinstaller.exe", "cmd.exe", "powershell.exe", "rundll32.exe", "regsvr32.exe", "certutil.exe", "curl.exe")
+| KEEP @timestamp, user.name, process.name, process.executable, process.parent.name, process.pid
+| SORT @timestamp DESC
+| LIMIT 40
+]]>
+        </Query>
+      </Step>
+      <Step order="5" name="Host investigation">
+        <Purpose>Host investigation</Purpose>
+        <Query platform="Elastic" language="ES|QL" id="Q-05">
+          <![CDATA[
+FROM logs-fim.event-*
+| WHERE host.name == "$host"
+    AND @timestamp >= NOW() - 4 hours
+| STATS events = COUNT(*), first_seen = MIN(@timestamp), last_seen = MAX(@timestamp)
+    BY event.action
+| SORT events DESC
+| LIMIT 15
+]]>
+        </Query>
+      </Step>
+      <Step order="6" name="Hash investigation">
+        <Purpose>Hash investigation</Purpose>
+        <Query platform="Elastic" language="ES|QL" id="Q-06">
+          <![CDATA[
+FROM logs-fim.event-*
+| WHERE event.action == "created" AND host.name == "$host"
+    AND file.extension IN ("exe", "dll", "sys")
+    AND (file.path LIKE "*System32*" OR file.path LIKE "*SysWOW64*" OR file.path LIKE "*drivers*")
+    AND @timestamp >= NOW() - 4 hours
+| EVAL has_sha1 = file.hash.sha1 IS NOT NULL
+| STATS creates = COUNT(*) BY has_sha1, file.owner
+| SORT creates DESC
+| LIMIT 15
+]]>
+        </Query>
+      </Step>
+      <Step order="7" name="File investigation">
+        <Purpose>File investigation</Purpose>
+        <Query platform="Elastic" language="ES|QL" id="Q-07">
+          <![CDATA[
+FROM logs-fim.event-*
+| WHERE event.action == "created" AND host.name == "$host"
+    AND file.extension IN ("exe", "dll", "sys")
+    AND (file.path LIKE "*System32*" OR file.path LIKE "*SysWOW64*" OR file.path LIKE "*drivers*")
+    AND file.owner IS NOT NULL
+    AND NOT (file.owner LIKE "*TrustedInstaller*" OR file.owner LIKE "*SYSTEM*")
+    AND @timestamp >= NOW() - 4 hours
+| KEEP @timestamp, file.path, file.owner, file.hash.sha1
+| SORT @timestamp DESC
+| LIMIT 20
+]]>
+        </Query>
+      </Step>
+      <Step order="8" name="Authentication investigation">
+        <Purpose>Authentication investigation</Purpose>
+        <Query platform="Elastic" language="ES|QL" id="Q-08">
+          <![CDATA[
+FROM logs-system.security*
+| WHERE @timestamp >= NOW() - 4 hours AND host.name == "$host"
+    AND event.code IN ("4624", "4672")
+| STATS events = COUNT(*), first_seen = MIN(@timestamp), last_seen = MAX(@timestamp)
+    BY event.code, user.name
+| SORT events DESC
+| LIMIT 30
+]]>
+        </Query>
+      </Step>
+      <Step order="9" name="Timeline Reconstruction">
+        <Purpose>Timeline Reconstruction</Purpose>
+        <Query platform="Elastic" language="ES|QL" id="Q-09">
+          <![CDATA[
+FROM logs-fim.event-*
+| WHERE event.action == "created" AND host.name == "$host"
+    AND file.extension IN ("exe", "dll", "sys")
+    AND (file.path LIKE "*System32*" OR file.path LIKE "*SysWOW64*" OR file.path LIKE "*drivers*")
+    AND @timestamp >= NOW() - 4 hours
+| KEEP @timestamp, file.path, file.owner, file.hash.sha1
+| SORT @timestamp ASC
+| LIMIT 200
+]]>
+        </Query>
+      </Step>
+      <Step order="10" name="Lateral movement validation">
+        <Purpose>Lateral movement validation</Purpose>
+        <Query platform="Elastic" language="ES|QL" id="Q-10">
+          <![CDATA[
+FROM logs-system.security*
+| WHERE @timestamp >= NOW() - 4 hours AND host.name == "$host"
+    AND event.code IN ("4624", "4648", "4768", "4769", "5140")
+| STATS events = COUNT(*) BY event.code, user.name
+| SORT events DESC
+| LIMIT 30
+]]>
+        </Query>
+      </Step>
+      <Step order="11" name="Persistence validation">
+        <Purpose>Persistence validation</Purpose>
+        <Query platform="Elastic" language="ES|QL" id="Q-11">
+          <![CDATA[
+FROM logs-system.security*
+| WHERE @timestamp >= NOW() - 4 hours AND host.name == "$host"
+    AND event.code IN ("7045", "4697", "4698", "4720")
+| STATS events = COUNT(*) BY event.code, user.name
+| SORT events DESC
+| LIMIT 20
+]]>
+        </Query>
+      </Step>
+      <Step order="12" name="Defense evasion validation">
+        <Purpose>Defense evasion validation</Purpose>
+        <Query platform="Elastic" language="ES|QL" id="Q-12">
+          <![CDATA[
+FROM logs-system.security*
+| WHERE @timestamp >= NOW() - 4 hours AND host.name == "$host"
+    AND event.code == "4688"
+    AND TO_LOWER(process.name) IN ("rundll32.exe", "regsvr32.exe", "dllhost.exe", "mavinject.exe")
+| KEEP @timestamp, user.name, process.name, process.executable, process.parent.name, process.pid
+| SORT @timestamp DESC
+| LIMIT 30
+]]>
+        </Query>
+      </Step>
+      <Step order="13" name="Impact assessment">
+        <Purpose>Impact assessment</Purpose>
+        <Query platform="Elastic" language="ES|QL" id="Q-13">
+          <![CDATA[
+FROM logs-fim.event-*
+| WHERE event.action == "created" AND host.name == "$host"
+    AND file.extension IN ("exe", "dll", "sys")
+    AND (file.path LIKE "*System32*" OR file.path LIKE "*SysWOW64*" OR file.path LIKE "*drivers*")
+    AND @timestamp >= NOW() - 4 hours
+| STATS creates = COUNT(*), distinct_owners = COUNT_DISTINCT(file.owner), distinct_paths = COUNT_DISTINCT(file.path)
+| LIMIT 1
+]]>
+        </Query>
+      </Step>
+      <Step order="14" name="Finalize verdict">
+        <DecisionTree>
+        </DecisionTree>
+      </Step>
+    </Workflow>
+  </Investigation>
+  <ClassificationGuidance>
+    <TruePositive>
+      <Definition></Definition>
+    </TruePositive>
+    <FalsePositive>
+      <Definition></Definition>
+      <Indicators>
+        <Item>Windows servicing (the dominant benign cause). CBS / Windows Update writes many new signed .exe/.dll into System32/SysWOW64 as TrustedInstaller/SYSTEM in patch bursts. This is a false_positive (authorised) when the owner is a servicing identity, the file is one of a batch, and the hash is benign. (Validated on $host: TsWpfWrp.exe, PresentationNative_v0300.dll, etc. as TrustedInstaller.)</Item>
+        <Item>Authorised software installs / runtime redistributables. Legitimate installers (e.g. Visual C++ runtimes - mfc*, atl*, vcomp*) writing into System32 under SYSTEM. Confirm the install, then classify authorised.</Item>
+        <Item>Driver updates. Vendor/OS driver packages writing .sys into \drivers\ under a servicing identity.</Item>
+        <Item>An unbaselined benign installer producing system-path writes - a misconfiguration (section 6/section 13), not an attack, once the software is recognised.</Item>
+        <Item>A planted-binary attempt proven blocked/removed before execution is not benign - it is a blocked-malicious drop (section 13), documented as such.</Item>
+        <Item>Servicing writes dominate and are TrustedInstaller/SYSTEM-owned. Live, recent System32 creates on nim-est-apv07 were owned by NT SERVICE\TrustedInstaller (e.g. TsWpfWrp.exe, PresentationNative_v0300.dll) and NT AUTHORITY\SYSTEM (e.g. WindowsAccessBridge-64.dll, mfc100.dll); across the estate, per-host system-dir creates showed only 1-2 distinct owners (the servicing identities). A non-servicing owner is therefore a strong anomaly against this baseline.</Item>
+        <Item>file.hash.sha1 is frequently NULL on freshly-created system binaries (validated: null on the SYSTEM-owned mfc100.dll create, present on the TrustedInstaller TsWpfWrp.exe), and sha256/file.name are unmapped - so hash reputation is often unavailable at triage. A null hash is a telemetry gap, not a clean verdict, and there is no code-signing status in FIM.</Item>
+        <Item>Creates cluster around patch cycles. A 4h window is often empty or shows a servicing batch; the most recent examples may be days old. A 0-row window is normal - re-anchor to the alert time.</Item>
+      </Indicators>
+    </FalsePositive>
+    <Misconfiguration>
+      <Definition></Definition>
+    </Misconfiguration>
+    <NeedsEscalation>
+      <Definition></Definition>
+    </NeedsEscalation>
+  </ClassificationGuidance>
+  <ResponseActions>
+    <Phase name="Containment">
+      <Action>True_positive (attacker-planted binary): quarantine the binary at $file_path, isolate $host, and identify the writing process/account (section 15.2/section 15.12) and the delivery path. If a service/driver/task was registered to run it (section 17.2), disable it.</Action>
+      <Action>Preserve the sample before removal (for hashing, signing check, and reverse engineering) - the FIM feed cannot attribute the write, so host-side capture of the file and the writing process is essential.</Action>
+      <Action>Preserve evidence: attach INV-01 (binary detail), INV-02 (servicing batch), INV-03 (non-servicing owners), the section 15.2 writing-process context, and the section 17.2 persistence findings to the case.</Action>
+      <Action>Investigation here is read-only; quarantine, isolation and persistence removal run only via the authorised, human-approved change path. Treat a non-servicing binary in System32 on a bank server as live until proven benign.</Action>
+    </Phase>
+    <Phase name="Eradication">
+      <Action>Remove the planted binary and its execution wiring: quarantine/delete the file, and remove any service/driver/scheduled task (section 17.2) or Run key registered to execute or side-load it.</Action>
+      <Action>Identify and disable the writing process/account and remediate the delivery vector (how the binary reached the host).</Action>
+      <Action>Hunt the side-load / execution: confirm whether a trusted process loaded the planted DLL (section 17.4) or a masqueraded process ran, and hunt the same hash across peers (especially other servers the account touched).</Action>
+      <Action>Rotate credentials for any account implicated in the write, and review for reuse.</Action>
+    </Phase>
+    <Phase name="Recovery">
+      <Action>Reimage $host if integrity is uncertain (a system-directory drop implies privileged code execution); otherwise validate all eradication actions hold after restart and that no planted binary remains.</Action>
+      <Action>Return to service only after the binary and its persistence are removed, the writer/vector identified, and monitoring confirms no re-drop.</Action>
+      <Action>Harden: application-allowlist system-directory binaries, restrict System32/SysWOW64/drivers writes to the servicing identities, and enrich FIM with hash reputation and code-signing status to speed this triage (the two biggest gaps here - section 8).</Action>
+      <Action>Keep the detection broad - recognise authorised software that writes to system paths, but never exclude any owner or system path from monitoring.</Action>
+    </Phase>
+  </ResponseActions>
+  <Escalation>
+    <Trigger>Escalate to SOC L2 / Incident Response and the endpoint/EDR team when any of the following hold:
+
+- A non-servicing owner wrote the system-directory binary (section 15.10) - the strongest single drop indicator.
+- The hash is malicious/unknown with a masquerading name/location or a side-load target.
+- Execution/persistence corroboration - side-load launchers (section 17.4) or a service/driver/task (section 17.2) registered around the create.
+- The hash reputation is unresolved (sha1 null/unknown) on a sensitive host and the owner/context is insufficient - escalate as needs_escalation with the gaps named.
+
+Hand off with INV-01/02/03, the section 15.2 writing-process context, the section 17.2 persistence findings, and the hash/signing verdict; quarantine the binary and isolate the host.</Trigger>
+    <To>SOC L2 / IR</To>
+  </Escalation>
+  <ClosureCriteria>
+    <Item>false_positive (authorised servicing/install): the binary is within a TrustedInstaller/SYSTEM servicing batch (section 14.2) or a documented authorised install, with a benign hash; documented as legitimate.</Item>
+    <Item>false_positive (proven-blocked drop): a planted-binary attempt positively proven blocked/removed before execution (quarantined by endpoint control, no execution) - a blocked-malicious drop, documented as such; never benign.</Item>
+    <Item>misconfiguration: a recognised installer/runtime writes into a system path, benign but unbaselined; the software is baselined and the expected writes recorded (no exclusion of owner/path).</Item>
+    <Item>true_positive: the binary is quarantined, $host contained, the writing process/account and delivery vector identified, side-load/execution/persistence hunted; incident documented.</Item>
+    <Item>needs_escalation: handed to endpoint/EDR + SOC L2 with the reputation/context gaps documented.</Item>
+  </ClosureCriteria>
+  <Limitations>
+    <Item>file.owner is the discriminator, and it is present on creates. NT SERVICE\TrustedInstaller / NT AUTHORITY\SYSTEM = Windows servicing (the dominant benign cause - validated on $host for TsWpfWrp.exe, PresentationNative_v0300.dll); a user/app service account writing into System32 is the drop signal. Do not auto-clear on a servicing owner alone - verify the batch and (where present) the hash.</Item>
+    <Item>file.hash.sha1 is frequently null on fresh system binaries, and there is no signing status. Masquerading is judged from owner/path/reputation, not signature. A null hash is a telemetry gap, not a clean verdict - obtain the SHA-256 and signature from the host.</Item>
+    <Item>The FIM feed has no writing process - attribution is cross-index. Recover the writer and any side-loading process from $host's logs-system.security* 4688 (rich on the FIM hosts - nim-est-apv07 ≈24k 4688/4h), and the execution wiring from 7045/4697/4698.</Item>
+    <Item>Servicing dominates the base rate. Per-host system-dir creates showed only 1-2 owners (the servicing identities); a non-servicing owner is a strong anomaly against that baseline. Creates cluster around patch cycles, so a 0-row 4h window is normal.</Item>
+    <Item>Evasion - SYSTEM write and side-load-outside-System32. An actor with SYSTEM can write under a servicing identity (INV-03 won't surface it), or place a side-load DLL beside a trusted application outside System32 (avoiding the path filter). Complement with hash reputation/signing enrichment, logs-system.security* 4688 process creation, DLL-load/side-load telemetry where available, and the service-install and Kaspersky detections around the create.</Item>
+    <Item>KB-worthy (persist to NBI customer scope): (1) logs-fim.event-* file.owner populated on creates and is the servicing-vs-drop discriminator (TrustedInstaller/SYSTEM = servicing); (2) file.hash.sha1 frequently null on fresh system binaries, sha256/file.name unmapped, no signing status; (3) no user.name/process.name in the FIM feed → attribute via logs-system.security* 4688/7045 on the host; (4) TsWpfWrp.exe on nim-est-apv07 = TrustedInstaller servicing create with SHA-1 cbfe51d526a1af83c28761eba4198fd0488b2c85; (5) per-host system-dir creates carry only 1-2 (servicing) owners. All observed live on 2026-08-19.</Item>
+  </Limitations>
+</Playbook>

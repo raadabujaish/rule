@@ -1,0 +1,66 @@
+{
+  "name": "Windows — Audit Policy Changed by Interactive Account",
+  "tags": [
+    "NBI-ActiveDirectory",
+    "Phase3",
+    "QA-remediation",
+    "Defense-Evasion"
+  ],
+  "interval": "5m",
+  "enabled": true,
+  "description": "Detects a change to the Windows system audit policy (4719) made by an interactive/human account rather than a computer account or SYSTEM. Routine audit-policy events come from GPO reapplication under machine/SYSTEM context (0 interactive baseline over 30d). A human changing audit policy typically means an attacker disabling audit subcategories to blind the SOC, or an unauthorised configuration change.",
+  "risk_score": 73,
+  "severity": "high",
+  "note": "## Investigation\n1. `SubjectUserName` = the interactive account; `AuditPolicyChanges` shows which subcategory was added/removed (removal = auditing disabled).\n2. Any interactive audit-policy change is unexpected — confirm against change control.\n## Response\nIf unauthorised, restore the audit policy (GPO/`auditpol`) and investigate the account for compromise.",
+  "output_index": "",
+  "investigation_fields": {
+    "field_names": [
+      "winlog.event_data.SubjectUserName",
+      "winlog.event_data.AuditPolicyChanges",
+      "winlog.event_data.CategoryId",
+      "host.name"
+    ]
+  },
+  "author": [
+    "raadabujaish"
+  ],
+  "false_positives": [],
+  "from": "now-9m",
+  "rule_id": "nbi-ad-audit-policy-tampering",
+  "max_signals": 100,
+  "risk_score_mapping": [],
+  "severity_mapping": [],
+  "threat": [
+    {
+      "framework": "MITRE ATT&CK",
+      "tactic": {
+        "id": "TA0005",
+        "name": "Defense Evasion",
+        "reference": "https://attack.mitre.org/tactics/TA0005/"
+      },
+      "technique": [
+        {
+          "id": "T1562.002",
+          "name": "Impair Defenses: Disable Windows Event Logging",
+          "reference": "https://attack.mitre.org/techniques/T1562/002/"
+        }
+      ]
+    }
+  ],
+  "to": "now",
+  "references": [
+    "https://attack.mitre.org/techniques/T1562/002/"
+  ],
+  "version": 1,
+  "exceptions_list": [],
+  "related_integrations": [],
+  "required_fields": [],
+  "setup": "",
+  "type": "query",
+  "language": "kuery",
+  "index": [
+    "logs-system.security-*"
+  ],
+  "query": "event.code:\"4719\" and not winlog.event_data.SubjectUserName:*$ and not winlog.event_data.SubjectUserName:\"SYSTEM\" and not winlog.event_data.SubjectUserName:\"LOCAL SERVICE\" and not winlog.event_data.SubjectUserName:\"NETWORK SERVICE\"",
+  "actions": []
+}

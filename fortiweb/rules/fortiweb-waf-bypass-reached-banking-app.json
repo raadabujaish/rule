@@ -1,0 +1,75 @@
+{
+  "name": "FortiWeb — Web Attack Bypassed the WAF and Reached a Banking Application",
+  "tags": [
+    "NBI-Perimeter",
+    "Phase3",
+    "FortiWeb",
+    "WAF"
+  ],
+  "interval": "5m",
+  "enabled": true,
+  "description": "Detects a real web application attack (SQL injection, XSS, known exploit, or malicious-IP request) that the FortiWeb WAF flagged but did NOT block (action = Alert, not Alert_Deny) against a public banking application (businessonline / mobile / loyalty / e-statement .nbi.iq). The WAF blocks the overwhelming majority of such attacks; an attack that passed through reached the application and is the highest-priority perimeter signal.",
+  "risk_score": 95,
+  "severity": "critical",
+  "note": "## Investigation\n1. `data.attack_type` is the attack class; `data.http_host`+`data.http_url` the exact target; `data.original_src`/`x_forwarded_for` the client; `data.msg` the signature detail.\n2. Because it was not blocked, assume the request reached the app — check the application/DB logs (MS SQL / Oracle audit) for the same URL/time for signs of successful exploitation.\n## Response\nBlock the source, confirm whether the request succeeded, and review the WAF policy for why this attack was not denied.",
+  "output_index": "",
+  "investigation_fields": {
+    "field_names": [
+      "data.attack_type",
+      "data.action",
+      "data.severity_level",
+      "data.http_host",
+      "data.http_url",
+      "data.http_method",
+      "data.original_src",
+      "data.src",
+      "data.srccountry",
+      "data.policy",
+      "data.msg",
+      "x_forwarded_for"
+    ]
+  },
+  "author": [
+    "raadabujaish"
+  ],
+  "false_positives": [],
+  "from": "now-9m",
+  "rule_id": "nbi-fweb-attack-not-blocked",
+  "max_signals": 100,
+  "risk_score_mapping": [],
+  "severity_mapping": [],
+  "threat": [
+    {
+      "framework": "MITRE ATT&CK",
+      "tactic": {
+        "id": "TA0001",
+        "name": "Initial Access",
+        "reference": "https://attack.mitre.org/tactics/TA0001/"
+      },
+      "technique": [
+        {
+          "id": "T1190",
+          "name": "Exploit Public-Facing Application",
+          "reference": "https://attack.mitre.org/techniques/T1190/"
+        }
+      ]
+    }
+  ],
+  "to": "now",
+  "references": [
+    "https://attack.mitre.org/",
+    "https://docs.fortinet.com/product/fortiweb"
+  ],
+  "version": 1,
+  "exceptions_list": [],
+  "related_integrations": [],
+  "required_fields": [],
+  "setup": "",
+  "type": "query",
+  "language": "kuery",
+  "index": [
+    "logs-tcp.generic-*"
+  ],
+  "query": "tags:\"Fortiweb\" and data.type:\"attack\" and data.action:\"Alert\" and data.attack_type:(\"SQL Injection\" or \"SQL Injection (Extended)\" or \"Cross Site Scripting\" or \"Cross Site Scripting (Extended)\" or \"Known Exploits\" or \"SQL/XSS Syntax Based Detection\" or \"Generic Attacks\" or \"Generic Attacks(Extended)\" or \"Malicious IPs\")",
+  "actions": []
+}

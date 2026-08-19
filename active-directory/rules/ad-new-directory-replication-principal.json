@@ -1,0 +1,92 @@
+{
+  "name": "AD — New Directory Replication Principal",
+  "tags": [
+    "NBI",
+    "Identity",
+    "Active Directory",
+    "DCSync",
+    "T1003.006",
+    "Credential Access",
+    "class:primary",
+    "PROPOSED"
+  ],
+  "interval": "1h",
+  "enabled": true,
+  "description": "Detects a directory-replication principal — an identity performing DS-Replication-Get-Changes / Get-Changes-All / Get-Changes-In-Filtered-Set on a domain controller (Windows 4662, control-access GUIDs 1131f6aa / 1131f6ad / 89e95b76) — whose SID has NOT been seen replicating in the last 90 days. Granting a controlled account directory-replication rights is the classic DCSync setup step (T1003.006). At NBI the entire 90-day replicator population is four stable identities (Azure AD Connect, two DC machine accounts, and sanctioned directory-read accounts); a fifth, new replicator is inherently high-signal. Keyed on the stable SID (not the account name) so an attacker cannot evade by naming the account into an allowlist, and rate-agnostic (New Terms) so a single replication still fires. 4662 carries no network source IP — origin is the DC that logged it (host.name) plus the actor SID; correlate 4624/4768 for the source host.",
+  "risk_score": 73,
+  "severity": "high",
+  "note": "### Triage — new directory-replication principal\n1. **WHO** `winlog.event_data.SubjectUserName` / `SubjectUserSid` — a newly-sanctioned tool (backup/sync/monitoring) or an unexpected account? Confirm with the AD team whether replication rights were just granted, and by whom.\n2. **WHAT** `winlog.event_data.Properties` — which right? `*1131f6ad*` (Get-Changes-**ALL**) = can extract secrets → treat as **critical** (see the Get-Changes-All companion rule). `*1131f6aa*`/`*89e95b76*` only = directory-metadata read.\n3. **FROM WHERE** 4662 has no source IP — pivot the actor SID into 4624/4768 around this time to find the source host/IP. A replication principal authenticating from a workstation is suspicious.\n4. **Escalate** if rights were not deliberately granted, the account is a normal user/computer, or Get-Changes-ALL is present. De-escalate only after the AD team confirms a sanctioned replicator — then add its **SID** (never its name) to the approved-replicator `known_infrastructure` list.",
+  "output_index": "",
+  "meta": {
+    "standard": {
+      "lifecycle": "PROPOSED",
+      "analytic_class": "primary",
+      "technique": "T1003.006",
+      "logic_explanation": "New Terms on SubjectUserSid over 4662 DCSync control-access GUIDs; 90d history; fires on a never-before-seen replicator SID.",
+      "evidence": {
+        "replicator_population_90d": 4,
+        "backtest_novel_7d": 0,
+        "source_ip_on_4662": "absent"
+      },
+      "supersedes": "nbi-dcsync-nonapproved (idx9)"
+    }
+  },
+  "investigation_fields": {
+    "field_names": [
+      "winlog.event_data.SubjectUserName",
+      "winlog.event_data.SubjectUserSid",
+      "host.name",
+      "winlog.event_data.Properties",
+      "winlog.event_data.SubjectDomainName"
+    ]
+  },
+  "author": [],
+  "false_positives": [],
+  "from": "now-70m",
+  "rule_id": "nbi-ad-t1003_006-new-replicator-identity",
+  "max_signals": 100,
+  "risk_score_mapping": [],
+  "severity_mapping": [],
+  "threat": [
+    {
+      "framework": "MITRE ATT&CK",
+      "tactic": {
+        "id": "TA0006",
+        "name": "Credential Access",
+        "reference": "https://attack.mitre.org/tactics/TA0006/"
+      },
+      "technique": [
+        {
+          "id": "T1003",
+          "name": "OS Credential Dumping",
+          "reference": "https://attack.mitre.org/techniques/T1003/",
+          "subtechnique": [
+            {
+              "id": "T1003.006",
+              "name": "DCSync",
+              "reference": "https://attack.mitre.org/techniques/T1003/006/"
+            }
+          ]
+        }
+      ]
+    }
+  ],
+  "to": "now",
+  "references": [],
+  "version": 1,
+  "exceptions_list": [],
+  "related_integrations": [],
+  "required_fields": [],
+  "setup": "",
+  "type": "new_terms",
+  "query": "event.code:\"4662\" and winlog.event_data.Properties:(*1131f6aa* or *1131f6ad* or *89e95b76*)",
+  "new_terms_fields": [
+    "winlog.event_data.SubjectUserSid"
+  ],
+  "history_window_start": "now-90d",
+  "index": [
+    "logs-system.security-*"
+  ],
+  "language": "kuery",
+  "actions": []
+}

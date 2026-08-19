@@ -1,0 +1,72 @@
+{
+  "name": "AD — Mass Group Enumeration via LOLBin (BloodHound/SharpHound)",
+  "tags": [
+    "NBI-ActiveDirectory",
+    "Phase3",
+    "QA-remediation",
+    "Discovery"
+  ],
+  "interval": "1h",
+  "enabled": true,
+  "description": "Detects a scripting/LOLBin process (PowerShell, wmic, cmd, net, rundll32, cscript/wscript, mshta) enumerating 15+ security-enabled groups (4799) from a single host/account within an hour. This is the signature of BloodHound/SharpHound and manual AD reconnaissance. Enterprise software (Cluster, Veeam, Kaspersky, ManageEngine) and the known admin jump-host baseline are excluded, so the residual signal is anomalous group enumeration.",
+  "risk_score": 68,
+  "severity": "high",
+  "note": "## Investigation\n1. `CallerProcessName` = the enumerating LOLBin; `SubjectUserName`/`host.name` = the actor.\n2. A workstation/server (not an admin jump host) running PowerShell/net enumerating many groups rapidly = likely SharpHound. Pull the full process tree.\n## Response\nIsolate the host, identify the collector binary/script, and hunt for follow-on lateral movement / Kerberoasting.",
+  "output_index": "",
+  "investigation_fields": {
+    "field_names": [
+      "winlog.event_data.CallerProcessName",
+      "winlog.event_data.SubjectUserName",
+      "host.name"
+    ]
+  },
+  "author": [
+    "raadabujaish"
+  ],
+  "false_positives": [],
+  "from": "now-70m",
+  "rule_id": "nbi-ad-bloodhound-enumeration",
+  "max_signals": 100,
+  "risk_score_mapping": [],
+  "severity_mapping": [],
+  "threat": [
+    {
+      "framework": "MITRE ATT&CK",
+      "tactic": {
+        "id": "TA0007",
+        "name": "Discovery",
+        "reference": "https://attack.mitre.org/tactics/TA0007/"
+      },
+      "technique": [
+        {
+          "id": "T1069.002",
+          "name": "Permission Groups Discovery: Domain Groups",
+          "reference": "https://attack.mitre.org/techniques/T1069/002/"
+        }
+      ]
+    }
+  ],
+  "to": "now",
+  "references": [
+    "https://attack.mitre.org/techniques/T1069/002/"
+  ],
+  "version": 1,
+  "exceptions_list": [],
+  "related_integrations": [],
+  "required_fields": [],
+  "setup": "",
+  "type": "threshold",
+  "language": "kuery",
+  "index": [
+    "logs-system.security-*"
+  ],
+  "query": "event.code:\"4799\" and winlog.event_data.CallerProcessName:(*powershell* or *\\\\wmic.exe or *\\\\cmd.exe or *rundll32* or *cscript* or *wscript* or *mshta* or *\\\\net.exe or *\\\\net1.exe) and not (host.name:\"nim-jump-apv22\" and winlog.event_data.SubjectUserName:\"jamal.admin\")",
+  "threshold": {
+    "field": [
+      "host.name",
+      "winlog.event_data.SubjectUserName"
+    ],
+    "value": 15
+  },
+  "actions": []
+}

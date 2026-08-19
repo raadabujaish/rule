@@ -1,0 +1,180 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<Playbook xmlns="https://soc.example/playbooks" id="PB-JCB-NEW-01" name="Forcepoint DLP — Bulk Sensitive Data to Personal / Public Email by One User - SOC Playbook" version="2.1" status="Production" classification="TLP:AMBER">
+  <Metadata>
+    <Owner>JCB Detection Engineering (WatchWave)</Owner>
+    <LastUpdated>2026-08-19</LastUpdated>
+    <Severity default="High">High</Severity>
+    <Confidence default="Medium">Medium</Confidence>
+    <Category>Exfiltration / Data Transfer</Category>
+    <MitreAttack>
+      <Technique id="T1567" name="Exfiltration Over Web Service"/>
+      <Tactic id="TA0010" name="Exfiltration"/>
+    </MitreAttack>
+    <References>
+      <Reference title="MITRE ATT and CK T1567 Exfiltration Over Web Service" url="https://attack.mitre.org/techniques/T1567/"/>
+    </References>
+  </Metadata>
+  <ExecutiveSummary>
+    <Overview>Forcepoint DLP flagged one internal user (cef.extensions.loginName like INTDOM\user) moving a BURST of sensitive-classified content (Sensitive words / PCI / Files Outbound) to a personal or public mail domain (destination classified "Public Mail Domain"). Triage: is this data exfiltration / insider activity, or an authorised bulk business transfer? Note: JCB Forcepoint runs many policies in Monitor Mode, so deviceAction "Permitted, Monitor Mode" means DLP observed but did NOT block — the data most likely left the perimeter.</Overview>
+    <BusinessImpact>For a bank, bulk sensitive or PCI-scoped data leaving to personal webmail is a direct insider-exfiltration and PCI-DSS / data-protection breach vector. Volume by a single user is the escalating signal versus a one-off incidental transfer.</BusinessImpact>
+  </ExecutiveSummary>
+  <Scope><Assets>
+    <AssetType>Forcepoint DLP endpoints and web / email gateways (Content Gateway, Endpoint HTTPS)</AssetType>
+    <AssetType>User workstations in intdom.local</AssetType>
+  </Assets><LogSources>
+    <LogSource>Forcepoint DLP CEF via syslog - logs-cef.log-*</LogSource>
+  </LogSources></Scope>
+  <Prerequisites><TelemetryRequirements>
+    <Requirement>Forcepoint DLP CEF (verified live on logs-cef.log-*, observer.vendor == "Forcepoint"). Fields: cef.extensions.loginName (INTDOM\user or a display name), cef.extensions.deviceEventCategory (data classification, e.g. "Public Mail Domain", "Sensitive words", "Sensitive Words-Outbound", "Files Outbound", "JCB PCI"; multiple joined by "; "), cef.extensions.destinationHosts and cef.extensions.destinationUserName (external destination host / mail domain), cef.extensions.deviceAction ("Permitted", "Permitted, Monitor Mode", or "Blocked"), cef.extensions.filename, cef.extensions.sourceServiceName (channel: Forcepoint Content Gateway / Endpoint HTTPS), cef.extensions.sourceHost, cef.extensions.sourceIp, cef.extensions.eventId. Derived entity user.name = TO_LOWER(last token of loginName split on backslash).</Requirement>
+  </TelemetryRequirements><DetectionSignals>
+    <Signal><Name>Bulk Sensitive Data to Personal / Public Email by One User</Name><Details>One INTDOM user with multiple Forcepoint DLP incidents where the destination is a Public Mail Domain AND the content is classified Sensitive words / PCI / Files Outbound.</Details></Signal>
+  </DetectionSignals></Prerequisites>
+  <Inputs>
+    <Input name="$user" description="Derived user.name = lowercased login without domain (e.g. ramis). Matches the alert entity user.name."/>
+  </Inputs>
+  <Triage><ImmediateCapture>
+    <Item>$user: $user</Item>
+    <Item>Note whether the DLP action was blocked or "Permitted, Monitor Mode" (observed only).</Item>
+  </ImmediateCapture><InitialAssessment>
+    <Rule>Weigh the full evidence story per the ClassificationGuidance, not any single fact. Volume + sensitivity + destination + Monitor-Mode-permitted together drive the verdict.</Rule>
+  </InitialAssessment></Triage>
+  <Investigation>
+    <Goal>Determine whether this user's burst of sensitive-data transfers to a personal / public mail domain is exfiltration / insider activity or an authorised bulk business transfer.</Goal>
+    <Workflow>
+      <Step order="1" name="Quantify the user's bulk sensitive transfers to public mail domains">
+        <Purpose>Count incidents, distinct external destinations, data classifications and action outcome for this user in the window - bulk to varied destinations is the exfil signal.</Purpose>
+        <Query platform="Elastic" language="ES|QL" id="INV-01">
+          <![CDATA[
+FROM logs-cef.log-*
+| WHERE observer.vendor == "Forcepoint" AND cef.extensions.loginName LIKE "INTDOM*"
+    AND cef.extensions.deviceEventCategory LIKE "*Public Mail Domain*"
+    AND (cef.extensions.deviceEventCategory LIKE "*Sensitive words*" OR cef.extensions.deviceEventCategory LIKE "*PCI*" OR cef.extensions.deviceEventCategory LIKE "*Files Outbound*")
+    AND @timestamp >= NOW() - 4 hours
+| EVAL user.name = TO_LOWER(MV_LAST(SPLIT(cef.extensions.loginName, "\\")))
+| WHERE user.name == "$user"
+| STATS incidents = COUNT(*), destinations = COUNT_DISTINCT(cef.extensions.destinationHosts), dst_list = VALUES(cef.extensions.destinationHosts), categories = VALUES(cef.extensions.deviceEventCategory), actions = VALUES(cef.extensions.deviceAction), channels = VALUES(cef.extensions.sourceServiceName)
+| LIMIT 1
+          ]]>
+        </Query>
+        <ExpectedOutput>
+          <Field name="incidents"/>
+          <Field name="destinations"/>
+          <Field name="dst_list"/>
+          <Field name="actions"/>
+        </ExpectedOutput>
+        <AnalystNotes>Many incidents across several distinct public mail domains = exfil pattern. A single destination that is a known business partner webmail may be an authorised exception. Check whether actions are Monitor-Mode-permitted (data left) or Blocked.</AnalystNotes>
+      </Step>
+      <Step order="2" name="Enumerate the individual transfers (what, where, allowed or blocked)">
+        <Purpose>List each transfer so the analyst can read the data category, destination and action - the concrete evidence for the case.</Purpose>
+        <Query platform="Elastic" language="ES|QL" id="INV-02">
+          <![CDATA[
+FROM logs-cef.log-*
+| WHERE observer.vendor == "Forcepoint" AND cef.extensions.loginName LIKE "INTDOM*"
+    AND cef.extensions.deviceEventCategory LIKE "*Public Mail Domain*"
+    AND @timestamp >= NOW() - 4 hours
+| EVAL user.name = TO_LOWER(MV_LAST(SPLIT(cef.extensions.loginName, "\\")))
+| WHERE user.name == "$user"
+| KEEP @timestamp, cef.extensions.destinationHosts, cef.extensions.deviceEventCategory, cef.extensions.deviceAction, cef.extensions.filename, cef.extensions.sourceServiceName, cef.extensions.sourceHost, cef.extensions.sourceIp, cef.extensions.eventId
+| SORT @timestamp DESC
+| LIMIT 50
+          ]]>
+        </Query>
+        <ExpectedOutput>
+          <Field name="cef.extensions.destinationHosts"/>
+          <Field name="cef.extensions.deviceEventCategory"/>
+          <Field name="cef.extensions.deviceAction"/>
+          <Field name="cef.extensions.filename"/>
+        </ExpectedOutput>
+        <AnalystNotes>PCI or "Files Outbound" content to gmail/outlook/yahoo/proton is high concern. "Sensitive words" to a partner domain may be routine. sourceServiceName distinguishes web upload (Content Gateway / Endpoint HTTPS) from email channel.</AnalystNotes>
+      </Step>
+      <Step order="3" name="Blocked vs permitted (Monitor Mode) breakdown for this user">
+        <Purpose>Establish whether the DLP policy actually blocked the transfers or only monitored them - decisive for impact and for whether data left the perimeter.</Purpose>
+        <Query platform="Elastic" language="ES|QL" id="INV-03">
+          <![CDATA[
+FROM logs-cef.log-*
+| WHERE observer.vendor == "Forcepoint" AND cef.extensions.loginName LIKE "INTDOM*"
+    AND @timestamp >= NOW() - 4 hours
+| EVAL user.name = TO_LOWER(MV_LAST(SPLIT(cef.extensions.loginName, "\\")))
+| WHERE user.name == "$user"
+| EVAL act = TO_LOWER(cef.extensions.deviceAction)
+| EVAL blocked = CASE(act LIKE "*block*", 1, 0), permitted = CASE(act LIKE "*permit*", 1, 0)
+| STATS total = COUNT(*), permitted = SUM(permitted), blocked = SUM(blocked) BY cef.extensions.deviceEventCategory
+| SORT total DESC
+| LIMIT 20
+          ]]>
+        </Query>
+        <ExpectedOutput>
+          <Field name="total"/>
+          <Field name="permitted"/>
+          <Field name="blocked"/>
+          <Field name="cef.extensions.deviceEventCategory"/>
+        </ExpectedOutput>
+        <AnalystNotes>High permitted counts on Sensitive/PCI/Files-Outbound categories = data left under Monitor Mode (true impact). All-blocked = policy working; treat as a control-validation / potential circumvention-attempt review rather than confirmed loss.</AnalystNotes>
+      </Step>
+    </Workflow>
+  </Investigation>
+  <DecisionTree>
+    <Node><Condition>Multiple incidents of Sensitive words / PCI / Files-Outbound content to one or more personal / public mail domains, Monitor-Mode-permitted (data left the perimeter).</Condition><Result>True Positive (Data Exfiltration to Personal Email - escalate to IR and compliance)</Result></Node>
+    <Node><Condition>The transfers were actually Blocked by Forcepoint, OR they went to an authorised business destination with a documented justification.</Condition><Result>False Positive (Authorised transfer or proven blocked by policy)</Result></Node>
+    <Node><Condition>DLP policy over-classifying benign content (e.g. newsletters / templates flagged as Sensitive or PCI) inflating the incident count.</Condition><Result>Misconfiguration (DLP policy tuning)</Result></Node>
+    <Node><Condition>Sensitive content to an ambiguous destination, or it is unclear whether the user was authorised.</Condition><Result>Needs Escalation (data-handling review with the business owner and compliance)</Result></Node>
+  </DecisionTree>
+  <ClassificationGuidance>
+    <FalsePositive>
+      <Definition>An authorised bulk business transfer, or attempts that Forcepoint proved it Blocked.</Definition>
+      <Indicators>
+        <Item>Destination is an approved business partner / sanctioned service, with justification.</Item>
+        <Item>deviceAction shows Blocked for the transfers (policy enforced).</Item>
+        <Item>Content classification is a demonstrable over-match on benign data.</Item>
+      </Indicators>
+      <SOCAction>
+        <Item>Confirm business justification or the block outcome; document; close as authorised_or_blocked (not "benign").</Item>
+      </SOCAction>
+    </FalsePositive>
+    <TruePositive>
+      <Definition>Exfiltration of bulk sensitive / PCI data to personal or public webmail.</Definition>
+      <Indicators>
+        <Item>Multiple Sensitive / PCI / Files-Outbound incidents by one user.</Item>
+        <Item>Personal / public mail domains as destinations.</Item>
+        <Item>Monitor-Mode-permitted (the data actually egressed).</Item>
+      </Indicators>
+      <SOCAction>
+        <Item>Engage DLP / compliance and the user's manager; preserve the incident evidence and the transferred files; interview the user; reset / restrict the account if compromise or malice is suspected; open an IR case.</Item>
+      </SOCAction>
+    </TruePositive>
+    <Misconfiguration>
+      <Definition>A DLP policy over-classifying benign content, inflating sensitive-incident volume.</Definition>
+      <Indicators>
+        <Item>Benign content repeatedly matched as Sensitive / PCI.</Item>
+        <Item>The same template / newsletter drives most incidents.</Item>
+      </Indicators>
+      <SOCAction>
+        <Item>Raise a DLP policy-tuning request with the classification detail; document; suppress the specific benign pattern.</Item>
+      </SOCAction>
+    </Misconfiguration>
+  </ClassificationGuidance>
+  <Response><IRForHumans>
+    <Phase name="Immediate Actions (0-30 minutes)">
+      <Action priority="1">Identify the user (loginName / user.name), the data categories, the destinations, and whether the transfers were permitted (Monitor Mode) or blocked.</Action>
+      <Action priority="2">If bulk sensitive / PCI data was permitted to personal webmail, treat as exfiltration: engage DLP / compliance and preserve the incident records.</Action>
+    </Phase>
+    <Phase name="Containment and Eradication (hours)">
+      <Action>Review the transferred data with DLP / compliance; interview the user and their manager; if the account is compromised or the act is malicious, reset credentials and restrict egress for the user.</Action>
+    </Phase>
+    <Phase name="Recovery and Hardening (days)">
+      <Action>Move the relevant DLP policies from Monitor Mode to Block for personal-mail destinations; enforce egress controls; block risky destinations; deliver targeted user awareness; document lessons learned.</Action>
+    </Phase>
+  </IRForHumans></Response>
+  <Escalation>
+    <Trigger>Bulk sensitive / PCI content confirmed permitted (Monitor Mode) to personal / public webmail, or any indication of account compromise or intentional exfiltration.</Trigger>
+    <To>SOC L2 / IR</To>
+  </Escalation>
+  <Closure>
+    <FalsePositiveClosure>
+      <Item>Authorised business transfer or proven policy block confirmed and documented; DLP over-classification (if any) raised for tuning.</Item>
+    </FalsePositiveClosure>
+    <TruePositiveClosure>
+      <Item>Exfiltration scoped with compliance; transferred data reviewed; user addressed; account secured; DLP policy moved to Block; IR case recorded.</Item>
+    </TruePositiveClosure>
+  </Closure>
+</Playbook>

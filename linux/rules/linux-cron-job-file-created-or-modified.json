@@ -1,0 +1,80 @@
+{
+  "rule_id": "jcb-fim-linux-cron-persistence",
+  "name": "Linux — Cron Job File Created or Modified",
+  "version": 1,
+  "enabled": true,
+  "interval": "1h",
+  "from": "now-90m",
+  "to": "now",
+  "description": "Attacker objective\nPersist on a Linux host by creating or modifying a cron job that periodically executes attacker code.\n\nAttack logic\nCron executes commands on a schedule from job files under /etc/cron* and the per-user spool. Creating or altering one of these files installs a recurring execution/persistence mechanism.\n\nWhy this detection works\nFile-integrity monitoring records writes to the cron job files, surfacing cron-based persistence at the filesystem level even without process context.\n\nFalse positives\nLegitimate administration or configuration-management tooling that installs/updates a cron job.\n\nTuning\nAllowlist verified configuration-management and application-deployment workflows; correlate with the host's shell/auth activity (not captured by FIM); prioritise servers where cron rarely changes.\n\nRequired telemetry\nFile Integrity Monitoring (fim.event): file.path (cron job files), event.action, host.name. No process/user context — correlate with auditd.",
+  "tags": [
+    "JCB",
+    "FIM",
+    "Phase3",
+    "Tactic: Persistence",
+    "Use Case: Threat Detection"
+  ],
+  "author": [
+    "raadabujaish"
+  ],
+  "license": "",
+  "threat": [
+    {
+      "framework": "MITRE ATT&CK",
+      "tactic": {
+        "id": "TA0003",
+        "name": "Persistence",
+        "reference": "https://attack.mitre.org/tactics/TA0003/"
+      },
+      "technique": [
+        {
+          "id": "T1053",
+          "name": "Scheduled Task/Job",
+          "reference": "https://attack.mitre.org/techniques/T1053/",
+          "subtechnique": [
+            {
+              "id": "T1053.003",
+              "name": "Cron",
+              "reference": "https://attack.mitre.org/techniques/T1053/003/"
+            }
+          ]
+        }
+      ]
+    }
+  ],
+  "investigation_fields": {
+    "field_names": [
+      "host.name",
+      "file.path",
+      "file.extension",
+      "event.action",
+      "user.name",
+      "process.name",
+      "event.dataset"
+    ]
+  },
+  "related_integrations": [],
+  "required_fields": [],
+  "setup": "",
+  "note": "## Investigation guide\n1. file.path names the cron file and host.name the host; FIM does not show who added it.\n2. Pivot to auditd/system.auth to identify the actor and the command scheduled.\n3. Review the job's command; an unexpected cron entry is persistence — remove and investigate.",
+  "false_positives": [
+    "Legitimate administration or configuration-management tooling that installs/updates a cron job."
+  ],
+  "references": [
+    "https://attack.mitre.org/techniques/T1053/003/"
+  ],
+  "risk_score": 68,
+  "risk_score_mapping": [],
+  "severity": "high",
+  "severity_mapping": [],
+  "output_index": "",
+  "max_signals": 100,
+  "exceptions_list": [],
+  "actions": [],
+  "type": "query",
+  "language": "kuery",
+  "index": [
+    "logs-fim.event-*"
+  ],
+  "query": "event.dataset:\"fim.event\" and event.action:(\"created\" or \"updated\" or \"moved\") and (file.path:\"/etc/crontab\" or file.path:\"/etc/anacrontab\" or file.path:*/etc/cron.d/* or file.path:*/etc/cron.hourly/* or file.path:*/etc/cron.daily/* or file.path:*/etc/cron.weekly/* or file.path:*/etc/cron.monthly/* or file.path:*/var/spool/cron/*)"
+}

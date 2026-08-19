@@ -1,0 +1,72 @@
+{
+  "rule_id": "jcb-def-multiproduct-entity",
+  "name": "Defender — User Flagged by Multiple Defender Products",
+  "version": 1,
+  "enabled": true,
+  "interval": "1h",
+  "from": "now-24h",
+  "to": "now",
+  "description": "Attacker objective\nOperate as a compromised identity whose malicious activity is independently observed by more than one Microsoft Defender sensor.\n\nAttack logic\nWhen two distinct Defender products (Endpoint, Identity, Office 365, antivirus) independently flag the same user, the corroboration sharply increases the likelihood of a genuine compromise over a single-sensor false positive.\n\nWhy this detection works\nCounting distinct Defender detection sources per user, across the real-attack sensors, elevates cross-sensor agreement into one high-confidence alert.\n\nFalse positives\nA power user whose legitimate activity independently trips two sensors; shared/service accounts.\n\nTuning\nExclude verified shared/service accounts; require a specific high-value source (Endpoint/Identity) if noisy.\n\nRequired telemetry\nm365_defender.alert (user.name, detection_source, title, threat.tactic.name).",
+  "tags": [
+    "JCB",
+    "Defender",
+    "Phase3",
+    "Tactic: Initial Access",
+    "Use Case: Threat Detection"
+  ],
+  "author": [
+    "raadabujaish"
+  ],
+  "license": "",
+  "threat": [
+    {
+      "framework": "MITRE ATT&CK",
+      "tactic": {
+        "id": "TA0001",
+        "name": "Initial Access",
+        "reference": "https://attack.mitre.org/tactics/TA0001/"
+      },
+      "technique": [
+        {
+          "id": "T1078",
+          "name": "Valid Accounts",
+          "reference": "https://attack.mitre.org/techniques/T1078/"
+        }
+      ]
+    }
+  ],
+  "investigation_fields": {
+    "field_names": [
+      "user.name",
+      "message",
+      "m365_defender.incident.severity",
+      "m365_defender.incident.status",
+      "m365_defender.alert.title",
+      "m365_defender.alert.severity",
+      "m365_defender.alert.detection_source",
+      "host.name",
+      "event.action"
+    ]
+  },
+  "related_integrations": [],
+  "required_fields": [],
+  "setup": "",
+  "note": "## Investigation guide\n1. The user was flagged by multiple Defender products — review each product's alert and evidence.\n2. Correlate with the user's Windows/AD activity (logons, privileged changes) and contain the account if compromise is confirmed.",
+  "false_positives": [
+    "A power user whose legitimate activity independently trips two sensors; shared/service accounts."
+  ],
+  "references": [
+    "https://attack.mitre.org/techniques/T1078/"
+  ],
+  "risk_score": 78,
+  "risk_score_mapping": [],
+  "severity": "high",
+  "severity_mapping": [],
+  "output_index": "",
+  "max_signals": 100,
+  "exceptions_list": [],
+  "actions": [],
+  "type": "esql",
+  "language": "esql",
+  "query": "FROM logs-m365_defender.alert* METADATA _id, _index, _version\n| WHERE user.name IS NOT NULL AND NOT user.name IN (\"Unknown\",\"LOGIN\",\"-\",\"System\",\"SYSTEM\") AND m365_defender.alert.detection_source IN (\"microsoftDefenderForEndpoint\",\"microsoftDefenderForIdentity\",\"microsoftDefenderForOffice365\",\"antivirus\")\n| STATS sources = VALUES(m365_defender.alert.detection_source), distinct_sources = COUNT_DISTINCT(m365_defender.alert.detection_source), titles = VALUES(m365_defender.alert.title), tactics = VALUES(threat.tactic.name) BY user.name\n| WHERE distinct_sources >= 2"
+}

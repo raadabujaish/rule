@@ -1,0 +1,149 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<Playbook xmlns="https://soc.example/playbooks" id="PB-AD-018" name="AD/Windows — Audit Policy Changed by Interactive Account - SOC Playbook" version="1.0" status="Production" classification="TLP:AMBER">
+  <Metadata>
+    <Owner>JCB Detection Engineering (WatchWave)</Owner>
+    <LastUpdated>2026-08-14</LastUpdated>
+    <Severity default="Medium">Medium</Severity>
+    <Confidence default="Medium">Medium</Confidence>
+    <Category>Defense Evasion / Impair Defenses</Category>
+    <MitreAttack>
+      <Technique id="T1562.002" name="Disable Windows Event Logging"/>
+      <Tactic id="TA0005" name="Defense Evasion"/>
+    </MitreAttack>
+    <References>
+      <Reference title="MITRE ATT and CK" url="https://attack.mitre.org/techniques/T1562/"/>
+    </References>
+  </Metadata>
+  <ExecutiveSummary>
+    <Overview>The system audit policy was changed (4719) by an interactive (non-machine, non-service) account. The rule already excludes machine/SYSTEM/service accounts, so this is specifically a human-driven audit change. Triage question: sanctioned audit tuning, or an attacker disabling logging to go dark?</Overview>
+    <BusinessImpact>Disabling audit subcategories (logon, process creation, object access) blinds detection before the real attack proceeds.</BusinessImpact>
+  </ExecutiveSummary>
+  <Scope><Assets>
+    <AssetType>Active Directory domain controllers (INTDOM)</AssetType>
+    <AssetType>Windows member servers and workstations</AssetType>
+  </Assets><LogSources>
+    <LogSource>Windows Security event log - logs-system.security-*</LogSource>
+  </LogSources></Scope>
+  <Prerequisites><TelemetryRequirements>
+    <Requirement>Windows Security auditing shipped via Elastic Agent to logs-system.security-* (verified live).</Requirement>
+  </TelemetryRequirements><DetectionSignals>
+    <Signal><Name>Interactive audit change</Name><Details>4719, SubjectUserName not a machine/SYSTEM/service account.</Details></Signal>
+  </DetectionSignals></Prerequisites>
+  <Inputs>
+    <Input name="$username" description="Interactive account that changed audit policy (SubjectUserName)."/>
+    <Input name="$hostname" description="Host where changed."/>
+  </Inputs>
+  <Triage><ImmediateCapture>
+    <Item>Actor: $username</Item>
+    <Item>Host: $hostname</Item>
+  </ImmediateCapture><InitialAssessment>
+    <Rule>GPO-driven audit changes come from machine accounts (excluded); a human toggling audit on a server is unusual and worth confirming - disabling subcategories is more suspicious than enabling.</Rule>
+  </InitialAssessment></Triage>
+  <Investigation>
+    <Goal>Determine whether the interactive audit change is authorised hardening/tuning or an attempt to reduce logging before malicious activity.</Goal>
+    <Workflow>
+      <Step order="1" name="Scope the audit change and actor">
+        <Purpose>Confirm actor and whether several hosts had audit changed by the same person (broad blinding).</Purpose>
+        <Query platform="Elastic" language="ES|QL" id="INV-01-AUDIT-CHANGE">
+          <![CDATA[
+FROM logs-system.security-*
+| WHERE event.code == "4719" AND winlog.event_data.SubjectUserName == "$username" AND @timestamp >= NOW() - 4 hours
+| KEEP @timestamp, host.name, winlog.event_data.SubjectUserName, winlog.event_data.CategoryId, winlog.event_data.SubcategoryId, winlog.event_data.AuditPolicyChanges
+| SORT @timestamp DESC
+| LIMIT 30
+          ]]>
+        </Query>
+        <ExpectedOutput>
+          <Field name="host.name"/>
+          <Field name="winlog.event_data.SubcategoryId"/>
+          <Field name="winlog.event_data.AuditPolicyChanges"/>
+        </ExpectedOutput>
+        <AnalystNotes>AuditPolicyChanges values indicating 'removed' (success/failure auditing turned off) for Logon or Detailed Tracking is the concerning direction. Enabling auditing is benign hardening.</AnalystNotes>
+      </Step>
+      <Step order="2" name="Did the actor's session then perform actions that new gaps would hide">
+        <Purpose>If auditing was reduced and then privileged/logon activity occurred, the change was preparation.</Purpose>
+        <Query platform="Elastic" language="ES|QL" id="INV-02-AUDIT-FOLLOWON">
+          <![CDATA[
+FROM logs-system.security-*
+| WHERE host.name == "$hostname" AND event.code IN ("4624","4672","4688","7045") AND @timestamp >= NOW() - 2 hours
+| STATS c = COUNT(*), codes = VALUES(event.code), users = VALUES(winlog.event_data.TargetUserName)
+| LIMIT 10
+          ]]>
+        </Query>
+        <ExpectedOutput>
+          <Field name="codes"/>
+          <Field name="users"/>
+          <Field name="c"/>
+        </ExpectedOutput>
+        <AnalystNotes>Activity right after an audit reduction is what the attacker wanted unlogged; correlate the actor across both.</AnalystNotes>
+      </Step>
+      <Step order="3" name="Finalize classification">
+        <DecisionTree>
+          <Node><Condition>INV-01 shows audit subcategories being DISABLED (removed) by an interactive account with no change record, especially across hosts.</Condition><Result>True Positive (Defense Evasion - escalate)</Result></Node>
+          <Node><Condition>INV-02 shows privileged/logon activity right after auditing was reduced by the same actor.</Condition><Result>True Positive (Logging disabled before activity - IR)</Result></Node>
+          <Node><Condition>INV-01 shows auditing being ENABLED/hardened by a known admin, or a documented tuning change.</Condition><Result>False Positive</Result></Node>
+          <Node><Condition>Interactive change with unclear direction/authorisation.</Condition><Result>Needs Escalation</Result></Node>
+        </DecisionTree>
+        <DocumentationChecklist>
+          <Item>Attach outputs of INV-01-AUDIT-CHANGE, INV-02-AUDIT-FOLLOWON to the case.</Item>
+        </DocumentationChecklist>
+      </Step>
+    </Workflow>
+  </Investigation>
+  <ClassificationGuidance>
+    <FalsePositive>
+      <Definition>Authorised audit hardening or tuning by an administrator.</Definition>
+      <Indicators>
+        <Item>Known admin.</Item>
+        <Item>Change enables/expands auditing or matches a hardening ticket.</Item>
+        <Item>Single host, documented.</Item>
+      </Indicators>
+      <SOCAction>
+        <Item>Verify the change record; close as false_positive.</Item>
+      </SOCAction>
+    </FalsePositive>
+    <TruePositive>
+      <Definition>An actor disabling auditing to reduce visibility before/around malicious activity.</Definition>
+      <Indicators>
+        <Item>Subcategories disabled (Logon/Process/Object Access).</Item>
+        <Item>Multiple hosts.</Item>
+        <Item>Followed by privileged activity.</Item>
+      </Indicators>
+      <SOCAction>
+        <Item>Re-enable auditing (or reapply GPO); isolate the host if follow-on is present.</Item>
+        <Item>Investigate the actor; open IR.</Item>
+      </SOCAction>
+    </TruePositive>
+    <Misconfiguration>
+      <Definition>A misapplied local audit change diverging from GPO.</Definition>
+      <Indicators>
+        <Item>Local override that GPO will revert.</Item>
+        <Item>Admin experimenting without malicious intent.</Item>
+      </Indicators>
+      <SOCAction>
+        <Item>Reapply the standard audit GPO; document.</Item>
+      </SOCAction>
+    </Misconfiguration>
+  </ClassificationGuidance>
+  <Response><IRForHumans>
+    <Phase name="Immediate Actions (0-30 minutes)">
+      <Action priority="1">Reapply the standard audit policy/GPO.</Action>
+      <Action priority="2">If subcategories were disabled: isolate and investigate the actor.</Action>
+    </Phase>
+    <Phase name="Containment and Eradication (hours)">
+      <Action>Correlate actor activity across hosts; reconstruct the reduced-visibility window.</Action>
+    </Phase>
+    <Phase name="Recovery and Hardening (days)">
+      <Action>Enforce audit policy via GPO only; alert on local overrides; restrict SeSecurityPrivilege.</Action>
+    </Phase>
+  </IRForHumans></Response>
+  <QualityChecks>
+    <Check>Rule excludes machine/SYSTEM/service accounts so this is human-driven by design.</Check>
+    <Check>GPO refresh 4719 from machine accounts (the 4,915/30d noise) is correctly out of scope.</Check>
+  </QualityChecks>
+  <ClosureCriteria><FalsePositiveClosure>
+    <Item>Hardening/authorised tuning confirmed.</Item>
+  </FalsePositiveClosure><TruePositiveClosure>
+    <Item>Audit policy restored; actor investigated; visibility gap reconstructed.</Item>
+  </TruePositiveClosure></ClosureCriteria>
+</Playbook>

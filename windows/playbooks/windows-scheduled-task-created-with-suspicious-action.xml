@@ -1,0 +1,150 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<Playbook xmlns="https://soc.example/playbooks" id="PB-WIN-013" name="Windows — Scheduled Task Created with Suspicious Action - SOC Playbook" version="1.0" status="Production" classification="TLP:AMBER">
+  <Metadata>
+    <Owner>JCB Detection Engineering (WatchWave)</Owner>
+    <LastUpdated>2026-08-14</LastUpdated>
+    <Severity default="High">High</Severity>
+    <Confidence default="Medium">Medium</Confidence>
+    <Category>Persistence / Scheduled Task</Category>
+    <MitreAttack>
+      <Technique id="T1053.005" name="Scheduled Task"/>
+      <Tactic id="TA0003" name="Persistence"/>
+    </MitreAttack>
+    <References>
+      <Reference title="MITRE ATT and CK" url="https://attack.mitre.org/techniques/T1053/"/>
+    </References>
+  </Metadata>
+  <ExecutiveSummary>
+    <Overview>A scheduled task was created (4698) whose action content contains suspicious patterns - encoded PowerShell, download cradles, or interpreter execution. Triage question: is this a persistence/execution task, or a legitimate scheduled job?</Overview>
+    <BusinessImpact>Scheduled tasks are a common persistence and delayed-execution mechanism; an encoded-command task is almost always malicious.</BusinessImpact>
+  </ExecutiveSummary>
+  <Scope><Assets>
+    <AssetType>Windows servers and workstations (INTDOM domain)</AssetType>
+    <AssetType>Domain controllers</AssetType>
+  </Assets><LogSources>
+    <LogSource>Windows Security event log - logs-system.security-*</LogSource>
+  </LogSources></Scope>
+  <Prerequisites><TelemetryRequirements>
+    <Requirement>Windows Security + Sysmon + PowerShell logs via Elastic Agent (verified live). Sysmon event.code 1=process(command_line/parent populated), 11=file, 13/12=registry(registry.path populated); process.code_signature NOT collected.</Requirement>
+  </TelemetryRequirements><DetectionSignals>
+    <Signal><Name>Suspicious scheduled task</Name><Details>4698 TaskContent with powershell -enc / frombase64 / download patterns.</Details></Signal>
+  </DetectionSignals></Prerequisites>
+  <Inputs>
+    <Input name="$hostname" description="Host where the task was created."/>
+    <Input name="$username" description="Creating principal (SubjectUserName)."/>
+  </Inputs>
+  <Triage><ImmediateCapture>
+    <Item>Host: $hostname</Item>
+  </ImmediateCapture><InitialAssessment>
+    <Rule>Weigh the evidence story, not any single fact - see ClassificationGuidance.</Rule>
+  </InitialAssessment></Triage>
+  <Investigation>
+    <Goal>Determine whether the scheduled task is malicious persistence/execution or a legitimate job.</Goal>
+    <Workflow>
+      <Step order="1" name="Task detail: name, action content, creator">
+        <Purpose>The task action content reveals the payload (encoded PS, download cradle, LOLBin).</Purpose>
+        <Query platform="Elastic" language="ES|QL" id="INV-01-SCHTASK-DETAIL">
+          <![CDATA[
+FROM logs-system.security-*
+| WHERE event.code == "4698" AND host.name == "$hostname" AND @timestamp >= NOW() - 4 hours
+| KEEP @timestamp, winlog.event_data.SubjectUserName, winlog.event_data.TaskName, winlog.event_data.TaskContent
+| SORT @timestamp DESC
+| LIMIT 10
+          ]]>
+        </Query>
+        <ExpectedOutput>
+          <Field name="winlog.event_data.TaskName"/>
+          <Field name="winlog.event_data.SubjectUserName"/>
+          <Field name="winlog.event_data.TaskContent"/>
+        </ExpectedOutput>
+        <AnalystNotes>TaskContent with -enc/FromBase64String, a download cradle (IEX/DownloadString), or execution from temp/appdata = malicious. A vendor task pointing at a signed binary on a schedule is benign.</AnalystNotes>
+      </Step>
+      <Step order="2" name="Was the task created right after a remote/suspicious logon">
+        <Purpose>Task persistence created just after remote access links it to an intrusion.</Purpose>
+        <Query platform="Elastic" language="ES|QL" id="INV-02-SCHTASK-ORIGIN" optional="true">
+          <![CDATA[
+FROM logs-system.security-*
+| WHERE host.name == "$hostname" AND event.code IN ("4624","4672") AND @timestamp >= NOW() - 1 hours
+| EVAL src = COALESCE(TO_STRING(source.ip), "local")
+| STATS c = COUNT(*), types = VALUES(winlog.event_data.LogonType), users = VALUES(winlog.event_data.TargetUserName) BY src
+| SORT c DESC
+| LIMIT 10
+          ]]>
+        </Query>
+        <ExpectedOutput>
+          <Field name="src"/>
+          <Field name="types"/>
+          <Field name="users"/>
+        </ExpectedOutput>
+        <AnalystNotes>A remote/interactive logon by the creator shortly before the task creation supports an intrusion-driven persistence.</AnalystNotes>
+      </Step>
+      <Step order="3" name="Finalize classification">
+        <DecisionTree>
+          <Node><Condition>Task action contains encoded PowerShell/download cradle/temp-path execution.</Condition><Result>True Positive (Malicious Persistence - IR)</Result></Node>
+          <Node><Condition>A verifiable vendor/admin scheduled job under a change record.</Condition><Result>False Positive</Result></Node>
+          <Node><Condition>Suspicious task with unclear provenance.</Condition><Result>Needs Escalation</Result></Node>
+        </DecisionTree>
+        <DocumentationChecklist>
+          <Item>Attach outputs of INV-01-SCHTASK-DETAIL, INV-02-SCHTASK-ORIGIN to the case.</Item>
+        </DocumentationChecklist>
+      </Step>
+    </Workflow>
+  </Investigation>
+  <ClassificationGuidance>
+    <FalsePositive>
+      <Definition>A legitimate scheduled job.</Definition>
+      <Indicators>
+        <Item>Vendor/admin task.</Item>
+        <Item>Signed target.</Item>
+        <Item>Change record.</Item>
+      </Indicators>
+      <SOCAction>
+        <Item>Confirm the job; close as false_positive.</Item>
+      </SOCAction>
+    </FalsePositive>
+    <TruePositive>
+      <Definition>Malicious scheduled-task persistence/execution.</Definition>
+      <Indicators>
+        <Item>Encoded/download-cradle content.</Item>
+        <Item>Temp/appdata execution.</Item>
+        <Item>Follows remote logon.</Item>
+      </Indicators>
+      <SOCAction>
+        <Item>Delete the task; isolate the host; open IR.</Item>
+        <Item>Hunt the creator's other persistence and origin.</Item>
+      </SOCAction>
+    </TruePositive>
+    <Misconfiguration>
+      <Definition>A deployment tool creating tasks with wrapper commands.</Definition>
+      <Indicators>
+        <Item>A known deployment account.</Item>
+        <Item>Consistent expected task.</Item>
+      </Indicators>
+      <SOCAction>
+        <Item>Baseline; document/exception.</Item>
+      </SOCAction>
+    </Misconfiguration>
+  </ClassificationGuidance>
+  <Response><IRForHumans>
+    <Phase name="Immediate Actions (0-30 minutes)">
+      <Action priority="1">Confirm the activity on the host; if malicious indicators, isolate the host.</Action>
+      <Action priority="2">Identify the responsible account/process and its origin.</Action>
+    </Phase>
+    <Phase name="Containment and Eradication (hours)">
+      <Action>Isolate the host; capture volatile evidence; hunt the same pattern across the estate.</Action>
+      <Action>Reset credentials used on the host if compromise is confirmed.</Action>
+    </Phase>
+    <Phase name="Recovery and Hardening (days)">
+      <Action>Remediate the root cause; add/verify EDR coverage; apply relevant hardening.</Action>
+    </Phase>
+  </IRForHumans></Response>
+  <QualityChecks>
+    <Check>Confirm the required telemetry (Sysmon/Security auditing) is present on the host.</Check>
+    <Check>Tune known-benign administrative sources via exceptions, not by disabling the rule.</Check>
+  </QualityChecks>
+  <ClosureCriteria><FalsePositiveClosure>
+    <Item>Activity confirmed benign/authorised and documented.</Item>
+  </FalsePositiveClosure><TruePositiveClosure>
+    <Item>Host contained and triaged; root cause eradicated; estate swept; findings recorded.</Item>
+  </TruePositiveClosure></ClosureCriteria>
+</Playbook>

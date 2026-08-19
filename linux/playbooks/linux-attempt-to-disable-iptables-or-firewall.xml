@@ -1,0 +1,147 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<Playbook xmlns="https://soc.example/playbooks" id="PB-LNX-009" name="Linux — Attempt to Disable IPTables or Firewall - SOC Playbook" version="1.0" status="Production" classification="TLP:AMBER">
+  <Metadata>
+    <Owner>JCB Detection Engineering (WatchWave)</Owner>
+    <LastUpdated>2026-08-14</LastUpdated>
+    <Severity default="Medium">Medium</Severity>
+    <Confidence default="Medium">Medium</Confidence>
+    <Category>Defense Evasion / Impair Defenses</Category>
+    <MitreAttack>
+      <Technique id="T1562.004" name="Disable or Modify System Firewall"/>
+      <Tactic id="TA0005" name="Defense Evasion"/>
+    </MitreAttack>
+    <References>
+      <Reference title="MITRE ATT and CK" url="https://attack.mitre.org/techniques/T1562/"/>
+    </References>
+  </Metadata>
+  <ExecutiveSummary>
+    <Overview>The host firewall was flushed/disabled or its rules changed. RECOVERED: JCB auditd NETFILTER_CFG records firewall rule/config changes (proven live on hq-ameyo hosts), and USER_CMD captures sudo iptables/ufw/firewalld commands. Triage: attacker disabling the firewall, or legitimate firewall administration?</Overview>
+    <BusinessImpact>Disabling the host firewall removes a network defense before an attack.</BusinessImpact>
+  </ExecutiveSummary>
+  <Scope><Assets>
+    <AssetType>Linux servers (core banking, app, DB - INTDOM)</AssetType>
+  </Assets><LogSources>
+    <LogSource>Linux auditd NETFILTER_CFG/USER_CMD - logs-auditd.log-*</LogSource>
+  </LogSources></Scope>
+  <Prerequisites><TelemetryRequirements>
+    <Requirement>JCB Linux auditd does NOT audit execve (no EXECVE records, event.action:exec never occurs) or file paths. It DOES capture: USER_CMD (commands run via sudo, WITH process.args + auditd.log.AUID/UID user), SERVICE_STOP/START (auditd.log.unit), NETFILTER_CFG (firewall config), package events. These queries use those real records.</Requirement>
+    <Requirement>COVERAGE IS PARTIAL: USER_CMD captures only sudo-invoked commands - it misses actions taken when already root and non-sudo execution. Full coverage requires enabling auditd execve+file auditing (or Elastic Defend / ingesting the already-installed MDE-for-Linux device telemetry).</Requirement>
+  </TelemetryRequirements><DetectionSignals>
+    <Signal><Name>Attempt to Disable IPTables or Firewall</Name><Details>Firewall config change (auditd NETFILTER_CFG) or sudo firewall command (USER_CMD).</Details></Signal>
+  </DetectionSignals></Prerequisites>
+  <Inputs>
+    <Input name="$hostname" description="Host where the firewall changed."/>
+  </Inputs>
+  <Triage><ImmediateCapture>
+    <Item>$hostname: $hostname</Item>
+  </ImmediateCapture><InitialAssessment>
+    <Rule>Weigh the full evidence story per the ClassificationGuidance, not any single fact.</Rule>
+  </InitialAssessment></Triage>
+  <Investigation>
+    <Goal>Determine whether the firewall change is an attacker disabling it or legitimate administration.</Goal>
+    <Workflow>
+      <Step order="1" name="Firewall config changes on the host (NETFILTER_CFG)">
+        <Purpose>auditd NETFILTER_CFG records firewall table/rule changes - a burst or a flush is the concern.</Purpose>
+        <Query platform="Elastic" language="ES|QL" id="INV-01-NF-CHANGE">
+          <![CDATA[
+FROM logs-auditd.log-*
+| WHERE auditd.log.record_type == "NETFILTER_CFG" AND host.name == "$hostname" AND @timestamp >= NOW() - 4 hours
+| STATS changes = COUNT(*), tables = VALUES(auditd.log.table), first_seen = MIN(@timestamp), last_seen = MAX(@timestamp)
+| LIMIT 1
+          ]]>
+        </Query>
+        <ExpectedOutput>
+          <Field name="changes"/>
+          <Field name="tables"/>
+          <Field name="first_seen"/>
+          <Field name="last_seen"/>
+        </ExpectedOutput>
+        <AnalystNotes>Many rapid NETFILTER changes, or a change to the filter table dropping rules, is suspicious. Routine ruleset reloads (e.g. by fail2ban/docker/firewalld on startup) are benign - correlate with the sudo command below.</AnalystNotes>
+      </Step>
+      <Step order="2" name="Was a firewall-control command run via sudo">
+        <Purpose>A sudo iptables -F / ufw disable / systemctl stop firewalld identifies the actor and the intent (flush/disable).</Purpose>
+        <Query platform="Elastic" language="ES|QL" id="INV-02-NF-CMD" optional="true">
+          <![CDATA[
+FROM logs-auditd.log-*
+| WHERE auditd.log.record_type == "USER_CMD" AND host.name == "$hostname" AND @timestamp >= NOW() - 4 hours
+| EVAL cmd = MV_CONCAT(process.args, " ")
+| WHERE cmd RLIKE "(?i).*(iptables|ip6tables|ufw|firewalld|nft).*"
+| KEEP @timestamp, auditd.log.AUID, cmd
+| SORT @timestamp DESC
+| LIMIT 10
+          ]]>
+        </Query>
+        <ExpectedOutput>
+          <Field name="auditd.log.AUID"/>
+          <Field name="cmd"/>
+        </ExpectedOutput>
+        <AnalystNotes>A sudo 'iptables -F' (flush), 'ufw disable', or 'systemctl stop firewalld' by an unexpected AUID is the attacker disabling the firewall. A firewall reload under maintenance is benign.</AnalystNotes>
+      </Step>
+      <Step order="3" name="Finalize classification">
+        <DecisionTree>
+          <Node><Condition>A firewall flush/disable by an unexpected user, or a rule change dropping protection amid suspicious activity.</Condition><Result>True Positive (Firewall Disabled / Defense Evasion - investigate host)</Result></Node>
+          <Node><Condition>A routine firewall ruleset reload/maintenance by an admin or a known service.</Condition><Result>False Positive / Benign Activity</Result></Node>
+          <Node><Condition>Firewall change with unclear cause.</Condition><Result>Needs Escalation</Result></Node>
+        </DecisionTree>
+        <DocumentationChecklist>
+          <Item>Attach outputs of INV-01-NF-CHANGE, INV-02-NF-CMD to the case.</Item>
+        </DocumentationChecklist>
+      </Step>
+    </Workflow>
+  </Investigation>
+  <ClassificationGuidance>
+    <FalsePositive>
+      <Definition>Routine firewall administration/reload.</Definition>
+      <Indicators>
+        <Item>Maintenance/reload by an admin.</Item>
+        <Item>Known service (firewalld/docker/fail2ban).</Item>
+        <Item>Rules re-added.</Item>
+      </Indicators>
+      <SOCAction>
+        <Item>Confirm the maintenance/service; close as benign_activity.</Item>
+      </SOCAction>
+    </FalsePositive>
+    <TruePositive>
+      <Definition>An attacker disabling the host firewall.</Definition>
+      <Indicators>
+        <Item>Flush/disable by an unexpected user.</Item>
+        <Item>Protection dropped.</Item>
+        <Item>Amid suspicious activity.</Item>
+      </Indicators>
+      <SOCAction>
+        <Item>Restore the firewall; inspect the host for what the open window allowed; open IR.</Item>
+      </SOCAction>
+    </TruePositive>
+    <Misconfiguration>
+      <Definition>A config-management tool cycling firewall rules.</Definition>
+      <Indicators>
+        <Item>Known config tool.</Item>
+        <Item>Benign reload pattern.</Item>
+      </Indicators>
+      <SOCAction>
+        <Item>Baseline; document.</Item>
+      </SOCAction>
+    </Misconfiguration>
+  </ClassificationGuidance>
+  <Response><IRForHumans>
+    <Phase name="Immediate Actions (0-30 minutes)">
+      <Action priority="1">Confirm the firewall change and whether protection was removed.</Action>
+      <Action priority="2">If evasion, restore the firewall and inspect the host.</Action>
+    </Phase>
+    <Phase name="Containment and Eradication (hours)">
+      <Action>Restore the firewall; inspect the exposed window; open IR.</Action>
+    </Phase>
+    <Phase name="Recovery and Hardening (days)">
+      <Action>Enable auditd execve auditing; redesign the detection to use NETFILTER_CFG + USER_CMD; alert on firewall flush/disable.</Action>
+    </Phase>
+  </IRForHumans></Response>
+  <QualityChecks>
+    <Check>RECOVERED via NETFILTER_CFG (firewall config changes) + USER_CMD (sudo iptables/ufw) - proven live. The paired EQL detection cannot fire; redesign it to these records.</Check>
+    <Check>Partial: NETFILTER_CFG shows config changes (not always a clean flush signal); USER_CMD catches sudo firewall commands; a direct root iptables call outside sudo may be missed.</Check>
+  </QualityChecks>
+  <ClosureCriteria><FalsePositiveClosure>
+    <Item>Maintenance confirmed; documented.</Item>
+  </FalsePositiveClosure><TruePositiveClosure>
+    <Item>Firewall restored; exposed window inspected; host contained.</Item>
+  </TruePositiveClosure></ClosureCriteria>
+</Playbook>

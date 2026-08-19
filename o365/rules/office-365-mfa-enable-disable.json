@@ -1,0 +1,85 @@
+{
+  "rule_id": "be367455-9761-4f01-8899-d30d46faebba",
+  "name": "Office 365 - MFA Enable/Disable ",
+  "version": 1,
+  "enabled": true,
+  "interval": "5m",
+  "from": "now-900s",
+  "to": "now",
+  "description": "Detects when strong authentication is enabled or disabled, as these changes may impact account security.",
+  "tags": [],
+  "author": [],
+  "license": "",
+  "threat": [],
+  "investigation_fields": {
+    "field_names": [
+      "user.name",
+      "user.id",
+      "source.ip",
+      "event.action",
+      "event.code",
+      "event.outcome",
+      "o365.audit.Operation",
+      "o365.audit.ResultStatus",
+      "o365.audit.ObjectId",
+      "o365.audit.Severity",
+      "message"
+    ]
+  },
+  "related_integrations": [],
+  "required_fields": [],
+  "setup": "",
+  "false_positives": [],
+  "references": [],
+  "risk_score": 21,
+  "risk_score_mapping": [],
+  "severity": "low",
+  "severity_mapping": [],
+  "output_index": "",
+  "max_signals": 100,
+  "exceptions_list": [],
+  "actions": [],
+  "meta": {
+    "from": "10m",
+    "kibana_siem_app_url": "https://jcb.scanwave.local:8008/app/security"
+  },
+  "type": "query",
+  "language": "kuery",
+  "index": [
+    "logs-*"
+  ],
+  "query": "",
+  "filters": [
+    {
+      "meta": {
+        "index": "17a9bfd8-b2da-4635-9d66-ed153194a4c7",
+        "type": "custom",
+        "disabled": false,
+        "negate": false,
+        "alias": null,
+        "key": "query",
+        "value": "{\"bool\":{\"minimum_should_match\":1,\"should\":[{\"match_phrase\":{\"event.action\":\"Disable Strong Authentication.\"}},{\"match_phrase\":{\"event.action\":\"Enable Strong Authentication.\"}}]}}"
+      },
+      "$state": {
+        "store": "appState"
+      },
+      "query": {
+        "bool": {
+          "minimum_should_match": 1,
+          "should": [
+            {
+              "match_phrase": {
+                "event.action": "Disable Strong Authentication."
+              }
+            },
+            {
+              "match_phrase": {
+                "event.action": "Enable Strong Authentication."
+              }
+            }
+          ]
+        }
+      }
+    }
+  ]
+}

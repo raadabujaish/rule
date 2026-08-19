@@ -1,0 +1,86 @@
+{
+  "rule_id": "jcb-fgt-lateral-admin-fanout",
+  "name": "FortiGate — Lateral Movement: Admin-Protocol Fan-Out from Non-Admin Host",
+  "version": 1,
+  "enabled": true,
+  "interval": "1h",
+  "from": "now-1h",
+  "to": "now",
+  "description": "Attacker objective\nSpread across internal hosts via administrative protocols (SMB/RDP/WinRM/SSH/RPC/VNC) after an initial compromise.\n\nAttack logic\nFan-out to many internal hosts over administrative protocols is normally limited to sanctioned management/jump hosts and domain controllers. A source outside that set reaching many internal hosts on admin ports is anomalous lateral movement.\n\nWhy this detection works\nExcluding the management subnet, domain controllers and scanners, then counting distinct internal destinations on admin ports, isolates genuine east-west fan-out.\n\nFalse positives\nA new legitimate jump/management/backup/patch host.\n\nTuning\nAdd verified management systems to the exclusion after review.\n\nRequired telemetry\nFortiGate traffic logs (source.ip, destination.ip, destination.port, action).",
+  "tags": [
+    "JCB",
+    "Perimeter",
+    "Phase3",
+    "Use Case: Threat Detection",
+    "Tactic: Lateral Movement"
+  ],
+  "author": [
+    "raadabujaish"
+  ],
+  "license": "",
+  "threat": [
+    {
+      "framework": "MITRE ATT&CK",
+      "tactic": {
+        "id": "TA0008",
+        "name": "Lateral Movement",
+        "reference": "https://attack.mitre.org/tactics/TA0008/"
+      },
+      "technique": [
+        {
+          "id": "T1021",
+          "name": "Remote Services",
+          "reference": "https://attack.mitre.org/techniques/T1021/"
+        }
+      ]
+    }
+  ],
+  "investigation_fields": {
+    "field_names": [
+      "source.ip",
+      "destination.ip",
+      "destination.port",
+      "fortinet.firewall.action"
+    ]
+  },
+  "related_integrations": [],
+  "required_fields": [],
+  "setup": "",
+  "note": "## Investigation guide\n1. source.ip = the fanning-out host; the ports/destinations show the spread.\n2. Correlate with a prior malware / DNS-C2 / exploit alert on the source — lateral movement follows initial access.\n3. Isolate if confirmed.",
+  "false_positives": [
+    "A new legitimate jump/management/backup/patch host."
+  ],
+  "references": [
+    "https://attack.mitre.org/techniques/T1021/"
+  ],
+  "risk_score": 76,
+  "risk_score_mapping": [],
+  "severity": "high",
+  "severity_mapping": [],
+  "output_index": "",
+  "max_signals": 100,
+  "exceptions_list": [],
+  "actions": [],
+  "meta": {
+    "kibana_siem_app_url": ""
+  },
+  "type": "threshold",
+  "language": "kuery",
+  "index": [
+    "logs-fortinet_fortigate.traffic-*"
+  ],
+  "query": "fortinet.firewall.srccountry:\"Reserved\" and fortinet.firewall.dstcountry:\"Reserved\" and fortinet.firewall.action:\"accept\" and destination.port:(445 or 3389 or 5985 or 5986 or 22 or 135 or 5900) and not source.ip:(\"192.168.166.1\" or \"192.168.25.1\" or \"192.168.25.2\" or \"172.17.25.1\" or \"192.168.157.1\" ) and not source.ip:\"192.168.41.0/24\"",
+  "filters": [],
+  "threshold": {
+    "field": [
+      "source.ip"
+    ],
+    "value": 1,
+    "cardinality": [
+      {
+        "field": "destination.ip",
+        "value": 10
+      }
+    ]
+  }
+}

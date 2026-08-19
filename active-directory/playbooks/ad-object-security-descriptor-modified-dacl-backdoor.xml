@@ -1,0 +1,149 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<Playbook xmlns="https://soc.example/playbooks" id="PB-AD-013" name="AD — Object Security Descriptor Modified (DACL Backdoor) - SOC Playbook" version="1.0" status="Production" classification="TLP:AMBER">
+  <Metadata>
+    <Owner>JCB Detection Engineering (WatchWave)</Owner>
+    <LastUpdated>2026-08-14</LastUpdated>
+    <Severity default="High">High</Severity>
+    <Confidence default="Medium">Medium</Confidence>
+    <Category>Persistence / Domain Policy Modification</Category>
+    <MitreAttack>
+      <Technique id="T1098" name="Account Manipulation"/>
+      <Tactic id="TA0003" name="Persistence"/>
+    </MitreAttack>
+    <References>
+      <Reference title="MITRE ATT and CK" url="https://attack.mitre.org/techniques/T1098/"/>
+    </References>
+  </Metadata>
+  <ExecutiveSummary>
+    <Overview>An object's nTSecurityDescriptor was modified (5136) by a non-SYSTEM principal - attackers edit DACLs to grant themselves rights (GenericAll, DS-Replication, WriteDACL) on privileged objects for stealthy persistence. Triage question: legitimate delegation change, or a permission backdoor being planted?</Overview>
+    <BusinessImpact>A DACL edit granting rights over the domain root or a privileged group is persistent, low-noise domain control that survives password resets.</BusinessImpact>
+  </ExecutiveSummary>
+  <Scope><Assets>
+    <AssetType>Active Directory domain controllers (INTDOM)</AssetType>
+    <AssetType>Windows member servers and workstations</AssetType>
+  </Assets><LogSources>
+    <LogSource>Windows Security event log - logs-system.security-*</LogSource>
+  </LogSources></Scope>
+  <Prerequisites><TelemetryRequirements>
+    <Requirement>Windows Security auditing shipped via Elastic Agent to logs-system.security-* (verified live).</Requirement>
+  </TelemetryRequirements><DetectionSignals>
+    <Signal><Name>Security descriptor change</Name><Details>5136 AttributeLDAPDisplayName nTSecurityDescriptor, subject not SYSTEM.</Details></Signal>
+  </DetectionSignals></Prerequisites>
+  <Inputs>
+    <Input name="$username" description="Principal that changed the descriptor (SubjectUserName)."/>
+    <Input name="$hostname" description="DC where recorded."/>
+  </Inputs>
+  <Triage><ImmediateCapture>
+    <Item>Actor: $username</Item>
+    <Item>DC: $hostname</Item>
+  </ImmediateCapture><InitialAssessment>
+    <Rule>Delegation changes by identity admins during projects are legitimate; edits to the domain head / AdminSDHolder / privileged groups by an unexpected principal are backdoor shapes.</Rule>
+  </InitialAssessment></Triage>
+  <Investigation>
+    <Goal>Determine whether the DACL change is authorised delegation or a self-serving rights grant on a sensitive object.</Goal>
+    <Workflow>
+      <Step order="1" name="Which objects had descriptors changed by this principal">
+        <Purpose>The sensitivity of the TARGET object (domain root, AdminSDHolder, Tier-0 groups) sets the severity.</Purpose>
+        <Query platform="Elastic" language="ES|QL" id="INV-01-DACL-OBJECTS">
+          <![CDATA[
+FROM logs-system.security-*
+| WHERE event.code == "5136" AND winlog.event_data.AttributeLDAPDisplayName == "nTSecurityDescriptor" AND winlog.event_data.SubjectUserName == "$username" AND @timestamp >= NOW() - 4 hours
+| KEEP @timestamp, winlog.event_data.ObjectDN, winlog.event_data.ObjectClass, host.name
+| SORT @timestamp DESC
+| LIMIT 30
+          ]]>
+        </Query>
+        <ExpectedOutput>
+          <Field name="winlog.event_data.ObjectDN"/>
+          <Field name="winlog.event_data.ObjectClass"/>
+        </ExpectedOutput>
+        <AnalystNotes>ObjectDN = domain root, CN=AdminSDHolder, or a Tier-0 group/OU is high severity. Edits to a single delegated OU are lower concern.</AnalystNotes>
+      </Step>
+      <Step order="2" name="Is the actor concurrently doing other privileged directory changes">
+        <Purpose>DACL edits combined with group/SPN/key changes indicate an active persistence campaign, not a one-off delegation.</Purpose>
+        <Query platform="Elastic" language="ES|QL" id="INV-02-DACL-CAMPAIGN">
+          <![CDATA[
+FROM logs-system.security-*
+| WHERE winlog.event_data.SubjectUserName == "$username" AND event.code IN ("5136","4728","4732","4756","4742") AND @timestamp >= NOW() - 4 hours
+| STATS ops = COUNT(*), codes = VALUES(event.code), attrs = VALUES(winlog.event_data.AttributeLDAPDisplayName)
+| LIMIT 1
+          ]]>
+        </Query>
+        <ExpectedOutput>
+          <Field name="ops"/>
+          <Field name="codes"/>
+          <Field name="attrs"/>
+        </ExpectedOutput>
+        <AnalystNotes>Multiple change types across objects by one principal in minutes = campaign; escalate regardless of the actor's nominal role.</AnalystNotes>
+      </Step>
+      <Step order="3" name="Finalize classification">
+        <DecisionTree>
+          <Node><Condition>INV-01 shows a descriptor change on the domain root, AdminSDHolder, or a Tier-0 object by an unexpected principal.</Condition><Result>True Positive (Permission Backdoor - IR immediately)</Result></Node>
+          <Node><Condition>INV-02 shows the actor concurrently changing groups/keys/delegation across objects.</Condition><Result>True Positive (Persistence Campaign - IR)</Result></Node>
+          <Node><Condition>INV-01 shows a scoped delegation change on a project OU by a known identity admin under change control.</Condition><Result>False Positive</Result></Node>
+          <Node><Condition>Actor is a delegated admin but the target sensitivity/authorisation is unclear.</Condition><Result>Needs Escalation</Result></Node>
+        </DecisionTree>
+        <DocumentationChecklist>
+          <Item>Attach outputs of INV-01-DACL-OBJECTS, INV-02-DACL-CAMPAIGN to the case.</Item>
+        </DocumentationChecklist>
+      </Step>
+    </Workflow>
+  </Investigation>
+  <ClassificationGuidance>
+    <FalsePositive>
+      <Definition>Authorised delegation/permission management by an identity admin.</Definition>
+      <Indicators>
+        <Item>Known admin.</Item>
+        <Item>Scoped to an intended OU/object.</Item>
+        <Item>Matches a change ticket.</Item>
+      </Indicators>
+      <SOCAction>
+        <Item>Verify the delegation change; close as false_positive.</Item>
+      </SOCAction>
+    </FalsePositive>
+    <TruePositive>
+      <Definition>A DACL edit planting persistent rights on a sensitive object.</Definition>
+      <Indicators>
+        <Item>Target is domain root / AdminSDHolder / Tier-0.</Item>
+        <Item>Actor unexpected or acting in a campaign.</Item>
+        <Item>Rights granted to the actor or a controlled account.</Item>
+      </Indicators>
+      <SOCAction>
+        <Item>Review and revert the ACL change; reset affected trustees.</Item>
+        <Item>Disable the actor, isolate its host, open IR.</Item>
+        <Item>Audit AdminSDHolder and domain-root ACLs fully.</Item>
+      </SOCAction>
+    </TruePositive>
+    <Misconfiguration>
+      <Definition>A tool over-writing security descriptors due to misconfiguration.</Definition>
+      <Indicators>
+        <Item>Automation account re-applying descriptors per a broken template.</Item>
+        <Item>Owner confirms benign.</Item>
+      </Indicators>
+      <SOCAction>
+        <Item>Fix the tool; verify no excess rights were granted.</Item>
+      </SOCAction>
+    </Misconfiguration>
+  </ClassificationGuidance>
+  <Response><IRForHumans>
+    <Phase name="Immediate Actions (0-30 minutes)">
+      <Action priority="1">Capture and review the new ACL; revert unauthorised entries.</Action>
+      <Action priority="2">Disable/isolate the actor if suspicious.</Action>
+    </Phase>
+    <Phase name="Containment and Eradication (hours)">
+      <Action>Audit domain-root/AdminSDHolder ACLs; reset trustees that gained rights.</Action>
+    </Phase>
+    <Phase name="Recovery and Hardening (days)">
+      <Action>Baseline and monitor ACLs on Tier-0 objects; restrict WriteDACL.</Action>
+    </Phase>
+  </IRForHumans></Response>
+  <QualityChecks>
+    <Check>nTSecurityDescriptor edits are inherently sensitive - SYSTEM is excluded to cut noise.</Check>
+    <Check>Decoding the SDDL delta may require the AD team.</Check>
+  </QualityChecks>
+  <ClosureCriteria><FalsePositiveClosure>
+    <Item>Scoped, authorised delegation confirmed.</Item>
+  </FalsePositiveClosure><TruePositiveClosure>
+    <Item>Backdoor ACL reverted; Tier-0 descriptors audited; actor eradicated.</Item>
+  </TruePositiveClosure></ClosureCriteria>
+</Playbook>

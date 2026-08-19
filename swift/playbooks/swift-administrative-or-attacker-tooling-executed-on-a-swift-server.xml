@@ -1,0 +1,149 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<Playbook xmlns="https://soc.example/playbooks" id="PB-SWIFT-001" name="SWIFT — Administrative or Attacker Tooling Executed on a SWIFT Server - SOC Playbook" version="1.0" status="Production" classification="TLP:AMBER">
+  <Metadata>
+    <Owner>JCB Detection Engineering (WatchWave)</Owner>
+    <LastUpdated>2026-08-14</LastUpdated>
+    <Severity default="High">High</Severity>
+    <Confidence default="High">High</Confidence>
+    <Category>Execution / Tooling on SWIFT</Category>
+    <MitreAttack>
+      <Technique id="T1059" name="Command and Scripting Interpreter"/>
+      <Tactic id="TA0002" name="Execution"/>
+    </MitreAttack>
+    <References>
+      <Reference title="MITRE ATT and CK" url="https://attack.mitre.org/techniques/T1059/"/>
+    </References>
+  </Metadata>
+  <ExecutiveSummary>
+    <Overview>A process (4688) ran on a SWIFT server that matches administrative or attacker tooling (PsExec, PowerShell, credential/recon tools, etc.). SWIFT servers should run only a tightly-controlled software set. Triage: sanctioned SWIFT administration, or attacker tooling on a payment server?</Overview>
+    <BusinessImpact>Any unexpected tooling on a SWIFT server threatens the payment system - the highest-impact banking asset.</BusinessImpact>
+  </ExecutiveSummary>
+  <Scope><Assets>
+    <AssetType>SWIFT Alliance payment servers (saa*, hq-sw-app*, hq-swift*)</AssetType>
+  </Assets><LogSources>
+    <LogSource>Windows Security on SWIFT servers - logs-system.security-*</LogSource>
+  </LogSources></Scope>
+  <Prerequisites><TelemetryRequirements>
+    <Requirement>Windows Security auditing on SWIFT hosts (verified live: saa76dr, hq-sw-app-p, hq-swift-accs-p, saa72live, hq-swift-web-p). SWIFT servers are the highest-value payment assets - any anomaly is high priority.</Requirement>
+  </TelemetryRequirements><DetectionSignals>
+    <Signal><Name>Administrative or Attacker Tooling Execu</Name><Details>process on a SWIFT host matching admin/attacker tooling.</Details></Signal>
+  </DetectionSignals></Prerequisites>
+  <Inputs>
+    <Input name="$hostname" description="SWIFT server (host.name)."/>
+    <Input name="$process" description="Process name / tool if scoped."/>
+  </Inputs>
+  <Triage><ImmediateCapture>
+    <Item>$hostname: $hostname</Item>
+  </ImmediateCapture><InitialAssessment>
+    <Rule>Weigh the full evidence story per the ClassificationGuidance, not any single fact.</Rule>
+  </InitialAssessment></Triage>
+  <Investigation>
+    <Goal>Determine whether the tooling on the SWIFT server is sanctioned administration or attacker activity.</Goal>
+    <Workflow>
+      <Step order="1" name="Tooling/process activity on the SWIFT server">
+        <Purpose>The process, parent and account reveal sanctioned admin vs attacker tooling on this restricted asset.</Purpose>
+        <Query platform="Elastic" language="ES|QL" id="INV-01-SWIFT-PROC">
+          <![CDATA[
+FROM logs-windows.sysmon_operational-*,logs-system.security-*
+| WHERE event.code IN ("1","4688") AND host.name == "$hostname" AND @timestamp >= NOW() - 4 hours
+| WHERE process.name RLIKE "(?i)(psexec|powershell|pwsh|cmd|wmic|net1?|reg|mimikatz|procdump|rubeus|certutil|bitsadmin|nc|ncat).*"
+| KEEP @timestamp, process.name, process.parent.name, user.name, process.command_line
+| SORT @timestamp DESC
+| LIMIT 20
+          ]]>
+        </Query>
+        <ExpectedOutput>
+          <Field name="process.name"/>
+          <Field name="process.parent.name"/>
+          <Field name="user.name"/>
+          <Field name="process.command_line"/>
+        </ExpectedOutput>
+        <AnalystNotes>On a SWIFT server, ANY PsExec/credential-tool/download-tool is high concern. Sanctioned admin uses a known jump-host/account under change control. Read command_line for intent; an unexpected account or tool is likely an incident.</AnalystNotes>
+      </Step>
+      <Step order="2" name="Logon context on the SWIFT server">
+        <Purpose>Where the session originated (jump host vs unexpected source) distinguishes sanctioned admin from intrusion.</Purpose>
+        <Query platform="Elastic" language="ES|QL" id="INV-02-SWIFT-LOGON" optional="true">
+          <![CDATA[
+FROM logs-system.security-*
+| WHERE host.name == "$hostname" AND event.code == "4624" AND winlog.event_data.LogonType IN ("2","3","10") AND @timestamp >= NOW() - 4 hours
+| EVAL src = COALESCE(TO_STRING(source.ip), "local")
+| STATS logons = COUNT(*), users = VALUES(winlog.event_data.TargetUserName), types = VALUES(winlog.event_data.LogonType) BY src
+| SORT logons DESC
+| LIMIT 10
+          ]]>
+        </Query>
+        <ExpectedOutput>
+          <Field name="src"/>
+          <Field name="users"/>
+          <Field name="types"/>
+        </ExpectedOutput>
+        <AnalystNotes>A logon from an approved SWIFT jump host by an authorised operator is sanctioned. A logon from an unexpected source, or a non-SWIFT account, preceding the tooling is intrusion.</AnalystNotes>
+      </Step>
+      <Step order="3" name="Finalize classification">
+        <DecisionTree>
+          <Node><Condition>Attacker/credential/download tooling on the SWIFT server, or tooling from an unexpected source/account.</Condition><Result>True Positive (Intrusion on SWIFT Server - CSP incident process, IR)</Result></Node>
+          <Node><Condition>Sanctioned SWIFT administration using an approved tool/account under change control.</Condition><Result>False Positive</Result></Node>
+          <Node><Condition>An admin using a non-standard-but-legitimate tool without a change record.</Condition><Result>Needs Escalation</Result></Node>
+        </DecisionTree>
+        <DocumentationChecklist>
+          <Item>Attach outputs of INV-01-SWIFT-PROC, INV-02-SWIFT-LOGON to the case.</Item>
+        </DocumentationChecklist>
+      </Step>
+    </Workflow>
+  </Investigation>
+  <ClassificationGuidance>
+    <FalsePositive>
+      <Definition>Sanctioned SWIFT administration.</Definition>
+      <Indicators>
+        <Item>Approved tool/account.</Item>
+        <Item>Approved SWIFT jump host.</Item>
+        <Item>Change record.</Item>
+      </Indicators>
+      <SOCAction>
+        <Item>Verify the change/admin; close as false_positive.</Item>
+      </SOCAction>
+    </FalsePositive>
+    <TruePositive>
+      <Definition>Attacker tooling on a SWIFT payment server.</Definition>
+      <Indicators>
+        <Item>Credential/download/PsExec tooling.</Item>
+        <Item>Unexpected account/source.</Item>
+        <Item>No change record.</Item>
+      </Indicators>
+      <SOCAction>
+        <Item>Invoke the SWIFT CSP incident process; isolate the server; preserve evidence; review payments for fraud; open IR.</Item>
+      </SOCAction>
+    </TruePositive>
+    <Misconfiguration>
+      <Definition>A non-standard admin tool used without change control.</Definition>
+      <Indicators>
+        <Item>Legitimate admin, non-standard tool.</Item>
+        <Item>No ticket.</Item>
+      </Indicators>
+      <SOCAction>
+        <Item>Require change control; document; add the tool to the allowlist if approved.</Item>
+      </SOCAction>
+    </Misconfiguration>
+  </ClassificationGuidance>
+  <Response><IRForHumans>
+    <Phase name="Immediate Actions (0-30 minutes)">
+      <Action priority="1">Confirm the activity on the SWIFT server; SWIFT anomalies are high priority.</Action>
+      <Action priority="2">If unauthorised, isolate per the SWIFT CSP incident process.</Action>
+    </Phase>
+    <Phase name="Containment and Eradication (hours)">
+      <Action>Isolate the SWIFT server per the CSP incident process; preserve evidence; engage the SWIFT/payments team; open IR.</Action>
+      <Action>Review payment activity for fraud.</Action>
+    </Phase>
+    <Phase name="Recovery and Hardening (days)">
+      <Action>Enforce SWIFT CSP controls: restricted access, MFA/jump-host, allowlisted software, segregation from the general network.</Action>
+    </Phase>
+  </IRForHumans></Response>
+  <QualityChecks>
+    <Check>SWIFT servers are in-scope for the SWIFT Customer Security Programme - treat every anomaly as high priority and involve the payments team.</Check>
+  </QualityChecks>
+  <ClosureCriteria><FalsePositiveClosure>
+    <Item>Sanctioned admin confirmed; documented.</Item>
+  </FalsePositiveClosure><TruePositiveClosure>
+    <Item>SWIFT server isolated per CSP; payments reviewed; IR recorded.</Item>
+  </TruePositiveClosure></ClosureCriteria>
+</Playbook>

@@ -1,0 +1,149 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<Playbook xmlns="https://soc.example/playbooks" id="PB-WIN-011" name="Windows — Remote-Execution Service Installed on a New Host (PsExec / PAExec / RemCom Family) - SOC Playbook" version="1.0" status="Production" classification="TLP:AMBER">
+  <Metadata>
+    <Owner>JCB Detection Engineering (WatchWave)</Owner>
+    <LastUpdated>2026-08-14</LastUpdated>
+    <Severity default="High">High</Severity>
+    <Confidence default="High">High</Confidence>
+    <Category>Lateral Movement / Remote Services</Category>
+    <MitreAttack>
+      <Technique id="T1569.002" name="Service Execution"/>
+      <Tactic id="TA0002" name="Execution"/>
+    </MitreAttack>
+    <References>
+      <Reference title="MITRE ATT and CK" url="https://attack.mitre.org/techniques/T1569/"/>
+    </References>
+  </Metadata>
+  <ExecutiveSummary>
+    <Overview>A remote-execution service (PSEXESVC, PAExec, RemCom, CSExec, winexesvc, impacket, SecretsDump) was installed (7045) on a host first-seen for it (new_terms). Triage question: is this lateral movement/credential dumping, or an admin using PsExec legitimately on a new host?</Overview>
+    <BusinessImpact>These service names are the fingerprints of remote-execution and credential-dumping tools; installation on a new host signals lateral movement.</BusinessImpact>
+  </ExecutiveSummary>
+  <Scope><Assets>
+    <AssetType>Windows servers and workstations (INTDOM domain)</AssetType>
+    <AssetType>Domain controllers</AssetType>
+  </Assets><LogSources>
+    <LogSource>Windows System log - logs-system.system-*</LogSource>
+  </LogSources></Scope>
+  <Prerequisites><TelemetryRequirements>
+    <Requirement>Windows Security + Sysmon + PowerShell logs via Elastic Agent (verified live). Sysmon event.code 1=process(command_line/parent populated), 11=file, 13/12=registry(registry.path populated); process.code_signature NOT collected.</Requirement>
+  </TelemetryRequirements><DetectionSignals>
+    <Signal><Name>Remote-exec service install</Name><Details>7045 with a PsExec/PAExec/RemCom/Impacket/SecretsDump service name, new host.</Details></Signal>
+  </DetectionSignals></Prerequisites>
+  <Inputs>
+    <Input name="$hostname" description="Host where the service was installed."/>
+    <Input name="$service" description="Service name (ServiceName)."/>
+  </Inputs>
+  <Triage><ImmediateCapture>
+    <Item>Host: $hostname</Item>
+  </ImmediateCapture><InitialAssessment>
+    <Rule>Weigh the evidence story, not any single fact - see ClassificationGuidance.</Rule>
+  </InitialAssessment></Triage>
+  <Investigation>
+    <Goal>Determine whether the remote-execution service install is lateral movement/credential dumping or legitimate admin use.</Goal>
+    <Workflow>
+      <Step order="1" name="Service install detail and any SecretsDump indicator">
+        <Purpose>The service name and image path reveal the tool; SecretsDump/impacket names indicate credential theft, not just execution.</Purpose>
+        <Query platform="Elastic" language="ES|QL" id="INV-01-REMSVC-INSTALL">
+          <![CDATA[
+FROM logs-system.system-*
+| WHERE event.code == "7045" AND host.name == "$hostname" AND @timestamp >= NOW() - 4 hours
+| KEEP @timestamp, winlog.event_data.ServiceName, winlog.event_data.ImagePath, winlog.event_data.ServiceType, winlog.event_data.AccountName
+| SORT @timestamp DESC
+| LIMIT 15
+          ]]>
+        </Query>
+        <ExpectedOutput>
+          <Field name="winlog.event_data.ServiceName"/>
+          <Field name="winlog.event_data.ImagePath"/>
+          <Field name="winlog.event_data.AccountName"/>
+        </ExpectedOutput>
+        <AnalystNotes>SecretsDump*/impacket* = credential dumping (worse than plain PsExec). ImagePath with a random name in ADMIN$/temp = attacker tool. A one-off admin PsExec differs from a sweep.</AnalystNotes>
+      </Step>
+      <Step order="2" name="Broader spread - same service family on other hosts">
+        <Purpose>The same remote-exec service appearing on multiple hosts is active lateral movement.</Purpose>
+        <Query platform="Elastic" language="ES|QL" id="INV-02-REMSVC-SPREAD" optional="true">
+          <![CDATA[
+FROM logs-system.system-*
+| WHERE event.code == "7045" AND winlog.event_data.ServiceName RLIKE "(?i)(psexe|paexec|remcom|csexec|winexe|impacket|secretsdump|btobto).*" AND @timestamp >= NOW() - 4 hours
+| STATS installs = COUNT(*), hosts = COUNT_DISTINCT(host.name), host_list = VALUES(host.name), services = VALUES(winlog.event_data.ServiceName)
+| LIMIT 1
+          ]]>
+        </Query>
+        <ExpectedOutput>
+          <Field name="installs"/>
+          <Field name="hosts"/>
+          <Field name="host_list"/>
+          <Field name="services"/>
+        </ExpectedOutput>
+        <AnalystNotes>Multiple hosts with the same remote-exec service family in the window = lateral movement campaign - escalate. One host may be a single admin action.</AnalystNotes>
+      </Step>
+      <Step order="3" name="Finalize classification">
+        <DecisionTree>
+          <Node><Condition>SecretsDump/impacket service (credential dumping), or the same remote-exec service across multiple hosts.</Condition><Result>True Positive (Lateral Movement / Credential Dumping - IR)</Result></Node>
+          <Node><Condition>A single PSEXESVC install by a documented admin performing a known remote task.</Condition><Result>False Positive / Benign Activity</Result></Node>
+          <Node><Condition>Remote-exec service install with unclear admin provenance.</Condition><Result>Needs Escalation</Result></Node>
+        </DecisionTree>
+        <DocumentationChecklist>
+          <Item>Attach outputs of INV-01-REMSVC-INSTALL, INV-02-REMSVC-SPREAD to the case.</Item>
+        </DocumentationChecklist>
+      </Step>
+    </Workflow>
+  </Investigation>
+  <ClassificationGuidance>
+    <FalsePositive>
+      <Definition>A sanctioned admin using PsExec for a known task.</Definition>
+      <Indicators>
+        <Item>Documented admin action.</Item>
+        <Item>Single host.</Item>
+        <Item>Known admin account.</Item>
+      </Indicators>
+      <SOCAction>
+        <Item>Confirm the task; close as benign_activity; new_terms will learn the host.</Item>
+      </SOCAction>
+    </FalsePositive>
+    <TruePositive>
+      <Definition>Lateral movement or credential dumping via remote-execution tooling.</Definition>
+      <Indicators>
+        <Item>SecretsDump/impacket service.</Item>
+        <Item>Spread across hosts.</Item>
+        <Item>Random image path in admin share/temp.</Item>
+      </Indicators>
+      <SOCAction>
+        <Item>Isolate affected hosts; open IR; treat credentials on them as exposed.</Item>
+        <Item>Scope the spread; reset exposed credentials.</Item>
+      </SOCAction>
+    </TruePositive>
+    <Misconfiguration>
+      <Definition>A management tool using an embedded PsExec-like service by design.</Definition>
+      <Indicators>
+        <Item>A known management product.</Item>
+        <Item>Consistent expected service name.</Item>
+      </Indicators>
+      <SOCAction>
+        <Item>Baseline the product; document.</Item>
+      </SOCAction>
+    </Misconfiguration>
+  </ClassificationGuidance>
+  <Response><IRForHumans>
+    <Phase name="Immediate Actions (0-30 minutes)">
+      <Action priority="1">Confirm the activity on the host; if malicious indicators, isolate the host.</Action>
+      <Action priority="2">Identify the responsible account/process and its origin.</Action>
+    </Phase>
+    <Phase name="Containment and Eradication (hours)">
+      <Action>Isolate the host; capture volatile evidence; hunt the same pattern across the estate.</Action>
+      <Action>Reset credentials used on the host if compromise is confirmed.</Action>
+    </Phase>
+    <Phase name="Recovery and Hardening (days)">
+      <Action>Remediate the root cause; add/verify EDR coverage; apply relevant hardening.</Action>
+    </Phase>
+  </IRForHumans></Response>
+  <QualityChecks>
+    <Check>Confirm the required telemetry (Sysmon/Security auditing) is present on the host.</Check>
+    <Check>Tune known-benign administrative sources via exceptions, not by disabling the rule.</Check>
+  </QualityChecks>
+  <ClosureCriteria><FalsePositiveClosure>
+    <Item>Activity confirmed benign/authorised and documented.</Item>
+  </FalsePositiveClosure><TruePositiveClosure>
+    <Item>Host contained and triaged; root cause eradicated; estate swept; findings recorded.</Item>
+  </TruePositiveClosure></ClosureCriteria>
+</Playbook>

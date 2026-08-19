@@ -1,0 +1,79 @@
+{
+  "rule_id": "jcb-f5-auth-attack-banking",
+  "name": "F5 WAF — Authentication/Authorization Attack Reaching Internet Banking",
+  "version": 1,
+  "enabled": true,
+  "interval": "1h",
+  "from": "now-24h",
+  "to": "now",
+  "description": "Attacker objective\nBypass or brute-force authentication/authorization on the internet-banking login to take over customer accounts.\n\nAttack logic\nThe WAF classifies authentication/authorization attacks. A source generating many such attacks against the banking login in a short window is running a credential or authorization attack.\n\nWhy this detection works\nSource aggregation over the auth/authz attack type isolates the actor; correlating with backend authentication-failure logs confirms success.\n\nFalse positives\nA misbehaving legitimate integration hitting auth endpoints; a scanner.\n\nTuning\nSet the event count to local volume; correlate with backend authentication logs.\n\nRequired telemetry\nF5 ASM / Advanced WAF events (CEF): attack_type (Authentication/Authorization), deviceAction, source.ip.",
+  "tags": [
+    "JCB",
+    "F5-WAF",
+    "Phase3",
+    "Use Case: Threat Detection",
+    "Tactic: Credential Access"
+  ],
+  "author": [
+    "raadabujaish"
+  ],
+  "threat": [
+    {
+      "framework": "MITRE ATT&CK",
+      "tactic": {
+        "id": "TA0006",
+        "name": "Credential Access",
+        "reference": "https://attack.mitre.org/tactics/TA0006/"
+      },
+      "technique": [
+        {
+          "id": "T1110",
+          "name": "Brute Force",
+          "reference": "https://attack.mitre.org/techniques/T1110/"
+        }
+      ]
+    }
+  ],
+  "investigation_fields": {
+    "field_names": [
+      "source.ip",
+      "cef.extensions.deviceCustomString4",
+      "cef.extensions.deviceCustomString1",
+      "url.original",
+      "cef.extensions.deviceAction",
+      "cef.extensions.deviceCustomNumber2",
+      "source.geo.country_name",
+      "source.as.organization.name"
+    ]
+  },
+  "related_integrations": [],
+  "required_fields": [],
+  "setup": "",
+  "note": "## Investigation guide\n1. Review the targeted auth endpoints and whether the source also succeeded (backend logon logs).\n2. A credential attack on the banking login is high priority; consider blocking.",
+  "false_positives": [
+    "A misbehaving legitimate integration hitting auth endpoints; a scanner."
+  ],
+  "references": [
+    "https://attack.mitre.org/techniques/T1110/"
+  ],
+  "risk_score": 73,
+  "risk_score_mapping": [],
+  "severity": "high",
+  "severity_mapping": [],
+  "output_index": "",
+  "max_signals": 100,
+  "exceptions_list": [],
+  "actions": [],
+  "type": "threshold",
+  "language": "kuery",
+  "index": [
+    "logs-cef.log-*"
+  ],
+  "query": "observer.vendor:\"F5\" and cef.extensions.deviceCustomString4:\"Authentication/Authorization Attacks\" and cef.extensions.deviceCustomNumber2 >= 4 and not cef.extensions.deviceAction:\"blocked\"",
+  "threshold": {
+    "field": [
+      "source.ip"
+    ],
+    "value": 10
+  }
+}

@@ -1,0 +1,76 @@
+{
+  "rule_id": "jcb-def-xdr-attack-alert",
+  "name": "Defender — High-Confidence Endpoint/Identity/Office Attack Alert",
+  "version": 1,
+  "enabled": true,
+  "interval": "1h",
+  "from": "now-90m",
+  "to": "now",
+  "description": "Attacker objective\nEstablish or extend a foothold — exploit a public-facing service, deliver malware, create a rogue account, or compromise an identity — surfaced by Microsoft Defender XDR (Endpoint, Identity, Office 365).\n\nAttack logic\nDefender's Endpoint/Identity/Office sensors apply cloud-scale analytics and raise a discrete alert on genuine attacker activity. Unlike the DLP and bulk-antivirus streams, these three sources correspond to real intrusion behaviour and are low-volume.\n\nWhy this detection works\nScoping to the Endpoint/Identity/Office sources (excluding DLP/bulk-AV and resolved alerts) surfaces every high-confidence Defender detection, and derives the device short-name and user so the alert can be correlated with Windows, AD and perimeter detections on the same entity.\n\nFalse positives\nA Defender benign-positive or a sanctioned red-team exercise (e.g. an authorised scanner triggering an exploitation alert).\n\nTuning\nTriage against the Defender determination; suppress verified benign detections by title or actor; escalate high severity and privileged-user/critical-server alerts.\n\nRequired telemetry\nm365_defender.alert (detection_source, severity, status, title, evidence.device_dns_name, user.name, threat.tactic.name).",
+  "tags": [
+    "JCB",
+    "Defender",
+    "Phase3",
+    "Tactic: Initial Access",
+    "Use Case: Threat Detection"
+  ],
+  "author": [
+    "raadabujaish"
+  ],
+  "license": "",
+  "threat": [
+    {
+      "framework": "MITRE ATT&CK",
+      "tactic": {
+        "id": "TA0001",
+        "name": "Initial Access",
+        "reference": "https://attack.mitre.org/tactics/TA0001/"
+      },
+      "technique": [
+        {
+          "id": "T1190",
+          "name": "Exploit Public-Facing Application",
+          "reference": "https://attack.mitre.org/techniques/T1190/"
+        }
+      ]
+    }
+  ],
+  "investigation_fields": {
+    "field_names": [
+      "@timestamp",
+      "user.name",
+      "host.name",
+      "m365_defender.alert.title",
+      "m365_defender.alert.severity",
+      "m365_defender.alert.detection_source",
+      "m365_defender.alert.incident_id",
+      "threat.tactic.name",
+      "m365_defender.alert.evidence.device_dns_name",
+      "message",
+      "m365_defender.incident.severity",
+      "m365_defender.incident.status",
+      "event.action"
+    ]
+  },
+  "related_integrations": [],
+  "required_fields": [],
+  "setup": "",
+  "note": "## Investigation guide\n1. Open the Defender alert and review the title, evidence entities and MITRE techniques.\n2. Identify the device/user; for exploitation or account-creation alerts, treat the entity as compromised pending triage.\n3. Correlate with the Windows/AD and perimeter detections on the same user/host.",
+  "false_positives": [
+    "A Defender benign-positive or a sanctioned red-team exercise (e.g. an authorised scanner triggering an exploitation alert)."
+  ],
+  "references": [
+    "https://attack.mitre.org/techniques/T1190/"
+  ],
+  "risk_score": 73,
+  "risk_score_mapping": [],
+  "severity": "high",
+  "severity_mapping": [],
+  "output_index": "",
+  "max_signals": 100,
+  "exceptions_list": [],
+  "actions": [],
+  "type": "esql",
+  "language": "esql",
+  "query": "FROM logs-m365_defender.alert* METADATA _id, _index, _version\n| WHERE m365_defender.alert.detection_source IN (\"microsoftDefenderForEndpoint\",\"microsoftDefenderForIdentity\",\"microsoftDefenderForOffice365\") AND m365_defender.alert.severity != \"informational\" AND m365_defender.alert.status != \"resolved\" AND NOT user.name IN (\"nessus\")\n| EVAL host.name = MV_FIRST(SPLIT(TO_LOWER(MV_FIRST(m365_defender.alert.evidence.device_dns_name)), \".\"))\n| KEEP @timestamp, user.name, host.name, m365_defender.alert.title, m365_defender.alert.severity, m365_defender.alert.detection_source, m365_defender.alert.incident_id, threat.tactic.name, m365_defender.alert.evidence.device_dns_name"
+}

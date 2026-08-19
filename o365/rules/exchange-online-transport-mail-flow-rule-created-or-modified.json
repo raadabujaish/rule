@@ -1,0 +1,79 @@
+{
+  "rule_id": "jcb-m365-transport-rule-change",
+  "name": "Exchange Online — Transport (Mail Flow) Rule Created or Modified",
+  "version": 1,
+  "enabled": true,
+  "interval": "1h",
+  "from": "now-90m",
+  "to": "now",
+  "description": "Attacker objective\nIntercept, redirect, copy or silently drop organisational email by creating or modifying an Exchange transport (mail-flow) rule.\n\nAttack logic\nTransport rules act on all mail flow. An attacker can add a rule that blind-copies mail to an external address, redirects specific messages, or deletes security-related notifications to hide activity.\n\nWhy this detection works\nThe unified audit log records transport-rule create/modify/remove operations with the acting principal; these are infrequent administrative changes.\n\nFalse positives\nA legitimate mail-administration change to routing, disclaimers or compliance rules.\n\nTuning\nCorrelate with change control; review the rule's actions (bcc/redirect/delete) and conditions; allowlist sanctioned mail-admin automation.\n\nRequired telemetry\no365.audit RecordType 1, Operations 'New-TransportRule' / 'Set-TransportRule' / 'Remove-TransportRule' (Parameters, user.name=actor).",
+  "tags": [
+    "JCB",
+    "M365",
+    "Phase3",
+    "Tactic: Collection",
+    "Use Case: Threat Detection"
+  ],
+  "author": [
+    "raadabujaish"
+  ],
+  "license": "",
+  "threat": [
+    {
+      "framework": "MITRE ATT&CK",
+      "tactic": {
+        "id": "TA0009",
+        "name": "Collection",
+        "reference": "https://attack.mitre.org/tactics/TA0009/"
+      },
+      "technique": [
+        {
+          "id": "T1114",
+          "name": "Email Collection",
+          "reference": "https://attack.mitre.org/techniques/T1114/"
+        }
+      ]
+    }
+  ],
+  "investigation_fields": {
+    "field_names": [
+      "user.name",
+      "user.id",
+      "source.ip",
+      "event.action",
+      "event.code",
+      "event.outcome",
+      "o365.audit.Operation",
+      "o365.audit.ResultStatus",
+      "o365.audit.ObjectId",
+      "o365.audit.Severity",
+      "message",
+      "event.dataset",
+      "o365.audit"
+    ]
+  },
+  "related_integrations": [],
+  "required_fields": [],
+  "setup": "",
+  "note": "## Investigation guide\n1. Review the transport rule's conditions and actions (especially blind-copy, redirect or delete).\n2. Confirm the change was authorised; a rule that exfiltrates or drops mail is high-risk — revert and investigate the actor.",
+  "false_positives": [
+    "A legitimate mail-administration change to routing, disclaimers or compliance rules."
+  ],
+  "references": [
+    "https://attack.mitre.org/techniques/T1114/"
+  ],
+  "risk_score": 56,
+  "risk_score_mapping": [],
+  "severity": "medium",
+  "severity_mapping": [],
+  "output_index": "",
+  "max_signals": 100,
+  "exceptions_list": [],
+  "actions": [],
+  "type": "query",
+  "language": "kuery",
+  "index": [
+    "logs-o365*"
+  ],
+  "query": "event.dataset:\"o365.audit\" and event.action:(\"New-TransportRule\" or \"Set-TransportRule\" or \"Remove-TransportRule\")"
+}

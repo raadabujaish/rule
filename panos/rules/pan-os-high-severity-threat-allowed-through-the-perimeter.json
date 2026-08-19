@@ -1,0 +1,53 @@
+{
+  "rule_id": "jcb-panw-high-threat-allowed",
+  "name": "PAN-OS — High-Severity Threat Allowed Through the Perimeter",
+  "version": 1,
+  "enabled": true,
+  "interval": "5m",
+  "from": "now-10m",
+  "to": "now",
+  "description": "Promotes only actionable Palo Alto threat events: high/critical IPS or spyware signatures whose session was ALLOWED (not blocked). Replaces the deleted catch-all External Alerts rule (which promoted 550k+ PAN-OS events/day) with a scoped, low-volume signal for threats that got through.",
+  "tags": [
+    "JCB",
+    "Detection-QA-2026-08",
+    "Perimeter"
+  ],
+  "author": [
+    "JCB Detection Engineering"
+  ],
+  "license": "internal",
+  "threat": [],
+  "investigation_fields": {
+    "field_names": [
+      "source.ip",
+      "destination.ip",
+      "destination.port",
+      "panw.panos.threat.name",
+      "panw.panos.threat.id",
+      "event.action",
+      "event.severity",
+      "rule.name",
+      "network.application",
+      "message"
+    ]
+  },
+  "related_integrations": [],
+  "required_fields": [],
+  "setup": "",
+  "false_positives": [],
+  "references": [],
+  "risk_score": 73,
+  "risk_score_mapping": [],
+  "severity": "high",
+  "severity_mapping": [],
+  "output_index": "",
+  "max_signals": 100,
+  "exceptions_list": [],
+  "actions": [],
+  "type": "query",
+  "language": "kuery",
+  "index": [
+    "logs-panw.panos-*"
+  ],
+  "query": "event.dataset:\"panw.panos\" and panw.panos.sub_type:(vulnerability or spyware) and panw.panos.action:(alert or allow) and event.severity <= 2"
+}

@@ -1,0 +1,88 @@
+{
+  "rule_id": "jcb-win-pth-overpass-logon",
+  "name": "Windows — Pass-the-Hash / Overpass-the-Hash Logon Pattern",
+  "version": 1,
+  "enabled": true,
+  "interval": "1h",
+  "from": "now-90m",
+  "to": "now",
+  "description": "Attacker objective\nAuthenticate with a stolen NTLM hash or Kerberos key instead of a password (Pass-the-Hash / Overpass-the-Hash) to impersonate a user.\n\nAttack logic\nTools such as Mimikatz sekurlsa::pth create a logon session with alternate credentials. This produces a distinctive new-credentials (type 9) logon via the seclogo logon process using the Negotiate package — a fingerprint that legitimate runas/network logons do not match.\n\nWhy this detection works\nLogon auditing (4624) records the logon type, logon process and authentication package; the specific type-9 + seclogo + Negotiate combination isolates the pass-the-hash pattern.\n\nFalse positives\nSome legitimate 'run as different user with network credentials' scenarios; verify the account and process context.\n\nTuning\nBaseline any legitimate tooling that produces this pattern and allowlist it; investigate unexpected occurrences.\n\nRequired telemetry\nWindows Security 4624 (LogonType, LogonProcessName, AuthenticationPackageName).",
+  "tags": [
+    "JCB",
+    "Windows",
+    "Phase3",
+    "Use Case: Threat Detection",
+    "Tactic: Credential Access"
+  ],
+  "author": [
+    "raadabujaish"
+  ],
+  "license": "",
+  "threat": [
+    {
+      "framework": "MITRE ATT&CK",
+      "tactic": {
+        "id": "TA0006",
+        "name": "Credential Access",
+        "reference": "https://attack.mitre.org/tactics/TA0006/"
+      },
+      "technique": [
+        {
+          "id": "T1550",
+          "name": "Use Alternate Authentication Material",
+          "reference": "https://attack.mitre.org/techniques/T1550/",
+          "subtechnique": [
+            {
+              "id": "T1550.002",
+              "name": "Pass the Hash",
+              "reference": "https://attack.mitre.org/techniques/T1550/002/"
+            }
+          ]
+        }
+      ]
+    }
+  ],
+  "investigation_fields": {
+    "field_names": [
+      "host.name",
+      "winlog.computer_name",
+      "user.name",
+      "user.domain",
+      "winlog.event_data.TargetUserName",
+      "winlog.event_data.TargetDomainName",
+      "source.ip",
+      "winlog.event_data.LogonType",
+      "winlog.event_data.Status",
+      "winlog.event_data.SubStatus",
+      "winlog.event_data.ServiceName",
+      "winlog.event_data.TicketOptions",
+      "event.code",
+      "event.action",
+      "winlog.event_data.LogonProcessName"
+    ]
+  },
+  "related_integrations": [],
+  "required_fields": [],
+  "setup": "",
+  "note": "## Investigation guide\n1. Identify the target account and the host; a seclogo type-9 Negotiate logon is the classic pass-the-hash fingerprint.\n2. Correlate with the process that initiated it (Mimikatz-style tooling) and the source host.\n3. If confirmed, rotate the impersonated account's credentials and treat the host as compromised.",
+  "false_positives": [
+    "Some legitimate 'run as different user with network credentials' scenarios; verify the account and process context."
+  ],
+  "references": [
+    "https://attack.mitre.org/techniques/T1550/"
+  ],
+  "risk_score": 73,
+  "risk_score_mapping": [],
+  "severity": "high",
+  "severity_mapping": [],
+  "output_index": "",
+  "max_signals": 100,
+  "exceptions_list": [],
+  "actions": [],
+  "type": "query",
+  "language": "kuery",
+  "index": [
+    "logs-system.security-*"
+  ],
+  "query": "event.code:\"4624\" and winlog.event_data.LogonType:\"9\" and winlog.event_data.LogonProcessName:\"seclogo\" and winlog.event_data.AuthenticationPackageName:\"Negotiate\""
+}

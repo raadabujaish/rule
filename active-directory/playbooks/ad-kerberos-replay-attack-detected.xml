@@ -1,0 +1,147 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<Playbook xmlns="https://soc.example/playbooks" id="PB-AD-006" name="AD — Kerberos Replay Attack Detected - SOC Playbook" version="1.0" status="Production" classification="TLP:AMBER">
+  <Metadata>
+    <Owner>JCB Detection Engineering (WatchWave)</Owner>
+    <LastUpdated>2026-08-14</LastUpdated>
+    <Severity default="Medium">Medium</Severity>
+    <Confidence default="Low">Low</Confidence>
+    <Category>Credential Access / Kerberos Replay</Category>
+    <MitreAttack>
+      <Technique id="T1558" name="Steal or Forge Kerberos Tickets"/>
+      <Tactic id="TA0006" name="Credential Access"/>
+    </MitreAttack>
+    <References>
+      <Reference title="MITRE ATT and CK" url="https://attack.mitre.org/techniques/T1558/"/>
+    </References>
+  </Metadata>
+  <ExecutiveSummary>
+    <Overview>Windows raised 4649 ('a replay attack was detected') - the KDC saw a duplicated authenticator. Triage question: genuine ticket replay, or the well-known benign cause (clock/duplicate request quirks, load balancers re-sending)?</Overview>
+    <BusinessImpact>Real Kerberos replay implies an attacker on the network path reusing captured authenticators - rare but severe.</BusinessImpact>
+  </ExecutiveSummary>
+  <Scope><Assets>
+    <AssetType>Active Directory domain controllers (INTDOM)</AssetType>
+    <AssetType>Windows member servers and workstations</AssetType>
+  </Assets><LogSources>
+    <LogSource>Windows Security event log - logs-system.security-*</LogSource>
+  </LogSources></Scope>
+  <Prerequisites><TelemetryRequirements>
+    <Requirement>Windows Security auditing shipped via Elastic Agent to logs-system.security-* (verified live).</Requirement>
+  </TelemetryRequirements><DetectionSignals>
+    <Signal><Name>KDC replay signal</Name><Details>Event 4649 on a DC.</Details></Signal>
+  </DetectionSignals></Prerequisites>
+  <Inputs>
+    <Input name="$hostname" description="DC that raised 4649."/>
+    <Input name="$target_user" description="Account named in the 4649 event (from INV-01)."/>
+  </Inputs>
+  <Triage><ImmediateCapture>
+    <Item>DC: $hostname</Item>
+  </ImmediateCapture><InitialAssessment>
+    <Rule>4649 in isolation with no other auth anomalies for the involved principal is usually a protocol quirk; verify before closing.</Rule>
+  </InitialAssessment></Triage>
+  <Investigation>
+    <Goal>Determine whether the 4649 is an isolated protocol artifact or coincides with real duplicated-authentication behavior for the same principal.</Goal>
+    <Workflow>
+      <Step order="1" name="Pull the 4649 events and involved principals">
+        <Purpose>Get the exact principals/hosts involved - 4649 is rare, every instance matters.</Purpose>
+        <Query platform="Elastic" language="ES|QL" id="INV-01-REPLAY-EVENTS">
+          <![CDATA[
+FROM logs-system.security-*
+| WHERE event.code == "4649" AND @timestamp >= NOW() - 4 hours
+| KEEP @timestamp, host.name, winlog.event_data.TargetUserName, winlog.event_data.SubjectUserName, winlog.computer_name
+| SORT @timestamp DESC
+| LIMIT 20
+          ]]>
+        </Query>
+        <ExpectedOutput>
+          <Field name="@timestamp"/>
+          <Field name="host.name"/>
+          <Field name="winlog.event_data.TargetUserName"/>
+        </ExpectedOutput>
+        <AnalystNotes>Note the involved account(s). Several 4649s for different accounts on one DC in a short span leans infrastructure quirk; repeated 4649 for ONE account is more suspicious.</AnalystNotes>
+      </Step>
+      <Step order="2" name="Involved account's authentication picture around the event">
+        <Purpose>Real replay should coincide with duplicate/parallel session behavior for the account: same-second logons from different sources.</Purpose>
+        <Query platform="Elastic" language="ES|QL" id="INV-02-REPLAY-CONTEXT">
+          <![CDATA[
+FROM logs-system.security-*
+| WHERE event.code IN ("4624","4625","4771","4768") AND winlog.event_data.TargetUserName == "$target_user" AND @timestamp >= NOW() - 2 hours
+| EVAL src = COALESCE(TO_STRING(source.ip), "local")
+| STATS c = COUNT(*), codes = VALUES(event.code) BY src
+| SORT c DESC
+| LIMIT 15
+          ]]>
+        </Query>
+        <ExpectedOutput>
+          <Field name="src"/>
+          <Field name="c"/>
+          <Field name="codes"/>
+        </ExpectedOutput>
+        <AnalystNotes>Two different sources authenticating as the same account in the same window supports replay/credential sharing; a single source points to client retry quirks.</AnalystNotes>
+      </Step>
+      <Step order="3" name="Finalize classification">
+        <DecisionTree>
+          <Node><Condition>INV-02 shows the same account authenticating from two or more distinct sources in the same window, corroborating duplicated authenticators.</Condition><Result>True Positive (Possible Replay - escalate to IR)</Result></Node>
+          <Node><Condition>Single 4649 with no duplicated-source behavior and a known time-skew/load-balancer path involved.</Condition><Result>False Positive</Result></Node>
+          <Node><Condition>4649s recur on one DC across many accounts (KDC-side quirk, patch level or NLB re-send).</Condition><Result>Misconfiguration</Result></Node>
+          <Node><Condition>Account context is incomplete (no source data) - cannot corroborate either way.</Condition><Result>Needs Escalation</Result></Node>
+        </DecisionTree>
+        <DocumentationChecklist>
+          <Item>Attach outputs of INV-01-REPLAY-EVENTS, INV-02-REPLAY-CONTEXT to the case.</Item>
+        </DocumentationChecklist>
+      </Step>
+    </Workflow>
+  </Investigation>
+  <ClassificationGuidance>
+    <FalsePositive>
+      <Definition>Protocol/infrastructure artifact (retransmission, clock skew) without any duplicated-session evidence.</Definition>
+      <Indicators>
+        <Item>Isolated event.</Item>
+        <Item>No dual-source authentication for the account.</Item>
+        <Item>Known NLB/proxy in path.</Item>
+      </Indicators>
+      <SOCAction>
+        <Item>Document and close as false_positive; monitor recurrence.</Item>
+      </SOCAction>
+    </FalsePositive>
+    <TruePositive>
+      <Definition>An on-path actor replayed captured Kerberos material.</Definition>
+      <Indicators>
+        <Item>Dual-source simultaneous authentication for the account.</Item>
+        <Item>Follow-on access from the second source.</Item>
+      </Indicators>
+      <SOCAction>
+        <Item>Reset the account and revoke tickets.</Item>
+        <Item>Investigate the network path for interception; escalate to IR.</Item>
+      </SOCAction>
+    </TruePositive>
+    <Misconfiguration>
+      <Definition>Systemic KDC/infrastructure behavior repeatedly producing 4649 without malicious cause.</Definition>
+      <Indicators>
+        <Item>Recurring across accounts on the same DC.</Item>
+        <Item>Correlates with NLB retransmits or clock drift (0x25 skew also elevated).</Item>
+      </Indicators>
+      <SOCAction>
+        <Item>Engage AD platform team: fix time sync / NLB behavior; document the pattern.</Item>
+      </SOCAction>
+    </Misconfiguration>
+  </ClassificationGuidance>
+  <Response><IRForHumans>
+    <Phase name="Immediate Actions (0-30 minutes)">
+      <Action priority="1">Identify involved account and freeze if dual-source is confirmed.</Action>
+    </Phase>
+    <Phase name="Containment and Eradication (hours)">
+      <Action>Reset credentials; inspect network path segment for capture points.</Action>
+    </Phase>
+    <Phase name="Recovery and Hardening (days)">
+      <Action>Time-sync hygiene; review NLB Kerberos handling.</Action>
+    </Phase>
+  </IRForHumans></Response>
+  <QualityChecks>
+    <Check>4649 volume in JCB 90d was near zero - any burst is itself signal.</Check>
+  </QualityChecks>
+  <ClosureCriteria><FalsePositiveClosure>
+    <Item>No dual-source behavior; artifact documented.</Item>
+  </FalsePositiveClosure><TruePositiveClosure>
+    <Item>Account reset; path investigated; findings recorded.</Item>
+  </TruePositiveClosure></ClosureCriteria>
+</Playbook>

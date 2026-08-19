@@ -1,0 +1,79 @@
+{
+  "rule_id": "jcb-rec-potential-upgrade-of-non-interactive-shell",
+  "name": "Linux — Potential Upgrade of Non-interactive Shell",
+  "version": 1,
+  "enabled": true,
+  "interval": "5m",
+  "from": "now-9m",
+  "to": "now",
+  "description": "Identifies when a non-interactive terminal (tty) is being upgraded to a fully interactive shell. Attackers may upgrade a simple reverse shell to a fully interactive tty after obtaining initial access to a host, in order to obtain a more stable connection.",
+  "tags": [
+    "JCB",
+    "Linux"
+  ],
+  "author": [
+    "raadabujaish"
+  ],
+  "threat": [
+    {
+      "framework": "MITRE ATT&CK",
+      "tactic": {
+        "id": "TA0002",
+        "name": "Execution",
+        "reference": "https://attack.mitre.org/tactics/TA0002/"
+      },
+      "technique": [
+        {
+          "id": "T1059",
+          "name": "Command and Scripting Interpreter",
+          "reference": "https://attack.mitre.org/techniques/T1059/",
+          "subtechnique": [
+            {
+              "id": "T1059.004",
+              "name": "Unix Shell",
+              "reference": "https://attack.mitre.org/techniques/T1059/004/"
+            }
+          ]
+        }
+      ]
+    }
+  ],
+  "investigation_fields": {
+    "field_names": [
+      "host.name",
+      "user.name",
+      "user.id",
+      "process.name",
+      "process.executable",
+      "process.args",
+      "process.parent.name",
+      "file.path",
+      "event.action",
+      "event.outcome",
+      "message",
+      "host.os.type",
+      "event.type",
+      "process.args_count"
+    ]
+  },
+  "related_integrations": [],
+  "required_fields": [],
+  "setup": "",
+  "false_positives": [],
+  "references": [],
+  "risk_score": 47,
+  "risk_score_mapping": [],
+  "severity": "medium",
+  "severity_mapping": [],
+  "output_index": "",
+  "max_signals": 100,
+  "exceptions_list": [],
+  "actions": [],
+  "type": "eql",
+  "language": "eql",
+  "index": [
+    "logs-auditd.log-*",
+    "logs-auditd_manager.auditd-*"
+  ],
+  "query": "process where host.os.type == \"linux\" and event.type == \"start\" and event.action in (\"exec\", \"exec_event\") and (\n  (process.name == \"stty\" and process.args == \"raw\" and process.args == \"-echo\" and process.args_count >= 3) or\n  (process.name == \"script\" and process.args in (\"-qc\", \"-c\") and process.args == \"/dev/null\" and \n   process.args_count == 4)\n)\n"
+}

@@ -1,0 +1,80 @@
+{
+  "rule_id": "jcb-ad-spn-added",
+  "name": "AD — SPN Added by Non-Computer Principal (Kerberoast Setup)",
+  "version": 1,
+  "enabled": true,
+  "interval": "30m",
+  "from": "now-1h",
+  "to": "now",
+  "description": "Attacker objective\nSet a Service Principal Name on an account (especially a user account) to make it Kerberoastable.\n\nAttack logic\nComputer accounts self-register SPNs and are excluded. A human or service principal adding an SPN — particularly to a user account — is a Kerberoast-setup pattern that precedes an RC4/service-ticket request.\n\nWhy this detection works\nEvent 5136 records servicePrincipalName additions with the acting subject, so excluding computer principals isolates the setup behaviour.\n\nFalse positives\nAdministrative service-account provisioning.\n\nTuning\nAllowlist provisioning admins; an SPN added to a user account is highest-risk.\n\nRequired telemetry\nWindows Security 5136 (AttributeLDAPDisplayName=servicePrincipalName, SubjectUserName, ObjectDN).",
+  "tags": [
+    "JCB",
+    "ActiveDirectory",
+    "Phase3",
+    "Use Case: Threat Detection",
+    "Tactic: Credential Access"
+  ],
+  "author": [
+    "raadabujaish"
+  ],
+  "threat": [
+    {
+      "framework": "MITRE ATT&CK",
+      "tactic": {
+        "id": "TA0006",
+        "name": "Credential Access",
+        "reference": "https://attack.mitre.org/tactics/TA0006/"
+      },
+      "technique": [
+        {
+          "id": "T1558",
+          "name": "Steal or Forge Kerberos Tickets",
+          "reference": "https://attack.mitre.org/techniques/T1558/",
+          "subtechnique": [
+            {
+              "id": "T1558.003",
+              "name": "Kerberoasting",
+              "reference": "https://attack.mitre.org/techniques/T1558/003/"
+            }
+          ]
+        }
+      ]
+    }
+  ],
+  "investigation_fields": {
+    "field_names": [
+      "winlog.event_data.SubjectUserName",
+      "winlog.event_data.TargetUserName",
+      "winlog.event_data.ServiceName",
+      "winlog.event_data.AttributeLDAPDisplayName",
+      "winlog.event_data.ObjectDN",
+      "winlog.computer_name",
+      "winlog.event_data.IpAddress"
+    ]
+  },
+  "related_integrations": [],
+  "required_fields": [],
+  "setup": "",
+  "note": "## Investigation guide\n1. SubjectUserName added the SPN; ObjectDN = the account.\n2. If the target is a user account, rotate its password and watch for a subsequent RC4 service-ticket request.",
+  "false_positives": [
+    "Administrative service-account provisioning."
+  ],
+  "references": [
+    "https://attack.mitre.org/techniques/T1558/",
+    "https://attack.mitre.org/techniques/T1558/003/"
+  ],
+  "risk_score": 68,
+  "risk_score_mapping": [],
+  "severity": "high",
+  "severity_mapping": [],
+  "output_index": "",
+  "max_signals": 100,
+  "exceptions_list": [],
+  "actions": [],
+  "type": "query",
+  "language": "kuery",
+  "index": [
+    "logs-system.security-*"
+  ],
+  "query": "event.code:\"5136\" and winlog.event_data.AttributeLDAPDisplayName:\"servicePrincipalName\" and not winlog.event_data.SubjectUserName:*$ and not winlog.event_data.SubjectUserName:\"SYSTEM\""
+}

@@ -1,0 +1,80 @@
+{
+  "rule_id": "jcb-def-endpoint-multitactic",
+  "name": "Defender — Endpoint Incident Spanning Multiple Attack Tactics",
+  "version": 1,
+  "enabled": true,
+  "interval": "1h",
+  "from": "now-24h",
+  "to": "now",
+  "description": "Attacker objective\nProgress an intrusion on one endpoint or incident across several attack stages — for example malware execution followed by persistence, discovery, or lateral movement.\n\nAttack logic\nMicrosoft Defender groups related alerts into an incident per entity. An incident that spans two or more distinct non-DLP attack tactics represents a genuine, multi-stage compromise rather than an isolated detection.\n\nWhy this detection works\nAggregating distinct Defender tactics per incident (excluding the DLP/exfiltration class) confirms multi-stage activity that any single Defender alert cannot, with low false-positive risk.\n\nFalse positives\nA single behaviour that Defender maps to two adjacent tactics; a noisy test/UAT host generating varied benign detections.\n\nTuning\nExclude verified test/UAT incidents; raise the distinct-tactic threshold for higher confidence.\n\nRequired telemetry\nm365_defender.alert (incident_id, threat.tactic.name, title, evidence, severity, user.name).",
+  "tags": [
+    "JCB",
+    "Defender",
+    "Phase3",
+    "Tactic: Execution",
+    "Use Case: Threat Detection"
+  ],
+  "author": [
+    "raadabujaish"
+  ],
+  "license": "",
+  "threat": [
+    {
+      "framework": "MITRE ATT&CK",
+      "tactic": {
+        "id": "TA0002",
+        "name": "Execution",
+        "reference": "https://attack.mitre.org/tactics/TA0002/"
+      },
+      "technique": [
+        {
+          "id": "T1204",
+          "name": "User Execution",
+          "reference": "https://attack.mitre.org/techniques/T1204/",
+          "subtechnique": [
+            {
+              "id": "T1204.002",
+              "name": "Malicious File",
+              "reference": "https://attack.mitre.org/techniques/T1204/002/"
+            }
+          ]
+        }
+      ]
+    }
+  ],
+  "investigation_fields": {
+    "field_names": [
+      "m365_defender.alert.incident_id",
+      "message",
+      "m365_defender.incident.severity",
+      "m365_defender.incident.status",
+      "m365_defender.alert.title",
+      "m365_defender.alert.severity",
+      "m365_defender.alert.detection_source",
+      "user.name",
+      "host.name",
+      "event.action"
+    ]
+  },
+  "related_integrations": [],
+  "required_fields": [],
+  "setup": "",
+  "note": "## Investigation guide\n1. Review the incident in the Defender console; the tactics/titles show the attack progression.\n2. Identify the device and user; treat as an active multi-stage compromise — isolate and begin IR.\n3. Correlate the device/user with Windows/AD detections for corroboration and scope.",
+  "false_positives": [
+    "A single behaviour that Defender maps to two adjacent tactics; a noisy test/UAT host generating varied benign detections."
+  ],
+  "references": [
+    "https://attack.mitre.org/techniques/T1204/"
+  ],
+  "risk_score": 90,
+  "risk_score_mapping": [],
+  "severity": "critical",
+  "severity_mapping": [],
+  "output_index": "",
+  "max_signals": 100,
+  "exceptions_list": [],
+  "actions": [],
+  "type": "esql",
+  "language": "esql",
+  "query": "FROM logs-m365_defender.alert* METADATA _id, _index, _version\n| WHERE threat.tactic.name IS NOT NULL AND threat.tactic.name != \"Exfiltration\" AND m365_defender.alert.incident_id IS NOT NULL\n| STATS tactics = VALUES(threat.tactic.name), distinct_tactics = COUNT_DISTINCT(threat.tactic.name), titles = VALUES(m365_defender.alert.title), devices = VALUES(m365_defender.alert.evidence.device_dns_name), users = VALUES(user.name), severities = VALUES(m365_defender.alert.severity) BY m365_defender.alert.incident_id\n| WHERE distinct_tactics >= 2"
+}

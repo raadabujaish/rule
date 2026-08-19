@@ -1,0 +1,148 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<Playbook xmlns="https://soc.example/playbooks" id="PB-AD-012" name="AD — New Computer (Machine) Account Created - SOC Playbook" version="1.0" status="Production" classification="TLP:AMBER">
+  <Metadata>
+    <Owner>JCB Detection Engineering (WatchWave)</Owner>
+    <LastUpdated>2026-08-14</LastUpdated>
+    <Severity default="Medium">Medium</Severity>
+    <Confidence default="Low">Low</Confidence>
+    <Category>Persistence / Create Account</Category>
+    <MitreAttack>
+      <Technique id="T1136.002" name="Domain Account"/>
+      <Tactic id="TA0003" name="Persistence"/>
+    </MitreAttack>
+    <References>
+      <Reference title="MITRE ATT and CK" url="https://attack.mitre.org/techniques/T1136/"/>
+    </References>
+  </Metadata>
+  <ExecutiveSummary>
+    <Overview>A computer account was created (4741). Most are legitimate device joins, but attackers create machine accounts for persistence and for attacks like noPac/sAMAccountName spoofing and RBCD. Triage question: was this a normal domain-join by a provisioning/admin path, or an unexpected principal minting a machine account?</Overview>
+    <BusinessImpact>Attacker-controlled computer accounts enable resource-based delegation abuse and blend into normal AD noise.</BusinessImpact>
+  </ExecutiveSummary>
+  <Scope><Assets>
+    <AssetType>Active Directory domain controllers (INTDOM)</AssetType>
+    <AssetType>Windows member servers and workstations</AssetType>
+  </Assets><LogSources>
+    <LogSource>Windows Security event log - logs-system.security-*</LogSource>
+  </LogSources></Scope>
+  <Prerequisites><TelemetryRequirements>
+    <Requirement>Windows Security auditing shipped via Elastic Agent to logs-system.security-* (verified live).</Requirement>
+  </TelemetryRequirements><DetectionSignals>
+    <Signal><Name>Computer account creation</Name><Details>4741.</Details></Signal>
+  </DetectionSignals></Prerequisites>
+  <Inputs>
+    <Input name="$username" description="Creator principal (SubjectUserName)."/>
+    <Input name="$target_user" description="New computer account name (TargetUserName)."/>
+  </Inputs>
+  <Triage><ImmediateCapture>
+    <Item>Creator: $username</Item>
+    <Item>New machine: $target_user</Item>
+  </ImmediateCapture><InitialAssessment>
+    <Rule>Bulk device provisioning via SCCM/Intune/join account is routine; a normal user account creating a machine account (default MachineAccountQuota=10 lets any user do this) is the abuse shape.</Rule>
+  </InitialAssessment></Triage>
+  <Investigation>
+    <Goal>Determine whether the creator is an approved device-provisioning path and whether the new account shows abuse (rename, delegation, immediate ticket).</Goal>
+    <Workflow>
+      <Step order="1" name="Creator identity and creation rate">
+        <Purpose>A designated join/provisioning account creating machines is normal; a regular USER creating one (MAQ abuse) stands out.</Purpose>
+        <Query platform="Elastic" language="ES|QL" id="INV-01-MACH-CREATE">
+          <![CDATA[
+FROM logs-system.security-*
+| WHERE event.code == "4741" AND @timestamp >= NOW() - 4 hours
+| STATS created = COUNT(*), machines = VALUES(winlog.event_data.TargetUserName) BY winlog.event_data.SubjectUserName
+| SORT created DESC
+| LIMIT 25
+          ]]>
+        </Query>
+        <ExpectedOutput>
+          <Field name="winlog.event_data.SubjectUserName"/>
+          <Field name="created"/>
+          <Field name="machines"/>
+        </ExpectedOutput>
+        <AnalystNotes>Provisioning accounts create many; a human user with 1 creation stands out. A user creating several machine accounts quickly is noPac/RBCD-style setup.</AnalystNotes>
+      </Step>
+      <Step order="2" name="Was the new machine account renamed or delegated right after (4742)">
+        <Purpose>Immediate 4742 changes to the new account (sAMAccountName rename, msDS-AllowedToActOnBehalfOf) are the noPac/RBCD tells.</Purpose>
+        <Query platform="Elastic" language="ES|QL" id="INV-02-MACH-MANIP">
+          <![CDATA[
+FROM logs-system.security-*
+| WHERE event.code == "4742" AND winlog.event_data.TargetUserName == "$target_user" AND @timestamp >= NOW() - 2 hours
+| KEEP @timestamp, winlog.event_data.SubjectUserName, winlog.event_data.AttributeLDAPDisplayName, winlog.event_data.SamAccountName
+| SORT @timestamp DESC
+| LIMIT 15
+          ]]>
+        </Query>
+        <ExpectedOutput>
+          <Field name="winlog.event_data.AttributeLDAPDisplayName"/>
+          <Field name="winlog.event_data.SamAccountName"/>
+        </ExpectedOutput>
+        <AnalystNotes>A rename (SamAccountName dropping the trailing $) or msDS-AllowedToActOnBehalfOfOtherIdentity being set immediately after creation is strong RBCD/noPac evidence.</AnalystNotes>
+      </Step>
+      <Step order="3" name="Finalize classification">
+        <DecisionTree>
+          <Node><Condition>INV-01 shows a NON-provisioning user creating the machine account, especially several, or INV-02 shows immediate rename/delegation changes.</Condition><Result>True Positive (Machine-account abuse - escalate)</Result></Node>
+          <Node><Condition>INV-01 shows a designated join/provisioning account (SCCM/Intune/domain-join service) creating the account normally.</Condition><Result>False Positive</Result></Node>
+          <Node><Condition>Creator is a helpdesk/admin user with device-join rights and no follow-on manipulation - routine but unticketed.</Condition><Result>Benign Activity</Result></Node>
+          <Node><Condition>Creator role unclear and no manipulation yet.</Condition><Result>Needs Escalation</Result></Node>
+        </DecisionTree>
+        <DocumentationChecklist>
+          <Item>Attach outputs of INV-01-MACH-CREATE, INV-02-MACH-MANIP to the case.</Item>
+        </DocumentationChecklist>
+      </Step>
+    </Workflow>
+  </Investigation>
+  <ClassificationGuidance>
+    <FalsePositive>
+      <Definition>Normal device onboarding via an approved provisioning identity.</Definition>
+      <Indicators>
+        <Item>Creator is the domain-join/SCCM/Intune service or a device admin.</Item>
+        <Item>No post-creation rename/delegation.</Item>
+      </Indicators>
+      <SOCAction>
+        <Item>Confirm the device-join workflow; close as false_positive/benign_activity.</Item>
+      </SOCAction>
+    </FalsePositive>
+    <TruePositive>
+      <Definition>Attacker created a machine account for delegation abuse or persistence.</Definition>
+      <Indicators>
+        <Item>Regular user creating machine account(s) (MAQ abuse).</Item>
+        <Item>Immediate rename (noPac) or RBCD delegation set.</Item>
+        <Item>New account used to obtain tickets.</Item>
+      </Indicators>
+      <SOCAction>
+        <Item>Disable/delete the rogue machine account.</Item>
+        <Item>Investigate the creator's session; open IR.</Item>
+        <Item>Set MachineAccountQuota to 0 and delegate joins properly.</Item>
+      </SOCAction>
+    </TruePositive>
+    <Misconfiguration>
+      <Definition>An automation creating computer objects unexpectedly (staging/imaging job misfire).</Definition>
+      <Indicators>
+        <Item>Provisioning account creating extras due to a broken job.</Item>
+        <Item>No manipulation.</Item>
+      </Indicators>
+      <SOCAction>
+        <Item>Clean up stray objects; fix the job.</Item>
+      </SOCAction>
+    </Misconfiguration>
+  </ClassificationGuidance>
+  <Response><IRForHumans>
+    <Phase name="Immediate Actions (0-30 minutes)">
+      <Action priority="1">If abuse indicators: disable the new machine account; identify the creator's session.</Action>
+    </Phase>
+    <Phase name="Containment and Eradication (hours)">
+      <Action>Hunt for RBCD delegation and ticket requests using the account; remove delegation.</Action>
+    </Phase>
+    <Phase name="Recovery and Hardening (days)">
+      <Action>Set MachineAccountQuota=0; delegate machine creation to provisioning accounts only.</Action>
+    </Phase>
+  </IRForHumans></Response>
+  <QualityChecks>
+    <Check>4741 is high-volume-benign in most estates - rely on creator identity + 4742 follow-on, not the creation alone.</Check>
+    <Check>Pair with 4742 delegation monitoring.</Check>
+  </QualityChecks>
+  <ClosureCriteria><FalsePositiveClosure>
+    <Item>Approved provisioning path confirmed; no manipulation.</Item>
+  </FalsePositiveClosure><TruePositiveClosure>
+    <Item>Rogue account removed; creator investigated; MAQ hardened.</Item>
+  </TruePositiveClosure></ClosureCriteria>
+</Playbook>

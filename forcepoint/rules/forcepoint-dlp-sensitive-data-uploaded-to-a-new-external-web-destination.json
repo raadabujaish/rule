@@ -1,0 +1,89 @@
+{
+  "rule_id": "jcb-fp-new-web-destination-sensitive",
+  "name": "Forcepoint DLP — Sensitive Data Uploaded to a New External Web Destination",
+  "version": 1,
+  "enabled": true,
+  "interval": "1h",
+  "from": "now-90m",
+  "to": "now",
+  "description": "Attacker objective\nExfiltrate sensitive data by uploading it over the web to a new external destination — a personal cloud-storage account, file-sharing site, or other service not previously used.\n\nAttack logic\nUsers upload data to a stable set of sanctioned web destinations. The first time sensitive content is uploaded to a destination not seen before is a candidate exfiltration or shadow-IT event.\n\nWhy this detection works\nA new-terms model over the web destination auto-baselines the organisation's normal upload destinations and fires only when sensitive content goes to a genuinely new one.\n\nFalse positives\nAdoption of a new legitimate SaaS/cloud service; a new business partner portal.\n\nTuning\nAllowlist sanctioned new destinations after review; scope to higher-value classifiers if the volume of new SaaS destinations is high.\n\nRequired telemetry\nForcepoint DLP CEF (web channels): destinationHosts (upload destination), sourceServiceName (channel), deviceEventCategory (sensitive classifier), loginName.",
+  "tags": [
+    "JCB",
+    "Forcepoint-DLP",
+    "Phase3",
+    "Tactic: Exfiltration",
+    "Use Case: Insider Threat",
+    "Use Case: Threat Detection"
+  ],
+  "author": [
+    "raadabujaish"
+  ],
+  "license": "",
+  "threat": [
+    {
+      "framework": "MITRE ATT&CK",
+      "tactic": {
+        "id": "TA0010",
+        "name": "Exfiltration",
+        "reference": "https://attack.mitre.org/tactics/TA0010/"
+      },
+      "technique": [
+        {
+          "id": "T1567",
+          "name": "Exfiltration Over Web Service",
+          "reference": "https://attack.mitre.org/techniques/T1567/",
+          "subtechnique": [
+            {
+              "id": "T1567.002",
+              "name": "Exfiltration to Cloud Storage",
+              "reference": "https://attack.mitre.org/techniques/T1567/002/"
+            }
+          ]
+        }
+      ]
+    }
+  ],
+  "investigation_fields": {
+    "field_names": [
+      "user.name",
+      "source.ip",
+      "destination.ip",
+      "destination.port",
+      "event.action",
+      "message",
+      "observer.product",
+      "observer.vendor",
+      "cef.extensions.sourceServiceName",
+      "cef.extensions.deviceEventCategory",
+      "cef.extensions.destinationHosts"
+    ]
+  },
+  "related_integrations": [],
+  "required_fields": [],
+  "setup": "",
+  "note": "## Investigation guide\n1. Identify the new destination (destinationHosts), the user and the sensitive content.\n2. Determine whether the destination is a sanctioned service or personal cloud storage / file-sharing site.\n3. If unsanctioned, treat as exfiltration/shadow-IT and review what data reached it.",
+  "false_positives": [
+    "Adoption of a new legitimate SaaS/cloud service; a new business partner portal."
+  ],
+  "references": [
+    "https://attack.mitre.org/techniques/T1567/"
+  ],
+  "risk_score": 56,
+  "risk_score_mapping": [],
+  "severity": "medium",
+  "severity_mapping": [],
+  "output_index": "",
+  "max_signals": 100,
+  "exceptions_list": [],
+  "actions": [],
+  "type": "new_terms",
+  "query": "observer.vendor:\"Forcepoint\" and cef.extensions.sourceServiceName:(*Content Gateway* or *Endpoint HTTPS* or *Endpoint Web*) and cef.extensions.deviceEventCategory:(*Sensitive words* or *PCI* or *Files Outbound* or *Sensitive Words-Outbound*) and cef.extensions.destinationHosts:* and not cef.extensions.destinationHosts:\"N/A\"",
+  "new_terms_fields": [
+    "cef.extensions.destinationHosts"
+  ],
+  "history_window_start": "now-14d",
+  "index": [
+    "logs-cef.log-*"
+  ],
+  "language": "kuery"
+}

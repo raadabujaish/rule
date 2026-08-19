@@ -1,0 +1,70 @@
+{
+  "rule_id": "jcb-corr-external-multilayer-attack",
+  "name": "Correlation — External Source Attacking Multiple Security Layers",
+  "version": 1,
+  "enabled": true,
+  "interval": "1h",
+  "from": "now-24h",
+  "to": "now",
+  "description": "Attacker objective\nCompromise the bank by attacking across multiple perimeter layers — the web-application firewall, the next-gen firewall IPS, and the edge firewall — from a single source.\n\nAttack logic\nAn opportunistic scan hits one layer. A source that trips detections on two or more distinct perimeter products (WAF, FortiGate IPS, PAN-OS) is running a deliberate, multi-vector campaign against the institution.\n\nWhy this detection works\nCorrelating distinct perimeter product families per external source over the alert stream elevates coordinated cross-layer attacks above isolated single-layer noise.\n\nFalse positives\nA shared NAT/proxy egress aggregating many clients; an authorized external penetration test.\n\nTuning\nAllowlist sanctioned testers and known shared egress IPs; raise the distinct-layer threshold for higher confidence.\n\nRequired telemetry\nThe perimeter/WAF detection alerts (F5, FortiGate, PAN-OS) with source.ip populated.",
+  "tags": [
+    "JCB",
+    "Correlation",
+    "Phase3",
+    "Use Case: Threat Detection",
+    "Tactic: Initial Access"
+  ],
+  "author": [
+    "raadabujaish"
+  ],
+  "license": "",
+  "threat": [
+    {
+      "framework": "MITRE ATT&CK",
+      "tactic": {
+        "id": "TA0001",
+        "name": "Initial Access",
+        "reference": "https://attack.mitre.org/tactics/TA0001/"
+      },
+      "technique": [
+        {
+          "id": "T1190",
+          "name": "Exploit Public-Facing Application",
+          "reference": "https://attack.mitre.org/techniques/T1190/"
+        }
+      ]
+    }
+  ],
+  "investigation_fields": {
+    "field_names": [
+      "source.ip",
+      "kibana.alert.rule.name",
+      "kibana.alert.severity",
+      "host.name",
+      "user.name",
+      "destination.ip",
+      "message"
+    ]
+  },
+  "related_integrations": [],
+  "required_fields": [],
+  "setup": "",
+  "note": "## Investigation guide\n1. source.ip is the external attacker; review which layers and detections it triggered.\n2. Treat as a targeted campaign: block the source at the edge and hunt for any successful reach to internal assets.",
+  "false_positives": [
+    "A shared NAT/proxy egress aggregating many clients; an authorized external penetration test."
+  ],
+  "references": [
+    "https://attack.mitre.org/techniques/T1190/"
+  ],
+  "risk_score": 80,
+  "risk_score_mapping": [],
+  "severity": "high",
+  "severity_mapping": [],
+  "output_index": "",
+  "max_signals": 100,
+  "exceptions_list": [],
+  "actions": [],
+  "type": "esql",
+  "language": "esql",
+  "query": "FROM .alerts-security.alerts-* METADATA _id, _index, _version\n| WHERE source.ip IS NOT NULL AND (kibana.alert.rule.name LIKE \"F5 WAF*\" OR kibana.alert.rule.name LIKE \"FortiGate*\" OR kibana.alert.rule.name LIKE \"PAN-OS*\")\n| EVAL product = CASE(kibana.alert.rule.name LIKE \"F5 WAF*\", \"F5-WAF\", kibana.alert.rule.name LIKE \"PAN-OS*\", \"PAN-OS\", \"FortiGate\")\n| STATS layers = COUNT_DISTINCT(product), products = VALUES(product), detections = VALUES(kibana.alert.rule.name), alerts = COUNT() BY source.ip\n| WHERE layers >= 2"
+}

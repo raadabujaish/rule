@@ -1,0 +1,150 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<Playbook xmlns="https://soc.example/playbooks" id="PB-F5-006" name="F5 WAF — Sustained Blocked Attack Campaign Against Banking Applications - SOC Playbook" version="1.0" status="Production" classification="TLP:AMBER">
+  <Metadata>
+    <Owner>JCB Detection Engineering (WatchWave)</Owner>
+    <LastUpdated>2026-08-14</LastUpdated>
+    <Severity default="Medium">Medium</Severity>
+    <Confidence default="Medium">Medium</Confidence>
+    <Category>Initial Access / Exploit Public-Facing Application (Blocked)</Category>
+    <MitreAttack>
+      <Technique id="T1190" name="Exploit Public-Facing Application"/>
+      <Tactic id="TA0001" name="Initial Access"/>
+    </MitreAttack>
+    <References>
+      <Reference title="MITRE ATT and CK" url="https://attack.mitre.org/techniques/T1190/"/>
+    </References>
+  </Metadata>
+  <ExecutiveSummary>
+    <Overview>One source generated a sustained campaign (&gt;=300 in ~30 min) of rating&gt;=4 attacks that the WAF BLOCKED. A blocked attack is still a real attack - this is the JCB pattern like source 152.70.180.122 (205k blocked high-rating hits/week) that no rule previously reported. Triage question: is the WAF holding, and did ANY request from this source slip through to the backend?</Overview>
+    <BusinessImpact>A sustained campaign, even blocked, signals a determined adversary; if the WAF ever misses one request the impact is real. Confirming full containment is the goal.</BusinessImpact>
+  </ExecutiveSummary>
+  <Scope><Assets>
+    <AssetType>F5 BIG-IP ASM / Advanced WAF fronting JCB internet banking and public web apps</AssetType>
+    <AssetType>Published banking applications and their backend servers</AssetType>
+  </Assets><LogSources>
+    <LogSource>F5 ASM CEF events via syslog -&gt; logs-cef.log-* (observer.vendor F5)</LogSource>
+  </LogSources></Scope>
+  <Prerequisites><TelemetryRequirements>
+    <Requirement>F5 ASM logging to CEF over syslog, parsed into logs-cef.log-* (verified live).</Requirement>
+    <Requirement>CEF fields: deviceCustomString4=attack_type, deviceCustomNumber2=violation_rating (&gt;=4 = real attack), deviceCustomString1=security policy, requestUrl, requestMethod, deviceCustomNumber1=HTTP response code, deviceCustomString6=source geo, cef.name=violation name, event.action=passed|alerted|blocked.</Requirement>
+  </TelemetryRequirements><DetectionSignals>
+    <Signal><Name>Blocked campaign</Name><Details>&gt;=300 blocked rating&gt;=4 attack events from one source in ~30 min.</Details></Signal>
+  </DetectionSignals></Prerequisites>
+  <Inputs>
+    <Input name="$source_ip" description="Campaigning source IP."/>
+  </Inputs>
+  <Triage><ImmediateCapture>
+    <Item>Source: $source_ip</Item>
+    <Item>Blocked volume from the alert</Item>
+  </ImmediateCapture><InitialAssessment>
+    <Rule>Blocked-only from a single source is 'attack contained' - but the presence of ANY passed/alerted event for the same source flips priority to reached-target risk.</Rule>
+  </InitialAssessment></Triage>
+  <Investigation>
+    <Goal>Confirm the WAF blocked the whole campaign, or find the requests that were NOT blocked.</Goal>
+    <Workflow>
+      <Step order="1" name="Enforcement split - did anything slip past blocking">
+        <Purpose>The decisive question: for this campaigning source, count passed/alerted vs blocked.</Purpose>
+        <Query platform="Elastic" language="ES|QL" id="INV-01-F5CAMP-SPLIT">
+          <![CDATA[
+FROM logs-cef.log-*
+| WHERE observer.vendor == "F5" AND source.ip == "$source_ip" AND cef.extensions.deviceCustomNumber2 >= 4 AND @timestamp >= NOW() - 4 hours
+| STATS total = COUNT(*), blocked = COUNT(CASE(event.action == "blocked", 1, null)), passed = COUNT(CASE(event.action == "passed", 1, null)), alerted = COUNT(CASE(event.action == "alerted", 1, null)), types = VALUES(cef.extensions.deviceCustomString4), apps = VALUES(cef.extensions.deviceCustomString1)
+| LIMIT 1
+          ]]>
+        </Query>
+        <ExpectedOutput>
+          <Field name="total"/>
+          <Field name="blocked"/>
+          <Field name="passed"/>
+          <Field name="alerted"/>
+        </ExpectedOutput>
+        <AnalystNotes>passed &gt; 0 means some requests reached the backend despite the campaign - pivot to PB-F5-001/004 for those. blocked == total means fully contained.</AnalystNotes>
+      </Step>
+      <Step order="2" name="Campaign character and source geo">
+        <Purpose>Understand the attack composition and whether it is the known high-volume campaign infrastructure.</Purpose>
+        <Query platform="Elastic" language="ES|QL" id="INV-02-F5CAMP-CHAR">
+          <![CDATA[
+FROM logs-cef.log-*
+| WHERE observer.vendor == "F5" AND source.ip == "$source_ip" AND @timestamp >= NOW() - 4 hours
+| STATS events = COUNT(*), geo = VALUES(cef.extensions.deviceCustomString6), methods = VALUES(cef.extensions.requestMethod), sample_urls = VALUES(cef.extensions.requestUrl) BY cef.extensions.deviceCustomString4
+| SORT events DESC
+| LIMIT 15
+          ]]>
+        </Query>
+        <ExpectedOutput>
+          <Field name="cef.extensions.deviceCustomString4"/>
+          <Field name="events"/>
+          <Field name="geo"/>
+        </ExpectedOutput>
+        <AnalystNotes>Automated tooling shows a narrow set of attack types hammered repeatedly from one geo. Note the geo/ASN for blocklist and threat-intel correlation.</AnalystNotes>
+      </Step>
+      <Step order="3" name="Finalize classification">
+        <DecisionTree>
+          <Node><Condition>INV-01 shows passed/alerted events &gt; 0 for the campaigning source (WAF did not fully contain it).</Condition><Result>True Positive (Campaign Partially Reached App - escalate, pivot to exploitation playbooks)</Result></Node>
+          <Node><Condition>INV-01 shows blocked == total (fully contained sustained attack from an external source).</Condition><Result>True Positive (Attack Blocked - block source at perimeter, monitor)</Result></Node>
+          <Node><Condition>Source is an internal scanner/test generating blocked signatures by design.</Condition><Result>False Positive</Result></Node>
+          <Node><Condition>Blocked campaign but source attribution/geo is ambiguous (e.g. CDN/proxy).</Condition><Result>Needs Escalation</Result></Node>
+        </DecisionTree>
+        <DocumentationChecklist>
+          <Item>Attach outputs of INV-01-F5CAMP-SPLIT, INV-02-F5CAMP-CHAR to the case.</Item>
+        </DocumentationChecklist>
+      </Step>
+    </Workflow>
+  </Investigation>
+  <ClassificationGuidance>
+    <FalsePositive>
+      <Definition>An approved scanner or test generating blocked signature traffic.</Definition>
+      <Indicators>
+        <Item>Internal/known test source.</Item>
+        <Item>All blocked; expected scan window.</Item>
+      </Indicators>
+      <SOCAction>
+        <Item>Confirm the scan; exception the source; close as false_positive.</Item>
+      </SOCAction>
+    </FalsePositive>
+    <TruePositive>
+      <Definition>A determined attack campaign against the banking apps (blocked, or partially through).</Definition>
+      <Indicators>
+        <Item>Sustained high-rating attacks from one external source.</Item>
+        <Item>Any passed/alerted events (partial reach).</Item>
+        <Item>Automated tooling signature.</Item>
+      </Indicators>
+      <SOCAction>
+        <Item>Block the source at the perimeter/firewall (offload from the WAF).</Item>
+        <Item>If any passed: pivot to exploitation IR.</Item>
+        <Item>Add the source geo/ASN to threat intel and monitor for new IPs.</Item>
+      </SOCAction>
+    </TruePositive>
+    <Misconfiguration>
+      <Definition>A benign automated client repeatedly tripping a signature the policy over-flags.</Definition>
+      <Indicators>
+        <Item>Internal automation hitting a fixed endpoint flagged as attack.</Item>
+        <Item>All blocked; one attack type.</Item>
+      </Indicators>
+      <SOCAction>
+        <Item>Tune the false-flagging signature; document.</Item>
+      </SOCAction>
+    </Misconfiguration>
+  </ClassificationGuidance>
+  <Response><IRForHumans>
+    <Phase name="Immediate Actions (0-30 minutes)">
+      <Action priority="1">Block the source at the perimeter to offload the WAF.</Action>
+      <Action priority="2">If any request passed: escalate to exploitation IR.</Action>
+    </Phase>
+    <Phase name="Containment and Eradication (hours)">
+      <Action>Add source/ASN to blocklists and threat intel; monitor for campaign continuation from new IPs.</Action>
+    </Phase>
+    <Phase name="Recovery and Hardening (days)">
+      <Action>Perimeter-block persistent campaign sources; ensure enforcement (not transparent) on all public policies.</Action>
+    </Phase>
+  </IRForHumans></Response>
+  <QualityChecks>
+    <Check>Threshold 300/30m from the measured campaign baseline (e.g. 152.70.180.122).</Check>
+    <Check>The value of this rule is catching WAF-absorbed campaigns that were previously invisible.</Check>
+  </QualityChecks>
+  <ClosureCriteria><FalsePositiveClosure>
+    <Item>Fully blocked + benign/known source; documented.</Item>
+  </FalsePositiveClosure><TruePositiveClosure>
+    <Item>Source perimeter-blocked; no request reached the backend; intel recorded.</Item>
+  </TruePositiveClosure></ClosureCriteria>
+</Playbook>

@@ -1,0 +1,88 @@
+{
+  "rule_id": "jcb-ad-acl-backdoor",
+  "name": "AD — Object Security Descriptor Modified (DACL Backdoor)",
+  "version": 1,
+  "enabled": true,
+  "interval": "30m",
+  "from": "now-1h",
+  "to": "now",
+  "description": "Attacker objective\nGrant stealthy rights (DCSync/GenericAll/WriteDACL) on an AD object for persistence or escalation by modifying its security descriptor.\n\nAttack logic\nSecurity-descriptor changes on directory objects are normally system-driven (for example AdminSDHolder propagation under the SYSTEM context). Human-driven descriptor changes — especially on Tier-0 objects — can plant an ACL backdoor such as replication (DCSync) rights.\n\nWhy this detection works\nEvent 5136 records nTSecurityDescriptor modifications with the acting subject, so excluding SYSTEM isolates human-driven ACL changes.\n\nFalse positives\nAuthorised delegation changes.\n\nTuning\nCorrelate with change control; pay special attention to grants of replication (DCSync), GenericAll or WriteDACL rights.\n\nRequired telemetry\nWindows Security 5136 (AttributeLDAPDisplayName=nTSecurityDescriptor, SubjectUserName, ObjectDN).",
+  "tags": [
+    "JCB",
+    "ActiveDirectory",
+    "Phase3",
+    "Use Case: Threat Detection",
+    "Tactic: Privilege Escalation",
+    "Tactic: Persistence"
+  ],
+  "author": [
+    "raadabujaish"
+  ],
+  "threat": [
+    {
+      "framework": "MITRE ATT&CK",
+      "tactic": {
+        "id": "TA0004",
+        "name": "Privilege Escalation",
+        "reference": "https://attack.mitre.org/tactics/TA0004/"
+      },
+      "technique": [
+        {
+          "id": "T1098",
+          "name": "Account Manipulation",
+          "reference": "https://attack.mitre.org/techniques/T1098/"
+        }
+      ]
+    },
+    {
+      "framework": "MITRE ATT&CK",
+      "tactic": {
+        "id": "TA0003",
+        "name": "Persistence",
+        "reference": "https://attack.mitre.org/tactics/TA0003/"
+      },
+      "technique": [
+        {
+          "id": "T1098",
+          "name": "Account Manipulation",
+          "reference": "https://attack.mitre.org/techniques/T1098/"
+        }
+      ]
+    }
+  ],
+  "investigation_fields": {
+    "field_names": [
+      "winlog.event_data.SubjectUserName",
+      "winlog.event_data.TargetUserName",
+      "winlog.event_data.ServiceName",
+      "winlog.event_data.AttributeLDAPDisplayName",
+      "winlog.event_data.ObjectDN",
+      "winlog.computer_name",
+      "winlog.event_data.IpAddress"
+    ]
+  },
+  "related_integrations": [],
+  "required_fields": [],
+  "setup": "",
+  "note": "## Investigation guide\n1. SubjectUserName changed the ACL of ObjectDN.\n2. Inspect the added ACE (DCSync / GenericAll / WriteDACL) and remove it if malicious; investigate the subject.",
+  "false_positives": [
+    "Authorised delegation changes."
+  ],
+  "references": [
+    "https://attack.mitre.org/techniques/T1098/"
+  ],
+  "risk_score": 73,
+  "risk_score_mapping": [],
+  "severity": "high",
+  "severity_mapping": [],
+  "output_index": "",
+  "max_signals": 100,
+  "exceptions_list": [],
+  "actions": [],
+  "type": "query",
+  "language": "kuery",
+  "index": [
+    "logs-system.security-*"
+  ],
+  "query": "event.code:\"5136\" and winlog.event_data.AttributeLDAPDisplayName:\"nTSecurityDescriptor\" and not winlog.event_data.SubjectUserName:\"SYSTEM\""
+}

@@ -1,0 +1,78 @@
+{
+  "rule_id": "jcb-panos-sensitive-config-change",
+  "name": "PAN-OS — Sensitive Firewall Change (Security Rule or Admin User)",
+  "version": 1,
+  "enabled": true,
+  "interval": "1h",
+  "from": "now-70m",
+  "to": "now",
+  "description": "Attacker objective\nWeaken the perimeter by adding/modifying/deleting a security policy rule to open access, or by manipulating firewall admin accounts.\n\nAttack logic\nChanges to security-rule policy or to firewall management users are the highest-risk configuration operations on an edge firewall. This rule catches such sensitive changes by any administrator, complementing the new-admin rule.\n\nWhy this detection works\nPAN-OS CONFIG logs fully attribute each change (admin, cmd, path); scoping to security-rule and management-user paths surfaces the sensitive subset.\n\nFalse positives\nRoutine authorised rule/user maintenance.\n\nTuning\nOperate as a review queue and correlate with change tickets; optionally exclude routine automation identities.\n\nRequired telemetry\nPAN-OS CONFIG logs (type, cmd, path, admin).",
+  "tags": [
+    "JCB",
+    "Perimeter",
+    "Phase3",
+    "Use Case: Threat Detection",
+    "Tactic: Defense Evasion"
+  ],
+  "author": [
+    "raadabujaish"
+  ],
+  "threat": [
+    {
+      "framework": "MITRE ATT&CK",
+      "tactic": {
+        "id": "TA0005",
+        "name": "Defense Evasion",
+        "reference": "https://attack.mitre.org/tactics/TA0005/"
+      },
+      "technique": [
+        {
+          "id": "T1562",
+          "name": "Impair Defenses",
+          "reference": "https://attack.mitre.org/techniques/T1562/",
+          "subtechnique": [
+            {
+              "id": "T1562.004",
+              "name": "Disable or Modify System Firewall",
+              "reference": "https://attack.mitre.org/techniques/T1562/004/"
+            }
+          ]
+        }
+      ]
+    }
+  ],
+  "investigation_fields": {
+    "field_names": [
+      "panw.panos.admin",
+      "panw.panos.cmd",
+      "panw.panos.path",
+      "panw.panos.result",
+      "host.ip"
+    ]
+  },
+  "related_integrations": [],
+  "required_fields": [],
+  "setup": "",
+  "note": "## Investigation guide\n1. admin + path + cmd = who changed which security rule or user.\n2. Verify against change control; a rule that opens inbound access, or a newly added admin, is high-risk.",
+  "false_positives": [
+    "Routine authorised rule/user maintenance."
+  ],
+  "references": [
+    "https://attack.mitre.org/techniques/T1562/",
+    "https://attack.mitre.org/techniques/T1562/004/"
+  ],
+  "risk_score": 73,
+  "risk_score_mapping": [],
+  "severity": "high",
+  "severity_mapping": [],
+  "output_index": "",
+  "max_signals": 100,
+  "exceptions_list": [],
+  "actions": [],
+  "type": "query",
+  "language": "kuery",
+  "index": [
+    "logs-panw.panos-*"
+  ],
+  "query": "panw.panos.type:\"CONFIG\" and panw.panos.cmd:(\"delete\" or \"set\" or \"edit\" or \"rename\") and (panw.panos.path:*rulebase*security*rules* or panw.panos.path:*mgt-config*users*)"
+}

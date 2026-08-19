@@ -1,0 +1,134 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<Playbook xmlns="https://soc.example/playbooks" id="PB-FG-009" name="QA - Matched Clear Text Protocols - Firewalls - SOC Playbook" version="1.0" status="Production" classification="TLP:AMBER">
+  <Metadata>
+    <Owner>JCB Detection Engineering (WatchWave)</Owner>
+    <LastUpdated>2026-08-14</LastUpdated>
+    <Severity default="Low">Low</Severity>
+    <Confidence default="Low">Low</Confidence>
+    <Category>Discovery / Hygiene - Cleartext Protocol Usage</Category>
+    <MitreAttack>
+      <Technique id="T1040" name="Network Sniffing"/>
+      <Tactic id="TA0006" name="Credential Access"/>
+    </MitreAttack>
+    <References>
+      <Reference title="MITRE ATT and CK" url="https://attack.mitre.org/techniques/T1040/"/>
+    </References>
+  </Metadata>
+  <ExecutiveSummary>
+    <Overview>Traffic on clear-text protocol ports (FTP 21, Telnet 23, SMTP 25, POP/IMAP, SNMP, MSSQL 1521, etc.) crossing a security boundary was observed, excluding intra-RFC1918 and Microsoft destinations. Triage question: is a sensitive protocol exposed in clear text (a hygiene/exposure risk), or expected legacy traffic?</Overview>
+    <BusinessImpact>Cleartext protocols expose credentials and data to interception; in a bank this is a compliance and credential-theft risk more than an active attack.</BusinessImpact>
+  </ExecutiveSummary>
+  <Scope><Assets>
+    <AssetType>FortiGate perimeter and internal firewalls (HQ + DR)</AssetType>
+    <AssetType>Internal server and user segments behind the FortiGate</AssetType>
+  </Assets><LogSources>
+    <LogSource>FortiGate traffic - logs-fortinet_fortigate.traffic-*</LogSource>
+  </LogSources></Scope>
+  <Prerequisites><TelemetryRequirements>
+    <Requirement>FortiGate logs shipped via Elastic Agent to logs-fortinet_fortigate.* (verified live).</Requirement>
+    <Requirement>Fields: fortinet.firewall.subtype (ips/dns/...), fortinet.firewall.action, fortinet.firewall.severity, fortinet.firewall.attack, fortinet.firewall.srccountry/dstcountry ('Reserved' = RFC1918 internal), fortinet.firewall.cfgpath, dns.question.name, source.ip, destination.ip, destination.port.</Requirement>
+  </TelemetryRequirements><DetectionSignals>
+    <Signal><Name>Cleartext protocol crossing boundary</Name><Details>dst_port in the cleartext set, not intra-internal, not Microsoft.</Details></Signal>
+  </DetectionSignals></Prerequisites>
+  <Inputs>
+    <Input name="$source_ip" description="Source of the cleartext traffic (if the alert scopes one)."/>
+    <Input name="$dest_ip" description="Destination (if scoped)."/>
+  </Inputs>
+  <Triage><ImmediateCapture>
+    <Item>Source: $source_ip</Item>
+    <Item>Destination: $dest_ip</Item>
+  </ImmediateCapture><InitialAssessment>
+    <Rule>This is primarily a hygiene finding; escalate only if the cleartext traffic carries credentials to/from an untrusted network or a sensitive system.</Rule>
+  </InitialAssessment></Triage>
+  <Investigation>
+    <Goal>Determine whether cleartext protocol usage represents a real exposure (sensitive system / untrusted path) or expected legacy internal traffic.</Goal>
+    <Workflow>
+      <Step order="1" name="Cleartext connections: protocol, endpoints, direction">
+        <Purpose>Identify which cleartext protocols, between which endpoints, and whether the path crosses a trust boundary.</Purpose>
+        <Query platform="Elastic" language="ES|QL" id="INV-01-FGCLEAR-CONN">
+          <![CDATA[
+FROM logs-fortinet_fortigate.traffic-*
+| WHERE destination.port IN (20, 21, 23, 25, 110, 143, 161, 1521) AND fortinet.firewall.action == "accept" AND @timestamp >= NOW() - 4 hours
+| STATS conns = COUNT(*), sources = COUNT_DISTINCT(source.ip), dcountry = VALUES(fortinet.firewall.dstcountry) BY destination.port, destination.ip
+| SORT conns DESC
+| LIMIT 25
+          ]]>
+        </Query>
+        <ExpectedOutput>
+          <Field name="destination.port"/>
+          <Field name="destination.ip"/>
+          <Field name="conns"/>
+          <Field name="dcountry"/>
+        </ExpectedOutput>
+        <AnalystNotes>Telnet(23)/FTP(21) to a sensitive host, or any cleartext to/from an external destination (dcountry not Reserved), is the real exposure. Intra-internal legacy app traffic is lower risk.</AnalystNotes>
+      </Step>
+      <Step order="2" name="Finalize classification">
+        <DecisionTree>
+          <Node><Condition>INV-01 shows cleartext protocol traffic crossing to/from an EXTERNAL destination (credentials exposed over untrusted path).</Condition><Result>True Positive (Cleartext Exposure - remediate, escalate to security engineering)</Result></Node>
+          <Node><Condition>INV-01 shows cleartext to a sensitive internal system (DB/admin) that should use encrypted protocols.</Condition><Result>Misconfiguration (insecure protocol on sensitive system)</Result></Node>
+          <Node><Condition>INV-01 shows expected legacy internal application traffic with a documented exception.</Condition><Result>Benign Activity / Accepted Risk</Result></Node>
+          <Node><Condition>Cleartext usage whose sensitivity/path cannot be determined.</Condition><Result>Needs Escalation</Result></Node>
+        </DecisionTree>
+        <DocumentationChecklist>
+          <Item>Attach outputs of INV-01-FGCLEAR-CONN to the case.</Item>
+        </DocumentationChecklist>
+      </Step>
+    </Workflow>
+  </Investigation>
+  <ClassificationGuidance>
+    <FalsePositive>
+      <Definition>Expected legacy internal application traffic on a cleartext protocol with a documented exception.</Definition>
+      <Indicators>
+        <Item>Intra-internal, known legacy app.</Item>
+        <Item>Documented and risk-accepted.</Item>
+        <Item>No external path.</Item>
+      </Indicators>
+      <SOCAction>
+        <Item>Confirm the documented exception; close as benign_activity/accepted_risk.</Item>
+      </SOCAction>
+    </FalsePositive>
+    <TruePositive>
+      <Definition>Cleartext exposure of credentials/data over an untrusted path.</Definition>
+      <Indicators>
+        <Item>Cleartext to/from an external destination.</Item>
+        <Item>Sensitive system endpoint.</Item>
+        <Item>No encryption where it is required.</Item>
+      </Indicators>
+      <SOCAction>
+        <Item>Remediate: move to an encrypted protocol; restrict the exposure.</Item>
+        <Item>Escalate to security engineering; assess credential exposure.</Item>
+      </SOCAction>
+    </TruePositive>
+    <Misconfiguration>
+      <Definition>A sensitive system misconfigured to use an insecure protocol.</Definition>
+      <Indicators>
+        <Item>DB/admin system reachable via Telnet/FTP/cleartext.</Item>
+        <Item>Should be TLS/SSH.</Item>
+      </Indicators>
+      <SOCAction>
+        <Item>Reconfigure the system for encrypted transport; document remediation.</Item>
+      </SOCAction>
+    </Misconfiguration>
+  </ClassificationGuidance>
+  <Response><IRForHumans>
+    <Phase name="Immediate Actions (0-30 minutes)">
+      <Action priority="1">Identify the endpoints and sensitivity.</Action>
+      <Action priority="2">For external exposure: remediate the path promptly.</Action>
+    </Phase>
+    <Phase name="Containment and Eradication (hours)">
+      <Action>Migrate cleartext protocols to encrypted equivalents; restrict where legacy is unavoidable.</Action>
+    </Phase>
+    <Phase name="Recovery and Hardening (days)">
+      <Action>Inventory and eliminate cleartext protocols on sensitive systems; enforce encryption policy.</Action>
+    </Phase>
+  </IRForHumans></Response>
+  <QualityChecks>
+    <Check>Converted from the QA ES|QL rule; this is hygiene, best run as a periodic report rather than a real-time alert.</Check>
+    <Check>AcceptRisk applies where legacy cleartext is documented and time-boxed.</Check>
+  </QualityChecks>
+  <ClosureCriteria><FalsePositiveClosure>
+    <Item>Documented legacy exception confirmed; risk accepted with expiry.</Item>
+  </FalsePositiveClosure><TruePositiveClosure>
+    <Item>Cleartext exposure remediated or migrated to encrypted transport.</Item>
+  </TruePositiveClosure></ClosureCriteria>
+</Playbook>

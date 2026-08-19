@@ -1,0 +1,149 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<Playbook xmlns="https://soc.example/playbooks" id="PB-WIN-026" name="Windows — Elastic Agent Service Terminated - SOC Playbook" version="1.0" status="Production" classification="TLP:AMBER">
+  <Metadata>
+    <Owner>JCB Detection Engineering (WatchWave)</Owner>
+    <LastUpdated>2026-08-14</LastUpdated>
+    <Severity default="High">High</Severity>
+    <Confidence default="Medium">Medium</Confidence>
+    <Category>Defense Evasion / Impair Defenses</Category>
+    <MitreAttack>
+      <Technique id="T1562.001" name="Disable or Modify Tools"/>
+      <Tactic id="TA0005" name="Defense Evasion"/>
+    </MitreAttack>
+    <References>
+      <Reference title="MITRE ATT and CK" url="https://attack.mitre.org/techniques/T1562/"/>
+    </References>
+  </Metadata>
+  <ExecutiveSummary>
+    <Overview>A process (net/sc/wmic/powershell/taskkill/PsKill/ProcessHacker) stopped or killed the Elastic Agent service. Triage question: is an attacker disabling monitoring, or is this a legitimate agent maintenance/upgrade?</Overview>
+    <BusinessImpact>Killing the Elastic Agent blinds detection on the host - a defense-evasion step before or during an intrusion.</BusinessImpact>
+  </ExecutiveSummary>
+  <Scope><Assets>
+    <AssetType>Windows servers and workstations (INTDOM domain)</AssetType>
+    <AssetType>Domain controllers</AssetType>
+  </Assets><LogSources>
+    <LogSource>Sysmon process + Windows Security 4688 - logs-windows.sysmon_operational-*,logs-system.security-*</LogSource>
+  </LogSources></Scope>
+  <Prerequisites><TelemetryRequirements>
+    <Requirement>Windows Security + Sysmon + PowerShell logs via Elastic Agent (verified live). Sysmon event.code 1=process(command_line/parent populated), 11=file, 13/12=registry(registry.path populated); process.code_signature NOT collected.</Requirement>
+  </TelemetryRequirements><DetectionSignals>
+    <Signal><Name>Agent terminated</Name><Details>stop/kill of the Elastic Agent service by net/sc/wmic/taskkill/etc.</Details></Signal>
+  </DetectionSignals></Prerequisites>
+  <Inputs>
+    <Input name="$hostname" description="Host where the agent was terminated."/>
+    <Input name="$username" description="Account (user.name)."/>
+  </Inputs>
+  <Triage><ImmediateCapture>
+    <Item>Host: $hostname</Item>
+  </ImmediateCapture><InitialAssessment>
+    <Rule>Weigh the evidence story, not any single fact - see ClassificationGuidance.</Rule>
+  </InitialAssessment></Triage>
+  <Investigation>
+    <Goal>Determine whether the Elastic Agent termination is defense evasion or legitimate maintenance.</Goal>
+    <Workflow>
+      <Step order="1" name="What stopped the agent and how">
+        <Purpose>The killing process/command and account reveal maintenance vs tampering.</Purpose>
+        <Query platform="Elastic" language="ES|QL" id="INV-01-AGENT-KILL">
+          <![CDATA[
+FROM logs-windows.sysmon_operational-*,logs-system.security-*
+| WHERE event.code IN ("1","4688") AND host.name == "$hostname" AND process.name RLIKE "(?i)(net|net1|sc|wmic|powershell|pwsh|taskkill|pskill|processhacker).*" AND process.command_line IS NOT NULL AND @timestamp >= NOW() - 4 hours
+| EVAL cl = TO_LOWER(process.command_line)
+| WHERE cl LIKE "*elastic*agent*" OR cl LIKE "*elastic-agent*" OR cl LIKE "*elasticendpoint*"
+| KEEP @timestamp, process.name, process.parent.name, process.command_line, user.name
+| SORT @timestamp DESC
+| LIMIT 15
+          ]]>
+        </Query>
+        <ExpectedOutput>
+          <Field name="process.name"/>
+          <Field name="process.command_line"/>
+          <Field name="user.name"/>
+        </ExpectedOutput>
+        <AnalystNotes>taskkill/PsKill/ProcessHacker against the agent by a non-admin = tampering. sc stop by an admin during a documented upgrade window is maintenance. Note whether other defenses were touched too.</AnalystNotes>
+      </Step>
+      <Step order="2" name="What happened on the host after the agent stopped">
+        <Purpose>Activity right after the agent stops is what the attacker wanted unmonitored (note: agent-off means Sysmon may still log).</Purpose>
+        <Query platform="Elastic" language="ES|QL" id="INV-02-AGENT-AFTER" optional="true">
+          <![CDATA[
+FROM logs-system.security-*
+| WHERE host.name == "$hostname" AND event.code IN ("4688","4624","7045","4697") AND @timestamp >= NOW() - 1 hours
+| STATS c = COUNT(*), codes = VALUES(event.code)
+| LIMIT 5
+          ]]>
+        </Query>
+        <ExpectedOutput>
+          <Field name="codes"/>
+          <Field name="c"/>
+        </ExpectedOutput>
+        <AnalystNotes>Security-channel events still flow even if the agent's endpoint component is killed; suspicious activity here after the kill supports tampering.</AnalystNotes>
+      </Step>
+      <Step order="3" name="Finalize classification">
+        <DecisionTree>
+          <Node><Condition>The agent was killed via taskkill/PsKill/ProcessHacker by a non-admin, or amid other suspicious activity.</Condition><Result>True Positive (Defense Evasion - IR, restore monitoring)</Result></Node>
+          <Node><Condition>A documented agent upgrade/maintenance by an admin under a window.</Condition><Result>False Positive</Result></Node>
+          <Node><Condition>Agent stopped with unclear authorisation.</Condition><Result>Needs Escalation</Result></Node>
+        </DecisionTree>
+        <DocumentationChecklist>
+          <Item>Attach outputs of INV-01-AGENT-KILL, INV-02-AGENT-AFTER to the case.</Item>
+        </DocumentationChecklist>
+      </Step>
+    </Workflow>
+  </Investigation>
+  <ClassificationGuidance>
+    <FalsePositive>
+      <Definition>Legitimate agent maintenance/upgrade.</Definition>
+      <Indicators>
+        <Item>Known admin/deployment tool.</Item>
+        <Item>Maintenance window.</Item>
+        <Item>sc/service-manager method.</Item>
+      </Indicators>
+      <SOCAction>
+        <Item>Verify the maintenance; close as false_positive.</Item>
+      </SOCAction>
+    </FalsePositive>
+    <TruePositive>
+      <Definition>An attacker disabling host monitoring.</Definition>
+      <Indicators>
+        <Item>taskkill/PsKill/ProcessHacker method.</Item>
+        <Item>Non-admin account.</Item>
+        <Item>Other defenses touched / suspicious follow-on.</Item>
+      </Indicators>
+      <SOCAction>
+        <Item>Restore the agent; isolate the host; open IR.</Item>
+        <Item>Reconstruct the unmonitored window from the Security channel.</Item>
+      </SOCAction>
+    </TruePositive>
+    <Misconfiguration>
+      <Definition>A management tool restarting the agent unexpectedly.</Definition>
+      <Indicators>
+        <Item>A known management product.</Item>
+        <Item>Restart (not kill) pattern.</Item>
+      </Indicators>
+      <SOCAction>
+        <Item>Baseline; document.</Item>
+      </SOCAction>
+    </Misconfiguration>
+  </ClassificationGuidance>
+  <Response><IRForHumans>
+    <Phase name="Immediate Actions (0-30 minutes)">
+      <Action priority="1">Confirm the activity on the host; if malicious indicators, isolate the host.</Action>
+      <Action priority="2">Identify the responsible account/process and its origin.</Action>
+    </Phase>
+    <Phase name="Containment and Eradication (hours)">
+      <Action>Isolate the host; capture volatile evidence; hunt the same pattern across the estate.</Action>
+      <Action>Reset credentials used on the host if compromise is confirmed.</Action>
+    </Phase>
+    <Phase name="Recovery and Hardening (days)">
+      <Action>Remediate the root cause; add/verify EDR coverage; apply relevant hardening.</Action>
+    </Phase>
+  </IRForHumans></Response>
+  <QualityChecks>
+    <Check>Confirm the required telemetry (Sysmon/Security auditing) is present on the host.</Check>
+    <Check>Tune known-benign administrative sources via exceptions, not by disabling the rule.</Check>
+  </QualityChecks>
+  <ClosureCriteria><FalsePositiveClosure>
+    <Item>Activity confirmed benign/authorised and documented.</Item>
+  </FalsePositiveClosure><TruePositiveClosure>
+    <Item>Host contained and triaged; root cause eradicated; estate swept; findings recorded.</Item>
+  </TruePositiveClosure></ClosureCriteria>
+</Playbook>

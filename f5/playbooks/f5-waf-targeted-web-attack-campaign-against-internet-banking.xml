@@ -1,0 +1,197 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<Playbook xmlns="https://soc.example/playbooks" id="PB-JCB-F5-03" name="F5 WAF — Targeted Web-Attack Campaign Against Internet Banking - SOC Playbook" version="2.1" status="Production" classification="TLP:AMBER">
+  <Metadata>
+    <Owner>JCB Detection Engineering (WatchWave)</Owner>
+    <LastUpdated>2026-08-19</LastUpdated>
+    <Severity default="High">High</Severity>
+    <Confidence default="Medium">Medium</Confidence>
+    <Category>Initial Access / Exploit Public-Facing Application</Category>
+    <MitreAttack>
+      <Technique id="T1190" name="Exploit Public-Facing Application"/>
+      <Tactic id="TA0001" name="Initial Access"/>
+    </MitreAttack>
+    <References>
+      <Reference title="MITRE ATT&amp;CK T1190 Exploit Public-Facing Application" url="https://attack.mitre.org/techniques/T1190/"/>
+      <Reference title="OWASP Web Security Testing Guide" url="https://owasp.org/www-project-web-security-testing-guide/"/>
+      <Reference title="F5 BIG-IP ASM / Advanced WAF violation rating and enforcement" url="https://techdocs.f5.com/en-us/bigip-15-1-0/big-ip-asm-implementations.html"/>
+    </References>
+  </Metadata>
+  <ExecutiveSummary>
+    <Overview>One source drove a multi-vector web-attack campaign against JCB internet banking — a threshold volume of events across many exploit classes (SQLi, XSS, Command Execution, Server Side Code Injection, Path Traversal, RFI, HTTP Request Smuggling, Session Hijacking, Detection Evasion, Trojan/Backdoor/Spyware, JSON Parser Attack, Injection Attempt). This rule casts a wider net than the critical-reached and RCE analytics: it fires on breadth and volume regardless of rating or enforcement. The triage question is two-part: how effective was enforcement (mostly blocked = contained attempt; substantial not-blocked = exposure), and did any high-rating request reach a banking backend?</Overview>
+    <BusinessImpact>A concerted multi-vector campaign against internet banking signals deliberate targeting rather than opportunistic scanning. Even if the WAF blocks most of it, one class slipping through can lead to data theft, account/transaction manipulation, or a DMZ foothold — and the source is a candidate for edge blocking and threat-intel enrichment.</BusinessImpact>
+  </ExecutiveSummary>
+  <Scope>
+    <Assets>
+      <AssetType>F5 BIG-IP ASM / Advanced WAF fronting JCB internet banking and public web apps (verified live: appliance F5-FRNT-WAF-01.JCBank.com.jo)</AssetType>
+      <AssetType>Published internet-banking applications and their backend servers</AssetType>
+    </Assets>
+    <LogSources>
+      <LogSource>F5 ASM CEF events via syslog - logs-cef.log-* (observer.vendor == "F5"; verified live)</LogSource>
+    </LogSources>
+  </Scope>
+  <Prerequisites>
+    <TelemetryRequirements>
+      <Requirement>F5 ASM logging to CEF over syslog, parsed into logs-cef.log-* (verified live).</Requirement>
+      <Requirement>CEF fields (verified live populated for F5): cef.extensions.deviceCustomString4 = attack type; cef.extensions.deviceCustomNumber2 = violation rating; cef.extensions.deviceCustomString1 = ASM policy; url.original = request URL; http.request.method = method; cef.extensions.deviceCustomNumber1 = backend HTTP response; cef.extensions.deviceAction = passed | alerted | blocked; source.geo.country_name and source.as.organization.name = attribution.</Requirement>
+    </TelemetryRequirements>
+    <DetectionSignals>
+      <Signal><Name>Multi-vector campaign volume</Name><Details>observer.vendor F5 with a threshold volume from one source.ip across the exploit-class set in cef.extensions.deviceCustomString4 (SQL-Injection, Cross Site Scripting (XSS), Command Execution, Server Side Code Injection, Path Traversal, Remote File Include, HTTP Request Smuggling Attack, Session Hijacking, Detection Evasion, Trojan/Backdoor/Spyware, JSON Parser Attack, Injection Attempt).</Details></Signal>
+      <Signal><Name>Enforcement effectiveness</Name><Details>The blocked-versus-not-blocked balance (cef.extensions.deviceAction) reveals whether the campaign was contained or partially forwarded.</Details></Signal>
+    </DetectionSignals>
+  </Prerequisites>
+  <Inputs>
+    <Input name="$source_ip" description="Attacking source IP from the alert (source.ip, threshold group key). Primary investigation pivot."/>
+  </Inputs>
+  <Triage>
+    <ImmediateCapture>
+      <Item>Source: $source_ip (with source.geo.country_name and source.as.organization.name)</Item>
+      <Item>Breadth: how many distinct exploit classes (cef.extensions.deviceCustomString4) and the peak rating (cef.extensions.deviceCustomNumber2)</Item>
+      <Item>Targeted banking apps / policies (cef.extensions.deviceCustomString1) and the blocked-versus-not-blocked balance (cef.extensions.deviceAction)</Item>
+    </ImmediateCapture>
+    <InitialAssessment>
+      <Rule>If enforcement blocked essentially everything (INV-01 dominated by action = blocked), this is a contained targeted campaign — still a True Positive for tracking/blocking, but not an active breach.</Rule>
+      <Rule>If a meaningful share is not-blocked at rating 4-5 (INV-02) — especially with a backend HTTP response in INV-03 — escalate as bypassed enforcement / possible reached-target.</Rule>
+      <Rule>If $source_ip is an authorised internal scanner / pentest host on schedule, lean False Positive (authorised) after confirming the engagement window and that nothing reached the backend.</Rule>
+    </InitialAssessment>
+  </Triage>
+  <Investigation>
+    <Goal>Characterise the campaign from $source_ip: which exploit classes and how broad, how effective enforcement was, which banking apps were targeted, and whether any high-rating unblocked request reached a backend.</Goal>
+    <Workflow>
+      <Step order="1" name="Attack-class breadth and enforcement mix for this source">
+        <Purpose>Show the full spread of exploit classes and, for each, whether the WAF blocked, alerted or passed — the contained-versus-exposed picture.</Purpose>
+        <Query platform="Elastic" language="ES|QL" id="INV-01-F5-CAMPAIGN-PROFILE">
+          <![CDATA[
+FROM logs-cef.log-*
+| WHERE observer.vendor == "F5" AND source.ip == "$source_ip" AND @timestamp >= NOW() - 4 hours
+| STATS events = COUNT(*), max_rating = MAX(cef.extensions.deviceCustomNumber2) BY cef.extensions.deviceCustomString4, cef.extensions.deviceAction
+| SORT events DESC
+| LIMIT 40
+          ]]>
+        </Query>
+        <ExpectedOutput>
+          <Field name="cef.extensions.deviceCustomString4"/>
+          <Field name="cef.extensions.deviceAction"/>
+          <Field name="events"/>
+          <Field name="max_rating"/>
+        </ExpectedOutput>
+        <AnalystNotes>Many distinct attack types from one source = deliberate multi-vector targeting. If the action column is overwhelmingly "blocked", the WAF contained the campaign (track and block the source). Rows where action is passed/alerted at max_rating 4-5 are the exposure — carry those classes into INV-02 and INV-03. Ignore high-volume N/A "passed" rows: those are ordinary application traffic, not attacks.</AnalystNotes>
+      </Step>
+      <Step order="2" name="Which banking apps were targeted and how hard">
+        <Purpose>Rank the ASM policies (banking apps) this source hit at rating 4-5, with the count of not-blocked events and the strongest backend response seen — where the real exposure sits.</Purpose>
+        <Query platform="Elastic" language="ES|QL" id="INV-02-F5-CAMPAIGN-APPS">
+          <![CDATA[
+FROM logs-cef.log-*
+| WHERE observer.vendor == "F5" AND source.ip == "$source_ip" AND cef.extensions.deviceCustomNumber2 >= 4 AND @timestamp >= NOW() - 4 hours
+| STATS events = COUNT(*), attack_types = COUNT_DISTINCT(cef.extensions.deviceCustomString4), not_blocked = COUNT(CASE(cef.extensions.deviceAction != "blocked", 1, null)), max_response = MAX(cef.extensions.deviceCustomNumber1) BY cef.extensions.deviceCustomString1
+| SORT events DESC
+| LIMIT 25
+          ]]>
+        </Query>
+        <ExpectedOutput>
+          <Field name="cef.extensions.deviceCustomString1"/>
+          <Field name="events"/>
+          <Field name="attack_types"/>
+          <Field name="not_blocked"/>
+          <Field name="max_response"/>
+        </ExpectedOutput>
+        <AnalystNotes>A policy with high events, several distinct attack_types and a non-zero not_blocked is the most exposed banking app. max_response above 0 (a real HTTP code) on a not-blocked policy is a reached-target hint — confirm with INV-03. Policies are the JCB banking apps (e.g. /Common/JCBank-Website-Policy, /Common/HQ-Web-Mobile-ICS-Policy, /Common/MenaMobile-WAF_Auto).</AnalystNotes>
+      </Step>
+      <Step order="3" name="High-rating unblocked requests that may have reached a backend">
+        <Purpose>Pull the exact rating-4/5 unblocked requests with URL, method, backend response and geo — the reached-target and payload evidence.</Purpose>
+        <Query platform="Elastic" language="ES|QL" id="INV-03-F5-CAMPAIGN-REACHED">
+          <![CDATA[
+FROM logs-cef.log-*
+| WHERE observer.vendor == "F5" AND source.ip == "$source_ip" AND cef.extensions.deviceAction != "blocked" AND cef.extensions.deviceCustomNumber2 >= 4 AND @timestamp >= NOW() - 4 hours
+| KEEP @timestamp, cef.extensions.deviceCustomString4, http.request.method, url.original, cef.extensions.deviceCustomNumber1, cef.extensions.deviceCustomString1, source.geo.country_name
+| SORT @timestamp DESC
+| LIMIT 25
+          ]]>
+        </Query>
+        <ExpectedOutput>
+          <Field name="url.original"/>
+          <Field name="cef.extensions.deviceCustomNumber1"/>
+          <Field name="cef.extensions.deviceCustomString4"/>
+          <Field name="cef.extensions.deviceCustomString1"/>
+          <Field name="source.geo.country_name"/>
+        </ExpectedOutput>
+        <AnalystNotes>Empty result here is the good outcome: no high-rating request escaped enforcement. Rows present mean specific exploit requests were forwarded — a backend response (cef.extensions.deviceCustomNumber1) of 2xx/3xx/5xx on any of them is a reached-target signal; inspect url.original for the payload and scope the app behind cef.extensions.deviceCustomString1.</AnalystNotes>
+      </Step>
+    </Workflow>
+  </Investigation>
+  <DecisionTree>
+    <Node><Condition>INV-03 shows a high-rating unblocked request with a backend HTTP response (cef.extensions.deviceCustomNumber1 of 2xx/3xx/5xx) against a banking policy — part of the campaign reached the application.</Condition><Result>True Positive (Campaign Reached Application - escalate to IR; inspect the targeted banking app/DB)</Result></Node>
+    <Node><Condition>INV-01 shows broad multi-vector targeting of internet banking from an external source (INV-03 foreign geo / hosting ASN), whether or not enforcement blocked it — a deliberate campaign against JCB.</Condition><Result>True Positive (Targeted Multi-Vector Campaign - block the source at the edge, enrich with threat intel; escalate if any not-blocked at rating 4-5)</Result></Node>
+    <Node><Condition>INV-01/INV-03 confirm $source_ip is a documented internal scanner / contracted-pentest host on an authorised schedule AND nothing reached the backend.</Condition><Result>False Positive (Authorised vulnerability scan / penetration test - exception the tester for the engagement window only)</Result></Node>
+    <Node><Condition>Volume is dominated by benign application traffic mislabeled by an over-eager or staging signature, or by an ASM policy in transparent mode inflating passed/alerted counts, rather than genuine attacks.</Condition><Result>Misconfiguration (Over-eager staging signature or transparent policy - engage the WAF team to tune/enforce)</Result></Node>
+    <Node><Condition>External multi-vector campaign, but backend reach cannot be confirmed or refuted from available fields and the source is not an authorised tester.</Condition><Result>Needs Escalation</Result></Node>
+  </DecisionTree>
+  <ClassificationGuidance>
+    <FalsePositive>
+      <Definition>Authorised vulnerability scanning or penetration testing that legitimately exercises many exploit classes against the web apps — an approved activity, not benign background noise.</Definition>
+      <Indicators>
+        <Item>Internal or contracted-pentest source on a documented, in-window engagement.</Item>
+        <Item>Broad but uniform coverage typical of a tool; INV-03 shows nothing reached the backend.</Item>
+        <Item>Source attributes to a known testing host/range, not a foreign hosting provider.</Item>
+      </Indicators>
+      <SOCAction>
+        <Item>Confirm the engagement window and tester source with the owning team.</Item>
+        <Item>Exception the tester source for the engagement duration only.</Item>
+        <Item>Close as false_positive with the ticket reference attached.</Item>
+      </SOCAction>
+    </FalsePositive>
+    <TruePositive>
+      <Definition>A deliberate multi-vector web-attack campaign against JCB internet banking, whether contained by the WAF or partially forwarded.</Definition>
+      <Indicators>
+        <Item>Many distinct exploit classes from one external source (INV-01).</Item>
+        <Item>Multiple banking policies targeted at rating 4-5 (INV-02).</Item>
+        <Item>Any not-blocked high-rating requests, especially with a backend response (INV-03).</Item>
+      </Indicators>
+      <SOCAction>
+        <Item>Block $source_ip at the WAF/edge; enrich the IP and ASN with threat intel and check for related sources.</Item>
+        <Item>If anything reached the backend, escalate to IR and inspect the targeted banking app and its data stores.</Item>
+        <Item>Preserve requests and matched signatures; consider virtual-patching the classes seen.</Item>
+      </SOCAction>
+    </TruePositive>
+    <Misconfiguration>
+      <Definition>Event volume is inflated by an over-eager/staging signature or a transparent ASM policy rather than genuine attacks, producing a campaign-shaped alert from mostly benign traffic.</Definition>
+      <Indicators>
+        <Item>The bulk of events resolve to a single immature signature or transparent policy.</Item>
+        <Item>Payloads on inspection are legitimate application requests.</Item>
+      </Indicators>
+      <SOCAction>
+        <Item>Engage the WAF team to tune the offending signature or move the policy to enforcement.</Item>
+        <Item>Re-triage as True Positive if genuine high-rating attacks are found within the volume.</Item>
+      </SOCAction>
+    </Misconfiguration>
+  </ClassificationGuidance>
+  <Response>
+    <IRForHumans>
+      <Phase name="Immediate Actions (0-30 minutes)">
+        <Action priority="1">Assess breadth and enforcement from INV-01; determine whether the campaign was contained (mostly blocked) or partially forwarded.</Action>
+        <Action priority="2">Check INV-03 for any high-rating unblocked request with a backend response; if present, engage IR for the targeted banking app.</Action>
+      </Phase>
+      <Phase name="Containment and Eradication (hours)">
+        <Action>Block $source_ip at the WAF/edge; enrich the IP/ASN and hunt for related campaign sources hitting the same policies.</Action>
+        <Action>For any reached-target, inspect the banking app and DB behind the targeted policy; preserve request forensics.</Action>
+      </Phase>
+      <Phase name="Recovery and Hardening (days)">
+        <Action>Ensure internet-banking ASM policies are enforcing; virtual-patch the exploit classes observed in the campaign.</Action>
+        <Action>Feed the source/ASN to edge blocklists and threat-intel; review whether a rate/geo control is warranted for the targeted apps.</Action>
+      </Phase>
+    </IRForHumans>
+  </Response>
+  <Escalation>
+    <Trigger>Any high-rating unblocked request with a backend response, a broad external multi-vector campaign against banking apps, or evidence of a coordinated set of sources.</Trigger>
+    <To>SOC L2 / IR</To>
+  </Escalation>
+  <Closure>
+    <FalsePositiveClosure>
+      <Item>Authorised scan/pentest confirmed against $source_ip; INV-03 shows no backend reach; engagement ticket attached.</Item>
+      <Item>Outputs of INV-01, INV-02, INV-03 attached to the case.</Item>
+    </FalsePositiveClosure>
+    <TruePositiveClosure>
+      <Item>Source blocked and enriched; any reached-target app inspected and cleared or remediated.</Item>
+      <Item>Campaign breadth, enforcement effectiveness and virtual-patch actions documented.</Item>
+    </TruePositiveClosure>
+  </Closure>
+</Playbook>

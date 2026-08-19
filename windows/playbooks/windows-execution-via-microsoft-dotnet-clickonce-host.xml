@@ -1,0 +1,151 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<Playbook xmlns="https://soc.example/playbooks" id="PB-WIN-029" name="Windows — Execution via Microsoft DotNet ClickOnce Host - SOC Playbook" version="1.0" status="Production" classification="TLP:AMBER">
+  <Metadata>
+    <Owner>JCB Detection Engineering (WatchWave)</Owner>
+    <LastUpdated>2026-08-14</LastUpdated>
+    <Severity default="Medium">Medium</Severity>
+    <Confidence default="Medium">Medium</Confidence>
+    <Category>Execution / User Execution</Category>
+    <MitreAttack>
+      <Technique id="T1204.002" name="Malicious File"/>
+      <Tactic id="TA0002" name="Execution"/>
+    </MitreAttack>
+    <References>
+      <Reference title="MITRE ATT and CK" url="https://attack.mitre.org/techniques/T1204/"/>
+    </References>
+  </Metadata>
+  <ExecutiveSummary>
+    <Overview>rundll32.exe invoked the ClickOnce host (dfshim ShOpenVerbApplication) followed by a network connection within 5s - ClickOnce deployment can run remote .NET applications with limited prompts. Triage question: is this a malicious ClickOnce app, or a legitimate ClickOnce deployment? (This detection exists as a duplicate rule pair; one playbook covers both.)</Overview>
+    <BusinessImpact>ClickOnce lets an attacker deliver and run a .NET payload from a URL with minimal user friction.</BusinessImpact>
+  </ExecutiveSummary>
+  <Scope><Assets>
+    <AssetType>Windows servers and workstations (INTDOM domain)</AssetType>
+    <AssetType>Domain controllers</AssetType>
+  </Assets><LogSources>
+    <LogSource>Sysmon process + Windows Security 4688 - logs-windows.sysmon_operational-*,logs-system.security-*</LogSource>
+  </LogSources></Scope>
+  <Prerequisites><TelemetryRequirements>
+    <Requirement>Windows Security + Sysmon + PowerShell logs via Elastic Agent (verified live). Sysmon event.code 1=process(command_line/parent populated), 11=file, 13/12=registry(registry.path populated); process.code_signature NOT collected.</Requirement>
+  </TelemetryRequirements><DetectionSignals>
+    <Signal><Name>ClickOnce host</Name><Details>rundll32 dfshim ShOpenVerbApplication then a network connection.</Details></Signal>
+  </DetectionSignals></Prerequisites>
+  <Inputs>
+    <Input name="$hostname" description="Host where ClickOnce ran."/>
+    <Input name="$username" description="Account (user.name)."/>
+  </Inputs>
+  <Triage><ImmediateCapture>
+    <Item>Host: $hostname</Item>
+  </ImmediateCapture><InitialAssessment>
+    <Rule>Weigh the evidence story, not any single fact - see ClassificationGuidance.</Rule>
+  </InitialAssessment></Triage>
+  <Investigation>
+    <Goal>Determine whether the ClickOnce execution delivered a malicious app or a legitimate deployment.</Goal>
+    <Workflow>
+      <Step order="1" name="ClickOnce invocation and network destination">
+        <Purpose>The command and the network destination reveal the source of the ClickOnce app.</Purpose>
+        <Query platform="Elastic" language="ES|QL" id="INV-01-CLICKONCE-DETAIL">
+          <![CDATA[
+FROM logs-windows.sysmon_operational-*,logs-system.security-*
+| WHERE event.code IN ("1","4688") AND host.name == "$hostname" AND process.name RLIKE "(?i)rundll32(.exe)?" AND process.command_line IS NOT NULL AND @timestamp >= NOW() - 4 hours
+| EVAL cl = TO_LOWER(process.command_line)
+| WHERE cl LIKE "*dfshim*" AND (cl LIKE "*shopenverbapplication*" OR cl LIKE "*#*")
+| KEEP @timestamp, process.parent.name, process.command_line, user.name
+| SORT @timestamp DESC
+| LIMIT 15
+          ]]>
+        </Query>
+        <ExpectedOutput>
+          <Field name="process.parent.name"/>
+          <Field name="process.command_line"/>
+          <Field name="user.name"/>
+        </ExpectedOutput>
+        <AnalystNotes>A ClickOnce app launched from a browser/email link pointing at an external/untrusted URL is the risk. An internal LOB ClickOnce app from a known deployment URL is benign. The parent (browser/outlook) and the deployment URL matter.</AnalystNotes>
+      </Step>
+      <Step order="2" name="Process origin and account on the host">
+        <Purpose>The parent process and account reveal whether this was interactive attacker activity or an automated/service context.</Purpose>
+        <Query platform="Elastic" language="ES|QL" id="INV-02-PROC-TREE" optional="true">
+          <![CDATA[
+FROM logs-windows.sysmon_operational-*,logs-system.security-*
+| WHERE event.code IN ("1","4688") AND host.name == "$hostname" AND @timestamp >= NOW() - 2 hours
+| STATS runs = COUNT(*), parents = VALUES(process.parent.name), users = VALUES(user.name) BY process.name
+| SORT runs DESC
+| LIMIT 15
+          ]]>
+        </Query>
+        <ExpectedOutput>
+          <Field name="process.name"/>
+          <Field name="parents"/>
+          <Field name="users"/>
+        </ExpectedOutput>
+        <AnalystNotes>A suspicious process spawned by an office app/browser/script interpreter, run by a normal user, is more concerning than one under a known admin/automation parent.</AnalystNotes>
+      </Step>
+      <Step order="3" name="Finalize classification">
+        <DecisionTree>
+          <Node><Condition>ClickOnce app launched from an external/untrusted URL, especially via a browser/email link, followed by suspicious child activity.</Condition><Result>True Positive (Malicious ClickOnce Delivery - IR)</Result></Node>
+          <Node><Condition>An internal line-of-business ClickOnce app from a known deployment source.</Condition><Result>False Positive / Benign Activity</Result></Node>
+          <Node><Condition>ClickOnce execution with an unclear source URL.</Condition><Result>Needs Escalation</Result></Node>
+        </DecisionTree>
+        <DocumentationChecklist>
+          <Item>Attach outputs of INV-01-CLICKONCE-DETAIL, INV-02-PROC-TREE to the case.</Item>
+        </DocumentationChecklist>
+      </Step>
+    </Workflow>
+  </Investigation>
+  <ClassificationGuidance>
+    <FalsePositive>
+      <Definition>A legitimate internal ClickOnce application.</Definition>
+      <Indicators>
+        <Item>Known internal deployment URL.</Item>
+        <Item>Expected LOB app.</Item>
+        <Item>Normal user context.</Item>
+      </Indicators>
+      <SOCAction>
+        <Item>Confirm the app; close as benign_activity.</Item>
+      </SOCAction>
+    </FalsePositive>
+    <TruePositive>
+      <Definition>Delivery of a malicious .NET application via ClickOnce.</Definition>
+      <Indicators>
+        <Item>External/untrusted deployment URL.</Item>
+        <Item>Browser/email parent.</Item>
+        <Item>Suspicious follow-on.</Item>
+      </Indicators>
+      <SOCAction>
+        <Item>Isolate the host; capture the ClickOnce manifest/payload; open IR.</Item>
+        <Item>Block the source; hunt for other recipients.</Item>
+      </SOCAction>
+    </TruePositive>
+    <Misconfiguration>
+      <Definition>A vendor app using ClickOnce updates by design.</Definition>
+      <Indicators>
+        <Item>A known vendor deployment URL.</Item>
+        <Item>Consistent expected app.</Item>
+      </Indicators>
+      <SOCAction>
+        <Item>Baseline; document.</Item>
+      </SOCAction>
+    </Misconfiguration>
+  </ClassificationGuidance>
+  <Response><IRForHumans>
+    <Phase name="Immediate Actions (0-30 minutes)">
+      <Action priority="1">Confirm the activity on the host; if malicious indicators, isolate the host.</Action>
+      <Action priority="2">Identify the responsible account/process and its origin.</Action>
+    </Phase>
+    <Phase name="Containment and Eradication (hours)">
+      <Action>Isolate the host; capture volatile evidence; hunt the same pattern across the estate.</Action>
+      <Action>Reset credentials used on the host if compromise is confirmed.</Action>
+    </Phase>
+    <Phase name="Recovery and Hardening (days)">
+      <Action>Remediate the root cause; add/verify EDR coverage; apply relevant hardening.</Action>
+    </Phase>
+  </IRForHumans></Response>
+  <QualityChecks>
+    <Check>Confirm the required telemetry (Sysmon/Security auditing) is present on the host.</Check>
+    <Check>Tune known-benign administrative sources via exceptions, not by disabling the rule.</Check>
+  </QualityChecks>
+  <ClosureCriteria><FalsePositiveClosure>
+    <Item>Activity confirmed benign/authorised and documented.</Item>
+  </FalsePositiveClosure><TruePositiveClosure>
+    <Item>Host contained and triaged; root cause eradicated; estate swept; findings recorded.</Item>
+  </TruePositiveClosure></ClosureCriteria>
+</Playbook>

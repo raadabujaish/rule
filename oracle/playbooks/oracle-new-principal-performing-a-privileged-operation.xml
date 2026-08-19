@@ -1,0 +1,126 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<Playbook xmlns="https://soc.example/playbooks" id="PB-ORA-006" name="Oracle — New Principal Performing a Privileged Operation - SOC Playbook" version="1.0" status="Production" classification="TLP:AMBER">
+  <Metadata>
+    <Owner>JCB Detection Engineering (WatchWave)</Owner>
+    <LastUpdated>2026-08-14</LastUpdated>
+    <Severity default="High">High</Severity>
+    <Confidence default="Medium">Medium</Confidence>
+    <Category>Privilege Escalation / Valid Accounts</Category>
+    <MitreAttack>
+      <Technique id="T1078" name="Valid Accounts"/>
+      <Tactic id="TA0004" name="Privilege Escalation"/>
+    </MitreAttack>
+    <References>
+      <Reference title="MITRE ATT and CK" url="https://attack.mitre.org/techniques/T1078/"/>
+    </References>
+  </Metadata>
+  <ExecutiveSummary>
+    <Overview>A principal not seen before (new_terms) performed a privileged Oracle operation (DELETE/TRUNCATE/ALTER SYSTEM/CREATE DB LINK). Triage: a new/compromised DB account performing privileged actions, or a newly-onboarded legitimate account?</Overview>
+    <BusinessImpact>A new principal performing privileged DB operations may be a compromised or attacker-created account.</BusinessImpact>
+  </ExecutiveSummary>
+  <Scope><Assets>
+    <AssetType>Oracle databases (core banking, AML, insurance)</AssetType>
+  </Assets><LogSources>
+    <LogSource>Oracle DB audit via apps-* - apps-*</LogSource>
+  </LogSources></Scope>
+  <Prerequisites><TelemetryRequirements>
+    <Requirement>Oracle DB audit in apps-* (verified live). Fields: ACTION_NAME, USERNAME, SQL_TEXT, plus the audited object. Rules exclude known service principals (e.g. INH_LIFE, BANKSYS, JCB_AML). The acting principal is USERNAME.</Requirement>
+  </TelemetryRequirements><DetectionSignals>
+    <Signal><Name>New Principal Performing a Privileged Op</Name><Details>first-seen principal performing a privileged Oracle op.</Details></Signal>
+  </DetectionSignals></Prerequisites>
+  <Inputs>
+    <Input name="$username" description="The new principal (USERNAME)."/>
+  </Inputs>
+  <Triage><ImmediateCapture>
+    <Item>$username: $username</Item>
+  </ImmediateCapture><InitialAssessment>
+    <Rule>Weigh the full evidence story per the ClassificationGuidance, not any single fact.</Rule>
+  </InitialAssessment></Triage>
+  <Investigation>
+    <Goal>Determine whether the new privileged principal is a compromised/rogue account or a legitimate new account.</Goal>
+    <Workflow>
+      <Step order="1" name="The new principal's privileged operations">
+        <Purpose>What privileged operations the new principal performed, and on what, sets the risk.</Purpose>
+        <Query platform="Elastic" language="ES|QL" id="INV-01-ORANEW-OPS">
+          <![CDATA[
+FROM apps-*
+| WHERE USERNAME == "$username" AND ACTION_NAME IN ("DELETE","TRUNCATE TABLE","ALTER SYSTEM","CREATE PUBLIC DATABASE LINK") AND @timestamp >= NOW() - 4 hours
+| KEEP @timestamp, ACTION_NAME, SQL_TEXT
+| SORT @timestamp DESC
+| LIMIT 20
+          ]]>
+        </Query>
+        <ExpectedOutput>
+          <Field name="ACTION_NAME"/>
+          <Field name="SQL_TEXT"/>
+        </ExpectedOutput>
+        <AnalystNotes>Destructive/exfil operations (TRUNCATE, DB link) by a brand-new principal are high-risk. A new DBA/app account performing expected setup is lower-risk. Read SQL_TEXT.</AnalystNotes>
+      </Step>
+      <Step order="2" name="Finalize classification">
+        <DecisionTree>
+          <Node><Condition>A new principal performing destructive/exfil operations (TRUNCATE/DB link/ALTER SYSTEM) with no onboarding record.</Condition><Result>True Positive (Rogue/Compromised DB Account - escalate, disable)</Result></Node>
+          <Node><Condition>A newly-onboarded legitimate DBA/app account performing expected operations.</Condition><Result>False Positive</Result></Node>
+          <Node><Condition>An application using a new service account (baseline gap).</Condition><Result>Misconfiguration</Result></Node>
+          <Node><Condition>New principal with unclear provenance.</Condition><Result>Needs Escalation</Result></Node>
+        </DecisionTree>
+        <DocumentationChecklist>
+          <Item>Attach outputs of INV-01-ORANEW-OPS to the case.</Item>
+        </DocumentationChecklist>
+      </Step>
+    </Workflow>
+  </Investigation>
+  <ClassificationGuidance>
+    <FalsePositive>
+      <Definition>A newly-onboarded legitimate account.</Definition>
+      <Indicators>
+        <Item>Documented onboarding.</Item>
+        <Item>Expected operations.</Item>
+        <Item>Known owner.</Item>
+      </Indicators>
+      <SOCAction>
+        <Item>Confirm onboarding; baseline; close as false_positive.</Item>
+      </SOCAction>
+    </FalsePositive>
+    <TruePositive>
+      <Definition>A rogue or compromised DB account.</Definition>
+      <Indicators>
+        <Item>No onboarding record.</Item>
+        <Item>Destructive/exfil operations.</Item>
+        <Item>Unexpected principal.</Item>
+      </Indicators>
+      <SOCAction>
+        <Item>Disable the account; review data impact; open IR.</Item>
+      </SOCAction>
+    </TruePositive>
+    <Misconfiguration>
+      <Definition>An app using an unbaselined service account.</Definition>
+      <Indicators>
+        <Item>Known app, new account.</Item>
+        <Item>Owner confirms.</Item>
+      </Indicators>
+      <SOCAction>
+        <Item>Baseline the account; document.</Item>
+      </SOCAction>
+    </Misconfiguration>
+  </ClassificationGuidance>
+  <Response><IRForHumans>
+    <Phase name="Immediate Actions (0-30 minutes)">
+      <Action priority="1">Identify the new principal and its operations; confirm onboarding.</Action>
+      <Action priority="2">If rogue, disable and review data impact.</Action>
+    </Phase>
+    <Phase name="Containment and Eradication (hours)">
+      <Action>Disable the account; review affected data; open IR.</Action>
+    </Phase>
+    <Phase name="Recovery and Hardening (days)">
+      <Action>Enforce DB account onboarding governance; alert on new privileged principals.</Action>
+    </Phase>
+  </IRForHumans></Response>
+  <QualityChecks>
+    <Check>new_terms keys on USERNAME; the privileged action set is DELETE/TRUNCATE/ALTER SYSTEM/CREATE DB LINK.</Check>
+  </QualityChecks>
+  <ClosureCriteria><FalsePositiveClosure>
+    <Item>Legitimate onboarding confirmed; documented.</Item>
+  </FalsePositiveClosure><TruePositiveClosure>
+    <Item>Rogue account disabled; data impact reviewed; IR recorded.</Item>
+  </TruePositiveClosure></ClosureCriteria>
+</Playbook>

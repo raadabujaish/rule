@@ -1,0 +1,151 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<Playbook xmlns="https://soc.example/playbooks" id="PB-JCB-NEW-1" name="Brute Force Attack Detection - IP Threshold  - SOC Playbook" version="2.1" status="Production" classification="TLP:AMBER">
+  <Metadata>
+    <Owner>JCB Detection Engineering (WatchWave)</Owner>
+    <LastUpdated>2026-08-19</LastUpdated>
+    <Severity default="Critical">Critical</Severity>
+    <Confidence default="Medium">Medium</Confidence>
+    <Category>Credential Access / Brute Force</Category>
+    <MitreAttack>
+      <Technique id="T1110" name="Brute Force"/>
+      <Tactic id="TA0006" name="Credential Access"/>
+    </MitreAttack>
+    <References>
+      <Reference title="MITRE ATT and CK - T1110 Brute Force" url="https://attack.mitre.org/techniques/T1110/"/>
+    </References>
+  </Metadata>
+  <ExecutiveSummary>
+    <Overview>The threshold rule "Brute Force Attack Detection - IP Threshold" fired on a burst of Windows failed logons (event.code 4625) attributed to a source. Triage question: is this a real password-guessing / spray attack against JCB accounts, or a benign failure storm (a service/scheduled-task running with a stale password, or a locked-out user)?</Overview>
+    <BusinessImpact>A successful brute force or password spray yields valid domain credentials - the foothold for lateral movement, privilege escalation and access to core banking systems. A single guessed privileged or service account can compromise the domain.</BusinessImpact>
+  </ExecutiveSummary>
+  <Scope>
+    <Assets>
+      <AssetType>Windows domain member servers and workstations (INTDOM), including Domain Controllers and application/service hosts</AssetType>
+    </Assets>
+    <LogSources>
+      <LogSource>Windows Security event log - logs-system.security-* (event.code 4625 failed logon, 4624 successful logon)</LogSource>
+    </LogSources>
+  </Scope>
+  <Prerequisites>
+    <TelemetryRequirements>
+      <Requirement>Windows Security auth events (verified live on JCB). Populated fields: host.name, winlog.event_data.TargetUserName, winlog.event_data.LogonType, winlog.event_data.SubStatus, winlog.event_data.Status, event.code, event.outcome (failure/success), event.action, event.category (authentication).</Requirement>
+      <Requirement>Known-population caveat (verified on JCB): Windows 4625/4624 at JCB do NOT populate a client IP - winlog.event_data.IpAddress and source.ip are null on interactive (LogonType 2) and network (LogonType 3) failures alike. The "IP" in this rule is the alert grouping key; corroborate the actual sourcing IP from network telemetry (FortiGate VPN, F5 WAF, NETSCOUT AED) when the client IP is absent.</Requirement>
+    </TelemetryRequirements>
+    <DetectionSignals>
+      <Signal><Name>Failed-Logon Burst Above IP Threshold</Name><Details>A volume of 4625 failures exceeding the rule threshold, grouped by the source the detection attributes them to.</Details></Signal>
+    </DetectionSignals>
+  </Prerequisites>
+  <Inputs>
+    <Input name="$srcip" description="Source IP the alert attributes the failed-logon burst to (the IP-threshold entity). May be absent in Windows 4625 at JCB - see the telemetry caveat."/>
+    <Input name="$host" description="Target Windows host receiving the failed logons (host.name). The reliably-populated pivot on JCB."/>
+  </Inputs>
+  <Triage>
+    <ImmediateCapture>
+      <Item>$srcip: $srcip</Item>
+      <Item>$host: $host</Item>
+    </ImmediateCapture>
+    <InitialAssessment>
+      <Rule>Weigh the full evidence story per the ClassificationGuidance (account spread, SubStatus reasons, and any success) - not any single fact. One account failing thousands of times with "wrong password" is usually a stale service credential; many distinct accounts failing with "no such user" is a spray.</Rule>
+    </InitialAssessment>
+  </Triage>
+  <Investigation>
+    <Goal>Determine whether the failed-logon burst is a real brute force / password spray (and whether any account was compromised), or a benign failure storm from a stale service credential or a locked-out user.</Goal>
+    <Workflow>
+      <Step order="1" name="Attempts attributable to the alerting source IP">
+        <Purpose>Characterise what the alert's source IP did: how many failures, against how many distinct accounts and hosts, and by which logon types. Breadth of accounts is the spray signature.</Purpose>
+        <Query platform="Elastic" language="ES|QL" id="INV-01">
+          <![CDATA[
+FROM logs-system.security-*
+| WHERE event.code == "4625" AND winlog.event_data.IpAddress == "$srcip" AND @timestamp >= NOW() - 4 hours
+| STATS fails = COUNT(*), distinct_accounts = COUNT_DISTINCT(winlog.event_data.TargetUserName), accounts = VALUES(winlog.event_data.TargetUserName), hosts = VALUES(host.name), logon_types = VALUES(winlog.event_data.LogonType)
+| LIMIT 1
+          ]]>
+        </Query>
+        <AnalystNotes>JCB caveat (verified live): Windows 4625 at JCB does not populate a client IP, so this step is often empty even for a real attack. An empty result does NOT clear the alert - proceed to Step 2 (host-keyed) and corroborate the sourcing IP from FortiGate VPN / F5 / NETSCOUT. Many distinct_accounts from one IP = password spray; one account with high fails = targeted guessing or a stale credential.</AnalystNotes>
+      </Step>
+      <Step order="2" name="Failed-logon burst on the targeted host">
+        <Purpose>The reliably-populated JCB view: how the failures distribute across accounts on the targeted host, and the SubStatus reasons that separate a spray from a service-account misconfiguration.</Purpose>
+        <Query platform="Elastic" language="ES|QL" id="INV-02">
+          <![CDATA[
+FROM logs-system.security-*
+| WHERE event.code == "4625" AND host.name == "$host" AND @timestamp >= NOW() - 4 hours
+| STATS fails = COUNT(*), distinct_accounts = COUNT_DISTINCT(winlog.event_data.TargetUserName), accounts = VALUES(winlog.event_data.TargetUserName), logon_types = VALUES(winlog.event_data.LogonType), sub_status = VALUES(winlog.event_data.SubStatus)
+| LIMIT 1
+          ]]>
+        </Query>
+        <AnalystNotes>SubStatus decode: 0xc0000064 = user name does not exist (username enumeration / spray hallmark); 0xc000006a = wrong password (targeted guessing OR a stale service/app credential); 0xc0000072 = account disabled; 0xc0000234 = account locked out; 0xc0000071 = password expired. Many distinct_accounts + 0xc0000064 = spray (escalate). One account + thousands of 0xc000006a on the same app/service host = almost always a stale service credential (misconfiguration).</AnalystNotes>
+      </Step>
+      <Step order="3" name="Successful logon after failures (breach check)">
+        <Purpose>The decisive signal: an account that logged on successfully (4624) on the same host during the failure burst may indicate a guessed password. Compare per-account success vs failure counts.</Purpose>
+        <Query platform="Elastic" language="ES|QL" id="INV-03">
+          <![CDATA[
+FROM logs-system.security-*
+| WHERE event.code IN ("4624","4625") AND host.name == "$host" AND @timestamp >= NOW() - 4 hours
+| STATS attempts = COUNT(*) BY event.code, winlog.event_data.TargetUserName
+| SORT attempts DESC
+| LIMIT 20
+          ]]>
+        </Query>
+        <AnalystNotes>An account showing both many 4625 failures AND a 4624 success in the same window is the highest-priority finding - treat as a possible successful brute force and pivot to that account's post-logon activity. Pure failures with no matching success supports spray-without-success (still credential-access, but no confirmed compromise).</AnalystNotes>
+      </Step>
+    </Workflow>
+  </Investigation>
+  <DecisionTree>
+    <Node><Condition>An account shows many 4625 failures AND a 4624 success on the same host in the window (INV-03), or many distinct accounts are targeted from one source with 0xc0000064 (INV-01/INV-02).</Condition><Result>True Positive (Brute Force / Password Spray - possible credential compromise)</Result></Node>
+    <Node><Condition>A single account fails thousands of times with 0xc000006a (wrong password) on an application/service host, matching a known service or scheduled task with a stale credential.</Condition><Result>Misconfiguration (stale service/app credential - not an attack)</Result></Node>
+    <Node><Condition>Failures resolve to a known locked-out or recently-password-changed user re-trying from their own workstation, with no account breadth and no success.</Condition><Result>False Positive (authorised user / benign failure storm)</Result></Node>
+    <Node><Condition>Real account breadth or an external-sourced burst, but the sourcing IP and scope cannot be established from available telemetry.</Condition><Result>Needs Escalation (corroborate source via FortiGate VPN / F5 / NETSCOUT; hand to SOC L2)</Result></Node>
+  </DecisionTree>
+  <ClassificationGuidance>
+    <FalsePositive>
+      <Definition>An authorised or proven-benign failure storm: a stale service/scheduled-task credential, or a locked-out / recently-changed user re-trying - not an adversary guessing passwords.</Definition>
+      <Indicators>
+        <Item>One (or very few) accounts, high failure count, SubStatus dominated by 0xc000006a (wrong password).</Item>
+        <Item>Target account is a service/app account (e.g. svc_*, *_srv) and the host is its application server.</Item>
+        <Item>No 4624 success for the failing account; no account breadth (spray).</Item>
+      </Indicators>
+      <SOCAction>
+        <Item>Confirm the account/host is a known service or a locked-out user; document the owning system; close as benign/misconfiguration and refer the stale credential to the system owner for rotation.</Item>
+      </SOCAction>
+    </FalsePositive>
+    <TruePositive>
+      <Definition>An adversary guessing credentials: many distinct accounts from one source (spray), sustained targeted guessing of one account, or any failure burst followed by a success.</Definition>
+      <Indicators>
+        <Item>Many distinct target accounts in a short window (spray), especially with 0xc0000064 (unknown user - enumeration).</Item>
+        <Item>A 4624 success for an account that also has a wall of 4625 failures (possible guessed password).</Item>
+        <Item>Targeting of privileged or service accounts, or a burst sourced from outside normal working hours / an unexpected host.</Item>
+      </Indicators>
+      <SOCAction>
+        <Item>If a success is present: treat the account as compromised - force password reset, revoke sessions, and investigate post-logon activity. Otherwise: reset/tighten targeted accounts, block/monitor the corroborated source, and hunt for the same source across VPN/WAF telemetry.</Item>
+      </SOCAction>
+    </TruePositive>
+  </ClassificationGuidance>
+  <Response>
+    <IRForHumans>
+      <Phase name="Immediate Actions (0-30 minutes)">
+        <Action priority="1">Determine from INV-03 whether any targeted account also succeeded (4624). If yes, treat that account as compromised immediately.</Action>
+        <Action priority="2">Establish the scope from INV-02: single account (likely service/misconfig) vs many accounts (spray). Capture the target host and account list.</Action>
+        <Action priority="3">If the client IP is absent, corroborate the source from FortiGate VPN / F5 / NETSCOUT telemetry for the same window before concluding.</Action>
+      </Phase>
+      <Phase name="Containment and Eradication (hours)">
+        <Action>For confirmed compromise: force password reset and revoke active sessions/Kerberos tickets for the account; block the corroborated source IP at the perimeter; review the account's logons and actions after the success.</Action>
+        <Action>For a spray without success: reset any weak/targeted accounts, enforce lockout/MFA where missing, and blocklist the source.</Action>
+      </Phase>
+      <Phase name="Recovery and Hardening (days)">
+        <Action>Rotate stale service/scheduled-task credentials that generate benign failure storms so they stop masking real attacks; review account-lockout and MFA policy; add the source and pattern to hunting.</Action>
+      </Phase>
+    </IRForHumans>
+  </Response>
+  <Escalation>
+    <Trigger>A 4624 success amid the failure burst (possible compromise), targeting of privileged/service accounts, or an external brute force whose source must be corroborated across VPN/WAF telemetry.</Trigger>
+    <To>SOC L2 / IR</To>
+  </Escalation>
+  <Closure>
+    <FalsePositiveClosure>
+      <Item>Benign storm confirmed (stale service credential or locked-out user); owning system and remediation (credential rotation) documented; no account breadth and no success.</Item>
+    </FalsePositiveClosure>
+    <TruePositiveClosure>
+      <Item>Compromised or targeted accounts reset and sessions revoked; source corroborated and blocked; post-compromise activity reviewed; spray/guessing pattern documented and added to hunting.</Item>
+    </TruePositiveClosure>
+  </Closure>
+</Playbook>

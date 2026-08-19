@@ -1,0 +1,147 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<Playbook xmlns="https://soc.example/playbooks" id="PB-AD-015" name="Windows — Pass-the-Hash / Overpass-the-Hash Logon Pattern - SOC Playbook" version="1.0" status="Production" classification="TLP:AMBER">
+  <Metadata>
+    <Owner>JCB Detection Engineering (WatchWave)</Owner>
+    <LastUpdated>2026-08-14</LastUpdated>
+    <Severity default="High">High</Severity>
+    <Confidence default="Medium">Medium</Confidence>
+    <Category>Lateral Movement / Use Alternate Authentication Material</Category>
+    <MitreAttack>
+      <Technique id="T1550.002" name="Pass the Hash"/>
+      <Tactic id="TA0008" name="Lateral Movement"/>
+    </MitreAttack>
+    <References>
+      <Reference title="MITRE ATT and CK" url="https://attack.mitre.org/techniques/T1550/"/>
+    </References>
+  </Metadata>
+  <ExecutiveSummary>
+    <Overview>A logon (4624) with LogonType 9, LogonProcessName seclogo and AuthenticationPackage Negotiate - the signature runas /netonly leaves when a stolen NTLM hash is used (Pass-the-Hash / Overpass-the-Hash). Triage question: is this an attacker moving laterally with a hash, or a legitimate admin tool that uses alternate credentials?</Overview>
+    <BusinessImpact>PtH lets an attacker authenticate as a user without the password, enabling lateral movement and privilege use across the domain.</BusinessImpact>
+  </ExecutiveSummary>
+  <Scope><Assets>
+    <AssetType>Active Directory domain controllers (INTDOM)</AssetType>
+    <AssetType>Windows member servers and workstations</AssetType>
+  </Assets><LogSources>
+    <LogSource>Windows Security event log - logs-system.security-*</LogSource>
+  </LogSources></Scope>
+  <Prerequisites><TelemetryRequirements>
+    <Requirement>Windows Security auditing shipped via Elastic Agent to logs-system.security-* (verified live).</Requirement>
+  </TelemetryRequirements><DetectionSignals>
+    <Signal><Name>PtH logon signature</Name><Details>4624 LogonType 9 + seclogo + Negotiate.</Details></Signal>
+  </DetectionSignals></Prerequisites>
+  <Inputs>
+    <Input name="$username" description="Account used in the alternate-credential logon (TargetUserName)."/>
+    <Input name="$hostname" description="Host where the logon occurred."/>
+    <Input name="$source_ip" description="Source IP if present."/>
+  </Inputs>
+  <Triage><ImmediateCapture>
+    <Item>Account: $username</Item>
+    <Item>Host: $hostname</Item>
+  </ImmediateCapture><InitialAssessment>
+    <Rule>Some admin tooling and cluster software legitimately uses runas /netonly; the risk is when the account is privileged and the host/timing is unusual.</Rule>
+  </InitialAssessment></Triage>
+  <Investigation>
+    <Goal>Determine whether the alternate-credential logon reflects hash reuse for lateral movement or a known administrative tool pattern.</Goal>
+    <Workflow>
+      <Step order="1" name="Frequency and spread of this PtH signature">
+        <Purpose>Isolated on one admin jump host = likely tooling; the same account showing this pattern across multiple hosts = lateral movement.</Purpose>
+        <Query platform="Elastic" language="ES|QL" id="INV-01-PTH-SPREAD">
+          <![CDATA[
+FROM logs-system.security-*
+| WHERE event.code == "4624" AND winlog.event_data.LogonType == "9" AND winlog.event_data.LogonProcessName == "seclogo" AND winlog.event_data.AuthenticationPackageName == "Negotiate" AND @timestamp >= NOW() - 4 hours
+| STATS events = COUNT(*), hosts = COUNT_DISTINCT(host.name), host_list = VALUES(host.name) BY winlog.event_data.TargetUserName
+| SORT events DESC
+| LIMIT 25
+          ]]>
+        </Query>
+        <ExpectedOutput>
+          <Field name="winlog.event_data.TargetUserName"/>
+          <Field name="hosts"/>
+          <Field name="host_list"/>
+        </ExpectedOutput>
+        <AnalystNotes>One account, many hosts in a short window = spreading. Confine attention to privileged accounts; a normal user showing this on several servers is high concern.</AnalystNotes>
+      </Step>
+      <Step order="2" name="What did the account do on this host after the logon">
+        <Purpose>Follow-on privileged actions (special privileges, service creation, share access) turn a suspicious logon into confirmed lateral movement.</Purpose>
+        <Query platform="Elastic" language="ES|QL" id="INV-02-PTH-FOLLOWON">
+          <![CDATA[
+FROM logs-system.security-*
+| WHERE host.name == "$hostname" AND winlog.event_data.TargetUserName == "$username" AND event.code IN ("4672","4673","4688","5140","7045") AND @timestamp >= NOW() - 2 hours
+| STATS c = COUNT(*), codes = VALUES(event.code) BY winlog.event_data.TargetUserName
+| LIMIT 10
+          ]]>
+        </Query>
+        <ExpectedOutput>
+          <Field name="codes"/>
+          <Field name="c"/>
+        </ExpectedOutput>
+        <AnalystNotes>4672 (special privileges), 5140 (share access), 7045 (service install) after the PtH logon indicate active use of the credential on this host.</AnalystNotes>
+      </Step>
+      <Step order="3" name="Finalize classification">
+        <DecisionTree>
+          <Node><Condition>INV-01 shows one account with the PtH signature across MULTIPLE hosts, or INV-02 shows privileged follow-on actions.</Condition><Result>True Positive (Lateral Movement via Hash - IR)</Result></Node>
+          <Node><Condition>INV-01 shows the signature confined to a known admin jump host / clustering software with an expected account.</Condition><Result>False Positive</Result></Node>
+          <Node><Condition>Isolated occurrence on one host with no follow-on and account role unclear.</Condition><Result>Needs Escalation</Result></Node>
+        </DecisionTree>
+        <DocumentationChecklist>
+          <Item>Attach outputs of INV-01-PTH-SPREAD, INV-02-PTH-FOLLOWON to the case.</Item>
+        </DocumentationChecklist>
+      </Step>
+    </Workflow>
+  </Investigation>
+  <ClassificationGuidance>
+    <FalsePositive>
+      <Definition>Legitimate administrative tooling using runas /netonly or clustering software using alternate credentials.</Definition>
+      <Indicators>
+        <Item>Confined to a known admin/jump host or service.</Item>
+        <Item>Expected account.</Item>
+        <Item>No lateral spread or privileged follow-on.</Item>
+      </Indicators>
+      <SOCAction>
+        <Item>Confirm the tool/host is expected; close as false_positive; document the benign pattern.</Item>
+      </SOCAction>
+    </FalsePositive>
+    <TruePositive>
+      <Definition>A stolen hash reused to authenticate and move laterally.</Definition>
+      <Indicators>
+        <Item>Same account, PtH signature across multiple hosts.</Item>
+        <Item>Privileged follow-on (4672/5140/7045).</Item>
+        <Item>Unusual host/timing for the account.</Item>
+      </Indicators>
+      <SOCAction>
+        <Item>Isolate affected hosts; reset the account and revoke sessions.</Item>
+        <Item>Hunt the origin of the hash (LSASS access); open IR.</Item>
+      </SOCAction>
+    </TruePositive>
+    <Misconfiguration>
+      <Definition>A misconfigured service repeatedly using netonly logons unnecessarily.</Definition>
+      <Indicators>
+        <Item>A service account generating the pattern on its own host by design flaw.</Item>
+        <Item>No spread, no privileged misuse.</Item>
+      </Indicators>
+      <SOCAction>
+        <Item>Reconfigure the service to use proper auth; document.</Item>
+      </SOCAction>
+    </Misconfiguration>
+  </ClassificationGuidance>
+  <Response><IRForHumans>
+    <Phase name="Immediate Actions (0-30 minutes)">
+      <Action priority="1">Isolate hosts showing spread; reset $username and revoke sessions.</Action>
+    </Phase>
+    <Phase name="Containment and Eradication (hours)">
+      <Action>Hunt for LSASS credential theft on the origin; check for tools (mimikatz) and other reused accounts.</Action>
+    </Phase>
+    <Phase name="Recovery and Hardening (days)">
+      <Action>Enable credential guard; restrict admin logon types; tier admin accounts.</Action>
+    </Phase>
+  </IRForHumans></Response>
+  <QualityChecks>
+    <Check>Signature (type 9 + seclogo + Negotiate) is specific but used by some legit tools - lateral spread and follow-on are the discriminators.</Check>
+    <Check>source.ip is often absent for local runas - rely on host spread.</Check>
+  </QualityChecks>
+  <ClosureCriteria><FalsePositiveClosure>
+    <Item>Confined to expected admin tooling; no spread or misuse.</Item>
+  </FalsePositiveClosure><TruePositiveClosure>
+    <Item>Hosts isolated, account reset, hash-theft origin found, IR closed.</Item>
+  </TruePositiveClosure></ClosureCriteria>
+</Playbook>

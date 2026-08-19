@@ -1,0 +1,85 @@
+{
+  "rule_id": "jcb-win-scheduled-task-suspicious",
+  "name": "Windows — Scheduled Task Created with Suspicious Action",
+  "version": 1,
+  "enabled": true,
+  "interval": "1h",
+  "from": "now-90m",
+  "to": "now",
+  "description": "Attacker objective\nCreate a scheduled task that runs attacker code for persistence or delayed/repeated execution.\n\nAttack logic\nAttackers register tasks that launch obfuscated PowerShell, scripting hosts, download cradles or binaries from user-writable paths, so the payload runs on a trigger or schedule.\n\nWhy this detection works\nScheduled-task-creation auditing (4698) records the full task definition; matching suspicious action/command patterns in the task content isolates malicious tasks, independent of case.\n\nFalse positives\nA legitimate administrative or software task that happens to invoke PowerShell with these arguments.\n\nTuning\nAllowlist verified task authors/names; treat encoded/hidden/download tasks as high-risk.\n\nRequired telemetry\nWindows Security 4698 (TaskName, TaskContent).",
+  "tags": [
+    "JCB",
+    "Windows",
+    "Phase3",
+    "Use Case: Threat Detection",
+    "Tactic: Persistence"
+  ],
+  "author": [
+    "raadabujaish"
+  ],
+  "license": "",
+  "threat": [
+    {
+      "framework": "MITRE ATT&CK",
+      "tactic": {
+        "id": "TA0003",
+        "name": "Persistence",
+        "reference": "https://attack.mitre.org/tactics/TA0003/"
+      },
+      "technique": [
+        {
+          "id": "T1053",
+          "name": "Scheduled Task/Job",
+          "reference": "https://attack.mitre.org/techniques/T1053/",
+          "subtechnique": [
+            {
+              "id": "T1053.005",
+              "name": "Scheduled Task",
+              "reference": "https://attack.mitre.org/techniques/T1053/005/"
+            }
+          ]
+        }
+      ]
+    }
+  ],
+  "investigation_fields": {
+    "field_names": [
+      "@timestamp",
+      "host.name",
+      "winlog.event_data.TaskName",
+      "winlog.event_data.SubjectUserName",
+      "winlog.event_data.TaskContent",
+      "user.name",
+      "user.domain",
+      "process.name",
+      "process.executable",
+      "process.command_line",
+      "process.args",
+      "process.parent.name",
+      "process.parent.executable",
+      "event.code",
+      "event.action"
+    ]
+  },
+  "related_integrations": [],
+  "required_fields": [],
+  "setup": "",
+  "note": "## Investigation guide\n1. Read the task action/command and the author (SubjectUserName).\n2. If the action is an encoded/hidden/download command, remove the task and investigate the author and host.",
+  "false_positives": [
+    "A legitimate administrative or software task that happens to invoke PowerShell with these arguments."
+  ],
+  "references": [
+    "https://attack.mitre.org/techniques/T1053/"
+  ],
+  "risk_score": 68,
+  "risk_score_mapping": [],
+  "severity": "high",
+  "severity_mapping": [],
+  "output_index": "",
+  "max_signals": 100,
+  "exceptions_list": [],
+  "actions": [],
+  "type": "esql",
+  "language": "esql",
+  "query": "FROM logs-system.security-* METADATA _id, _index, _version\n| WHERE event.code == \"4698\" AND winlog.event_data.TaskContent IS NOT NULL\n| EVAL tc = TO_LOWER(winlog.event_data.TaskContent)\n| WHERE (tc LIKE \"*powershell*\" AND (tc LIKE \"*-enc*\" OR tc LIKE \"*frombase64*\" OR tc LIKE \"*downloadstring*\" OR tc LIKE \"*downloadfile*\" OR tc LIKE \"*invoke-expression*\" OR tc LIKE \"*webclient*\" OR tc LIKE \"*iex(*\" OR tc LIKE \"*iex *\"))\n   OR tc LIKE \"*mshta*\"\n   OR (tc LIKE \"*regsvr32*\" AND tc LIKE \"*scrobj*\")\n   OR (tc LIKE \"*rundll32*\" AND (tc LIKE \"*javascript*\" OR tc LIKE \"*comsvcs*\"))\n   OR (tc LIKE \"*certutil*\" AND tc LIKE \"*urlcache*\")\n   OR (tc LIKE \"*bitsadmin*\" AND tc LIKE \"*transfer*\")\n| KEEP @timestamp, host.name, winlog.event_data.TaskName, winlog.event_data.SubjectUserName, winlog.event_data.TaskContent"
+}

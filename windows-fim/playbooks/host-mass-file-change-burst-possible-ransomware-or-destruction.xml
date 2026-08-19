@@ -1,0 +1,145 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<Playbook xmlns="https://soc.example/playbooks" id="PB-FIM-001" name="Host — Mass File Change Burst (Possible Ransomware or Destruction) - SOC Playbook" version="1.0" status="Production" classification="TLP:AMBER">
+  <Metadata>
+    <Owner>JCB Detection Engineering (WatchWave)</Owner>
+    <LastUpdated>2026-08-14</LastUpdated>
+    <Severity default="High">High</Severity>
+    <Confidence default="Medium">Medium</Confidence>
+    <Category>Impact / Data Encrypted for Impact</Category>
+    <MitreAttack>
+      <Technique id="T1486" name="Data Encrypted for Impact"/>
+      <Tactic id="TA0040" name="Impact"/>
+    </MitreAttack>
+    <References>
+      <Reference title="MITRE ATT and CK" url="https://attack.mitre.org/techniques/T1486/"/>
+    </References>
+  </Metadata>
+  <ExecutiveSummary>
+    <Overview>One host had a burst of file changes (&gt;=100 distinct files created/updated/moved/deleted via FIM in the window; 24h/host suppressed). Triage: active ransomware/destruction, or a legitimate bulk operation (backup/migration/software update)?</Overview>
+    <BusinessImpact>A mass file-change burst is the signature of ransomware encryption or destructive wiping.</BusinessImpact>
+  </ExecutiveSummary>
+  <Scope><Assets>
+    <AssetType>Windows servers/endpoints monitored by FIM</AssetType>
+  </Assets><LogSources>
+    <LogSource>Windows FIM - logs-fim.event-*</LogSource>
+  </LogSources></Scope>
+  <Prerequisites><TelemetryRequirements>
+    <Requirement>Windows FIM (verified live; monitors Windows system paths). Fields: file.path, file.name, file.extension, event.action, host.name.</Requirement>
+  </TelemetryRequirements><DetectionSignals>
+    <Signal><Name>Mass File Change Burst (Possible Ransomw</Name><Details>host with &gt;=100 distinct file changes (fim.event).</Details></Signal>
+  </DetectionSignals></Prerequisites>
+  <Inputs>
+    <Input name="$hostname" description="Host with the file-change burst."/>
+  </Inputs>
+  <Triage><ImmediateCapture>
+    <Item>$hostname: $hostname</Item>
+  </ImmediateCapture><InitialAssessment>
+    <Rule>Weigh the full evidence story per the ClassificationGuidance, not any single fact.</Rule>
+  </InitialAssessment></Triage>
+  <Investigation>
+    <Goal>Determine whether the mass file-change burst is ransomware/destruction or a legitimate bulk operation.</Goal>
+    <Workflow>
+      <Step order="1" name="File-change burst profile">
+        <Purpose>The action mix and file extensions distinguish encryption (renames/new extensions) from a benign bulk write.</Purpose>
+        <Query platform="Elastic" language="ES|QL" id="INV-01-FIM-BURST">
+          <![CDATA[
+FROM logs-fim.event-*
+| WHERE event.dataset == "fim.event" AND host.name == "$hostname" AND event.action IN ("created","updated","moved","deleted") AND @timestamp >= NOW() - 4 hours
+| STATS files = COUNT_DISTINCT(file.path), creates = COUNT(CASE(event.action=="created",1,null)), renames = COUNT(CASE(event.action=="moved",1,null)), deletes = COUNT(CASE(event.action=="deleted",1,null)), extensions = VALUES(file.extension)
+| LIMIT 1
+          ]]>
+        </Query>
+        <ExpectedOutput>
+          <Field name="files"/>
+          <Field name="creates"/>
+          <Field name="renames"/>
+          <Field name="deletes"/>
+          <Field name="extensions"/>
+        </ExpectedOutput>
+        <AnalystNotes>High renames/deletes with new uniform extensions (.locked, random) = ransomware encryption. High creates of a known type by a backup/migration = benign. Mass deletes = possible wiping. Read the extensions.</AnalystNotes>
+      </Step>
+      <Step order="2" name="What is driving the changes (ransom notes / process)">
+        <Purpose>Ransom-note files or a specific driving process confirm ransomware vs a bulk job.</Purpose>
+        <Query platform="Elastic" language="ES|QL" id="INV-02-FIM-CAUSE" optional="true">
+          <![CDATA[
+FROM logs-fim.event-*
+| WHERE event.dataset == "fim.event" AND host.name == "$hostname" AND event.action == "created" AND @timestamp >= NOW() - 4 hours
+| WHERE file.name RLIKE "(?i).*(readme|decrypt|recover|restore|lock).*"
+| STATS ransom_notes = COUNT(*), names = VALUES(file.name)
+| LIMIT 1
+          ]]>
+        </Query>
+        <ExpectedOutput>
+          <Field name="ransom_notes"/>
+          <Field name="names"/>
+        </ExpectedOutput>
+        <AnalystNotes>Ransom-note-style files created during the burst confirm ransomware - isolate immediately. None + a known bulk operation supports benign.</AnalystNotes>
+      </Step>
+      <Step order="3" name="Finalize classification">
+        <DecisionTree>
+          <Node><Condition>High renames/deletes with new extensions, or ransom-note files created during the burst.</Condition><Result>True Positive (Ransomware/Destruction - ISOLATE host NOW, activate IR)</Result></Node>
+          <Node><Condition>A legitimate bulk operation (backup/migration/update) with a known driver, no ransom notes.</Condition><Result>False Positive / Benign Activity</Result></Node>
+          <Node><Condition>A misconfigured job mass-changing files benignly.</Condition><Result>Misconfiguration</Result></Node>
+          <Node><Condition>Mass change with unclear cause.</Condition><Result>Needs Escalation (treat as high-priority)</Result></Node>
+        </DecisionTree>
+        <DocumentationChecklist>
+          <Item>Attach outputs of INV-01-FIM-BURST, INV-02-FIM-CAUSE to the case.</Item>
+        </DocumentationChecklist>
+      </Step>
+    </Workflow>
+  </Investigation>
+  <ClassificationGuidance>
+    <FalsePositive>
+      <Definition>A legitimate bulk file operation.</Definition>
+      <Indicators>
+        <Item>Backup/migration/update driver.</Item>
+        <Item>Uniform benign type.</Item>
+        <Item>No ransom notes.</Item>
+      </Indicators>
+      <SOCAction>
+        <Item>Confirm the operation; close as benign_activity.</Item>
+      </SOCAction>
+    </FalsePositive>
+    <TruePositive>
+      <Definition>Active ransomware or destruction.</Definition>
+      <Indicators>
+        <Item>High renames/deletes + new extensions.</Item>
+        <Item>Ransom notes.</Item>
+        <Item>Spreading.</Item>
+      </Indicators>
+      <SOCAction>
+        <Item>Isolate the host immediately; activate ransomware IR; protect backups; scope the spread; identify patient zero.</Item>
+      </SOCAction>
+    </TruePositive>
+    <Misconfiguration>
+      <Definition>A misconfigured mass-file job.</Definition>
+      <Indicators>
+        <Item>Known job misbehaving.</Item>
+        <Item>No encryption pattern.</Item>
+      </Indicators>
+      <SOCAction>
+        <Item>Fix the job; document; tune the rule.</Item>
+      </SOCAction>
+    </Misconfiguration>
+  </ClassificationGuidance>
+  <Response><IRForHumans>
+    <Phase name="Immediate Actions (0-30 minutes)">
+      <Action priority="1">Assess the change pattern; if ransomware, ISOLATE the host immediately.</Action>
+      <Action priority="2">Identify the driving process/operation.</Action>
+    </Phase>
+    <Phase name="Containment and Eradication (hours)">
+      <Action>Isolate the host; activate ransomware IR; protect backups; scope spread.</Action>
+    </Phase>
+    <Phase name="Recovery and Hardening (days)">
+      <Action>Ensure backups/immutability; EDR ransomware protection; segment file shares.</Action>
+    </Phase>
+  </IRForHumans></Response>
+  <QualityChecks>
+    <Check>24h/host suppressed; fim.event monitors Windows paths. Correlate with Sysmon process for the driver.</Check>
+  </QualityChecks>
+  <ClosureCriteria><FalsePositiveClosure>
+    <Item>Legitimate bulk operation confirmed; documented.</Item>
+  </FalsePositiveClosure><TruePositiveClosure>
+    <Item>Ransomware contained; spread scoped; backups verified.</Item>
+  </TruePositiveClosure></ClosureCriteria>
+</Playbook>

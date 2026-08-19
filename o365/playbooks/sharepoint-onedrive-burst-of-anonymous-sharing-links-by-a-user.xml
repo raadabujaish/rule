@@ -1,0 +1,147 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<Playbook xmlns="https://soc.example/playbooks" id="PB-O365-011" name="SharePoint/OneDrive — Burst of Anonymous Sharing Links by a User - SOC Playbook" version="1.0" status="Production" classification="TLP:AMBER">
+  <Metadata>
+    <Owner>JCB Detection Engineering (WatchWave)</Owner>
+    <LastUpdated>2026-08-14</LastUpdated>
+    <Severity default="Medium">Medium</Severity>
+    <Confidence default="Medium">Medium</Confidence>
+    <Category>Exfiltration / Transfer to Cloud Account</Category>
+    <MitreAttack>
+      <Technique id="T1567.002" name="Exfiltration to Cloud Storage"/>
+      <Tactic id="TA0010" name="Exfiltration"/>
+    </MitreAttack>
+    <References>
+      <Reference title="MITRE ATT and CK" url="https://attack.mitre.org/techniques/T1567/"/>
+    </References>
+  </Metadata>
+  <ExecutiveSummary>
+    <Overview>One user created a burst of anonymous (anyone-with-the-link) sharing links (AnonymousLinkCreated). Triage: legitimate bulk external collaboration, or data exfiltration / a compromised account mass-sharing content out?</Overview>
+    <BusinessImpact>Mass anonymous sharing exfiltrates data to anyone with the link, bypassing access controls - a data-loss and compromise indicator.</BusinessImpact>
+  </ExecutiveSummary>
+  <Scope><Assets>
+    <AssetType>Microsoft 365 / Entra ID tenant (JCB)</AssetType>
+    <AssetType>Exchange Online, SharePoint/OneDrive, Teams, Entra directory</AssetType>
+  </Assets><LogSources>
+    <LogSource>Microsoft 365 unified audit log - logs-o365.audit-*</LogSource>
+  </LogSources></Scope>
+  <Prerequisites><TelemetryRequirements>
+    <Requirement>O365 unified audit via Elastic Agent (verified live). Fields: event.action, user.name, source.ip, o365.audit.Operation, o365.audit.ResultStatus, o365.audit.ObjectId, o365.audit.ModifiedProperties, o365.audit.Parameters, o365.audit.UserId. INGEST LAG 20-60 min - all queries use a 4h window and timestamp_override event.ingested at rule level.</Requirement>
+    <Requirement>JCB egress NAT is 94.249.88.0/24 - internal users appear from it.</Requirement>
+  </TelemetryRequirements><DetectionSignals>
+    <Signal><Name>Burst of Anonymous Sharing Links by a Us</Name><Details>user with a burst of AnonymousLinkCreated.</Details></Signal>
+  </DetectionSignals></Prerequisites>
+  <Inputs>
+    <Input name="$username" description="User creating the anonymous links."/>
+    <Input name="$source_ip" description="User source IP if present."/>
+  </Inputs>
+  <Triage><ImmediateCapture>
+    <Item>$username: $username</Item>
+  </ImmediateCapture><InitialAssessment>
+    <Rule>Weigh the full evidence story per the ClassificationGuidance, not any single fact.</Rule>
+  </InitialAssessment></Triage>
+  <Investigation>
+    <Goal>Determine whether the anonymous-sharing burst is legitimate collaboration or data exfiltration.</Goal>
+    <Workflow>
+      <Step order="1" name="Anonymous-sharing burst detail">
+        <Purpose>The volume, files and timing separate normal collaboration from a mass exfil / compromised-account dump.</Purpose>
+        <Query platform="Elastic" language="ES|QL" id="INV-01-O365ANON-BURST">
+          <![CDATA[
+FROM logs-o365.audit-*
+| WHERE event.dataset == "o365.audit" AND event.action == "AnonymousLinkCreated" AND user.name == "$username" AND @timestamp >= NOW() - 4 hours
+| STATS links = COUNT(*), objects = COUNT_DISTINCT(o365.audit.ObjectId), sample = VALUES(o365.audit.ObjectId)
+| LIMIT 1
+          ]]>
+        </Query>
+        <ExpectedOutput>
+          <Field name="links"/>
+          <Field name="objects"/>
+          <Field name="sample"/>
+        </ExpectedOutput>
+        <AnalystNotes>Many links across many distinct sensitive files in minutes = exfil/compromise. A handful for a known project is normal collaboration. Note the file types/sites.</AnalystNotes>
+      </Step>
+      <Step order="2" name="Did a suspicious login precede the burst">
+        <Purpose>Anonymous-sharing burst right after an unusual login suggests a compromised account exfiltrating.</Purpose>
+        <Query platform="Elastic" language="ES|QL" id="INV-02-O365ANON-LOGIN" optional="true">
+          <![CDATA[
+FROM logs-o365.audit-*
+| WHERE event.dataset == "o365.audit" AND user.name == "$username" AND event.action IN ("UserLoggedIn","UserLoginFailed") AND @timestamp >= NOW() - 4 hours
+| STATS logins = COUNT(*), sources = VALUES(source.ip)
+| LIMIT 1
+          ]]>
+        </Query>
+        <ExpectedOutput>
+          <Field name="logins"/>
+          <Field name="sources"/>
+        </ExpectedOutput>
+        <AnalystNotes>A login from an unusual/foreign source (not the egress NAT) before the burst supports account compromise.</AnalystNotes>
+      </Step>
+      <Step order="3" name="Finalize classification">
+        <DecisionTree>
+          <Node><Condition>Many anonymous links across many sensitive files, especially after an unusual login.</Condition><Result>True Positive (Data Exfiltration / Compromised Account - IR)</Result></Node>
+          <Node><Condition>A moderate number of links for a known collaboration project by a normal user from the egress NAT.</Condition><Result>False Positive / Benign Activity</Result></Node>
+          <Node><Condition>A policy allowing anonymous links that a user is over-using without malicious intent.</Condition><Result>Misconfiguration</Result></Node>
+          <Node><Condition>Sharing burst with unclear intent/source.</Condition><Result>Needs Escalation</Result></Node>
+        </DecisionTree>
+        <DocumentationChecklist>
+          <Item>Attach outputs of INV-01-O365ANON-BURST, INV-02-O365ANON-LOGIN to the case.</Item>
+        </DocumentationChecklist>
+      </Step>
+    </Workflow>
+  </Investigation>
+  <ClassificationGuidance>
+    <FalsePositive>
+      <Definition>Legitimate external collaboration.</Definition>
+      <Indicators>
+        <Item>Known project/files.</Item>
+        <Item>Normal user from egress NAT.</Item>
+        <Item>Moderate volume.</Item>
+      </Indicators>
+      <SOCAction>
+        <Item>Confirm with the user; close as benign_activity.</Item>
+      </SOCAction>
+    </FalsePositive>
+    <TruePositive>
+      <Definition>Data exfiltration or a compromised account mass-sharing.</Definition>
+      <Indicators>
+        <Item>Many links across sensitive files.</Item>
+        <Item>Post-unusual-login timing.</Item>
+        <Item>Foreign source.</Item>
+      </Indicators>
+      <SOCAction>
+        <Item>Revoke the anonymous links; reset the account + tokens; open IR; review shared content.</Item>
+      </SOCAction>
+    </TruePositive>
+    <Misconfiguration>
+      <Definition>An over-permissive anonymous-sharing policy.</Definition>
+      <Indicators>
+        <Item>Policy permits anonymous links broadly.</Item>
+        <Item>User over-uses it benignly.</Item>
+      </Indicators>
+      <SOCAction>
+        <Item>Tighten the sharing policy; educate the user; document.</Item>
+      </SOCAction>
+    </Misconfiguration>
+  </ClassificationGuidance>
+  <Response><IRForHumans>
+    <Phase name="Immediate Actions (0-30 minutes)">
+      <Action priority="1">Confirm the change/actor in the audit log.</Action>
+      <Action priority="2">If unexpected/unauthorised, disable the actor session and reverse the change.</Action>
+    </Phase>
+    <Phase name="Containment and Eradication (hours)">
+      <Action>Reverse the change; revoke sessions/tokens for the actor and affected principals.</Action>
+      <Action>Review the actor's other recent audit activity.</Action>
+    </Phase>
+    <Phase name="Recovery and Hardening (days)">
+      <Action>Enforce MFA/conditional access; tighten admin consent and privileged-role governance (PIM); alert on these operations.</Action>
+    </Phase>
+  </IRForHumans></Response>
+  <QualityChecks>
+    <Check>Account for O365 ingest lag (20-60 min) - short windows miss events; this rule uses event.ingested override.</Check>
+    <Check>Exclude the egress NAT 94.249.88.0/24 where source is used; tune known admin/automation via exceptions.</Check>
+  </QualityChecks>
+  <ClosureCriteria><FalsePositiveClosure>
+    <Item>Legitimate collaboration confirmed; documented.</Item>
+  </FalsePositiveClosure><TruePositiveClosure>
+    <Item>Links revoked; account secured; shared content reviewed.</Item>
+  </TruePositiveClosure></ClosureCriteria>
+</Playbook>

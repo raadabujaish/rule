@@ -1,0 +1,223 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<Playbook xmlns="https://soc.example/playbooks" id="PB-JCB-ADW-005" name="Windows — Registry Persistence: IFEO / Winlogon / AppInit - SOC Playbook" version="2.1" status="Production" classification="TLP:AMBER">
+  <Metadata>
+    <Owner>JCB Detection Engineering (WatchWave)</Owner>
+    <LastUpdated>2026-08-19</LastUpdated>
+    <Severity default="High">High</Severity>
+    <Confidence default="Medium">Medium</Confidence>
+    <Category>Persistence / Registry Autostart Hijack</Category>
+    <MitreAttack>
+      <Technique id="T1546.012" name="Event Triggered Execution: Image File Execution Options Injection"/>
+      <Technique id="T1547.004" name="Boot or Logon Autostart Execution: Winlogon Helper DLL"/>
+      <Technique id="T1546.010" name="Event Triggered Execution: AppInit DLLs"/>
+      <Tactic id="TA0003" name="Persistence"/>
+    </MitreAttack>
+    <References>
+      <Reference title="MITRE ATT and CK T1546.012 Image File Execution Options Injection" url="https://attack.mitre.org/techniques/T1546/012/"/>
+      <Reference title="MITRE ATT and CK T1547.004 Winlogon Helper DLL" url="https://attack.mitre.org/techniques/T1547/004/"/>
+      <Reference title="MITRE ATT and CK T1546.010 AppInit DLLs" url="https://attack.mitre.org/techniques/T1546/010/"/>
+    </References>
+  </Metadata>
+  <ExecutiveSummary>
+    <Overview>A Sysmon registry-value-set event (event 13) modified one of three classic autostart persistence locations: an Image File Execution Options Debugger/GlobalFlag entry, the AppInit_DLLs value, or a Winlogon Shell/Userinit/Notify value. Each of these causes attacker code to run automatically - when a target program launches (IFEO), when any process loads user32.dll (AppInit), or at every interactive logon (Winlogon). The triage question is whether a legitimate installer/patch made the change, or an attacker planted an autostart hook.</Overview>
+    <BusinessImpact>These hijacks give an attacker durable, high-privilege execution that survives reboots and password resets. An IFEO Debugger on an accessibility binary (sethc.exe, utilman.exe) yields SYSTEM at the logon screen; a Winlogon Userinit/Shell change or AppInit DLL runs attacker code in every session on the host - on a banking server that is a persistent backdoor into core operations.</BusinessImpact>
+  </ExecutiveSummary>
+  <Scope>
+    <Assets>
+      <AssetType>Windows workstations and servers running Sysmon (INTDOM)</AssetType>
+      <AssetType>Privileged/administrative endpoints and jump hosts (highest impact)</AssetType>
+    </Assets>
+    <LogSources>
+      <LogSource>Sysmon registry events - logs-windows.sysmon_operational-* (event.code 13 value set, 12 key create)</LogSource>
+    </LogSources>
+  </Scope>
+  <Prerequisites>
+    <TelemetryRequirements>
+      <Requirement>Sysmon registry auditing shipped to logs-windows.sysmon_operational-* with event.code 13 present (verified live: ~31k code-13 events in 7 days) and IFEO/Winlogon/Run writes observed.</Requirement>
+      <Requirement>registry.path, registry.value, registry.data.strings and process.executable populated keyword fields (verified live).</Requirement>
+    </TelemetryRequirements>
+    <DetectionSignals>
+      <Signal><Name>IFEO injection</Name><Details>registry.path under Image File Execution Options with value Debugger or GlobalFlag - Debugger redirects a target exe to an attacker binary.</Details></Signal>
+      <Signal><Name>AppInit DLLs</Name><Details>registry.value AppInit_DLLs set to a DLL path that loads into every user32-linked process.</Details></Signal>
+      <Signal><Name>Winlogon hijack</Name><Details>registry.path under Winlogon with value Shell, Userinit or Notify changed to include attacker code that runs at logon.</Details></Signal>
+    </DetectionSignals>
+  </Prerequisites>
+  <Inputs>
+    <Input name="$host" description="Host where the registry persistence value was written (host.name from the alert)."/>
+    <Input name="$user" description="User context of the writing process (user.name from the alert)."/>
+    <Input name="$process" description="Full path of the process that wrote the value (process.executable from the alert)."/>
+  </Inputs>
+  <Triage>
+    <ImmediateCapture>
+      <Item>Host: $host; writing process: $process; user context: $user</Item>
+      <Item>Which family fired (IFEO Debugger/GlobalFlag, AppInit_DLLs, or Winlogon Shell/Userinit/Notify) and the registry.data.strings payload</Item>
+      <Item>For IFEO: the target executable named in the registry path (e.g. sethc.exe, an EDR/AV binary)</Item>
+    </ImmediateCapture>
+    <InitialAssessment>
+      <Rule>If $process is a trusted installer/patch component (msiexec, TrustedInstaller, a signed vendor updater) and the data points to a legitimate signed binary/DLL, lean False Positive / Misconfiguration - but read the payload before concluding.</Rule>
+      <Rule>If the payload points to a script host, a temp/user-writable path, or an unsigned binary, or the IFEO target is an accessibility or security binary, escalate as a persistence backdoor.</Rule>
+    </InitialAssessment>
+  </Triage>
+  <Investigation>
+    <Goal>Determine whether the registry autostart change on $host is a legitimate install/patch or attacker persistence, identify the payload it points to, and scope how far it spread.</Goal>
+    <Workflow>
+      <Step order="1" name="Read the persistence write and its payload">
+        <Purpose>Surface exactly what was set - the path, value, payload data and writing process - so the analyst can judge the target and the code it points to.</Purpose>
+        <Query platform="Elastic" language="ES|QL" id="INV-01">
+          <![CDATA[
+FROM logs-windows.sysmon_operational-*
+| WHERE @timestamp >= NOW() - 4 hours AND host.name == "$host" AND event.code == "13"
+    AND ( (TO_LOWER(registry.path) LIKE "*image file execution options*" AND registry.value IN ("Debugger","GlobalFlag"))
+       OR registry.value == "AppInit_DLLs"
+       OR (TO_LOWER(registry.path) LIKE "*winlogon*" AND registry.value IN ("Shell","Userinit","Notify")) )
+| STATS writes=COUNT(*), first_seen=MIN(@timestamp), last_seen=MAX(@timestamp), values=VALUES(registry.value), data=VALUES(registry.data.strings), procs=VALUES(process.executable) BY registry.path, user.name
+| SORT writes DESC
+| LIMIT 100
+          ]]>
+        </Query>
+        <ExpectedOutput>
+          <Field name="registry.path"/>
+          <Field name="data"/>
+          <Field name="procs"/>
+        </ExpectedOutput>
+        <AnalystNotes>Read data (registry.data.strings) carefully. Winlogon Userinit should be exactly C:\Windows\system32\userinit.exe, and Shell should be explorer.exe - anything appended is malicious. An IFEO Debugger pointing at cmd.exe/powershell/a temp path is a backdoor. AppInit_DLLs pointing to a non-vendor DLL is persistence.</AnalystNotes>
+      </Step>
+      <Step order="2" name="Profile the writing process">
+        <Purpose>Establish what wrote the value and where it came from. A signed installer is very different from a script host or an unsigned binary in a user-writable path.</Purpose>
+        <Query platform="Elastic" language="ES|QL" id="INV-02">
+          <![CDATA[
+FROM logs-windows.sysmon_operational-*
+| WHERE @timestamp >= NOW() - 4 hours AND host.name == "$host" AND event.code == "1" AND process.executable == "$process"
+| STATS starts=COUNT(*), first_seen=MIN(@timestamp), cmds=VALUES(process.command_line), parents=VALUES(process.parent.executable), parent_names=VALUES(process.parent.name) BY process.name, user.name
+| SORT starts DESC
+| LIMIT 50
+          ]]>
+        </Query>
+        <ExpectedOutput>
+          <Field name="cmds"/>
+          <Field name="parents"/>
+          <Field name="parent_names"/>
+        </ExpectedOutput>
+        <AnalystNotes>msiexec.exe / TrustedInstaller.exe / a signed vendor updater under services.exe is consistent with a legitimate install. reg.exe/powershell.exe/wscript.exe writing these keys, or a process launched by an Office app or from a temp path, indicates hands-on persistence.</AnalystNotes>
+      </Step>
+      <Step order="3" name="Map the persistence landscape on the host">
+        <Purpose>Determine whether this write is isolated or one of several autostart changes planted together (attackers commonly stack persistence).</Purpose>
+        <Query platform="Elastic" language="ES|QL" id="INV-03">
+          <![CDATA[
+FROM logs-windows.sysmon_operational-*
+| WHERE @timestamp >= NOW() - 4 hours AND host.name == "$host" AND event.code IN ("12","13")
+    AND ( TO_LOWER(registry.path) LIKE "*image file execution options*"
+       OR TO_LOWER(registry.path) LIKE "*winlogon*"
+       OR TO_LOWER(registry.path) LIKE "*appinit*"
+       OR TO_LOWER(registry.path) LIKE "*currentversion*run*" )
+| STATS writes=COUNT(*), values=VALUES(registry.value), procs=VALUES(process.executable) BY registry.path
+| SORT writes DESC
+| LIMIT 100
+          ]]>
+        </Query>
+        <ExpectedOutput>
+          <Field name="registry.path"/>
+          <Field name="values"/>
+          <Field name="procs"/>
+        </ExpectedOutput>
+        <AnalystNotes>Multiple autostart changes (IFEO plus a Run key plus a Winlogon edit) in the same window by the same process is a strong persistence-cluster signal. A single change from a known updater is more consistent with a patch.</AnalystNotes>
+      </Step>
+      <Step order="4" name="Scope how far the writing process spread the change">
+        <Purpose>Determine whether $process wrote the same persistence on many hosts (mass deployment - attacker tooling or an unexpected GPO) versus a single targeted host.</Purpose>
+        <Query platform="Elastic" language="ES|QL" id="INV-04">
+          <![CDATA[
+FROM logs-windows.sysmon_operational-*
+| WHERE @timestamp >= NOW() - 4 hours AND event.code == "13" AND process.executable == "$process"
+    AND ( (TO_LOWER(registry.path) LIKE "*image file execution options*" AND registry.value IN ("Debugger","GlobalFlag"))
+       OR registry.value == "AppInit_DLLs"
+       OR (TO_LOWER(registry.path) LIKE "*winlogon*" AND registry.value IN ("Shell","Userinit","Notify")) )
+| STATS writes=COUNT(*), hosts=COUNT_DISTINCT(host.name), host_list=VALUES(host.name), values=VALUES(registry.value) BY process.executable
+| LIMIT 20
+          ]]>
+        </Query>
+        <ExpectedOutput>
+          <Field name="hosts"/>
+          <Field name="host_list"/>
+          <Field name="values"/>
+        </ExpectedOutput>
+        <AnalystNotes>Writes across many hosts by the same executable point to either a sanctioned management/GPO deployment (verify with the platform team) or a spreading attacker. A single host with an anomalous writing process is targeted persistence.</AnalystNotes>
+      </Step>
+    </Workflow>
+  </Investigation>
+  <DecisionTree>
+    <Node><Condition>INV-01 payload points to a script host, user-writable/temp path, or unsigned binary, OR the IFEO target is an accessibility/security binary, OR Winlogon Userinit/Shell has content appended beyond the OS defaults - and INV-02 shows an untrusted writing process.</Condition><Result>True Positive (autostart persistence backdoor - escalate to IR immediately)</Result></Node>
+    <Node><Condition>INV-04 shows the same change written across many hosts by a process that cannot be confirmed as a sanctioned management/GPO deployment.</Condition><Result>Needs Escalation (possible mass persistence - confirm deployment source urgently)</Result></Node>
+    <Node><Condition>INV-02 shows a trusted installer/patch component (msiexec, TrustedInstaller, signed vendor updater) wrote the value and INV-01 data points to a legitimate signed binary/DLL consistent with that software.</Condition><Result>False Positive (authorised install/patch)</Result></Node>
+    <Node><Condition>A known management tool or driver package legitimately sets IFEO GlobalFlag/AppInit on a schedule (e.g. an EDR/AV or debugging config) and trips the rule as recurring noise.</Condition><Result>Misconfiguration (tune for the specific tool/value; do not broadly exception the persistence paths)</Result></Node>
+    <Node><Condition>Writing process or payload cannot be attributed, or signals are mixed.</Condition><Result>Needs Escalation</Result></Node>
+  </DecisionTree>
+  <ClassificationGuidance>
+    <FalsePositive>
+      <Definition>A legitimate installer, patch or management tool wrote the value - an authorised and attributable software action, not merely an assumed-benign change.</Definition>
+      <Indicators>
+        <Item>Writing process is a signed installer/updater or TrustedInstaller under a normal service parent (INV-02).</Item>
+        <Item>Payload data is a legitimate signed binary/DLL in a system path consistent with the software.</Item>
+        <Item>Change coincides with a known deployment/patch window.</Item>
+      </Indicators>
+      <SOCAction>
+        <Item>Confirm the install/patch with the platform or endpoint team.</Item>
+        <Item>If a specific management tool is chronically noisy, propose a scoped tuning for that value/process only.</Item>
+        <Item>Close as false_positive with the change reference attached.</Item>
+      </SOCAction>
+    </FalsePositive>
+    <TruePositive>
+      <Definition>An attacker planted a registry autostart hook for durable, privileged execution.</Definition>
+      <Indicators>
+        <Item>IFEO Debugger redirecting a target (especially sethc.exe/utilman.exe or a security binary) to attacker code.</Item>
+        <Item>Winlogon Userinit/Shell/Notify or AppInit_DLLs pointing to a script host, temp/user path, or unsigned DLL (INV-01).</Item>
+        <Item>Untrusted writing process (reg.exe/powershell/wscript or an Office-spawned process) and/or a persistence cluster (INV-03).</Item>
+      </Indicators>
+      <SOCAction>
+        <Item>Isolate $host; capture the payload binary/DLL and the registry value before remediation.</Item>
+        <Item>Remove the malicious value/restore the OS default (e.g. reset Userinit/Shell), and hunt for the payload executing.</Item>
+        <Item>Open an incident; determine initial access via the writing process lineage (INV-02) and check other hosts (INV-04).</Item>
+      </SOCAction>
+    </TruePositive>
+    <Misconfiguration>
+      <Definition>A legitimate tool or configuration writes these keys by design (e.g. an EDR setting GlobalFlag, a debugging IFEO entry) and generates recurring alerts.</Definition>
+      <Indicators>
+        <Item>Same benign value/process recurring on a schedule with a signed, expected payload.</Item>
+        <Item>No untrusted writer, no cluster of unrelated persistence changes.</Item>
+      </Indicators>
+      <SOCAction>
+        <Item>Confirm the tool/configuration with its owner.</Item>
+        <Item>Tune the rule for the specific value/process; track under detection-tuning, not IR.</Item>
+      </SOCAction>
+    </Misconfiguration>
+  </ClassificationGuidance>
+  <Response>
+    <IRForHumans>
+      <Phase name="Immediate Actions (0-30 minutes)">
+        <Action priority="1">If the payload is untrusted (INV-01), isolate $host and preserve the registry value and the referenced binary/DLL.</Action>
+        <Action priority="2">Identify the writing process lineage (INV-02) and check for the same change on other hosts (INV-04).</Action>
+      </Phase>
+      <Phase name="Containment and Eradication (hours)">
+        <Action>Remove the malicious value and restore OS defaults (Userinit/Shell), delete attacker DLL/binary, kill any running payload.</Action>
+        <Action>Determine and remediate initial access; reset credentials used on the host if compromise is confirmed.</Action>
+      </Phase>
+      <Phase name="Recovery and Hardening (days)">
+        <Action>Reimage if SYSTEM-level persistence is confirmed; validate Winlogon/AppInit/IFEO values across the affected tier.</Action>
+        <Action>Consider AppInit_DLLs disablement policy and monitoring of accessibility-binary IFEO entries.</Action>
+      </Phase>
+    </IRForHumans>
+  </Response>
+  <Escalation>
+    <Trigger>Any untrusted payload in an autostart value, an IFEO Debugger on an accessibility/security binary, a persistence cluster, or the same change across multiple hosts without a confirmed deployment source.</Trigger>
+    <To>SOC L2 / IR</To>
+  </Escalation>
+  <Closure>
+    <FalsePositiveClosure>
+      <Item>Install/patch/management change verified with the owning team and matches the process and payload.</Item>
+      <Item>Payload confirmed as a legitimate signed binary/DLL; no cluster of unrelated persistence changes.</Item>
+    </FalsePositiveClosure>
+    <TruePositiveClosure>
+      <Item>Malicious value removed/defaults restored, payload eradicated, host isolated or reimaged.</Item>
+      <Item>Initial access identified, spread scoped across hosts, and follow-on execution ruled out.</Item>
+    </TruePositiveClosure>
+  </Closure>
+</Playbook>

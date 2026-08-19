@@ -1,0 +1,79 @@
+{
+  "rule_id": "jcb-fim-mass-file-change-burst",
+  "name": "Host — Mass File Change Burst (Possible Ransomware or Destruction)",
+  "version": 1,
+  "enabled": true,
+  "interval": "1h",
+  "from": "now-24h",
+  "to": "now",
+  "description": "Attacker objective\nEncrypt, overwrite or destroy files at scale — ransomware or a wiper rapidly writing, renaming and deleting many files on a host.\n\nAttack logic\nRansomware and destructive malware touch a large number of files in a short window (encrypt-in-place, rename to a new extension, or delete). A host generating an unusually high volume of distinct file changes is exhibiting this pattern.\n\nWhy this detection works\nAggregating distinct changed files per host over the file-integrity stream distinguishes a mass-change burst from the routine handful of file changes a host makes during normal operation and patching.\n\nFalse positives\nA large software deployment, OS upgrade, or bulk migration/backup job on the host.\n\nTuning\nSet the per-host file-count threshold above the routine change rate; allowlist scheduled deployment/patch windows and hosts; note that coverage is limited to FIM-monitored paths, so user-data encryption outside those paths may not be visible.\n\nRequired telemetry\nFile Integrity Monitoring (fim.event): event.action, file.path, file.extension, host.name.",
+  "tags": [
+    "JCB",
+    "FIM",
+    "Phase3",
+    "Tactic: Impact",
+    "Use Case: Threat Detection"
+  ],
+  "author": [
+    "raadabujaish"
+  ],
+  "license": "",
+  "threat": [
+    {
+      "framework": "MITRE ATT&CK",
+      "tactic": {
+        "id": "TA0040",
+        "name": "Impact",
+        "reference": "https://attack.mitre.org/tactics/TA0040/"
+      },
+      "technique": [
+        {
+          "id": "T1486",
+          "name": "Data Encrypted for Impact",
+          "reference": "https://attack.mitre.org/techniques/T1486/"
+        }
+      ]
+    }
+  ],
+  "investigation_fields": {
+    "field_names": [
+      "host.name",
+      "file.path",
+      "file.extension",
+      "event.action",
+      "user.name",
+      "process.name"
+    ]
+  },
+  "related_integrations": [],
+  "required_fields": [],
+  "setup": "",
+  "note": "## Investigation guide\n1. host.name is the affected host; review the volume of creates/renames/deletes and the file extensions.\n2. A burst of renames to a common new extension, or mass deletion, indicates ransomware/wiper — isolate the host immediately.\n3. Correlate with Kaspersky/Defender detections and the host's backup status; confirm against any planned deployment.",
+  "false_positives": [
+    "A large software deployment, OS upgrade, or bulk migration/backup job on the host."
+  ],
+  "references": [
+    "https://attack.mitre.org/techniques/T1486/"
+  ],
+  "risk_score": 61,
+  "risk_score_mapping": [],
+  "severity": "medium",
+  "severity_mapping": [],
+  "output_index": "",
+  "max_signals": 100,
+  "exceptions_list": [],
+  "actions": [],
+  "type": "esql",
+  "language": "esql",
+  "query": "FROM logs-fim.event-* METADATA _id, _index, _version\n| WHERE event.dataset == \"fim.event\" AND event.action IN (\"created\",\"updated\",\"moved\",\"deleted\") AND host.name IS NOT NULL\n| STATS files = COUNT_DISTINCT(file.path), creates = COUNT(CASE(event.action==\"created\",1,null)), renames = COUNT(CASE(event.action==\"moved\",1,null)), deletes = COUNT(CASE(event.action==\"deleted\",1,null)), extensions = VALUES(file.extension) BY host.name\n| WHERE files >= 100",
+  "alert_suppression": {
+    "group_by": [
+      "host.name"
+    ],
+    "duration": {
+      "value": 24,
+      "unit": "h"
+    },
+    "missing_fields_strategy": "suppress"
+  }
+}

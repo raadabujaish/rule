@@ -1,0 +1,149 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<Playbook xmlns="https://soc.example/playbooks" id="PB-KAS-004" name="Kaspersky — Behavioral Threat Blocked (Adaptive Anomaly Control) - SOC Playbook" version="1.0" status="Production" classification="TLP:AMBER">
+  <Metadata>
+    <Owner>JCB Detection Engineering (WatchWave)</Owner>
+    <LastUpdated>2026-08-14</LastUpdated>
+    <Severity default="Medium">Medium</Severity>
+    <Confidence default="Medium">Medium</Confidence>
+    <Category>Behavioral Threat</Category>
+    <MitreAttack>
+      <Technique id="T1055" name="Process Injection"/>
+      <Tactic id="TA0005" name="Defense Evasion"/>
+    </MitreAttack>
+    <References>
+      <Reference title="MITRE ATT and CK" url="https://attack.mitre.org/techniques/T1055/"/>
+    </References>
+  </Metadata>
+  <ExecutiveSummary>
+    <Overview>Kaspersky's behavioral/adaptive-anomaly control blocked suspicious behavior (GNRL_EV_ADSEC_DETECT) - e.g. an unusual process action matching an attack pattern. Triage: real malicious behavior, or a legitimate-but-unusual application action?</Overview>
+    <BusinessImpact>Behavioral detections catch fileless/novel threats that signatures miss.</BusinessImpact>
+  </ExecutiveSummary>
+  <Scope><Assets>
+    <AssetType>Windows/Linux endpoints managed by Kaspersky</AssetType>
+    <AssetType>Kaspersky Security Center</AssetType>
+  </Assets><LogSources>
+    <LogSource>Kaspersky CEF via syslog - logs-cef.log-*</LogSource>
+  </LogSources></Scope>
+  <Prerequisites><TelemetryRequirements>
+    <Requirement>Kaspersky Security Center CEF (verified live). Fields: destination.domain (the affected ENDPOINT, not the collector), destination.user.name, cef.device.event_class_id, cef.name, message (malware name/path/SHA256), source.ip. Use destination.domain as the host of interest.</Requirement>
+  </TelemetryRequirements><DetectionSignals>
+    <Signal><Name>Behavioral Threat Blocked (Adaptive Anom</Name><Details>Kaspersky event_class_id cef.device.event_class_id == "GNRL_EV_ADSEC_DETECT".</Details></Signal>
+  </DetectionSignals></Prerequisites>
+  <Inputs>
+    <Input name="$endpoint" description="Affected endpoint (destination.domain)."/>
+    <Input name="$user" description="Endpoint user (destination.user.name) if present."/>
+  </Inputs>
+  <Triage><ImmediateCapture>
+    <Item>$endpoint: $endpoint</Item>
+  </ImmediateCapture><InitialAssessment>
+    <Rule>Weigh the full evidence story per the ClassificationGuidance, not any single fact.</Rule>
+  </InitialAssessment></Triage>
+  <Investigation>
+    <Goal>Determine whether the Kaspersky event is an active threat requiring response or a contained/benign detection.</Goal>
+    <Workflow>
+      <Step order="1" name="Confirm the Kaspersky detection and the affected endpoint">
+        <Purpose>Identify the endpoint (destination.domain), the threat name and the result (cured/blocked/not-cured).</Purpose>
+        <Query platform="Elastic" language="ES|QL" id="INV-01-KAS-DETECT">
+          <![CDATA[
+FROM logs-cef.log-*
+| WHERE cef.device.vendor == "KasperskyLab" AND (cef.device.event_class_id == "GNRL_EV_ADSEC_DETECT") AND destination.domain == "$endpoint" AND @timestamp >= NOW() - 4 hours
+| KEEP @timestamp, cef.device.event_class_id, cef.name, destination.domain, destination.user.name, message
+| SORT @timestamp DESC
+| LIMIT 20
+          ]]>
+        </Query>
+        <ExpectedOutput>
+          <Field name="cef.device.event_class_id"/>
+          <Field name="cef.name"/>
+          <Field name="destination.domain"/>
+          <Field name="message"/>
+        </ExpectedOutput>
+        <AnalystNotes>Read the message for the blocked behavior and process. A script interpreter spawning from Office, or an injection pattern, is malicious; an unusual but legitimate LOB-app action is benign.</AnalystNotes>
+      </Step>
+      <Step order="2" name="Other Kaspersky events on this endpoint (scope)">
+        <Purpose>Multiple detections or a management-drop on the same endpoint indicate active compromise vs a single caught object.</Purpose>
+        <Query platform="Elastic" language="ES|QL" id="INV-02-KAS-SCOPE" optional="true">
+          <![CDATA[
+FROM logs-cef.log-*
+| WHERE cef.device.vendor == "KasperskyLab" AND destination.domain == "$endpoint" AND @timestamp >= NOW() - 4 hours
+| STATS events = COUNT(*), classes = VALUES(cef.device.event_class_id), threats = VALUES(cef.name)
+| LIMIT 1
+          ]]>
+        </Query>
+        <ExpectedOutput>
+          <Field name="events"/>
+          <Field name="classes"/>
+          <Field name="threats"/>
+        </ExpectedOutput>
+        <AnalystNotes>Several distinct threats/classes on one endpoint in the window = active compromise; a single blocked object = contained.</AnalystNotes>
+      </Step>
+      <Step order="3" name="Finalize classification">
+        <DecisionTree>
+          <Node><Condition>A blocked attack-pattern behavior (injection, LOLBin, script-from-Office) on the endpoint.</Condition><Result>True Positive (Behavioral Threat - investigate endpoint)</Result></Node>
+          <Node><Condition>Kaspersky cured/blocked the object and no further activity on the endpoint.</Condition><Result>False Positive / Benign Activity</Result></Node>
+          <Node><Condition>A business app repeatedly tripping the anomaly control.</Condition><Result>Misconfiguration</Result></Node>
+          <Node><Condition>Detection with unclear disposition/spread.</Condition><Result>Needs Escalation</Result></Node>
+        </DecisionTree>
+        <DocumentationChecklist>
+          <Item>Attach outputs of INV-01-KAS-DETECT, INV-02-KAS-SCOPE to the case.</Item>
+        </DocumentationChecklist>
+      </Step>
+    </Workflow>
+  </Investigation>
+  <ClassificationGuidance>
+    <FalsePositive>
+      <Definition>A legitimate application performing an unusual-but-benign action.</Definition>
+      <Indicators>
+        <Item>Known LOB app.</Item>
+        <Item>Benign action mis-flagged.</Item>
+        <Item>No other indicators.</Item>
+      </Indicators>
+      <SOCAction>
+        <Item>Confirm the object was neutralised; close as benign_activity.</Item>
+      </SOCAction>
+    </FalsePositive>
+    <TruePositive>
+      <Definition>Real malicious behavior blocked by behavior analysis.</Definition>
+      <Indicators>
+        <Item>Injection/LOLBin/script-from-Office pattern.</Item>
+        <Item>Suspicious process.</Item>
+        <Item>Endpoint follow-on activity.</Item>
+      </Indicators>
+      <SOCAction>
+        <Item>Isolate the endpoint; full scan; capture sample; open IR.</Item>
+        <Item>Hunt the hash/IOC across endpoints.</Item>
+      </SOCAction>
+    </TruePositive>
+    <Misconfiguration>
+      <Definition>An over-aggressive anomaly rule flagging a business app.</Definition>
+      <Indicators>
+        <Item>A business app repeatedly tripping the anomaly control.</Item>
+      </Indicators>
+      <SOCAction>
+        <Item>Correct the config/exclusion; document.</Item>
+      </SOCAction>
+    </Misconfiguration>
+  </ClassificationGuidance>
+  <Response><IRForHumans>
+    <Phase name="Immediate Actions (0-30 minutes)">
+      <Action priority="1">Identify the affected endpoint (destination.domain) and the threat.</Action>
+      <Action priority="2">If malware active/uncured or spreading, isolate the endpoint.</Action>
+    </Phase>
+    <Phase name="Containment and Eradication (hours)">
+      <Action>Isolate the endpoint; run a full scan; capture the sample; open IR.</Action>
+      <Action>Hunt the same malware/hash across endpoints.</Action>
+    </Phase>
+    <Phase name="Recovery and Hardening (days)">
+      <Action>Ensure Kaspersky is enforcing + updated; add the hash/IOC to blocklists; verify EDR coverage.</Action>
+    </Phase>
+  </IRForHumans></Response>
+  <QualityChecks>
+    <Check>Kaspersky reports the endpoint in destination.domain (host.* is the collector pod) - always pivot on destination.domain.</Check>
+    <Check>The CEF pipeline occasionally mislabels events - see the pipeline health note in the phase-1 report.</Check>
+  </QualityChecks>
+  <ClosureCriteria><FalsePositiveClosure>
+    <Item>Object neutralised; endpoint clean; documented.</Item>
+  </FalsePositiveClosure><TruePositiveClosure>
+    <Item>Endpoint isolated + cleaned; hash hunted; no spread.</Item>
+  </TruePositiveClosure></ClosureCriteria>
+</Playbook>

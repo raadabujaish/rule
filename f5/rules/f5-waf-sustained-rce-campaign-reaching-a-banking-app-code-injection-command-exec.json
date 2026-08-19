@@ -1,0 +1,79 @@
+{
+  "rule_id": "jcb-f5-rce-reaching-app",
+  "name": "F5 WAF — Sustained RCE Campaign Reaching a Banking App (Code Injection / Command Execution)",
+  "version": 1,
+  "enabled": true,
+  "interval": "1h",
+  "from": "now-24h",
+  "to": "now",
+  "description": "Attacker objective\nAchieve remote code execution on the banking application backend via server-side code injection, OS command execution, or remote file inclusion.\n\nAttack logic\nRCE-class attack types are among the most dangerous a WAF classifies. A single source that lands several high-confidence RCE-class attacks the WAF did not block indicates sustained exploitation reaching the backend.\n\nWhy this detection works\nWhen the WAF is in alert-only mode, source-based aggregation isolates a real actor from scattered signature noise; scoping to RCE-class types and a non-blocking action keeps signal high.\n\nFalse positives\nA scanner operating against an alert-only policy; a WAF signature false-positive on benign content.\n\nTuning\nAdjust the event count to local volume; place the WAF policy in blocking mode to actually stop the attacks.\n\nRequired telemetry\nF5 ASM / Advanced WAF events (CEF): attack_type, violation_rating, deviceAction, source.ip, full request.",
+  "tags": [
+    "JCB",
+    "F5-WAF",
+    "Phase3",
+    "Use Case: Threat Detection",
+    "Tactic: Initial Access"
+  ],
+  "author": [
+    "raadabujaish"
+  ],
+  "threat": [
+    {
+      "framework": "MITRE ATT&CK",
+      "tactic": {
+        "id": "TA0001",
+        "name": "Initial Access",
+        "reference": "https://attack.mitre.org/tactics/TA0001/"
+      },
+      "technique": [
+        {
+          "id": "T1190",
+          "name": "Exploit Public-Facing Application",
+          "reference": "https://attack.mitre.org/techniques/T1190/"
+        }
+      ]
+    }
+  ],
+  "investigation_fields": {
+    "field_names": [
+      "source.ip",
+      "cef.extensions.deviceCustomString4",
+      "cef.extensions.deviceCustomString1",
+      "url.original",
+      "cef.extensions.deviceAction",
+      "cef.extensions.deviceCustomNumber2",
+      "source.geo.country_name",
+      "source.as.organization.name"
+    ]
+  },
+  "related_integrations": [],
+  "required_fields": [],
+  "setup": "",
+  "note": "## Investigation guide\n1. Review the full request for the RCE payloads and whether any returned a 2xx response.\n2. Treat as active exploitation of internet banking; escalate and consider blocking the source.",
+  "false_positives": [
+    "A scanner operating against an alert-only policy; a WAF signature false-positive on benign content."
+  ],
+  "references": [
+    "https://attack.mitre.org/techniques/T1190/"
+  ],
+  "risk_score": 78,
+  "risk_score_mapping": [],
+  "severity": "high",
+  "severity_mapping": [],
+  "output_index": "",
+  "max_signals": 100,
+  "exceptions_list": [],
+  "actions": [],
+  "type": "threshold",
+  "language": "kuery",
+  "index": [
+    "logs-cef.log-*"
+  ],
+  "query": "observer.vendor:\"F5\" and cef.extensions.deviceCustomString4:(\"Server Side Code Injection\" or \"Command Execution\") and cef.extensions.deviceCustomNumber2 >= 4 and not cef.extensions.deviceAction:\"blocked\"",
+  "threshold": {
+    "field": [
+      "source.ip"
+    ],
+    "value": 5
+  }
+}

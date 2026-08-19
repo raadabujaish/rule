@@ -1,0 +1,88 @@
+{
+  "rule_id": "jcb-rec-creation-of-hidden-files-and-directories-via",
+  "name": "Linux — Creation of Hidden Files and Directories via CommandLine",
+  "version": 1,
+  "enabled": true,
+  "interval": "5m",
+  "from": "now-9m",
+  "to": "now",
+  "description": "Users can mark specific files as hidden simply by putting a \".\" as the first character in the file or folder name. Adversaries can use this to their advantage to hide files and folders on the system for persistence and defense evasion. This rule looks for hidden files or folders in common writable directories.",
+  "tags": [
+    "JCB",
+    "Linux"
+  ],
+  "author": [
+    "raadabujaish"
+  ],
+  "threat": [
+    {
+      "framework": "MITRE ATT&CK",
+      "tactic": {
+        "id": "TA0005",
+        "name": "Defense Evasion",
+        "reference": "https://attack.mitre.org/tactics/TA0005/"
+      },
+      "technique": [
+        {
+          "id": "T1564",
+          "name": "Hide Artifacts",
+          "reference": "https://attack.mitre.org/techniques/T1564/",
+          "subtechnique": [
+            {
+              "id": "T1564.001",
+              "name": "Hidden Files and Directories",
+              "reference": "https://attack.mitre.org/techniques/T1564/001/"
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "framework": "MITRE ATT&CK",
+      "tactic": {
+        "id": "TA0003",
+        "name": "Persistence",
+        "reference": "https://attack.mitre.org/tactics/TA0003/"
+      },
+      "technique": []
+    }
+  ],
+  "investigation_fields": {
+    "field_names": [
+      "host.name",
+      "user.name",
+      "user.id",
+      "process.name",
+      "process.executable",
+      "process.args",
+      "process.parent.name",
+      "file.path",
+      "event.action",
+      "event.outcome",
+      "message",
+      "host.os.type",
+      "event.type",
+      "process.working_directory"
+    ]
+  },
+  "related_integrations": [],
+  "required_fields": [],
+  "setup": "",
+  "false_positives": [],
+  "references": [],
+  "risk_score": 47,
+  "risk_score_mapping": [],
+  "severity": "medium",
+  "severity_mapping": [],
+  "output_index": "",
+  "max_signals": 100,
+  "exceptions_list": [],
+  "actions": [],
+  "type": "eql",
+  "language": "eql",
+  "index": [
+    "logs-auditd.log-*",
+    "logs-auditd_manager.auditd-*"
+  ],
+  "query": "process where host.os.type == \"linux\" and event.type == \"start\" and event.action == \"exec\" and\nprocess.working_directory in (\"/tmp\", \"/var/tmp\", \"/dev/shm\") and\nprocess.args regex~ \"\"\"\\.[a-z0-9_\\-][a-z0-9_\\-\\.]{1,254}\"\"\" and\nnot process.name in (\"ls\", \"find\", \"grep\", \"git\", \"jq\", \"basename\")\n"
+}

@@ -1,0 +1,113 @@
+{
+  "rule_id": "jcb-ad-gpo-modified-unexpected",
+  "name": "AD — Group Policy Object Modified by an Unexpected Principal",
+  "version": 1,
+  "enabled": true,
+  "interval": "1h",
+  "from": "now-90m",
+  "to": "now",
+  "description": "Attacker objective\nModify a Group Policy Object to push attacker configuration — a startup/logon script, a new local admin, a scheduled task, or a security-setting change — across many machines at once.\n\nAttack logic\nGPOs are edited by a small set of authorized administrators. A directory change to a groupPolicyContainer object by any other principal is anomalous and can deploy malicious configuration domain-wide.\n\nWhy this detection works\nDirectory-service change auditing (5136) records modifications to Group Policy objects with the acting principal; a new-terms model auto-baselines the known GPO editors and fires on any new one.\n\nFalse positives\nOnboarding of a new legitimate GPO administrator.\n\nTuning\nAllowlist verified GPO administrators; correlate GPO edits with change control.\n\nRequired telemetry\nWindows Security 5136 (ObjectClass=groupPolicyContainer, SubjectUserName).",
+  "tags": [
+    "JCB",
+    "ActiveDirectory",
+    "Phase3",
+    "Use Case: Threat Detection",
+    "Tactic: Persistence",
+    "Tactic: Privilege Escalation"
+  ],
+  "author": [
+    "raadabujaish"
+  ],
+  "license": "",
+  "threat": [
+    {
+      "framework": "MITRE ATT&CK",
+      "tactic": {
+        "id": "TA0003",
+        "name": "Persistence",
+        "reference": "https://attack.mitre.org/tactics/TA0003/"
+      },
+      "technique": [
+        {
+          "id": "T1484",
+          "name": "Domain or Tenant Policy Modification",
+          "reference": "https://attack.mitre.org/techniques/T1484/",
+          "subtechnique": [
+            {
+              "id": "T1484.001",
+              "name": "Group Policy Modification",
+              "reference": "https://attack.mitre.org/techniques/T1484/001/"
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "framework": "MITRE ATT&CK",
+      "tactic": {
+        "id": "TA0004",
+        "name": "Privilege Escalation",
+        "reference": "https://attack.mitre.org/tactics/TA0004/"
+      },
+      "technique": [
+        {
+          "id": "T1484",
+          "name": "Domain or Tenant Policy Modification",
+          "reference": "https://attack.mitre.org/techniques/T1484/",
+          "subtechnique": [
+            {
+              "id": "T1484.001",
+              "name": "Group Policy Modification",
+              "reference": "https://attack.mitre.org/techniques/T1484/001/"
+            }
+          ]
+        }
+      ]
+    }
+  ],
+  "investigation_fields": {
+    "field_names": [
+      "host.name",
+      "user.name",
+      "user.domain",
+      "process.name",
+      "process.executable",
+      "process.command_line",
+      "process.args",
+      "process.parent.name",
+      "process.parent.executable",
+      "event.code",
+      "event.action",
+      "winlog.event_data.ObjectClass"
+    ]
+  },
+  "related_integrations": [],
+  "required_fields": [],
+  "setup": "",
+  "note": "## Investigation guide\n1. SubjectUserName is the (unexpected) principal editing a GPO; identify which GPO and what changed.\n2. Verify against change control; a malicious GPO edit can deploy code or privileged accounts widely — revert and investigate urgently.",
+  "false_positives": [
+    "Onboarding of a new legitimate GPO administrator."
+  ],
+  "references": [
+    "https://attack.mitre.org/techniques/T1484/",
+    "https://attack.mitre.org/techniques/T1484/"
+  ],
+  "risk_score": 73,
+  "risk_score_mapping": [],
+  "severity": "high",
+  "severity_mapping": [],
+  "output_index": "",
+  "max_signals": 100,
+  "exceptions_list": [],
+  "actions": [],
+  "type": "new_terms",
+  "query": "event.code:\"5136\" and winlog.event_data.ObjectClass:\"groupPolicyContainer\"",
+  "new_terms_fields": [
+    "winlog.event_data.SubjectUserName"
+  ],
+  "history_window_start": "now-30d",
+  "index": [
+    "logs-system.security-*"
+  ],
+  "language": "kuery"
+}

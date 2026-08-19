@@ -1,0 +1,80 @@
+{
+  "rule_id": "jcb-perimeter-multi-signal-compromise",
+  "name": "Perimeter — Host Exhibiting Multiple Attack Behaviors (Confirmed Compromise)",
+  "version": 1,
+  "enabled": true,
+  "interval": "30m",
+  "from": "now-24h",
+  "to": "now",
+  "description": "Attacker objective\nA fully-compromised internal host progressing through the kill chain — combining beaconing/C2, scanning, sweep, lateral movement, or internal exploitation.\n\nAttack logic\nAny single perimeter detection can be an isolated event. A host that triggers two or more distinct perimeter detections within a short window is exhibiting a multi-stage attack pattern.\n\nWhy this detection works\nCorrelating the count of distinct detection types per host over the alert stream converts several weak or medium signals into one high-confidence compromise alert.\n\nFalse positives\nVery low — requires two independent behaviours on the same host; a benign scanner plus a monitoring host could co-trigger.\n\nTuning\nExclude verified infrastructure that legitimately trips multiple behaviours.\n\nRequired telemetry\nThe perimeter detection alerts produced by the FortiGate/PAN-OS rules (host/source.ip and rule name present in the alert stream).",
+  "tags": [
+    "JCB",
+    "Perimeter",
+    "Phase3",
+    "Use Case: Threat Detection",
+    "Tactic: Lateral Movement",
+    "Correlation"
+  ],
+  "author": [
+    "raadabujaish"
+  ],
+  "threat": [
+    {
+      "framework": "MITRE ATT&CK",
+      "tactic": {
+        "id": "TA0008",
+        "name": "Lateral Movement",
+        "reference": "https://attack.mitre.org/tactics/TA0008/"
+      },
+      "technique": [
+        {
+          "id": "T1210",
+          "name": "Exploitation of Remote Services",
+          "reference": "https://attack.mitre.org/techniques/T1210/"
+        }
+      ]
+    }
+  ],
+  "investigation_fields": {
+    "field_names": [
+      "source.ip",
+      "kibana.alert.rule.name",
+      "kibana.alert.severity",
+      "host.name",
+      "user.name",
+      "destination.ip",
+      "message"
+    ]
+  },
+  "related_integrations": [],
+  "required_fields": [],
+  "setup": "",
+  "note": "## Investigation guide\n1. source.ip = the compromised host; the correlated list shows which behaviours it exhibited (e.g. beaconing + lateral).\n2. This is a confirmed-compromise pattern — isolate the host and begin IR immediately.",
+  "false_positives": [
+    "Very low — requires two independent behaviours on the same host; a benign scanner plus a monitoring host could co-trigger."
+  ],
+  "references": [
+    "https://attack.mitre.org/techniques/T1210/"
+  ],
+  "risk_score": 90,
+  "risk_score_mapping": [],
+  "severity": "critical",
+  "severity_mapping": [],
+  "output_index": "",
+  "max_signals": 100,
+  "exceptions_list": [],
+  "actions": [],
+  "type": "esql",
+  "language": "esql",
+  "query": "FROM .alerts-security.alerts-* METADATA _id, _index, _version | WHERE source.ip IS NOT NULL AND kibana.alert.rule.name LIKE \"FortiGate*\" | STATS distinct_detections = COUNT_DISTINCT(kibana.alert.rule.name), detections = VALUES(kibana.alert.rule.name) BY source.ip | WHERE distinct_detections >= 2",
+  "alert_suppression": {
+    "group_by": [
+      "source.ip"
+    ],
+    "duration": {
+      "value": 24,
+      "unit": "h"
+    },
+    "missing_fields_strategy": "suppress"
+  }
+}

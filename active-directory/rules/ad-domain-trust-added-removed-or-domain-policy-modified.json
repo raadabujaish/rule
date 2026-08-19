@@ -1,0 +1,62 @@
+{
+  "rule_id": "jcb-ad-domain-trust-policy-change",
+  "name": "AD — Domain Trust Added/Removed or Domain Policy Modified",
+  "version": 1,
+  "enabled": true,
+  "interval": "15m",
+  "from": "now-20m",
+  "to": "now",
+  "description": "Domain-level trust or policy changes: 4706/4707 (trust created/removed), 4713 (Kerberos policy), 4716 (trust info modified), 4739 (domain policy changed — 65 events/90d measured, sole occurring code). These were buried inside QA - Windows Changes with no dedicated coverage. Low volume, high value: trust manipulation is a forest-compromise technique.",
+  "tags": [
+    "JCB",
+    "Detection-QA-2026-08",
+    "Active Directory",
+    "Change Audit"
+  ],
+  "author": [
+    "JCB Detection Engineering"
+  ],
+  "license": "internal",
+  "threat": [],
+  "investigation_fields": {
+    "field_names": [
+      "host.name",
+      "winlog.event_data.SubjectUserName",
+      "winlog.event_data.DomainName",
+      "winlog.event_data.DomainPolicyChanged",
+      "event.code",
+      "event.action",
+      "message"
+    ]
+  },
+  "related_integrations": [],
+  "required_fields": [],
+  "setup": "",
+  "false_positives": [],
+  "references": [],
+  "risk_score": 73,
+  "risk_score_mapping": [],
+  "severity": "high",
+  "severity_mapping": [],
+  "output_index": "",
+  "max_signals": 100,
+  "exceptions_list": [],
+  "actions": [],
+  "type": "query",
+  "language": "kuery",
+  "index": [
+    "logs-system.security-*"
+  ],
+  "query": "event.code:(\"4706\" or \"4707\" or \"4713\" or \"4716\" or \"4739\")",
+  "alert_suppression": {
+    "group_by": [
+      "winlog.event_data.SubjectUserName",
+      "event.code"
+    ],
+    "duration": {
+      "value": 1,
+      "unit": "h"
+    },
+    "missing_fields_strategy": "doNotSuppress"
+  }
+}

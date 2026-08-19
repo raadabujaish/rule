@@ -1,0 +1,86 @@
+{
+  "rule_id": "jcb-rec-shared-object-created-or-changed-by-previous",
+  "name": "Linux — Shared Object Created or Changed by Previously Unknown Process",
+  "version": 1,
+  "enabled": true,
+  "interval": "5m",
+  "from": "now-9m",
+  "to": "now",
+  "description": "This rule monitors the creation of shared object files by previously unknown processes. The creation of a shared object file involves compiling code into a dynamically linked library that can be loaded by other programs at runtime. While this process is typically used for legitimate purposes, malicious actors can leverage shared object files to execute unauthorized code, inject malicious functionality into legitimate processes, or bypass security controls. This allows malware to persist on the system, evade detection, and potentially compromise the integrity and confidentiality of the affected system and its data.",
+  "tags": [
+    "JCB",
+    "Linux"
+  ],
+  "author": [
+    "raadabujaish"
+  ],
+  "threat": [
+    {
+      "framework": "MITRE ATT&CK",
+      "tactic": {
+        "id": "TA0003",
+        "name": "Persistence",
+        "reference": "https://attack.mitre.org/tactics/TA0003/"
+      },
+      "technique": [
+        {
+          "id": "T1574",
+          "name": "Hijack Execution Flow",
+          "reference": "https://attack.mitre.org/techniques/T1574/",
+          "subtechnique": [
+            {
+              "id": "T1574.006",
+              "name": "Dynamic Linker Hijacking",
+              "reference": "https://attack.mitre.org/techniques/T1574/006/"
+            }
+          ]
+        }
+      ]
+    }
+  ],
+  "investigation_fields": {
+    "field_names": [
+      "host.name",
+      "user.name",
+      "user.id",
+      "process.name",
+      "process.executable",
+      "process.args",
+      "process.parent.name",
+      "file.path",
+      "event.action",
+      "event.outcome",
+      "message",
+      "host.os.type",
+      "file.extension"
+    ]
+  },
+  "related_integrations": [],
+  "required_fields": [],
+  "setup": "",
+  "false_positives": [],
+  "references": [
+    "https://threatpost.com/sneaky-malware-backdoors-linux/180158/"
+  ],
+  "risk_score": 47,
+  "risk_score_mapping": [],
+  "severity": "medium",
+  "severity_mapping": [],
+  "output_index": "",
+  "max_signals": 100,
+  "exceptions_list": [],
+  "actions": [],
+  "type": "new_terms",
+  "query": "host.os.type:linux and event.action:(creation or file_create_event or file_rename_event or rename) and \nfile.path:(/dev/shm/* or /usr/lib/*) and file.extension:so and process.name:* and not (\n  process.name:(\"dockerd\" or \"dpkg\" or \"rpm\" or \"snapd\" or \"yum\" or \"vmis-launcher\" or \"pacman\" or\n  \"apt-get\" or \"dnf\" or \"podman\" or \"platform-python\") or \n  (process.name:vmware-install.pl and file.path:/usr/lib/vmware-tools/*)\n)\n",
+  "new_terms_fields": [
+    "host.id",
+    "file.path",
+    "process.executable"
+  ],
+  "history_window_start": "now-10d",
+  "index": [
+    "logs-auditd.log-*",
+    "logs-auditd_manager.auditd-*"
+  ],
+  "language": "kuery"
+}

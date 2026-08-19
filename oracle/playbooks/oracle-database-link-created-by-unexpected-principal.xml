@@ -1,0 +1,145 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<Playbook xmlns="https://soc.example/playbooks" id="PB-ORA-005" name="Oracle — Database Link Created by Unexpected Principal - SOC Playbook" version="1.0" status="Production" classification="TLP:AMBER">
+  <Metadata>
+    <Owner>JCB Detection Engineering (WatchWave)</Owner>
+    <LastUpdated>2026-08-14</LastUpdated>
+    <Severity default="High">High</Severity>
+    <Confidence default="Medium">Medium</Confidence>
+    <Category>Exfiltration / Lateral Movement</Category>
+    <MitreAttack>
+      <Technique id="T1567" name="Exfiltration Over Web Service"/>
+      <Tactic id="TA0010" name="Exfiltration"/>
+    </MitreAttack>
+    <References>
+      <Reference title="MITRE ATT and CK" url="https://attack.mitre.org/techniques/T1567/"/>
+    </References>
+  </Metadata>
+  <ExecutiveSummary>
+    <Overview>An Oracle CREATE PUBLIC DATABASE LINK was performed by an unexpected principal (INH_LIFE excluded). A database link connects to another database - it can be used to exfiltrate or pivot. Triage: unauthorised DB link (exfil/pivot), or legitimate integration?</Overview>
+    <BusinessImpact>A public database link can exfiltrate data to or pivot into another database - a data-movement and lateral-movement vector.</BusinessImpact>
+  </ExecutiveSummary>
+  <Scope><Assets>
+    <AssetType>Oracle databases (core banking, AML, insurance)</AssetType>
+  </Assets><LogSources>
+    <LogSource>Oracle DB audit via apps-* - apps-*</LogSource>
+  </LogSources></Scope>
+  <Prerequisites><TelemetryRequirements>
+    <Requirement>Oracle DB audit in apps-* (verified live). Fields: ACTION_NAME, USERNAME, SQL_TEXT, plus the audited object. Rules exclude known service principals (e.g. INH_LIFE, BANKSYS, JCB_AML). The acting principal is USERNAME.</Requirement>
+  </TelemetryRequirements><DetectionSignals>
+    <Signal><Name>Database Link Created by Unexpected Prin</Name><Details>Oracle ACTION_NAME CREATE PUBLIC DATABASE LINK by an unexpected USERNAME.</Details></Signal>
+  </DetectionSignals></Prerequisites>
+  <Inputs>
+    <Input name="$username" description="Oracle principal that performed the action (USERNAME)."/>
+    <Input name="$action" description="The Oracle action."/>
+  </Inputs>
+  <Triage><ImmediateCapture>
+    <Item>$username: $username</Item>
+  </ImmediateCapture><InitialAssessment>
+    <Rule>Weigh the full evidence story per the ClassificationGuidance, not any single fact.</Rule>
+  </InitialAssessment></Triage>
+  <Investigation>
+    <Goal>Determine whether the Oracle CREATE PUBLIC DATABASE LINK by an unexpected principal is malicious/unauthorised or legitimate DBA/application activity.</Goal>
+    <Workflow>
+      <Step order="1" name="Confirm the Oracle action, principal and SQL">
+        <Purpose>The principal, the SQL text and the target object separate authorised DBA/app work from unauthorised access.</Purpose>
+        <Query platform="Elastic" language="ES|QL" id="INV-01-ORA-ACTION">
+          <![CDATA[
+FROM apps-*
+| WHERE ACTION_NAME == "CREATE PUBLIC DATABASE LINK" AND USERNAME == "$username" AND @timestamp >= NOW() - 4 hours
+| KEEP @timestamp, ACTION_NAME, USERNAME, SQL_TEXT
+| SORT @timestamp DESC
+| LIMIT 25
+          ]]>
+        </Query>
+        <ExpectedOutput>
+          <Field name="ACTION_NAME"/>
+          <Field name="USERNAME"/>
+          <Field name="SQL_TEXT"/>
+        </ExpectedOutput>
+        <AnalystNotes>INH_LIFE is excluded, so this is an unexpected principal creating a DB link. Read SQL_TEXT for the target object and scope. An unexpected principal performing CREATE PUBLIC DATABASE LINK on sensitive banking tables is the concern; a known DBA/app principal is likely authorised.</AnalystNotes>
+      </Step>
+      <Step order="2" name="The principal's broader Oracle activity">
+        <Purpose>A burst of privileged actions by one principal indicates scripted abuse or a compromised DB account.</Purpose>
+        <Query platform="Elastic" language="ES|QL" id="INV-02-ORA-BREADTH" optional="true">
+          <![CDATA[
+FROM apps-*
+| WHERE USERNAME == "$username" AND ACTION_NAME IS NOT NULL AND @timestamp >= NOW() - 4 hours
+| STATS actions = COUNT(*), action_types = VALUES(ACTION_NAME)
+| LIMIT 1
+          ]]>
+        </Query>
+        <ExpectedOutput>
+          <Field name="actions"/>
+          <Field name="action_types"/>
+        </ExpectedOutput>
+        <AnalystNotes>Many privileged actions across objects by one principal = scripted/abnormal; a single expected action = routine.</AnalystNotes>
+      </Step>
+      <Step order="3" name="Finalize classification">
+        <DecisionTree>
+          <Node><Condition>A public DB link to an external/unexpected database by an unrecognised principal.</Condition><Result>True Positive (Unauthorised DB Link - escalate, DBA + IR)</Result></Node>
+          <Node><Condition>A known DBA/application principal performing the action as part of normal operation.</Condition><Result>False Positive</Result></Node>
+          <Node><Condition>An application using an unexpected-but-legitimate service account (baseline gap).</Condition><Result>Misconfiguration</Result></Node>
+          <Node><Condition>Action by an unrecognised principal with unclear authorisation.</Condition><Result>Needs Escalation</Result></Node>
+        </DecisionTree>
+        <DocumentationChecklist>
+          <Item>Attach outputs of INV-01-ORA-ACTION, INV-02-ORA-BREADTH to the case.</Item>
+        </DocumentationChecklist>
+      </Step>
+    </Workflow>
+  </Investigation>
+  <ClassificationGuidance>
+    <FalsePositive>
+      <Definition>A legitimate integration DB link by an approved account.</Definition>
+      <Indicators>
+        <Item>Known integration/DBA principal.</Item>
+        <Item>Expected target DB.</Item>
+        <Item>Documented integration.</Item>
+      </Indicators>
+      <SOCAction>
+        <Item>Confirm the principal/operation is authorised; add to the baseline; close as false_positive.</Item>
+      </SOCAction>
+    </FalsePositive>
+    <TruePositive>
+      <Definition>An unauthorised DB link for exfil/pivot.</Definition>
+      <Indicators>
+        <Item>Unrecognised principal.</Item>
+        <Item>External/unexpected target DB.</Item>
+        <Item>No integration record.</Item>
+      </Indicators>
+      <SOCAction>
+        <Item>Investigate the principal and session; if unauthorised, disable the account and review data impact; open IR.</Item>
+        <Item>Review what data/objects were affected.</Item>
+      </SOCAction>
+    </TruePositive>
+    <Misconfiguration>
+      <Definition>A legitimate app using an unbaselined service account.</Definition>
+      <Indicators>
+        <Item>Known app, unexpected account.</Item>
+        <Item>Owner confirms.</Item>
+      </Indicators>
+      <SOCAction>
+        <Item>Baseline the account; document.</Item>
+      </SOCAction>
+    </Misconfiguration>
+  </ClassificationGuidance>
+  <Response><IRForHumans>
+    <Phase name="Immediate Actions (0-30 minutes)">
+      <Action priority="1">Identify the principal and target object; confirm authorisation.</Action>
+      <Action priority="2">If unauthorised, disable the account and review data impact.</Action>
+    </Phase>
+    <Phase name="Containment and Eradication (hours)">
+      <Action>Disable the account; review affected data/objects; open IR.</Action>
+    </Phase>
+    <Phase name="Recovery and Hardening (days)">
+      <Action>Enforce least-privilege on DB principals; alert on privileged actions by new principals; review DBA access.</Action>
+    </Phase>
+  </IRForHumans></Response>
+  <QualityChecks>
+    <Check>Rules exclude known service principals; the acting principal is USERNAME; SQL_TEXT gives the operation detail.</Check>
+  </QualityChecks>
+  <ClosureCriteria><FalsePositiveClosure>
+    <Item>Authorised DBA/app activity confirmed; documented.</Item>
+  </FalsePositiveClosure><TruePositiveClosure>
+    <Item>Account disabled; data impact reviewed; IR recorded.</Item>
+  </TruePositiveClosure></ClosureCriteria>
+</Playbook>

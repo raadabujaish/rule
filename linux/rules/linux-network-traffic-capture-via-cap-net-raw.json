@@ -1,0 +1,79 @@
+{
+  "rule_id": "jcb-rec-network-traffic-capture-via-cap-net-raw",
+  "name": "Linux — Network Traffic Capture via CAP_NET_RAW",
+  "version": 1,
+  "enabled": true,
+  "interval": "5m",
+  "from": "now-9m",
+  "to": "now",
+  "description": "Identifies the ability of a process to be able to create RAW and PACKET socket types for the available network namespaces by a non-root user. A malicious process with this capability may exploit routing between hosts, bypass network access controls, and otherwise tamper with host networking if a firewall is not in place to limit the packet types and contents. The CAP_NET_RAW capability allows the process to bind to any address within the available namespaces, which allows network traffic sniffing by a non root user. The rule identifies previously unknown processes executing with CAP_NET_RAW capabilities through the use of the new terms rule type.",
+  "tags": [
+    "JCB",
+    "Linux"
+  ],
+  "author": [
+    "raadabujaish"
+  ],
+  "threat": [
+    {
+      "framework": "MITRE ATT&CK",
+      "tactic": {
+        "id": "TA0007",
+        "name": "Discovery",
+        "reference": "https://attack.mitre.org/tactics/TA0007/"
+      },
+      "technique": [
+        {
+          "id": "T1040",
+          "name": "Network Sniffing",
+          "reference": "https://attack.mitre.org/techniques/T1040/"
+        }
+      ]
+    }
+  ],
+  "investigation_fields": {
+    "field_names": [
+      "host.name",
+      "user.name",
+      "user.id",
+      "process.name",
+      "process.executable",
+      "process.args",
+      "process.parent.name",
+      "file.path",
+      "event.action",
+      "event.outcome",
+      "message",
+      "event.category",
+      "host.os.type",
+      "event.type",
+      "process.thread.capabilities.effective"
+    ]
+  },
+  "related_integrations": [],
+  "required_fields": [],
+  "setup": "",
+  "false_positives": [],
+  "references": [],
+  "risk_score": 21,
+  "risk_score_mapping": [],
+  "severity": "low",
+  "severity_mapping": [],
+  "output_index": "",
+  "max_signals": 100,
+  "exceptions_list": [],
+  "actions": [],
+  "type": "new_terms",
+  "query": "event.category:\"process\" and host.os.type:\"linux\" and event.type:\"start\" and event.action:\"exec\" and process.name:* and\n(process.thread.capabilities.effective:\"CAP_NET_RAW\" or process.thread.capabilities.permitted:\"CAP_NET_RAW\") and\nnot user.id:\"0\"\n",
+  "new_terms_fields": [
+    "host.id",
+    "user.id",
+    "process.executable"
+  ],
+  "history_window_start": "now-14d",
+  "index": [
+    "logs-auditd.log-*",
+    "logs-auditd_manager.auditd-*"
+  ],
+  "language": "kuery"
+}

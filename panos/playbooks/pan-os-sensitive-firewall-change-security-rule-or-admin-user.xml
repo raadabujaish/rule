@@ -1,0 +1,151 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<Playbook xmlns="https://soc.example/playbooks" id="PB-PAN-004" name="PAN-OS — Sensitive Firewall Change (Security Rule or Admin User) - SOC Playbook" version="1.0" status="Production" classification="TLP:AMBER">
+  <Metadata>
+    <Owner>JCB Detection Engineering (WatchWave)</Owner>
+    <LastUpdated>2026-08-14</LastUpdated>
+    <Severity default="High">High</Severity>
+    <Confidence default="Medium">Medium</Confidence>
+    <Category>Defense Evasion / Firewall Configuration Change</Category>
+    <MitreAttack>
+      <Technique id="T1562.004" name="Disable or Modify System Firewall"/>
+      <Tactic id="TA0005" name="Defense Evasion"/>
+    </MitreAttack>
+    <References>
+      <Reference title="MITRE ATT and CK" url="https://attack.mitre.org/techniques/T1562/"/>
+    </References>
+  </Metadata>
+  <ExecutiveSummary>
+    <Overview>A PAN-OS change touched a SENSITIVE object - a security rule (rulebase/security/rules) or an administrator account (mgt-config/admin) - via set/delete/edit/rename. Triage question: is this an authorised security-policy/admin change, or tampering that weakens protection or plants a backdoor admin?</Overview>
+    <BusinessImpact>Security-rule and admin-account changes directly control what the firewall permits and who can manage it - the highest-impact config changes.</BusinessImpact>
+  </ExecutiveSummary>
+  <Scope><Assets>
+    <AssetType>Palo Alto Networks perimeter firewalls</AssetType>
+    <AssetType>Internal and DMZ hosts behind PAN-OS</AssetType>
+  </Assets><LogSources>
+    <LogSource>PAN-OS config log - logs-panw.panos-*</LogSource>
+  </LogSources></Scope>
+  <Prerequisites><TelemetryRequirements>
+    <Requirement>PAN-OS logs via Elastic Agent to logs-panw.panos-* (verified live).</Requirement>
+    <Requirement>Fields: panw.panos.sub_type (vulnerability/spyware/CONFIG/...), panw.panos.action (alert/allow/reset-both/drop), event.severity (numeric; lower = more severe, 5 = informational), panw.panos.threat_category, panw.panos.threat.name, panw.panos.admin, panw.panos.cmd, panw.panos.path, panw.panos.result, source.ip, destination.ip, destination.port, network.application.</Requirement>
+  </TelemetryRequirements><DetectionSignals>
+    <Signal><Name>Sensitive config change</Name><Details>CONFIG, cmd set/delete/edit/rename, path rulebase*security*rules or admin.</Details></Signal>
+  </DetectionSignals></Prerequisites>
+  <Inputs>
+    <Input name="$admin" description="Administrator who made the change (panw.panos.admin)."/>
+    <Input name="$source_ip" description="Admin source IP if present."/>
+  </Inputs>
+  <Triage><ImmediateCapture>
+    <Item>Admin: $admin</Item>
+    <Item>Source: $source_ip</Item>
+  </ImmediateCapture><InitialAssessment>
+    <Rule>Security-rule and admin changes must map to a change ticket; a new admin account or a rule permitting broad access is a backdoor shape.</Rule>
+  </InitialAssessment></Triage>
+  <Investigation>
+    <Goal>Determine whether the sensitive change is authorised policy/admin work or tampering (weakening a rule, adding a backdoor admin).</Goal>
+    <Workflow>
+      <Step order="1" name="Detail the sensitive change - object, command, result">
+        <Purpose>See exactly which security rule or admin object was changed and how.</Purpose>
+        <Query platform="Elastic" language="ES|QL" id="INV-01-PANSENS-CHANGE">
+          <![CDATA[
+FROM logs-panw.panos-*
+| WHERE panw.panos.type == "CONFIG" AND panw.panos.cmd IN ("set","delete","edit","rename") AND @timestamp >= NOW() - 4 hours
+| STATS changes = COUNT(*), paths = VALUES(panw.panos.path), cmds = VALUES(panw.panos.cmd), results = VALUES(panw.panos.result) BY panw.panos.admin
+| SORT changes DESC
+| LIMIT 20
+          ]]>
+        </Query>
+        <ExpectedOutput>
+          <Field name="panw.panos.admin"/>
+          <Field name="paths"/>
+          <Field name="cmds"/>
+          <Field name="results"/>
+        </ExpectedOutput>
+        <AnalystNotes>A 'set' on mgt-config/admin = new/modified admin account (possible backdoor). A 'delete' on a security rule = protection removed. An 'edit' widening a rule's source/destination = exposure. Read the path carefully.</AnalystNotes>
+      </Step>
+      <Step order="2" name="Broader change session by this admin">
+        <Purpose>Sensitive changes bundled with many others, or by an unfamiliar admin, indicate tampering vs a single approved edit.</Purpose>
+        <Query platform="Elastic" language="ES|QL" id="INV-02-PANSENS-SESSION" optional="true">
+          <![CDATA[
+FROM logs-panw.panos-*
+| WHERE panw.panos.type == "CONFIG" AND panw.panos.admin == "$admin" AND @timestamp >= NOW() - 4 hours
+| STATS total_changes = COUNT(*), all_paths = VALUES(panw.panos.path), all_cmds = VALUES(panw.panos.cmd), first_seen = MIN(@timestamp), last_seen = MAX(@timestamp)
+| LIMIT 1
+          ]]>
+        </Query>
+        <ExpectedOutput>
+          <Field name="total_changes"/>
+          <Field name="all_paths"/>
+          <Field name="all_cmds"/>
+        </ExpectedOutput>
+        <AnalystNotes>A large change session touching rules AND admins AND logging config in minutes is a tampering pattern. A single scoped rule edit is normal administration.</AnalystNotes>
+      </Step>
+      <Step order="3" name="Finalize classification">
+        <DecisionTree>
+          <Node><Condition>INV-01 shows a new admin account created (set on mgt-config/admin) or a security rule deleted/widened with no change ticket.</Condition><Result>True Positive (Firewall Tampering / Backdoor Admin - IR immediately)</Result></Node>
+          <Node><Condition>INV-02 shows a large multi-object change session by an unfamiliar admin.</Condition><Result>True Positive (Suspicious Config Tampering - escalate)</Result></Node>
+          <Node><Condition>INV-01 shows a scoped security-rule change by a recognised admin matching an approved ticket.</Condition><Result>False Positive</Result></Node>
+          <Node><Condition>Sensitive change by a plausible admin but no ticket located.</Condition><Result>Needs Escalation</Result></Node>
+        </DecisionTree>
+        <DocumentationChecklist>
+          <Item>Attach outputs of INV-01-PANSENS-CHANGE, INV-02-PANSENS-SESSION to the case.</Item>
+        </DocumentationChecklist>
+      </Step>
+    </Workflow>
+  </Investigation>
+  <ClassificationGuidance>
+    <FalsePositive>
+      <Definition>Authorised security-policy or admin-account administration under change control.</Definition>
+      <Indicators>
+        <Item>Recognised firewall admin.</Item>
+        <Item>Matches an approved ticket.</Item>
+        <Item>Scoped, expected change.</Item>
+      </Indicators>
+      <SOCAction>
+        <Item>Verify the change ticket and object diff; close as false_positive.</Item>
+      </SOCAction>
+    </FalsePositive>
+    <TruePositive>
+      <Definition>Tampering that weakens protection or plants a backdoor administrator.</Definition>
+      <Indicators>
+        <Item>New/modified admin account.</Item>
+        <Item>Security rule deleted or widened.</Item>
+        <Item>Unfamiliar admin or large tampering session.</Item>
+      </Indicators>
+      <SOCAction>
+        <Item>Revert the change; disable any rogue admin account; open IR.</Item>
+        <Item>Audit all recent security-rule and admin changes; check for exposure created.</Item>
+      </SOCAction>
+    </TruePositive>
+    <Misconfiguration>
+      <Definition>Automation making sensitive changes too broadly due to misconfiguration.</Definition>
+      <Indicators>
+        <Item>An automation admin per a broken template.</Item>
+        <Item>Owner confirms benign scope error.</Item>
+      </Indicators>
+      <SOCAction>
+        <Item>Correct the automation; revert erroneous changes; document.</Item>
+      </SOCAction>
+    </Misconfiguration>
+  </ClassificationGuidance>
+  <Response><IRForHumans>
+    <Phase name="Immediate Actions (0-30 minutes)">
+      <Action priority="1">Review the sensitive object change; revert if unauthorised.</Action>
+      <Action priority="2">Disable any rogue admin account now.</Action>
+    </Phase>
+    <Phase name="Containment and Eradication (hours)">
+      <Action>Audit all recent security-rule/admin changes; check for exposure; reset compromised admins.</Action>
+    </Phase>
+    <Phase name="Recovery and Hardening (days)">
+      <Action>Enforce approval for security-rule and admin changes; PAM for firewall admins; config backup/diff.</Action>
+    </Phase>
+  </IRForHumans></Response>
+  <QualityChecks>
+    <Check>Path filter targets rulebase/security/rules and admin objects; cmd set/delete/edit/rename verified present.</Check>
+    <Check>This is the high-impact subset of PB-PAN-003; a new admin account is the clearest backdoor signal.</Check>
+  </QualityChecks>
+  <ClosureCriteria><FalsePositiveClosure>
+    <Item>Authorised policy/admin change confirmed; documented.</Item>
+  </FalsePositiveClosure><TruePositiveClosure>
+    <Item>Tampering reverted; rogue admin removed; exposure closed; changes audited.</Item>
+  </TruePositiveClosure></ClosureCriteria>
+</Playbook>

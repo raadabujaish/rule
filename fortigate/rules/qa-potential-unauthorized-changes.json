@@ -1,0 +1,162 @@
+{
+  "rule_id": "4306146c-1e1f-45fe-a227-e18c71263a4e",
+  "name": "QA -  Potential Unauthorized Changes",
+  "version": 1,
+  "enabled": true,
+  "interval": "1h",
+  "from": "now-3900s",
+  "to": "now",
+  "description": "Firewall - Potential Unauthorized Changes\n",
+  "tags": [
+    "IRM",
+    "QA"
+  ],
+  "author": [],
+  "license": "",
+  "threat": [],
+  "investigation_fields": {
+    "field_names": [
+      "source.ip",
+      "source.port",
+      "destination.ip",
+      "destination.port",
+      "fortinet.firewall.action",
+      "fortinet.firewall.subtype",
+      "fortinet.firewall.attack",
+      "fortinet.firewall.msg",
+      "fortinet.firewall.cfgpath",
+      "dns.question.name",
+      "network.transport",
+      "event.action",
+      "message",
+      "observer.vendor",
+      "rule.description"
+    ]
+  },
+  "related_integrations": [],
+  "required_fields": [],
+  "setup": "",
+  "false_positives": [],
+  "references": [],
+  "risk_score": 21,
+  "risk_score_mapping": [],
+  "severity": "low",
+  "severity_mapping": [],
+  "output_index": "",
+  "max_signals": 100,
+  "exceptions_list": [],
+  "actions": [],
+  "meta": {
+    "from": "5m",
+    "kibana_siem_app_url": "https://jcb.scanwave.local:8008/app/security"
+  },
+  "type": "query",
+  "language": "kuery",
+  "index": [
+    "apm-*-transaction*",
+    "auditbeat-*",
+    "endgame-*",
+    "filebeat-*",
+    "logs-*",
+    "packetbeat-*",
+    "traces-apm*",
+    "winlogbeat-*",
+    "-*elastic-cloud-logs-*"
+  ],
+  "query": "",
+  "filters": [
+    {
+      "meta": {
+        "index": "4c38200a-abe4-4f95-87a5-d8b6fe66f23c",
+        "type": "phrase",
+        "disabled": false,
+        "negate": false,
+        "alias": null,
+        "key": "observer.vendor",
+        "params": {
+          "query": "Fortinet"
+        }
+      },
+      "query": {
+        "match_phrase": {
+          "observer.vendor": "Fortinet"
+        }
+      },
+      "$state": {
+        "store": "appState"
+      }
+    },
+    {
+      "meta": {
+        "index": "4c38200a-abe4-4f95-87a5-d8b6fe66f23c",
+        "type": "phrase",
+        "disabled": false,
+        "negate": true,
+        "alias": null,
+        "key": "message",
+        "params": {
+          "query": "Configuration is changed in the admin session"
+        }
+      },
+      "query": {
+        "match_phrase": {
+          "message": "Configuration is changed in the admin session"
+        }
+      },
+      "$state": {
+        "store": "appState"
+      }
+    },
+    {
+      "meta": {
+        "index": "4c38200a-abe4-4f95-87a5-d8b6fe66f23c",
+        "type": "custom",
+        "disabled": false,
+        "negate": false,
+        "alias": null,
+        "key": "query",
+        "value": "{\"bool\":{\"minimum_should_match\":1,\"should\":[{\"match_phrase\":{\"rule.description\":\"User changed\"}},{\"match_phrase\":{\"rule.description\":\"Object attribute configured\"}},{\"match_phrase\":{\"rule.description\":\"Configuration changed\"}},{\"match_phrase\":{\"rule.description\":\"Local user added\"}},{\"match_phrase\":{\"rule.description\":\"Object configured\"}},{\"match_phrase\":{\"rule.description\":\"GUI_ENTRY_CHANGE\"}}]}}"
+      },
+      "$state": {
+        "store": "appState"
+      },
+      "query": {
+        "bool": {
+          "minimum_should_match": 1,
+          "should": [
+            {
+              "match_phrase": {
+                "rule.description": "User changed"
+              }
+            },
+            {
+              "match_phrase": {
+                "rule.description": "Object attribute configured"
+              }
+            },
+            {
+              "match_phrase": {
+                "rule.description": "Configuration changed"
+              }
+            },
+            {
+              "match_phrase": {
+                "rule.description": "Local user added"
+              }
+            },
+            {
+              "match_phrase": {
+                "rule.description": "Object configured"
+              }
+            },
+            {
+              "match_phrase": {
+                "rule.description": "GUI_ENTRY_CHANGE"
+              }
+            }
+          ]
+        }
+      }
+    }
+  ]
+}

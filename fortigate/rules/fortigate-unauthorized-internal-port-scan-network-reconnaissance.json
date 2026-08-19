@@ -1,0 +1,82 @@
+{
+  "rule_id": "jcb-fgt-internal-port-scan",
+  "name": "FortiGate — Unauthorized Internal Port Scan / Network Reconnaissance",
+  "version": 1,
+  "enabled": true,
+  "interval": "1h",
+  "from": "now-1h",
+  "to": "now",
+  "description": "Attacker objective\nMap internal services to find lateral-movement or exploitation targets (attacker recon, worm, or compromised host).\n\nAttack logic\nAn internal source contacting a large number of distinct destination ports in a short window is port-scanning. Approved vulnerability scanners are excluded; other high-cardinality sources are surfaced to verify.\n\nWhy this detection works\nCounting distinct destination ports per source distinguishes vertical scanning from normal service use.\n\nFalse positives\nAdditional authorised vulnerability-management hosts.\n\nTuning\nAdd verified scanner IPs to the exclusion after confirming them against the vuln-management inventory.\n\nRequired telemetry\nFortiGate traffic logs (source.ip, destination.port, srccountry).",
+  "tags": [
+    "JCB",
+    "Perimeter",
+    "Phase3",
+    "Use Case: Threat Detection",
+    "Tactic: Discovery"
+  ],
+  "author": [
+    "raadabujaish"
+  ],
+  "threat": [
+    {
+      "framework": "MITRE ATT&CK",
+      "tactic": {
+        "id": "TA0007",
+        "name": "Discovery",
+        "reference": "https://attack.mitre.org/tactics/TA0007/"
+      },
+      "technique": [
+        {
+          "id": "T1046",
+          "name": "Network Service Discovery",
+          "reference": "https://attack.mitre.org/techniques/T1046/"
+        }
+      ]
+    }
+  ],
+  "investigation_fields": {
+    "field_names": [
+      "source.ip",
+      "destination.ip",
+      "destination.port",
+      "fortinet.firewall.action",
+      "fortinet.firewall.srcintfrole"
+    ]
+  },
+  "related_integrations": [],
+  "required_fields": [],
+  "setup": "",
+  "note": "## Investigation guide\n1. source.ip = the scanner; verify against the approved vuln-management inventory.\n2. If not approved, treat as attacker recon or a worm and isolate the host.",
+  "false_positives": [
+    "Additional authorised vulnerability-management hosts."
+  ],
+  "references": [
+    "https://attack.mitre.org/techniques/T1046/"
+  ],
+  "risk_score": 73,
+  "risk_score_mapping": [],
+  "severity": "high",
+  "severity_mapping": [],
+  "output_index": "",
+  "max_signals": 100,
+  "exceptions_list": [],
+  "actions": [],
+  "type": "threshold",
+  "language": "kuery",
+  "index": [
+    "logs-fortinet_fortigate.traffic-*"
+  ],
+  "query": "fortinet.firewall.srccountry:\"Reserved\" and not source.ip:\"192.168.166.1\"",
+  "threshold": {
+    "field": [
+      "source.ip"
+    ],
+    "value": 1,
+    "cardinality": [
+      {
+        "field": "destination.port",
+        "value": 100
+      }
+    ]
+  }
+}

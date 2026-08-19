@@ -1,0 +1,94 @@
+{
+  "rule_id": "jcb-chg-win-account-lifecycle",
+  "name": "Change Audit — Windows User Account Created/Deleted/Enabled/Disabled/Modified",
+  "version": 1,
+  "enabled": true,
+  "interval": "1h",
+  "from": "now-70m",
+  "to": "now",
+  "description": "Change objective\nAudit every Windows user-account lifecycle change (create, delete, enable, disable, rename, unlock, modify) for change-control review.\n\nDetection logic\nWindows Security logs each account-management action with the acting subject and the target account. This rule surfaces all account lifecycle changes across the estate as an auditable change feed.\n\nWhy this works\nThe account-management event codes are a complete, structured record of user-account changes; scoping to them yields a clean change-audit trail.\n\nFalse positives\nAll routine helpdesk/IT account administration — this is an audit feed, expected to be non-zero.\n\nTuning\nRoute to a change-audit dashboard rather than paging; correlate each change with a change ticket; escalate creations of privileged or service accounts.\n\nRequired telemetry\nWindows Security: event.code 4720 (created), 4726 (deleted), 4722 (enabled), 4725 (disabled), 4738 (changed), 4767 (unlocked), 4781 (renamed); winlog.event_data.SubjectUserName (actor), TargetUserName (target).",
+  "tags": [
+    "JCB",
+    "Change-Monitoring",
+    "Use Case: Change Audit",
+    "Phase3",
+    "Tactic: Persistence"
+  ],
+  "author": [
+    "raadabujaish"
+  ],
+  "license": "",
+  "threat": [
+    {
+      "framework": "MITRE ATT&CK",
+      "tactic": {
+        "id": "TA0003",
+        "name": "Persistence",
+        "reference": "https://attack.mitre.org/tactics/TA0003/"
+      },
+      "technique": [
+        {
+          "id": "T1136",
+          "name": "Create Account",
+          "reference": "https://attack.mitre.org/techniques/T1136/",
+          "subtechnique": [
+            {
+              "id": "T1136.001",
+              "name": "Local Account",
+              "reference": "https://attack.mitre.org/techniques/T1136/001/"
+            }
+          ]
+        }
+      ]
+    }
+  ],
+  "investigation_fields": {
+    "field_names": [
+      "host.name",
+      "winlog.event_data.SubjectUserName",
+      "winlog.event_data.SubjectDomainName",
+      "winlog.event_data.TargetUserName",
+      "winlog.event_data.TargetDomainName",
+      "winlog.event_data.MemberName",
+      "winlog.event_data.MemberSid",
+      "event.code",
+      "event.action",
+      "message"
+    ]
+  },
+  "related_integrations": [],
+  "required_fields": [],
+  "setup": "",
+  "note": "## Investigation / audit guide\n1. event.code = the change; SubjectUserName = actor; TargetUserName = the account changed.\n2. Confirm the change maps to an authorized ticket; a new/enabled account, especially privileged, is highest priority.\n3. Correlate with the actor's logon and the target account's subsequent activity.",
+  "false_positives": [
+    "All routine helpdesk/IT account administration — this is an audit feed, expected to be non-zero."
+  ],
+  "references": [
+    "https://attack.mitre.org/techniques/T1136/001/"
+  ],
+  "risk_score": 21,
+  "risk_score_mapping": [],
+  "severity": "low",
+  "severity_mapping": [],
+  "output_index": "",
+  "max_signals": 100,
+  "exceptions_list": [],
+  "actions": [],
+  "type": "query",
+  "language": "kuery",
+  "index": [
+    "logs-system.security-*"
+  ],
+  "query": "event.code:(\"4720\" or \"4722\" or \"4725\" or \"4726\" or \"4738\" or \"4767\" or \"4781\")",
+  "alert_suppression": {
+    "group_by": [
+      "winlog.event_data.SubjectUserName",
+      "winlog.event_data.TargetUserName"
+    ],
+    "duration": {
+      "value": 1,
+      "unit": "h"
+    },
+    "missing_fields_strategy": "doNotSuppress"
+  }
+}

@@ -1,0 +1,153 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<Playbook xmlns="https://soc.example/playbooks" id="PB-WIN-018" name="Windows — Ingress Tool Transfer via LOLBin - SOC Playbook" version="1.0" status="Production" classification="TLP:AMBER">
+  <Metadata>
+    <Owner>JCB Detection Engineering (WatchWave)</Owner>
+    <LastUpdated>2026-08-14</LastUpdated>
+    <Severity default="High">High</Severity>
+    <Confidence default="Medium">Medium</Confidence>
+    <Category>Command and Control / Ingress Tool Transfer</Category>
+    <MitreAttack>
+      <Technique id="T1105" name="Ingress Tool Transfer"/>
+      <Tactic id="TA0011" name="Command and Control"/>
+    </MitreAttack>
+    <References>
+      <Reference title="MITRE ATT and CK" url="https://attack.mitre.org/techniques/T1105/"/>
+    </References>
+  </Metadata>
+  <ExecutiveSummary>
+    <Overview>A living-off-the-land binary was used to download a file - certutil -urlcache, bitsadmin /transfer, curl/wget to a remote URL, or PowerShell DownloadFile. Triage question: is an attacker pulling a payload/tool onto the host, or a legitimate admin/update download?</Overview>
+    <BusinessImpact>LOLBin downloads fetch attacker tooling while evading download controls - a common second-stage step.</BusinessImpact>
+  </ExecutiveSummary>
+  <Scope><Assets>
+    <AssetType>Windows servers and workstations (INTDOM domain)</AssetType>
+    <AssetType>Domain controllers</AssetType>
+  </Assets><LogSources>
+    <LogSource>Sysmon process + Windows Security 4688 - logs-windows.sysmon_operational-*,logs-system.security-*</LogSource>
+  </LogSources></Scope>
+  <Prerequisites><TelemetryRequirements>
+    <Requirement>Windows Security + Sysmon + PowerShell logs via Elastic Agent (verified live). Sysmon event.code 1=process(command_line/parent populated), 11=file, 13/12=registry(registry.path populated); process.code_signature NOT collected.</Requirement>
+  </TelemetryRequirements><DetectionSignals>
+    <Signal><Name>LOLBin download</Name><Details>certutil/bitsadmin/curl/wget/PowerShell download of a remote file.</Details></Signal>
+  </DetectionSignals></Prerequisites>
+  <Inputs>
+    <Input name="$hostname" description="Host that downloaded."/>
+    <Input name="$username" description="Account (user.name)."/>
+  </Inputs>
+  <Triage><ImmediateCapture>
+    <Item>Host: $hostname</Item>
+  </ImmediateCapture><InitialAssessment>
+    <Rule>Weigh the evidence story, not any single fact - see ClassificationGuidance.</Rule>
+  </InitialAssessment></Triage>
+  <Investigation>
+    <Goal>Determine whether the LOLBin download fetched attacker tooling or a legitimate file.</Goal>
+    <Workflow>
+      <Step order="1" name="Confirm the download command and URL">
+        <Purpose>The command reveals the tool and the remote URL/destination.</Purpose>
+        <Query platform="Elastic" language="ES|QL" id="INV-01-INGRESS-CMD">
+          <![CDATA[
+FROM logs-windows.sysmon_operational-*,logs-system.security-*
+| WHERE event.code IN ("1","4688") AND host.name == "$hostname" AND process.command_line IS NOT NULL AND @timestamp >= NOW() - 4 hours
+| EVAL cl = TO_LOWER(process.command_line)
+| WHERE (cl LIKE "*certutil*" AND (cl LIKE "*urlcache*" OR cl LIKE "*-f*http*")) OR (cl LIKE "*bitsadmin*" AND cl LIKE "*transfer*") OR ((cl LIKE "*curl*" OR cl LIKE "*wget*") AND cl LIKE "*http*") OR (cl LIKE "*downloadfile*" OR cl LIKE "*downloadstring*" OR cl LIKE "*invoke-webrequest*")
+| KEEP @timestamp, process.name, process.parent.name, user.name, process.command_line
+| SORT @timestamp DESC
+| LIMIT 20
+          ]]>
+        </Query>
+        <ExpectedOutput>
+          <Field name="process.name"/>
+          <Field name="process.parent.name"/>
+          <Field name="user.name"/>
+          <Field name="process.command_line"/>
+        </ExpectedOutput>
+        <AnalystNotes>The URL matters: a raw IP, a paste site, or an unusual domain fetching an .exe/.dll/.ps1 to temp/appdata = malicious. An internal update server or a signed vendor URL is likely benign. Note the destination path.</AnalystNotes>
+      </Step>
+      <Step order="2" name="Did the downloaded file then execute">
+        <Purpose>A download immediately followed by execution of the fetched file is the tool-transfer-then-run chain.</Purpose>
+        <Query platform="Elastic" language="ES|QL" id="INV-02-INGRESS-EXEC" optional="true">
+          <![CDATA[
+FROM logs-windows.sysmon_operational-*,logs-system.security-*
+| WHERE event.code IN ("1","4688") AND host.name == "$hostname" AND @timestamp >= NOW() - 1 hours
+| WHERE process.parent.name RLIKE "(?i)(cmd|powershell|pwsh|certutil|bitsadmin).*"
+| KEEP @timestamp, process.name, process.parent.name, process.command_line
+| SORT @timestamp DESC
+| LIMIT 15
+          ]]>
+        </Query>
+        <ExpectedOutput>
+          <Field name="process.name"/>
+          <Field name="process.parent.name"/>
+          <Field name="process.command_line"/>
+        </ExpectedOutput>
+        <AnalystNotes>A new process from temp/appdata spawned shortly after the download confirms the transferred tool ran - escalate to IR.</AnalystNotes>
+      </Step>
+      <Step order="3" name="Finalize classification">
+        <DecisionTree>
+          <Node><Condition>Download of an executable/script from a suspicious URL (raw IP/paste site/unusual domain) to temp/appdata, especially if it then executed.</Condition><Result>True Positive (Malicious Tool Transfer - IR)</Result></Node>
+          <Node><Condition>A download from an internal update server or signed vendor URL by an admin/updater.</Condition><Result>False Positive</Result></Node>
+          <Node><Condition>LOLBin download with an unclear URL/destination.</Condition><Result>Needs Escalation</Result></Node>
+        </DecisionTree>
+        <DocumentationChecklist>
+          <Item>Attach outputs of INV-01-INGRESS-CMD, INV-02-INGRESS-EXEC to the case.</Item>
+        </DocumentationChecklist>
+      </Step>
+    </Workflow>
+  </Investigation>
+  <ClassificationGuidance>
+    <FalsePositive>
+      <Definition>A legitimate admin/update download.</Definition>
+      <Indicators>
+        <Item>Internal/vendor URL.</Item>
+        <Item>Known updater/admin.</Item>
+        <Item>Benign destination.</Item>
+      </Indicators>
+      <SOCAction>
+        <Item>Verify the source; close as false_positive.</Item>
+      </SOCAction>
+    </FalsePositive>
+    <TruePositive>
+      <Definition>Attacker tool/payload ingress.</Definition>
+      <Indicators>
+        <Item>Suspicious URL.</Item>
+        <Item>Executable to temp/appdata.</Item>
+        <Item>Downloaded file executes.</Item>
+      </Indicators>
+      <SOCAction>
+        <Item>Isolate the host; capture the downloaded file; open IR.</Item>
+        <Item>Block the URL/IP; hunt the same download elsewhere.</Item>
+      </SOCAction>
+    </TruePositive>
+    <Misconfiguration>
+      <Definition>A misconfigured job downloading via LOLBin unnecessarily.</Definition>
+      <Indicators>
+        <Item>A known job/script.</Item>
+        <Item>Benign internal source.</Item>
+      </Indicators>
+      <SOCAction>
+        <Item>Refactor the job; document.</Item>
+      </SOCAction>
+    </Misconfiguration>
+  </ClassificationGuidance>
+  <Response><IRForHumans>
+    <Phase name="Immediate Actions (0-30 minutes)">
+      <Action priority="1">Confirm the activity on the host; if malicious indicators, isolate the host.</Action>
+      <Action priority="2">Identify the responsible account/process and its origin.</Action>
+    </Phase>
+    <Phase name="Containment and Eradication (hours)">
+      <Action>Isolate the host; capture volatile evidence; hunt the same pattern across the estate.</Action>
+      <Action>Reset credentials used on the host if compromise is confirmed.</Action>
+    </Phase>
+    <Phase name="Recovery and Hardening (days)">
+      <Action>Remediate the root cause; add/verify EDR coverage; apply relevant hardening.</Action>
+    </Phase>
+  </IRForHumans></Response>
+  <QualityChecks>
+    <Check>Confirm the required telemetry (Sysmon/Security auditing) is present on the host.</Check>
+    <Check>Tune known-benign administrative sources via exceptions, not by disabling the rule.</Check>
+  </QualityChecks>
+  <ClosureCriteria><FalsePositiveClosure>
+    <Item>Activity confirmed benign/authorised and documented.</Item>
+  </FalsePositiveClosure><TruePositiveClosure>
+    <Item>Host contained and triaged; root cause eradicated; estate swept; findings recorded.</Item>
+  </TruePositiveClosure></ClosureCriteria>
+</Playbook>

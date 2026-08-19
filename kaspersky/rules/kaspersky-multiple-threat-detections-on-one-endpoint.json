@@ -1,0 +1,78 @@
+{
+  "rule_id": "jcb-kav-host-multi-threat",
+  "name": "Kaspersky — Multiple Threat Detections on One Endpoint",
+  "version": 1,
+  "enabled": true,
+  "interval": "1h",
+  "from": "now-24h",
+  "to": "now",
+  "description": "Attacker objective\nOperate on a compromised endpoint that is generating several endpoint-security detections in a short window — repeated malware, blocked behaviours or network attacks.\n\nAttack logic\nAn isolated antivirus or behavioural detection may be a single blocked threat. One host producing multiple detections in a short window indicates active, repeated malicious activity rather than a one-off block.\n\nWhy this detection works\nAggregating threat detections per host over the endpoint-security stream elevates a cluster of detections on the same endpoint into a high-confidence compromise signal.\n\nFalse positives\nA host repeatedly visiting the same malicious-advertising domain, or a noisy adware infection generating many low-severity detections.\n\nTuning\nExclude low-risk adware verdicts; raise the per-host detection threshold if noisy.\n\nRequired telemetry\nKaspersky Security Center CEF (virus, behavioural and network-attack event classes; destination.domain).",
+  "tags": [
+    "JCB",
+    "Kaspersky",
+    "Phase3",
+    "Tactic: Execution",
+    "Use Case: Threat Detection"
+  ],
+  "author": [
+    "raadabujaish"
+  ],
+  "license": "",
+  "threat": [
+    {
+      "framework": "MITRE ATT&CK",
+      "tactic": {
+        "id": "TA0002",
+        "name": "Execution",
+        "reference": "https://attack.mitre.org/tactics/TA0002/"
+      },
+      "technique": [
+        {
+          "id": "T1204",
+          "name": "User Execution",
+          "reference": "https://attack.mitre.org/techniques/T1204/",
+          "subtechnique": [
+            {
+              "id": "T1204.002",
+              "name": "Malicious File",
+              "reference": "https://attack.mitre.org/techniques/T1204/002/"
+            }
+          ]
+        }
+      ]
+    }
+  ],
+  "investigation_fields": {
+    "field_names": [
+      "destination.domain",
+      "destination.user.name",
+      "destination.ip",
+      "cef.name",
+      "cef.device.event_class_id",
+      "cef.severity",
+      "message",
+      "observer.product"
+    ]
+  },
+  "related_integrations": [],
+  "required_fields": [],
+  "setup": "",
+  "note": "## Investigation guide\n1. Review the host's detections (threat names, processes, attack names) listed in the alert.\n2. Multiple distinct detection types on one host is a strong compromise indicator — isolate and perform full incident response.\n3. Correlate the host with its Windows/AD activity for scope.",
+  "false_positives": [
+    "A host repeatedly visiting the same malicious-advertising domain, or a noisy adware infection generating many low-severity detections."
+  ],
+  "references": [
+    "https://attack.mitre.org/techniques/T1204/"
+  ],
+  "risk_score": 78,
+  "risk_score_mapping": [],
+  "severity": "high",
+  "severity_mapping": [],
+  "output_index": "",
+  "max_signals": 100,
+  "exceptions_list": [],
+  "actions": [],
+  "type": "esql",
+  "language": "esql",
+  "query": "FROM logs-cef.log-* METADATA _id, _index, _version\n| WHERE observer.vendor == \"KasperskyLab\" AND destination.domain IS NOT NULL AND cef.device.event_class_id IN (\"GNRL_EV_VIRUS_FOUND\",\"GNRL_EV_VIRUS_FOUND_AND_BLOCKED\",\"GNRL_EV_OBJECT_BLOCKED\",\"GNRL_EV_VIRUS_OBJECT_NOTCURED\",\"GNRL_EV_ADSEC_DETECT\",\"GNRL_EV_ATTACK_DETECTED\")\n| STATS detections = COUNT(), distinct_types = COUNT_DISTINCT(cef.device.event_class_id), types = VALUES(cef.device.event_class_id), threat_names = VALUES(cef.extensions.deviceCustomString1), users = VALUES(destination.user.name) BY destination.domain\n| WHERE detections >= 3"
+}

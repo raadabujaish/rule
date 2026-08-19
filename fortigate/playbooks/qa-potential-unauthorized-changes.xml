@@ -1,0 +1,208 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<Playbook xmlns="https://soc.example/playbooks" id="PB-JCB-NEW-6" name="QA -  Potential Unauthorized Changes - SOC Playbook" version="2.1" status="Production" classification="TLP:AMBER">
+  <Metadata>
+    <Owner>JCB Detection Engineering (WatchWave)</Owner>
+    <LastUpdated>2026-08-19</LastUpdated>
+    <Severity default="Low">Low</Severity>
+    <Confidence default="Medium">Medium</Confidence>
+    <Category>Defense Evasion — Firewall Configuration Change</Category>
+    <MitreAttack>
+      <Technique id="T1562.004" name="Impair Defenses: Disable or Modify System Firewall"/>
+      <Tactic id="TA0005" name="Defense Evasion"/>
+    </MitreAttack>
+    <References>
+      <Reference title="MITRE ATT&amp;CK T1562.004 Disable or Modify System Firewall" url="https://attack.mitre.org/techniques/T1562/004/"/>
+      <Reference title="FortiGate Administrative event log reference (cfgpath/cfgattr)" url="https://docs.fortinet.com/document/fortigate/7.4.0/fortios-log-message-reference"/>
+    </References>
+  </Metadata>
+  <ExecutiveSummary>
+    <Overview>A configuration change was made on a FortiGate firewall (action Add/Edit/Delete on a system/firewall object — verified live: fortinet.firewall.cfgpath e.g. "firewall.policy", with the exact attribute delta in fortinet.firewall.cfgattr). The triage question: is this an authorised, change-managed edit by a network administrator, or an unauthorised/attacker modification that weakens the firewall (opens a policy, changes an address object, alters admin access)? IMPORTANT JCB TELEMETRY NOTES (verified live): on config-change events user.name and source.ip are NULL — the actor is carried in fortinet.firewall.ui, which reads like "GUI(192.168.193.10)" (admin via GUI from that source IP), "jsconsole", or "ha_daemon". "ha_daemon" is the High-Availability cluster automatically replicating the change from the primary to the secondary member (JCB-FGT-Primary/JCB-FGT-Secondary) and is benign. The field fortinet.firewall.msg does NOT exist in this data — use cfgpath/cfgattr/ui.</Overview>
+    <BusinessImpact>The FortiGate cluster is the perimeter and internal segmentation control for the bank's internet-facing and internal services. An unauthorised change — opening a policy, weakening an address group, altering admin/trusted-host settings — can expose banking applications or create a durable ingress path. Config changes made outside change control are the ones to scrutinise.</BusinessImpact>
+  </ExecutiveSummary>
+  <Scope>
+    <Assets>
+      <AssetType>FortiGate firewall cluster (JCB-FGT-Primary / JCB-FGT-Secondary — perimeter and segmentation)</AssetType>
+    </Assets>
+    <LogSources>
+      <LogSource>FortiGate event log — logs-fortinet_fortigate.log-* (verified live: fortinet.firewall.action Add/Edit/Delete, cfgpath, cfgattr, ui, observer.name; user.name/source.ip null on config events)</LogSource>
+    </LogSources>
+  </Scope>
+  <Prerequisites>
+    <TelemetryRequirements>
+      <Requirement>FortiGate admin/config event logging shipped to logs-fortinet_fortigate.log-* (verified live: Add/Edit/Delete on subtype "system" with cfgpath/cfgattr populated).</Requirement>
+      <Requirement>ACTOR IS IN ui, NOT user.name: on config-change events user.name and source.ip are null (verified live). Read the operator from fortinet.firewall.ui — "GUI(&lt;ip&gt;)" gives the admin's source IP; "ha_daemon" is benign HA replication between cluster members.</Requirement>
+      <Requirement>Changes appear in PAIRS across the cluster: the member where the admin acted shows ui="GUI(&lt;ip&gt;)"; the peer shows the same change with ui="ha_daemon" (verified live). Do not double-count the HA copy as a second unauthorised change.</Requirement>
+    </TelemetryRequirements>
+    <DetectionSignals>
+      <Signal><Name>Firewall config change</Name><Details>fortinet.firewall.action Add/Edit/Delete with cfgpath (object type) and cfgattr (the attribute delta) on a FortiGate (observer.name).</Details></Signal>
+      <Signal><Name>Operator origin</Name><Details>fortinet.firewall.ui identifies the operator: GUI(&lt;ip&gt;)/jsconsole = a human/admin session from that source; ha_daemon = automatic cluster replication (benign).</Details></Signal>
+    </DetectionSignals>
+  </Prerequisites>
+  <Inputs>
+    <Input name="$observer" description="The FortiGate device the change was logged on (observer.name from the alert, e.g. JCB-FGT-Primary)."/>
+  </Inputs>
+  <Triage>
+    <ImmediateCapture>
+      <Item>Device: $observer</Item>
+      <Item>What changed: cfgpath (object) and cfgattr (attribute delta) from the alert</Item>
+      <Item>Operator origin: fortinet.firewall.ui — GUI(&lt;ip&gt;) vs ha_daemon vs jsconsole/console</Item>
+    </ImmediateCapture>
+    <InitialAssessment>
+      <Rule>If the change ui is "ha_daemon", it is the HA peer replicating an edit already made on the other member — investigate the originating member, do not treat the replica as a separate change.</Rule>
+      <Rule>If ui is "GUI(&lt;known-admin-ip&gt;)" during a change window with a ticket, lean authorised administration. An unfamiliar source IP in ui, or a change to admin-access/trusted-host/policy that opens exposure with no ticket, escalates.</Rule>
+    </InitialAssessment>
+  </Triage>
+  <Investigation>
+    <Goal>Decide whether the FortiGate configuration change on $observer is authorised, change-managed administration or an unauthorised/attacker modification, attributing the operator via fortinet.firewall.ui and separating genuine edits from benign HA replication.</Goal>
+    <Workflow>
+      <Step order="1" name="Summarise the changes by operator on the device">
+        <Purpose>Group the config changes on $observer by action and operator (ui) — this immediately separates human/admin edits (GUI/jsconsole) from benign HA replication (ha_daemon) and shows what object types were touched.</Purpose>
+        <Query platform="Elastic" language="ES|QL" id="INV-01-CHANGES-BY-OPERATOR">
+          <![CDATA[
+FROM logs-fortinet_fortigate.log-*
+| WHERE observer.name == "$observer" AND fortinet.firewall.action IN ("Add","Edit","Delete") AND @timestamp >= NOW() - 4 hours
+| EVAL actor = fortinet.firewall.ui
+| STATS changes = COUNT(*), paths = VALUES(fortinet.firewall.cfgpath), first_seen = MIN(@timestamp), last_seen = MAX(@timestamp) BY fortinet.firewall.action, actor
+| SORT changes DESC
+| LIMIT 25
+          ]]>
+        </Query>
+        <ExpectedOutput>
+          <Field name="fortinet.firewall.action"/>
+          <Field name="actor"/>
+          <Field name="paths"/>
+        </ExpectedOutput>
+        <AnalystNotes>ha_daemon rows are the cluster peer replicating a change made on the other member — benign; pivot to the originating member. GUI(&lt;ip&gt;)/jsconsole rows are the real operator sessions to assess. An unfamiliar source IP inside a GUI(...) value is the standout signal.</AnalystNotes>
+      </Step>
+      <Step order="2" name="Inspect exactly what was changed">
+        <Purpose>Read the concrete attribute deltas (cfgattr) per object (cfgpath) so the security impact of the change is understood — e.g. a policy opened, an address object widened, admin access altered.</Purpose>
+        <Query platform="Elastic" language="ES|QL" id="INV-02-CHANGE-DETAIL">
+          <![CDATA[
+FROM logs-fortinet_fortigate.log-*
+| WHERE observer.name == "$observer" AND fortinet.firewall.action IN ("Add","Edit","Delete") AND @timestamp >= NOW() - 4 hours
+| KEEP @timestamp, fortinet.firewall.action, fortinet.firewall.cfgpath, fortinet.firewall.cfgattr, fortinet.firewall.ui
+| SORT @timestamp DESC
+| LIMIT 30
+          ]]>
+        </Query>
+        <ExpectedOutput>
+          <Field name="fortinet.firewall.cfgpath"/>
+          <Field name="fortinet.firewall.cfgattr"/>
+          <Field name="fortinet.firewall.ui"/>
+        </ExpectedOutput>
+        <AnalystNotes>Judge impact from cfgpath+cfgattr: changes to firewall.policy (allow rules), address/address-group objects that widen scope, system.admin / system.api-user, or admin trusted-host/interface access are the high-impact cases. Housekeeping edits (logging, comments, unrelated objects) are lower-impact. cfgattr shows the before-&gt;after values.</AnalystNotes>
+      </Step>
+      <Step order="3" name="Enumerate every operator that changed config (HA vs human)">
+        <Purpose>List all distinct operators (ui) that made changes and how many, so a single unexpected operator among the routine HA/admin traffic is obvious.</Purpose>
+        <Query platform="Elastic" language="ES|QL" id="INV-03-OPERATOR-ENUM">
+          <![CDATA[
+FROM logs-fortinet_fortigate.log-*
+| WHERE observer.name == "$observer" AND fortinet.firewall.action IN ("Add","Edit","Delete") AND @timestamp >= NOW() - 4 hours
+| EVAL is_ha = fortinet.firewall.ui LIKE "ha_daemon*"
+| STATS changes = COUNT(*), objects = COUNT_DISTINCT(fortinet.firewall.cfgpath), last_seen = MAX(@timestamp) BY fortinet.firewall.ui, is_ha
+| SORT changes DESC
+| LIMIT 20
+          ]]>
+        </Query>
+        <ExpectedOutput>
+          <Field name="fortinet.firewall.ui"/>
+          <Field name="is_ha"/>
+          <Field name="changes"/>
+        </ExpectedOutput>
+        <AnalystNotes>Expect a small set: ha_daemon (benign replica) and one or two known admin GUI(&lt;mgmt-ip&gt;) values. Any additional operator — an unfamiliar GUI source IP, an API user, or a console session at an odd time — is the one to justify against change control.</AnalystNotes>
+      </Step>
+      <Step order="4" name="Correlate an admin login/session to the change">
+        <Purpose>Tie the change to an administrative login on the device — a login from the same source in the window supports an attributable human change; changes with no corresponding admin login are more suspicious.</Purpose>
+        <Query platform="Elastic" language="ES|QL" id="INV-04-ADMIN-LOGIN-CORRELATION">
+          <![CDATA[
+FROM logs-fortinet_fortigate.log-*
+| WHERE observer.name == "$observer" AND fortinet.firewall.action == "login" AND @timestamp >= NOW() - 4 hours
+| STATS logins = COUNT(*), users = VALUES(user.name), sources = VALUES(source.ip), last_seen = MAX(@timestamp) BY event.outcome
+| SORT logins DESC
+| LIMIT 15
+          ]]>
+        </Query>
+        <ExpectedOutput>
+          <Field name="event.outcome"/>
+          <Field name="users"/>
+          <Field name="sources"/>
+        </ExpectedOutput>
+        <AnalystNotes>A successful admin login from the same source IP embedded in the change's GUI(...) ui, by a known admin account, corroborates authorised administration. Failed logins before the change (event.outcome != success) or a change with no admin login session at all raises the likelihood of unauthorised/automated tampering.</AnalystNotes>
+      </Step>
+    </Workflow>
+  </Investigation>
+  <DecisionTree>
+    <Node><Condition>INV-02/INV-03 show a high-impact change (firewall.policy opened, address object widened, system.admin/api-user or admin trusted-host/access altered) by an unfamiliar operator (unknown GUI source IP or unexpected API/console session) with no change ticket.</Condition><Result>True Positive (Unauthorised firewall change weakening defenses — escalate to IR)</Result></Node>
+    <Node><Condition>INV-04 shows the change coincides with failed admin logins or has no corresponding admin login session, and the operator origin cannot be tied to an authorised admin.</Condition><Result>True Positive (Suspicious/unattributable configuration change — escalate to IR)</Result></Node>
+    <Node><Condition>INV-01/INV-03 show the change was made by a known admin from a recognised management IP (GUI(&lt;mgmt-ip&gt;)) during a change window, INV-04 corroborates the admin login, and the change maps to a ticket.</Condition><Result>False Positive (Authorised, change-managed administration)</Result></Node>
+    <Node><Condition>The only records are ha_daemon replicas of a change already assessed on the originating cluster member (no new human edit).</Condition><Result>False Positive (Benign HA cluster replication)</Result></Node>
+    <Node><Condition>An API/automation operator (ui) made a legitimate-intent, scoped change matching a known workflow but outside the change-control path.</Condition><Result>Misconfiguration (Automation acting off change-control — route it through change control, do not blanket-exception)</Result></Node>
+    <Node><Condition>Operator origin is a known admin but no ticket/change record can be found, or the change impact is unclear.</Condition><Result>Needs Escalation</Result></Node>
+  </DecisionTree>
+  <ClassificationGuidance>
+    <FalsePositive>
+      <Definition>The change was authorised, change-managed administration by a known network admin, OR it is the HA peer benignly replicating a change already assessed on the other cluster member. "Authorised" or "proven HA replication" — never merely "a config changed".</Definition>
+      <Indicators>
+        <Item>ui = GUI(&lt;recognised management IP&gt;) by a known admin during an approved change window (INV-01/INV-03), corroborated by an admin login (INV-04).</Item>
+        <Item>ui = ha_daemon and the originating member's change is itself benign/authorised.</Item>
+        <Item>cfgattr shows a low-impact/housekeeping edit consistent with the ticket.</Item>
+      </Indicators>
+      <SOCAction>
+        <Item>Verify the change ticket and operator; close as false_positive.</Item>
+        <Item>For ha_daemon records, reference the originating member's assessment; do not raise a duplicate.</Item>
+      </SOCAction>
+    </FalsePositive>
+    <TruePositive>
+      <Definition>An unauthorised or attacker-driven change weakened the firewall — opening a policy, widening an address object, or altering administrative access — outside change control.</Definition>
+      <Indicators>
+        <Item>High-impact cfgpath/cfgattr change (policy/address/system.admin/trusted-host) by an unfamiliar operator (unknown GUI source IP, unexpected API/console).</Item>
+        <Item>No corresponding authorised admin login, or failed logins preceding the change (INV-04).</Item>
+        <Item>No change ticket; timing outside maintenance windows.</Item>
+      </Indicators>
+      <SOCAction>
+        <Item>Engage network/firewall admins to confirm and, if unauthorised, revert the change; preserve the config revision.</Item>
+        <Item>Treat the operator source as suspect; review FortiGate admin accounts and trusted-host settings; hunt for follow-on access enabled by the change.</Item>
+      </SOCAction>
+    </TruePositive>
+    <Misconfiguration>
+      <Definition>An automation/orchestration account (or an admin using an unsanctioned method) made a legitimate-intent change outside the change-control path — operational, not malicious.</Definition>
+      <Indicators>
+        <Item>An API/automation ui makes recurring, scoped changes matching a known workflow.</Item>
+        <Item>Owner confirms the automation and its scope.</Item>
+      </Indicators>
+      <SOCAction>
+        <Item>Route the automation through change control; document its expected cfgpath scope; keep the analytic enabled.</Item>
+      </SOCAction>
+    </Misconfiguration>
+  </ClassificationGuidance>
+  <Response>
+    <IRForHumans>
+      <Phase name="Immediate Actions (0-30 minutes)">
+        <Action priority="1">From INV-02 determine the security impact of the change; from INV-01/INV-03 attribute the operator (ui) and discount ha_daemon replicas.</Action>
+        <Action priority="2">If the change is high-impact and unattributable/unauthorised, engage firewall admins to revert it and preserve the current and prior config revisions.</Action>
+      </Phase>
+      <Phase name="Containment and Eradication (hours)">
+        <Action>Revert the unauthorised change; review adjacent config (policies, address objects, admin accounts, trusted hosts) for further tampering.</Action>
+        <Action>If an operator source is suspect, rotate FortiGate admin credentials/API keys and restrict admin access (trusted hosts); hunt for access enabled by the change.</Action>
+      </Phase>
+      <Phase name="Recovery and Hardening (days)">
+        <Action>Enforce change control for FortiGate edits; restrict admin GUI/API to defined management IPs; enable config-change notification/backup.</Action>
+        <Action>Baseline the expected operator (ui) set per member and alert on any new operator or high-impact cfgpath change as a higher-severity analytic.</Action>
+      </Phase>
+    </IRForHumans>
+  </Response>
+  <Escalation>
+    <Trigger>High-impact change (policy/address/admin access) by an unfamiliar operator, a change with no authorised admin login or preceded by failed logins, or an unrevertable/unexplained modification.</Trigger>
+    <To>SOC L2 / IR (with Network/Firewall administration)</To>
+  </Escalation>
+  <Closure>
+    <FalsePositiveClosure>
+      <Item>Change verified against an approved ticket and a known admin operator, or confirmed as a benign HA replica of an assessed change.</Item>
+      <Item>cfgattr impact reviewed and consistent with the authorised intent.</Item>
+    </FalsePositiveClosure>
+    <TruePositiveClosure>
+      <Item>Unauthorised change reverted and config revision preserved; adjacent config reviewed for further tampering.</Item>
+      <Item>Suspect operator/credentials contained and rotated; follow-on access hunted; incident documented.</Item>
+    </TruePositiveClosure>
+  </Closure>
+</Playbook>

@@ -1,0 +1,149 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<Playbook xmlns="https://soc.example/playbooks" id="PB-WIN-042" name="Windows — Sensitive Registry Hive Access via RegBack - SOC Playbook" version="1.0" status="Production" classification="TLP:AMBER">
+  <Metadata>
+    <Owner>JCB Detection Engineering (WatchWave)</Owner>
+    <LastUpdated>2026-08-14</LastUpdated>
+    <Severity default="High">High</Severity>
+    <Confidence default="Medium">Medium</Confidence>
+    <Category>Credential Access / OS Credential Dumping</Category>
+    <MitreAttack>
+      <Technique id="T1003.002" name="Security Account Manager"/>
+      <Tactic id="TA0006" name="Credential Access"/>
+    </MitreAttack>
+    <References>
+      <Reference title="MITRE ATT and CK" url="https://attack.mitre.org/techniques/T1003/"/>
+    </References>
+  </Metadata>
+  <ExecutiveSummary>
+    <Overview>A process accessed the backup registry hives in System32\config\RegBack (SAM/SECURITY/SYSTEM) - a stealthy path to credential material that avoids the locked live hives. Triage question: credential theft via RegBack, or a legitimate backup process?</Overview>
+    <BusinessImpact>The RegBack copies of SAM/SECURITY/SYSTEM contain the same credential material as the live hives and are often unprotected - a quiet credential-theft source.</BusinessImpact>
+  </ExecutiveSummary>
+  <Scope><Assets>
+    <AssetType>Windows servers and workstations (INTDOM domain)</AssetType>
+    <AssetType>Domain controllers</AssetType>
+  </Assets><LogSources>
+    <LogSource>Sysmon process + Windows Security - logs-windows.sysmon_operational-*,logs-system.security-*</LogSource>
+  </LogSources></Scope>
+  <Prerequisites><TelemetryRequirements>
+    <Requirement>Windows Security + Sysmon + PowerShell logs via Elastic Agent (verified live). Sysmon event.code 1=process(command_line/parent populated), 11=file, 13/12=registry(registry.path populated); process.code_signature NOT collected.</Requirement>
+  </TelemetryRequirements><DetectionSignals>
+    <Signal><Name>RegBack hive access</Name><Details>file access to System32\config\RegBack\SAM/SECURITY/SYSTEM.</Details></Signal>
+  </DetectionSignals></Prerequisites>
+  <Inputs>
+    <Input name="$hostname" description="Host where RegBack was accessed."/>
+    <Input name="$username" description="Account (user.name) if present."/>
+  </Inputs>
+  <Triage><ImmediateCapture>
+    <Item>Host: $hostname</Item>
+  </ImmediateCapture><InitialAssessment>
+    <Rule>Weigh the evidence story, not any single fact - see ClassificationGuidance.</Rule>
+  </InitialAssessment></Triage>
+  <Investigation>
+    <Goal>Determine whether the RegBack access is credential theft or a legitimate backup/read.</Goal>
+    <Workflow>
+      <Step order="1" name="Which process accessed the RegBack hives">
+        <Purpose>The accessing process and its path reveal credential-theft tooling vs a backup agent.</Purpose>
+        <Query platform="Elastic" language="ES|QL" id="INV-01-REGBACK-ACCESS">
+          <![CDATA[
+FROM logs-windows.sysmon_operational-*,logs-system.security-*
+| WHERE host.name == "$hostname" AND @timestamp >= NOW() - 4 hours
+| WHERE file.path RLIKE "(?i).*.*system32.*config.*regback.*(sam|security|system)"
+| KEEP @timestamp, process.name, process.executable, file.path, event.action, user.name
+| SORT @timestamp DESC
+| LIMIT 20
+          ]]>
+        </Query>
+        <ExpectedOutput>
+          <Field name="process.name"/>
+          <Field name="file.path"/>
+          <Field name="event.action"/>
+          <Field name="user.name"/>
+        </ExpectedOutput>
+        <AnalystNotes>A copy/reg/powershell/unknown process reading RegBack\SAM = credential theft. A backup agent reading all of config as part of an image is benign. NOTE: read-access auditing (Sysmon FileAccess / Security 4663) may be limited on some hosts - absence here does not fully clear the case; verify object-access auditing on the host.</AnalystNotes>
+      </Step>
+      <Step order="2" name="Credential-theft context on the host">
+        <Purpose>RegBack access alongside other credential activity is an attack chain.</Purpose>
+        <Query platform="Elastic" language="ES|QL" id="INV-02-REGBACK-CONTEXT" optional="true">
+          <![CDATA[
+FROM logs-system.security-*
+| WHERE host.name == "$hostname" AND event.code IN ("4688","4624","4672") AND @timestamp >= NOW() - 2 hours
+| STATS c = COUNT(*), codes = VALUES(event.code) BY winlog.event_data.LogonType
+| LIMIT 10
+          ]]>
+        </Query>
+        <ExpectedOutput>
+          <Field name="codes"/>
+          <Field name="c"/>
+        </ExpectedOutput>
+        <AnalystNotes>Privileged/remote activity around the RegBack access supports an attack chain.</AnalystNotes>
+      </Step>
+      <Step order="3" name="Finalize classification">
+        <DecisionTree>
+          <Node><Condition>A copy/script/credential tool accessing RegBack\SAM/SECURITY, especially amid other credential activity.</Condition><Result>True Positive (Credential Theft via RegBack - IR, treat local credentials as exposed)</Result></Node>
+          <Node><Condition>A backup agent reading config as part of a documented image/backup.</Condition><Result>False Positive</Result></Node>
+          <Node><Condition>RegBack access with unclear process/context (or limited access-audit telemetry).</Condition><Result>Needs Escalation</Result></Node>
+        </DecisionTree>
+        <DocumentationChecklist>
+          <Item>Attach outputs of INV-01-REGBACK-ACCESS, INV-02-REGBACK-CONTEXT to the case.</Item>
+        </DocumentationChecklist>
+      </Step>
+    </Workflow>
+  </Investigation>
+  <ClassificationGuidance>
+    <FalsePositive>
+      <Definition>A legitimate backup/imaging read.</Definition>
+      <Indicators>
+        <Item>Known backup agent.</Item>
+        <Item>Full-config read.</Item>
+        <Item>Documented backup.</Item>
+      </Indicators>
+      <SOCAction>
+        <Item>Confirm the backup; close as false_positive.</Item>
+      </SOCAction>
+    </FalsePositive>
+    <TruePositive>
+      <Definition>Credential theft via the backup hives.</Definition>
+      <Indicators>
+        <Item>copy/script/tool reading RegBack\SAM.</Item>
+        <Item>Credential-theft context.</Item>
+        <Item>Non-backup process.</Item>
+      </Indicators>
+      <SOCAction>
+        <Item>Isolate the host; open IR; reset local + logged-on credentials.</Item>
+        <Item>Restrict/clean RegBack; hunt the tooling.</Item>
+      </SOCAction>
+    </TruePositive>
+    <Misconfiguration>
+      <Definition>Weak protection on RegBack copies (config gap).</Definition>
+      <Indicators>
+        <Item>RegBack world-readable.</Item>
+        <Item>No malicious access yet.</Item>
+      </Indicators>
+      <SOCAction>
+        <Item>Restrict RegBack ACLs / clear stale copies; document.</Item>
+      </SOCAction>
+    </Misconfiguration>
+  </ClassificationGuidance>
+  <Response><IRForHumans>
+    <Phase name="Immediate Actions (0-30 minutes)">
+      <Action priority="1">Confirm the activity on the host; if malicious indicators, isolate the host.</Action>
+      <Action priority="2">Identify the responsible account/process and its origin.</Action>
+    </Phase>
+    <Phase name="Containment and Eradication (hours)">
+      <Action>Isolate the host; capture volatile evidence; hunt the same pattern across the estate.</Action>
+      <Action>Reset credentials used on the host if compromise is confirmed.</Action>
+    </Phase>
+    <Phase name="Recovery and Hardening (days)">
+      <Action>Remediate the root cause; add/verify EDR coverage; apply relevant hardening.</Action>
+    </Phase>
+  </IRForHumans></Response>
+  <QualityChecks>
+    <Check>Confirm the required telemetry (Sysmon/Security auditing) is present on the host.</Check>
+    <Check>Tune known-benign administrative sources via exceptions, not by disabling the rule.</Check>
+  </QualityChecks>
+  <ClosureCriteria><FalsePositiveClosure>
+    <Item>Activity confirmed benign/authorised and documented.</Item>
+  </FalsePositiveClosure><TruePositiveClosure>
+    <Item>Host contained and triaged; root cause eradicated; estate swept; findings recorded.</Item>
+  </TruePositiveClosure></ClosureCriteria>
+</Playbook>

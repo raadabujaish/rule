@@ -1,0 +1,79 @@
+{
+  "rule_id": "jcb-ora-createtable-unexpected-principal",
+  "name": "Oracle — CREATE TABLE by Unexpected Principal",
+  "version": 1,
+  "enabled": true,
+  "interval": "1h",
+  "from": "now-3h",
+  "to": "now",
+  "description": "Attacker objective\nStage sensitive data for theft by copying tables (CREATE TABLE AS SELECT) before exfiltration.\n\nAttack logic\nCTAS in production is normally an ETL operation by a known service account. CREATE TABLE by any other principal — especially copying client or account tables — is data-staging behaviour.\n\nWhy this detection works\nUnified Audit records the statement and principal, so allowlisting ETL makes other CTAS a high-signal event.\n\nFalse positives\nA new ETL/reporting account.\n\nTuning\nAllowlist verified accounts; review the CTAS source table for sensitivity.\n\nRequired telemetry\nOracle Unified Audit shipped as apps-* (ACTION_NAME, USERNAME, SQL_TEXT).",
+  "tags": [
+    "JCB",
+    "Oracle",
+    "Phase3",
+    "Use Case: Threat Detection",
+    "Tactic: Collection"
+  ],
+  "author": [
+    "raadabujaish"
+  ],
+  "threat": [
+    {
+      "framework": "MITRE ATT&CK",
+      "tactic": {
+        "id": "TA0009",
+        "name": "Collection",
+        "reference": "https://attack.mitre.org/tactics/TA0009/"
+      },
+      "technique": [
+        {
+          "id": "T1074",
+          "name": "Data Staged",
+          "reference": "https://attack.mitre.org/techniques/T1074/",
+          "subtechnique": [
+            {
+              "id": "T1074.001",
+              "name": "Local Data Staging",
+              "reference": "https://attack.mitre.org/techniques/T1074/001/"
+            }
+          ]
+        }
+      ]
+    }
+  ],
+  "investigation_fields": {
+    "field_names": [
+      "USERNAME",
+      "ACTION_NAME",
+      "SQL_TEXT",
+      "type",
+      "TIMESTAMP"
+    ]
+  },
+  "related_integrations": [],
+  "required_fields": [],
+  "setup": "",
+  "note": "## Investigation guide\n1. SQL_TEXT shows the CTAS source; copying sensitive client/account tables by an unexpected actor is data-staging for theft.\n2. Correlate with any subsequent DB-link creation or large outbound transfer from the DB host.",
+  "false_positives": [
+    "A new ETL/reporting account."
+  ],
+  "references": [
+    "https://attack.mitre.org/techniques/T1074/",
+    "https://attack.mitre.org/techniques/T1074/001/"
+  ],
+  "risk_score": 56,
+  "risk_score_mapping": [],
+  "severity": "medium",
+  "severity_mapping": [],
+  "output_index": "",
+  "max_signals": 100,
+  "exceptions_list": [],
+  "actions": [],
+  "type": "query",
+  "language": "kuery",
+  "index": [
+    "apps-*",
+    "-apps-*-2025"
+  ],
+  "query": "ACTION_NAME.keyword:\"CREATE TABLE\" and not USERNAME.keyword:\"INH_LIFE\""
+}

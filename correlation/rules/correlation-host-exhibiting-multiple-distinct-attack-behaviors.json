@@ -1,0 +1,70 @@
+{
+  "rule_id": "jcb-corr-host-multistage-compromise",
+  "name": "Correlation — Host Exhibiting Multiple Distinct Attack Behaviors",
+  "version": 1,
+  "enabled": true,
+  "interval": "1h",
+  "from": "now-24h",
+  "to": "now",
+  "description": "Attacker objective\nOperate extensively on a single compromised host, leaving traces across several distinct attack techniques.\n\nAttack logic\nThe more distinct high-fidelity techniques a single host exhibits in a short window, the higher the certainty of an active, hands-on-keyboard compromise rather than an isolated anomaly.\n\nWhy this detection works\nCounting distinct high-fidelity JCB endpoint detections per host over the alert stream surfaces heavily-active hosts as a single, top-priority alert.\n\nFalse positives\nVery low — requires three independent high-fidelity detections on one host. A heavily-used administration host is the main candidate for tuning.\n\nTuning\nExclude verified administration hosts; lower or raise the distinct-detection threshold to fit the environment.\n\nRequired telemetry\nThe JCB Windows/AD detection alerts (host.name populated).",
+  "tags": [
+    "JCB",
+    "Correlation",
+    "Phase3",
+    "Use Case: Threat Detection",
+    "Tactic: Lateral Movement"
+  ],
+  "author": [
+    "raadabujaish"
+  ],
+  "license": "",
+  "threat": [
+    {
+      "framework": "MITRE ATT&CK",
+      "tactic": {
+        "id": "TA0008",
+        "name": "Lateral Movement",
+        "reference": "https://attack.mitre.org/tactics/TA0008/"
+      },
+      "technique": [
+        {
+          "id": "T1210",
+          "name": "Exploitation of Remote Services",
+          "reference": "https://attack.mitre.org/techniques/T1210/"
+        }
+      ]
+    }
+  ],
+  "investigation_fields": {
+    "field_names": [
+      "host.name",
+      "kibana.alert.rule.name",
+      "kibana.alert.severity",
+      "user.name",
+      "source.ip",
+      "destination.ip",
+      "message"
+    ]
+  },
+  "related_integrations": [],
+  "required_fields": [],
+  "setup": "",
+  "note": "## Investigation guide\n1. host.name is the compromised endpoint; review the full list of distinct detections it produced.\n2. Treat as a high-confidence active intrusion — isolate, preserve evidence and begin IR.\n3. Reconstruct the timeline from the individual detections to scope the incident.",
+  "false_positives": [
+    "Very low — requires three independent high-fidelity detections on one host. A heavily-used administration host is the main candidate for tuning."
+  ],
+  "references": [
+    "https://attack.mitre.org/techniques/T1210/"
+  ],
+  "risk_score": 90,
+  "risk_score_mapping": [],
+  "severity": "critical",
+  "severity_mapping": [],
+  "output_index": "",
+  "max_signals": 100,
+  "exceptions_list": [],
+  "actions": [],
+  "type": "esql",
+  "language": "esql",
+  "query": "FROM .alerts-security.alerts-* METADATA _id, _index, _version\n| WHERE host.name IS NOT NULL AND kibana.alert.rule.name IN (\"Windows — LSASS Memory Dump via Known Credential-Theft Tooling\", \"Windows — Credential Theft: Registry Hive or NTDS.dit Extraction\", \"Windows — Malicious PowerShell: AMSI/ETW Bypass or Offensive Tooling\", \"Windows — Pass-the-Hash / Overpass-the-Hash Logon Pattern\", \"Windows — Ingress Tool Transfer via LOLBin\", \"Windows — Signed Binary Proxy Execution (LOLBin)\", \"Windows — UAC Bypass via Auto-Elevated LOLBin\", \"AD — DCSync: Directory Replication by an Unexpected Principal\", \"AD — Kerberoasting: RC4 Service Ticket Requested\", \"AD — AS-REP Roasting: TGT Requested for a Pre-Auth-Disabled Account\", \"AD — Shadow Credentials (msDS-KeyCredentialLink Modified)\", \"AD — SPN Added by Non-Computer Principal (Kerberoast Setup)\", \"AD — Domain Reconnaissance via LOLBins / BloodHound\", \"Windows — Remote Execution via WMI or WinRM\", \"Windows — Service Installed with Suspicious Image Path\", \"Windows — Inhibit System Recovery (Ransomware Precursor)\", \"Windows — Defender / EDR / Firewall Tampering\", \"Windows — Registry Persistence: IFEO / Winlogon / AppInit\", \"Windows — Scheduled Task Created with Suspicious Action\", \"AD — Member Added to a Privileged (Tier-0) Group\", \"AD — Object Security Descriptor Modified (DACL Backdoor)\", \"AD — Group Policy Object Modified by an Unexpected Principal\", \"AD — KRBTGT Account Password Reset (Golden Ticket Prep / Remediation)\")\n| STATS distinct_detections = COUNT_DISTINCT(kibana.alert.rule.name), detections = VALUES(kibana.alert.rule.name), alerts = COUNT() BY host.name\n| WHERE distinct_detections >= 3"
+}

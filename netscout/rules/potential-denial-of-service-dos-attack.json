@@ -1,0 +1,149 @@
+{
+  "rule_id": "32497efb-5c14-4ecf-8c83-16813f253efb",
+  "name": "Potential Denial of Service (DoS) Attack",
+  "version": 1,
+  "enabled": true,
+  "interval": "5m",
+  "from": "now-600s",
+  "to": "now",
+  "description": "This rule detects an anomalously high volume of trafficoriginating from a single source IP address. A large number of requests in a short period can indicate an attempt For a DOS attack, rendering it unavailable for legitimate traffic.",
+  "tags": [],
+  "author": [],
+  "license": "",
+  "threat": [
+    {
+      "framework": "MITRE ATT&CK",
+      "tactic": {
+        "id": "TA0040",
+        "name": "Impact",
+        "reference": "https://attack.mitre.org/tactics/TA0040"
+      },
+      "technique": [
+        {
+          "id": "T1498",
+          "name": "Network Denial of Service",
+          "reference": "https://attack.mitre.org/techniques/T1498",
+          "subtechnique": []
+        }
+      ]
+    }
+  ],
+  "investigation_fields": {
+    "field_names": [
+      "user.name",
+      "source.ip",
+      "destination.ip",
+      "destination.port",
+      "event.action",
+      "message",
+      "observer.product"
+    ]
+  },
+  "related_integrations": [],
+  "required_fields": [],
+  "setup": "",
+  "false_positives": [],
+  "references": [],
+  "risk_score": 99,
+  "risk_score_mapping": [],
+  "severity": "critical",
+  "severity_mapping": [],
+  "output_index": "",
+  "max_signals": 100,
+  "exceptions_list": [],
+  "actions": [],
+  "meta": {
+    "from": "5m",
+    "kibana_siem_app_url": "https://172.31.14.118:16462/app/security"
+  },
+  "type": "threshold",
+  "language": "kuery",
+  "data_view_id": "logs-*",
+  "query": "",
+  "filters": [
+    {
+      "meta": {
+        "index": "1b12d77c-aa4e-4164-be16-1e7a1390088f",
+        "type": "custom",
+        "disabled": false,
+        "negate": false,
+        "alias": null,
+        "key": "query",
+        "value": "{\"bool\":{\"should\":[{\"bool\":{\"must\":[],\"filter\":[{\"match_phrase\":{\"message\":\"Connection_Allowed\"}}],\"should\":[],\"must_not\":[]}},{\"bool\":{\"must\":[],\"filter\":[{\"match_phrase\":{\"message\":\"Connecton_Refused\"}}],\"should\":[],\"must_not\":[]}},{\"bool\":{\"must\":[],\"filter\":[{\"bool\":{\"must\":[],\"filter\":[{\"match_phrase\":{\"message\":\"Connection_Closed\"}},{\"match_phrase\":{\"tags\":\"ForcePointv8\"}}],\"should\":[],\"must_not\":[]}}],\"should\":[],\"must_not\":[]}}],\"minimum_should_match\":1}}"
+      },
+      "$state": {
+        "store": "appState"
+      },
+      "query": {
+        "bool": {
+          "should": [
+            {
+              "bool": {
+                "must": [],
+                "filter": [
+                  {
+                    "match_phrase": {
+                      "message": "Connection_Allowed"
+                    }
+                  }
+                ],
+                "should": [],
+                "must_not": []
+              }
+            },
+            {
+              "bool": {
+                "must": [],
+                "filter": [
+                  {
+                    "match_phrase": {
+                      "message": "Connecton_Refused"
+                    }
+                  }
+                ],
+                "should": [],
+                "must_not": []
+              }
+            },
+            {
+              "bool": {
+                "must": [],
+                "filter": [
+                  {
+                    "bool": {
+                      "must": [],
+                      "filter": [
+                        {
+                          "match_phrase": {
+                            "message": "Connection_Closed"
+                          }
+                        },
+                        {
+                          "match_phrase": {
+                            "tags": "ForcePointv8"
+                          }
+                        }
+                      ],
+                      "should": [],
+                      "must_not": []
+                    }
+                  }
+                ],
+                "should": [],
+                "must_not": []
+              }
+            }
+          ],
+          "minimum_should_match": 1
+        }
+      }
+    }
+  ],
+  "threshold": {
+    "field": [
+      "source.ip"
+    ],
+    "value": 5000,
+    "cardinality": []
+  }
+}

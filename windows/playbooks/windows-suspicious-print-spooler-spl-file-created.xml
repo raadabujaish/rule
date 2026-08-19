@@ -1,0 +1,150 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<Playbook xmlns="https://soc.example/playbooks" id="PB-WIN-043" name="Windows — Suspicious Print Spooler SPL File Created - SOC Playbook" version="1.0" status="Production" classification="TLP:AMBER">
+  <Metadata>
+    <Owner>JCB Detection Engineering (WatchWave)</Owner>
+    <LastUpdated>2026-08-14</LastUpdated>
+    <Severity default="High">High</Severity>
+    <Confidence default="Medium">Medium</Confidence>
+    <Category>Privilege Escalation / Print Spooler Exploitation</Category>
+    <MitreAttack>
+      <Technique id="T1068" name="Exploitation for Privilege Escalation"/>
+      <Tactic id="TA0004" name="Privilege Escalation"/>
+    </MitreAttack>
+    <References>
+      <Reference title="MITRE ATT and CK" url="https://attack.mitre.org/techniques/T1068/"/>
+    </References>
+  </Metadata>
+  <ExecutiveSummary>
+    <Overview>An .spl file was created in System32\spool\PRINTERS by a process other than the legitimate spooler binaries - associated with PrintNightmare-class spooler exploitation. Triage question: spooler exploitation for SYSTEM code execution, or a benign print job?</Overview>
+    <BusinessImpact>Print spooler exploitation (PrintNightmare and variants) yields SYSTEM code execution and is a known privilege-escalation/RCE vector.</BusinessImpact>
+  </ExecutiveSummary>
+  <Scope><Assets>
+    <AssetType>Windows servers and workstations (INTDOM domain)</AssetType>
+    <AssetType>Domain controllers</AssetType>
+  </Assets><LogSources>
+    <LogSource>Sysmon file events - logs-windows.sysmon_operational-*</LogSource>
+  </LogSources></Scope>
+  <Prerequisites><TelemetryRequirements>
+    <Requirement>Windows Security + Sysmon + PowerShell logs via Elastic Agent (verified live). Sysmon event.code 1=process(command_line/parent populated), 11=file, 13/12=registry(registry.path populated); process.code_signature NOT collected.</Requirement>
+  </TelemetryRequirements><DetectionSignals>
+    <Signal><Name>Suspicious SPL file</Name><Details>.spl in spool\PRINTERS by a non-spooler process.</Details></Signal>
+  </DetectionSignals></Prerequisites>
+  <Inputs>
+    <Input name="$hostname" description="Host where the SPL file was created."/>
+    <Input name="$username" description="Account (user.name) if present."/>
+  </Inputs>
+  <Triage><ImmediateCapture>
+    <Item>Host: $hostname</Item>
+  </ImmediateCapture><InitialAssessment>
+    <Rule>Weigh the evidence story, not any single fact - see ClassificationGuidance.</Rule>
+  </InitialAssessment></Triage>
+  <Investigation>
+    <Goal>Determine whether the SPL file creation is spooler exploitation or a benign print job.</Goal>
+    <Workflow>
+      <Step order="1" name="The SPL file and creating process">
+        <Purpose>A non-spooler process writing to the PRINTERS directory is the exploitation signature.</Purpose>
+        <Query platform="Elastic" language="ES|QL" id="INV-01-SPL-CREATE">
+          <![CDATA[
+FROM logs-windows.sysmon_operational-*
+| WHERE event.code == "11" AND host.name == "$hostname" AND @timestamp >= NOW() - 4 hours
+| WHERE file.path RLIKE "(?i).*.*system32.*spool.*printers.*.*" AND file.extension RLIKE "(?i)spl"
+| KEEP @timestamp, process.name, process.executable, file.path, user.name
+| SORT @timestamp DESC
+| LIMIT 20
+          ]]>
+        </Query>
+        <ExpectedOutput>
+          <Field name="process.name"/>
+          <Field name="file.path"/>
+          <Field name="user.name"/>
+        </ExpectedOutput>
+        <AnalystNotes>spoolsv.exe/printfilterpipelinesvc writing .spl is normal. cmd/powershell/rundll32/an unknown process writing there is exploitation. Note the writing process.</AnalystNotes>
+      </Step>
+      <Step order="2" name="Did the host then show SYSTEM code execution">
+        <Purpose>A new service/process as SYSTEM shortly after the SPL write indicates successful exploitation.</Purpose>
+        <Query platform="Elastic" language="ES|QL" id="INV-02-SPL-EXEC" optional="true">
+          <![CDATA[
+FROM logs-system.security-*,logs-system.system-*
+| WHERE host.name == "$hostname" AND event.code IN ("7045","4697","4688") AND @timestamp >= NOW() - 1 hours
+| KEEP @timestamp, event.code, winlog.event_data.ServiceName, process.name
+| SORT @timestamp DESC
+| LIMIT 10
+          ]]>
+        </Query>
+        <ExpectedOutput>
+          <Field name="event.code"/>
+          <Field name="winlog.event_data.ServiceName"/>
+          <Field name="process.name"/>
+        </ExpectedOutput>
+        <AnalystNotes>A new service/SYSTEM process right after the SPL write confirms exploitation - escalate to IR.</AnalystNotes>
+      </Step>
+      <Step order="3" name="Finalize classification">
+        <DecisionTree>
+          <Node><Condition>An .spl file written to PRINTERS by a non-spooler process, especially followed by SYSTEM code execution.</Condition><Result>True Positive (Spooler Exploitation - IR, patch)</Result></Node>
+          <Node><Condition>A .spl created by the legitimate spooler during a normal print job.</Condition><Result>False Positive</Result></Node>
+          <Node><Condition>SPL creation by an unclear process.</Condition><Result>Needs Escalation</Result></Node>
+        </DecisionTree>
+        <DocumentationChecklist>
+          <Item>Attach outputs of INV-01-SPL-CREATE, INV-02-SPL-EXEC to the case.</Item>
+        </DocumentationChecklist>
+      </Step>
+    </Workflow>
+  </Investigation>
+  <ClassificationGuidance>
+    <FalsePositive>
+      <Definition>A normal print job.</Definition>
+      <Indicators>
+        <Item>spoolsv/print-pipeline wrote it.</Item>
+        <Item>Normal printing.</Item>
+        <Item>Expected context.</Item>
+      </Indicators>
+      <SOCAction>
+        <Item>Confirm normal printing; close as false_positive.</Item>
+      </SOCAction>
+    </FalsePositive>
+    <TruePositive>
+      <Definition>Print spooler exploitation.</Definition>
+      <Indicators>
+        <Item>Non-spooler process wrote the .spl.</Item>
+        <Item>SYSTEM execution follows.</Item>
+        <Item>PrintNightmare-class pattern.</Item>
+      </Indicators>
+      <SOCAction>
+        <Item>Isolate the host; open IR; ensure spooler patches are applied.</Item>
+        <Item>Disable the spooler where not needed; hunt estate-wide.</Item>
+      </SOCAction>
+    </TruePositive>
+    <Misconfiguration>
+      <Definition>A misconfigured print component writing unexpectedly.</Definition>
+      <Indicators>
+        <Item>A known print product misbehaving.</Item>
+        <Item>No exploitation follow-on.</Item>
+      </Indicators>
+      <SOCAction>
+        <Item>Fix/patch the print component; document.</Item>
+      </SOCAction>
+    </Misconfiguration>
+  </ClassificationGuidance>
+  <Response><IRForHumans>
+    <Phase name="Immediate Actions (0-30 minutes)">
+      <Action priority="1">Confirm the activity on the host; if malicious indicators, isolate the host.</Action>
+      <Action priority="2">Identify the responsible account/process and its origin.</Action>
+    </Phase>
+    <Phase name="Containment and Eradication (hours)">
+      <Action>Isolate the host; capture volatile evidence; hunt the same pattern across the estate.</Action>
+      <Action>Reset credentials used on the host if compromise is confirmed.</Action>
+    </Phase>
+    <Phase name="Recovery and Hardening (days)">
+      <Action>Remediate the root cause; add/verify EDR coverage; apply relevant hardening.</Action>
+    </Phase>
+  </IRForHumans></Response>
+  <QualityChecks>
+    <Check>Confirm the required telemetry (Sysmon/Security auditing) is present on the host.</Check>
+    <Check>Tune known-benign administrative sources via exceptions, not by disabling the rule.</Check>
+  </QualityChecks>
+  <ClosureCriteria><FalsePositiveClosure>
+    <Item>Activity confirmed benign/authorised and documented.</Item>
+  </FalsePositiveClosure><TruePositiveClosure>
+    <Item>Host contained and triaged; root cause eradicated; estate swept; findings recorded.</Item>
+  </TruePositiveClosure></ClosureCriteria>
+</Playbook>

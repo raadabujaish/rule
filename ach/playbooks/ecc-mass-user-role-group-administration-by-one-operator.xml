@@ -1,0 +1,125 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<Playbook xmlns="https://soc.example/playbooks" id="PB-ACH-003" name="ECC — Mass User/Role/Group Administration by One Operator - SOC Playbook" version="1.0" status="Production" classification="TLP:AMBER">
+  <Metadata>
+    <Owner>JCB Detection Engineering (WatchWave)</Owner>
+    <LastUpdated>2026-08-14</LastUpdated>
+    <Severity default="High">High</Severity>
+    <Confidence default="Medium">Medium</Confidence>
+    <Category>Privilege Escalation / Account Manipulation</Category>
+    <MitreAttack>
+      <Technique id="T1098" name="Account Manipulation"/>
+      <Tactic id="TA0004" name="Privilege Escalation"/>
+    </MitreAttack>
+    <References>
+      <Reference title="MITRE ATT and CK" url="https://attack.mitre.org/techniques/T1098/"/>
+    </References>
+  </Metadata>
+  <ExecutiveSummary>
+    <Overview>One operator performed a mass of user/role/group administration actions in the ECC system (ES|QL aggregate, type ECC_USR_AUDIT, excluding 2025 baseline). Triage: bulk legitimate administration, or an operator mass-manipulating access (privilege abuse/compromise)?</Overview>
+    <BusinessImpact>Mass access-administration by one operator can rapidly grant fraudulent privileges or create backdoor access at scale.</BusinessImpact>
+  </ExecutiveSummary>
+  <Scope><Assets>
+    <AssetType>ACH payment application, ECC user-administration</AssetType>
+  </Assets><LogSources>
+    <LogSource>ACH/ECC application audit via apps-* - apps-*</LogSource>
+  </LogSources></Scope>
+  <Prerequisites><TelemetryRequirements>
+    <Requirement>Banking-app audit in apps-* (verified live). ACH maker-checker fields USERNAME_MAKER/USERNAME_CHECKER; ECC user-admin type ECC_USR_AUDIT. type field distinguishes app streams (ACHAPP, ECC_USR_AUDIT).</Requirement>
+  </TelemetryRequirements><DetectionSignals>
+    <Signal><Name>Mass User/Role/Group Administration by O</Name><Details>one operator with mass ECC user/role/group changes.</Details></Signal>
+  </DetectionSignals></Prerequisites>
+  <Inputs>
+    <Input name="$user" description="The administering operator."/>
+  </Inputs>
+  <Triage><ImmediateCapture>
+    <Item>$user: $user</Item>
+  </ImmediateCapture><InitialAssessment>
+    <Rule>Weigh the full evidence story per the ClassificationGuidance, not any single fact.</Rule>
+  </InitialAssessment></Triage>
+  <Investigation>
+    <Goal>Determine whether the mass ECC administration is legitimate bulk work or privilege abuse/compromise.</Goal>
+    <Workflow>
+      <Step order="1" name="The operator's ECC administration volume and actions">
+        <Purpose>The volume and nature of changes separate a legitimate bulk task from mass privilege manipulation.</Purpose>
+        <Query platform="Elastic" language="ES|QL" id="INV-01-ECC-VOLUME">
+          <![CDATA[
+FROM apps-*
+| WHERE type == "ECC_USR_AUDIT" AND USERNAME == "$user" AND @timestamp >= NOW() - 4 hours
+| STATS changes = COUNT(*), actions = VALUES(ACTION_NAME)
+| LIMIT 1
+          ]]>
+        </Query>
+        <ExpectedOutput>
+          <Field name="changes"/>
+          <Field name="actions"/>
+        </ExpectedOutput>
+        <AnalystNotes>A large number of user/role/group changes in a short window by one operator is the signal. Legitimate bulk onboarding/migration is documented; unannounced mass changes, especially granting privileges, are abuse/compromise.</AnalystNotes>
+      </Step>
+      <Step order="2" name="Finalize classification">
+        <DecisionTree>
+          <Node><Condition>Mass privilege-granting changes by one operator with no documented bulk task.</Condition><Result>True Positive (Mass Privilege Abuse - escalate, review all changes)</Result></Node>
+          <Node><Condition>A documented bulk onboarding/migration by an authorised operator.</Condition><Result>False Positive / Benign Activity</Result></Node>
+          <Node><Condition>A migration/automation using one operator account (baseline gap).</Condition><Result>Misconfiguration</Result></Node>
+          <Node><Condition>Mass changes with unclear authorisation.</Condition><Result>Needs Escalation</Result></Node>
+        </DecisionTree>
+        <DocumentationChecklist>
+          <Item>Attach outputs of INV-01-ECC-VOLUME to the case.</Item>
+        </DocumentationChecklist>
+      </Step>
+    </Workflow>
+  </Investigation>
+  <ClassificationGuidance>
+    <FalsePositive>
+      <Definition>A documented bulk administration task.</Definition>
+      <Indicators>
+        <Item>Documented migration/onboarding.</Item>
+        <Item>Authorised operator.</Item>
+        <Item>Expected scope.</Item>
+      </Indicators>
+      <SOCAction>
+        <Item>Confirm the task; close as benign_activity.</Item>
+      </SOCAction>
+    </FalsePositive>
+    <TruePositive>
+      <Definition>Mass privilege manipulation by one operator.</Definition>
+      <Indicators>
+        <Item>Unannounced mass changes.</Item>
+        <Item>Privilege grants.</Item>
+        <Item>Compromised/abusing operator.</Item>
+      </Indicators>
+      <SOCAction>
+        <Item>Review ALL the changes; reverse unauthorised grants; disable the operator if compromised; escalate to fraud/compliance; open IR.</Item>
+      </SOCAction>
+    </TruePositive>
+    <Misconfiguration>
+      <Definition>A migration using one operator account.</Definition>
+      <Indicators>
+        <Item>Known migration.</Item>
+        <Item>Owner confirms.</Item>
+      </Indicators>
+      <SOCAction>
+        <Item>Baseline the migration; document.</Item>
+      </SOCAction>
+    </Misconfiguration>
+  </ClassificationGuidance>
+  <Response><IRForHumans>
+    <Phase name="Immediate Actions (0-30 minutes)">
+      <Action priority="1">Identify the operator and the scope of changes.</Action>
+      <Action priority="2">If abuse, review all changes and reverse unauthorised grants.</Action>
+    </Phase>
+    <Phase name="Containment and Eradication (hours)">
+      <Action>Review all changes; reverse unauthorised grants; disable the operator if compromised; escalate.</Action>
+    </Phase>
+    <Phase name="Recovery and Hardening (days)">
+      <Action>Govern bulk access-administration; require change tickets; alert on mass admin actions.</Action>
+    </Phase>
+  </IRForHumans></Response>
+  <QualityChecks>
+    <Check>type ECC_USR_AUDIT; excludes 2025 baseline. Correlate the specific grants in the app.</Check>
+  </QualityChecks>
+  <ClosureCriteria><FalsePositiveClosure>
+    <Item>Documented bulk task confirmed; documented.</Item>
+  </FalsePositiveClosure><TruePositiveClosure>
+    <Item>Unauthorised grants reversed; operator reviewed; fraud/compliance engaged.</Item>
+  </TruePositiveClosure></ClosureCriteria>
+</Playbook>

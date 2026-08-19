@@ -1,0 +1,78 @@
+{
+  "rule_id": "jcb-swift-suspicious-process",
+  "name": "SWIFT — Administrative or Attacker Tooling Executed on a SWIFT Server",
+  "version": 1,
+  "enabled": true,
+  "interval": "1h",
+  "from": "now-90m",
+  "to": "now",
+  "description": "Attacker objective\nOperate hands-on-keyboard on the SWIFT payment platform — running scripting interpreters, remote-execution utilities, credential-dumping or reconnaissance tooling — to stage fraud, dump credentials, or move laterally.\n\nDetection logic\nThe SWIFT servers run a tightly-scoped set of payment and file-transfer processes. Execution of PowerShell, PsExec/WMIC remote-exec utilities, credential-dumping tools, or reconnaissance binaries on these servers is outside normal operation and indicates interactive attacker activity or malicious automation on a Tier-0 asset.\n\nWhy this detection works\nScoping process-creation events on the SWIFT servers to attacker/administrative tooling (excluding the platform's normal command and SFTP processes) surfaces hands-on-keyboard activity on the payment system.\n\nFalse positives\nA sanctioned administrator or vendor running a diagnostic script/tool during an approved maintenance window.\n\nTuning\nAllowlist sanctioned maintenance tooling/windows; some environments run legitimate PowerShell/scripting in SWIFT automation — baseline and exclude verified scripts; prioritise credential-dumping and remote-exec tooling.\n\nRequired telemetry\nWindows Security on the SWIFT servers: event.code 4688, process.name/process.executable, process.command_line (if enabled), SubjectUserName, host.name.",
+  "tags": [
+    "JCB",
+    "SWIFT",
+    "Banking-Critical",
+    "Phase3",
+    "Tactic: Execution",
+    "Use Case: Threat Detection"
+  ],
+  "author": [
+    "raadabujaish"
+  ],
+  "license": "",
+  "threat": [
+    {
+      "framework": "MITRE ATT&CK",
+      "tactic": {
+        "id": "TA0002",
+        "name": "Execution",
+        "reference": "https://attack.mitre.org/tactics/TA0002/"
+      },
+      "technique": [
+        {
+          "id": "T1059",
+          "name": "Command and Scripting Interpreter",
+          "reference": "https://attack.mitre.org/techniques/T1059/"
+        }
+      ]
+    }
+  ],
+  "investigation_fields": {
+    "field_names": [
+      "host.name",
+      "user.name",
+      "user.domain",
+      "process.name",
+      "process.executable",
+      "process.command_line",
+      "process.args",
+      "process.parent.name",
+      "process.parent.executable",
+      "event.code",
+      "event.action"
+    ]
+  },
+  "related_integrations": [],
+  "required_fields": [],
+  "setup": "",
+  "note": "## Investigation guide\n1. process.name/executable = the tool; SubjectUserName = who ran it; host.name = the SWIFT server.\n2. Confirm whether an approved maintenance was underway; PowerShell, PsExec, WMIC, procdump or recon tooling on a SWIFT server is high-risk — treat as a suspected intrusion and isolate/preserve.\n3. Correlate with the interactive-logon and system-change detections on the same SWIFT server.",
+  "false_positives": [
+    "A sanctioned administrator or vendor running a diagnostic script/tool during an approved maintenance window."
+  ],
+  "references": [
+    "https://attack.mitre.org/techniques/T1059/"
+  ],
+  "risk_score": 90,
+  "risk_score_mapping": [],
+  "severity": "critical",
+  "severity_mapping": [],
+  "output_index": "",
+  "max_signals": 100,
+  "exceptions_list": [],
+  "actions": [],
+  "type": "query",
+  "language": "kuery",
+  "index": [
+    "logs-system.security-*"
+  ],
+  "query": "(host.name:*sw-app* or host.name:saa* or host.name:*swift*) and event.code:\"4688\" and process.name:(\"psexec.exe\" or \"psexesvc.exe\" or \"paexec.exe\" or \"wmic.exe\" or \"whoami.exe\" or \"nltest.exe\" or \"mshta.exe\" or \"certutil.exe\" or \"bitsadmin.exe\" or \"procdump.exe\" or \"procdump64.exe\" or \"ntdsutil.exe\" or \"vssadmin.exe\" or \"mimikatz.exe\" or \"rubeus.exe\" or \"sharphound.exe\" or \"adfind.exe\" or \"psloggedon.exe\" or \"netscan.exe\" or \"cobaltstrike.exe\" or \"advanced_port_scanner.exe\")"
+}

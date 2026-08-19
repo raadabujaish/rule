@@ -1,0 +1,126 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<Playbook xmlns="https://soc.example/playbooks" id="PB-ACH-002" name="ACH — Role or User Change Submitted by an Unexpected Maker - SOC Playbook" version="1.0" status="Production" classification="TLP:AMBER">
+  <Metadata>
+    <Owner>JCB Detection Engineering (WatchWave)</Owner>
+    <LastUpdated>2026-08-14</LastUpdated>
+    <Severity default="Medium">Medium</Severity>
+    <Confidence default="Medium">Medium</Confidence>
+    <Category>Privilege Escalation / Account Manipulation</Category>
+    <MitreAttack>
+      <Technique id="T1098" name="Account Manipulation"/>
+      <Tactic id="TA0004" name="Privilege Escalation"/>
+    </MitreAttack>
+    <References>
+      <Reference title="MITRE ATT and CK" url="https://attack.mitre.org/techniques/T1098/"/>
+    </References>
+  </Metadata>
+  <ExecutiveSummary>
+    <Overview>An ACH role/user change was submitted by a maker not previously seen doing so (new_terms on USERNAME_MAKER). Triage: an unexpected user modifying ACH roles/users (privilege manipulation), or a newly-authorised maker?</Overview>
+    <BusinessImpact>Unexpected changes to ACH roles/users can grant fraudulent payment privileges.</BusinessImpact>
+  </ExecutiveSummary>
+  <Scope><Assets>
+    <AssetType>ACH payment application, ECC user-administration</AssetType>
+  </Assets><LogSources>
+    <LogSource>ACH/ECC application audit via apps-* - apps-*</LogSource>
+  </LogSources></Scope>
+  <Prerequisites><TelemetryRequirements>
+    <Requirement>Banking-app audit in apps-* (verified live). ACH maker-checker fields USERNAME_MAKER/USERNAME_CHECKER; ECC user-admin type ECC_USR_AUDIT. type field distinguishes app streams (ACHAPP, ECC_USR_AUDIT).</Requirement>
+  </TelemetryRequirements><DetectionSignals>
+    <Signal><Name>Role or User Change Submitted by an Unex</Name><Details>ACH role/user change by a first-seen maker.</Details></Signal>
+  </DetectionSignals></Prerequisites>
+  <Inputs>
+    <Input name="$user" description="The maker who submitted the change (USERNAME_MAKER)."/>
+  </Inputs>
+  <Triage><ImmediateCapture>
+    <Item>$user: $user</Item>
+  </ImmediateCapture><InitialAssessment>
+    <Rule>Weigh the full evidence story per the ClassificationGuidance, not any single fact.</Rule>
+  </InitialAssessment></Triage>
+  <Investigation>
+    <Goal>Determine whether the new maker's role/user change is unauthorised privilege manipulation or a legitimate new maker.</Goal>
+    <Workflow>
+      <Step order="1" name="Role/user changes submitted by this maker">
+        <Purpose>What role/user changes the new maker submitted, and whether they grant payment privileges, sets the risk.</Purpose>
+        <Query platform="Elastic" language="ES|QL" id="INV-01-ACHROLE-CHANGE">
+          <![CDATA[
+FROM apps-*
+| WHERE type == "ACHAPP" AND USERNAME_MAKER == "$user" AND @timestamp >= NOW() - 4 hours
+| KEEP @timestamp, USERNAME_MAKER, USERNAME_CHECKER, type
+| SORT @timestamp DESC
+| LIMIT 20
+          ]]>
+        </Query>
+        <ExpectedOutput>
+          <Field name="USERNAME_MAKER"/>
+          <Field name="USERNAME_CHECKER"/>
+        </ExpectedOutput>
+        <AnalystNotes>A new maker granting ACH roles/payment privileges, especially self-checked or to suspicious users, is privilege manipulation. A newly-onboarded ACH admin performing expected changes is benign. Correlate the change detail in the app.</AnalystNotes>
+      </Step>
+      <Step order="2" name="Finalize classification">
+        <DecisionTree>
+          <Node><Condition>A new maker granting payment/admin privileges, especially with SoD issues.</Condition><Result>True Positive (ACH Privilege Manipulation - escalate, fraud/compliance)</Result></Node>
+          <Node><Condition>A newly-onboarded, authorised ACH maker performing expected changes.</Condition><Result>False Positive</Result></Node>
+          <Node><Condition>An operational process using a new maker account (baseline gap).</Condition><Result>Misconfiguration</Result></Node>
+          <Node><Condition>New maker with unclear authorisation.</Condition><Result>Needs Escalation</Result></Node>
+        </DecisionTree>
+        <DocumentationChecklist>
+          <Item>Attach outputs of INV-01-ACHROLE-CHANGE to the case.</Item>
+        </DocumentationChecklist>
+      </Step>
+    </Workflow>
+  </Investigation>
+  <ClassificationGuidance>
+    <FalsePositive>
+      <Definition>A newly-onboarded authorised ACH maker.</Definition>
+      <Indicators>
+        <Item>Documented onboarding.</Item>
+        <Item>Expected changes.</Item>
+        <Item>Proper maker-checker.</Item>
+      </Indicators>
+      <SOCAction>
+        <Item>Confirm onboarding; baseline; close as false_positive.</Item>
+      </SOCAction>
+    </FalsePositive>
+    <TruePositive>
+      <Definition>Unauthorised ACH privilege manipulation.</Definition>
+      <Indicators>
+        <Item>New maker granting privileges.</Item>
+        <Item>SoD issues.</Item>
+        <Item>Suspicious target users.</Item>
+      </Indicators>
+      <SOCAction>
+        <Item>Escalate to fraud/compliance; reverse the changes; review the maker; open IR.</Item>
+      </SOCAction>
+    </TruePositive>
+    <Misconfiguration>
+      <Definition>An ACH process using an unbaselined maker account.</Definition>
+      <Indicators>
+        <Item>Known process, new account.</Item>
+        <Item>Owner confirms.</Item>
+      </Indicators>
+      <SOCAction>
+        <Item>Baseline the account; document.</Item>
+      </SOCAction>
+    </Misconfiguration>
+  </ClassificationGuidance>
+  <Response><IRForHumans>
+    <Phase name="Immediate Actions (0-30 minutes)">
+      <Action priority="1">Identify the changes; if privilege manipulation, escalate to fraud/compliance.</Action>
+      <Action priority="2">Reverse unauthorised role/user changes.</Action>
+    </Phase>
+    <Phase name="Containment and Eradication (hours)">
+      <Action>Escalate to fraud/compliance; reverse changes; review the maker; open IR.</Action>
+    </Phase>
+    <Phase name="Recovery and Hardening (days)">
+      <Action>Govern ACH maker onboarding; enforce maker-checker on role changes; alert on new makers.</Action>
+    </Phase>
+  </IRForHumans></Response>
+  <QualityChecks>
+    <Check>new_terms on USERNAME_MAKER; type ACHAPP. Correlate change detail in the app.</Check>
+  </QualityChecks>
+  <ClosureCriteria><FalsePositiveClosure>
+    <Item>Authorised onboarding confirmed; documented.</Item>
+  </FalsePositiveClosure><TruePositiveClosure>
+    <Item>Changes reversed; fraud/compliance engaged; maker reviewed.</Item>
+  </TruePositiveClosure></ClosureCriteria>
+</Playbook>

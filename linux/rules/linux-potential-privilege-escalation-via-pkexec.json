@@ -1,0 +1,95 @@
+{
+  "rule_id": "jcb-rec-potential-privilege-escalation-via-pkexec",
+  "name": "Linux — Potential Privilege Escalation via PKEXEC",
+  "version": 1,
+  "enabled": true,
+  "interval": "5m",
+  "from": "now-9m",
+  "to": "now",
+  "description": "Identifies an attempt to exploit a local privilege escalation in polkit pkexec (CVE-2021-4034) via unsecure environment variable injection. Successful exploitation allows an unprivileged user to escalate to the root user.",
+  "tags": [
+    "JCB",
+    "Linux"
+  ],
+  "author": [
+    "raadabujaish"
+  ],
+  "threat": [
+    {
+      "framework": "MITRE ATT&CK",
+      "tactic": {
+        "id": "TA0004",
+        "name": "Privilege Escalation",
+        "reference": "https://attack.mitre.org/tactics/TA0004/"
+      },
+      "technique": [
+        {
+          "id": "T1068",
+          "name": "Exploitation for Privilege Escalation",
+          "reference": "https://attack.mitre.org/techniques/T1068/"
+        }
+      ]
+    },
+    {
+      "framework": "MITRE ATT&CK",
+      "tactic": {
+        "id": "TA0005",
+        "name": "Defense Evasion",
+        "reference": "https://attack.mitre.org/tactics/TA0005/"
+      },
+      "technique": [
+        {
+          "id": "T1574",
+          "name": "Hijack Execution Flow",
+          "reference": "https://attack.mitre.org/techniques/T1574/",
+          "subtechnique": [
+            {
+              "id": "T1574.007",
+              "name": "Path Interception by PATH Environment Variable",
+              "reference": "https://attack.mitre.org/techniques/T1574/007/"
+            }
+          ]
+        }
+      ]
+    }
+  ],
+  "investigation_fields": {
+    "field_names": [
+      "host.name",
+      "user.name",
+      "user.id",
+      "process.name",
+      "process.executable",
+      "process.args",
+      "process.parent.name",
+      "file.path",
+      "event.action",
+      "event.outcome",
+      "message",
+      "host.os.type"
+    ]
+  },
+  "related_integrations": [],
+  "required_fields": [],
+  "setup": "",
+  "false_positives": [],
+  "references": [
+    "https://seclists.org/oss-sec/2022/q1/80",
+    "https://haxx.in/files/blasty-vs-pkexec.c"
+  ],
+  "risk_score": 73,
+  "risk_score_mapping": [],
+  "severity": "high",
+  "severity_mapping": [],
+  "output_index": "",
+  "max_signals": 100,
+  "exceptions_list": [],
+  "actions": [],
+  "type": "eql",
+  "language": "eql",
+  "index": [
+    "logs-auditd.log-*",
+    "logs-auditd_manager.auditd-*"
+  ],
+  "query": "file where host.os.type == \"linux\" and file.path : \"/*GCONV_PATH*\"\n"
+}

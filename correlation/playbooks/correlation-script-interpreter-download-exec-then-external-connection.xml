@@ -1,0 +1,147 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<Playbook xmlns="https://soc.example/playbooks" id="PB-CORR-011" name="Correlation — Script Interpreter Download/Exec then External Connection - SOC Playbook" version="1.0" status="Production" classification="TLP:AMBER">
+  <Metadata>
+    <Owner>JCB Detection Engineering (WatchWave)</Owner>
+    <LastUpdated>2026-08-14</LastUpdated>
+    <Severity default="High">High</Severity>
+    <Confidence default="Medium">Medium</Confidence>
+    <Category>Command and Control / Download + C2</Category>
+    <MitreAttack>
+      <Technique id="T1059" name="Command and Scripting Interpreter"/>
+      <Tactic id="TA0011" name="Command and Control"/>
+    </MitreAttack>
+    <References>
+      <Reference title="MITRE ATT and CK" url="https://attack.mitre.org/techniques/T1059/"/>
+    </References>
+  </Metadata>
+  <ExecutiveSummary>
+    <Overview>A script interpreter downloaded/executed content and then made an external connection within 15 minutes (EQL sequence, same process). Triage: a malware download-then-C2 chain, or a legitimate script fetching a resource then calling an API?</Overview>
+    <BusinessImpact>Script download-then-external-connection is the download-cradle-then-C2 pattern of second-stage malware.</BusinessImpact>
+  </ExecutiveSummary>
+  <Scope><Assets>
+    <AssetType>Correlated across all JCB detection surfaces</AssetType>
+  </Assets><LogSources>
+    <LogSource>Sysmon process + network - logs-windows.sysmon_operational-*, logs-system.security-*</LogSource>
+  </LogSources></Scope>
+  <Prerequisites><TelemetryRequirements>
+    <Requirement>Sysmon process + network (event.code 3) (verified). EQL sequence rule; this playbook confirms the download and the external connection.</Requirement>
+  </TelemetryRequirements><DetectionSignals>
+    <Signal><Name>Script Interpreter Download/Exec then Ex</Name><Details>interpreter download/exec then external connection (same process).</Details></Signal>
+  </DetectionSignals></Prerequisites>
+  <Inputs>
+    <Input name="$hostname" description="Host where the sequence occurred."/>
+  </Inputs>
+  <Triage><ImmediateCapture>
+    <Item>$hostname: $hostname</Item>
+  </ImmediateCapture><InitialAssessment>
+    <Rule>Weigh the full evidence story per the ClassificationGuidance, not any single fact.</Rule>
+  </InitialAssessment></Triage>
+  <Investigation>
+    <Goal>Confirm the download-then-external-connection sequence and whether the destination is malicious.</Goal>
+    <Workflow>
+      <Step order="1" name="The interpreter's download and connection">
+        <Purpose>The interpreter command and the external destination reveal a malware cradle vs a legitimate API call.</Purpose>
+        <Query platform="Elastic" language="ES|QL" id="INV-01-CORRSCRIPT-SEQ">
+          <![CDATA[
+FROM logs-windows.sysmon_operational-*,logs-system.security-*
+| WHERE host.name == "$hostname" AND event.code IN ("1","4688") AND process.name RLIKE "(?i)(powershell|pwsh|python|wscript|cscript|mshta|node).*" AND process.command_line IS NOT NULL AND @timestamp >= NOW() - 4 hours
+| EVAL cl = TO_LOWER(process.command_line)
+| WHERE cl LIKE "*download*" OR cl LIKE "*http*" OR cl LIKE "*iex*" OR cl LIKE "*invoke*"
+| KEEP @timestamp, process.name, process.command_line, user.name
+| SORT @timestamp DESC
+| LIMIT 15
+          ]]>
+        </Query>
+        <ExpectedOutput>
+          <Field name="process.name"/>
+          <Field name="process.command_line"/>
+          <Field name="user.name"/>
+        </ExpectedOutput>
+        <AnalystNotes>A download cradle (IEX/DownloadString) then a connection to a suspicious external destination = malware C2. A legitimate script fetching from an internal/vendor API is benign. Read the destination.</AnalystNotes>
+      </Step>
+      <Step order="2" name="External connections from the host's interpreters">
+        <Purpose>The external destinations the interpreter connected to determine malicious vs benign.</Purpose>
+        <Query platform="Elastic" language="ES|QL" id="INV-02-CORRSCRIPT-CONN" optional="true">
+          <![CDATA[
+FROM logs-windows.sysmon_operational-*
+| WHERE host.name == "$hostname" AND event.code == "3" AND process.name RLIKE "(?i)(powershell|pwsh|python|wscript|cscript|mshta|node).*" AND @timestamp >= NOW() - 4 hours
+| STATS conns = COUNT(*), destinations = COUNT_DISTINCT(destination.ip), dest_ports = VALUES(destination.port) BY process.name
+| SORT conns DESC
+| LIMIT 10
+          ]]>
+        </Query>
+        <ExpectedOutput>
+          <Field name="process.name"/>
+          <Field name="destinations"/>
+          <Field name="dest_ports"/>
+        </ExpectedOutput>
+        <AnalystNotes>Connections to a raw IP / unusual port / suspicious domain after the download = C2. Internal/vendor API endpoints = benign.</AnalystNotes>
+      </Step>
+      <Step order="3" name="Finalize classification">
+        <DecisionTree>
+          <Node><Condition>A download cradle then a connection to a suspicious external destination.</Condition><Result>True Positive (Download + C2 - isolate, IR)</Result></Node>
+          <Node><Condition>A legitimate script fetching from an internal/vendor API then calling it.</Condition><Result>False Positive</Result></Node>
+          <Node><Condition>A deployment/automation script downloading then connecting benignly.</Condition><Result>Benign Activity</Result></Node>
+          <Node><Condition>Sequence with an unclear destination.</Condition><Result>Needs Escalation</Result></Node>
+        </DecisionTree>
+        <DocumentationChecklist>
+          <Item>Attach outputs of INV-01-CORRSCRIPT-SEQ, INV-02-CORRSCRIPT-CONN to the case.</Item>
+        </DocumentationChecklist>
+      </Step>
+    </Workflow>
+  </Investigation>
+  <ClassificationGuidance>
+    <FalsePositive>
+      <Definition>A legitimate script fetching/calling an internal/vendor API.</Definition>
+      <Indicators>
+        <Item>Internal/vendor destination.</Item>
+        <Item>Known script.</Item>
+        <Item>Benign resource.</Item>
+      </Indicators>
+      <SOCAction>
+        <Item>Confirm the script/destination; close as false_positive.</Item>
+      </SOCAction>
+    </FalsePositive>
+    <TruePositive>
+      <Definition>A malware download-then-C2 chain.</Definition>
+      <Indicators>
+        <Item>Download cradle.</Item>
+        <Item>Suspicious external destination.</Item>
+        <Item>Second-stage behavior.</Item>
+      </Indicators>
+      <SOCAction>
+        <Item>Isolate the host; capture the downloaded payload; open IR; block the destination; hunt peers.</Item>
+      </SOCAction>
+    </TruePositive>
+    <Misconfiguration>
+      <Definition>A deployment/automation script.</Definition>
+      <Indicators>
+        <Item>Known automation.</Item>
+        <Item>Benign internal source/destination.</Item>
+      </Indicators>
+      <SOCAction>
+        <Item>Baseline; document.</Item>
+      </SOCAction>
+    </Misconfiguration>
+  </ClassificationGuidance>
+  <Response><IRForHumans>
+    <Phase name="Immediate Actions (0-30 minutes)">
+      <Action priority="1">Isolate the host; capture the payload; block the destination.</Action>
+      <Action priority="2">Reconstruct the sequence.</Action>
+    </Phase>
+    <Phase name="Containment and Eradication (hours)">
+      <Action>Isolate host; capture payload; block destination; open IR; hunt peers.</Action>
+    </Phase>
+    <Phase name="Recovery and Hardening (days)">
+      <Action>Restrict interpreter egress; app-control on script interpreters; EDR.</Action>
+    </Phase>
+  </IRForHumans></Response>
+  <QualityChecks>
+    <Check>Confirm the download and connection are the SAME process, and the destination is external/suspicious.</Check>
+  </QualityChecks>
+  <ClosureCriteria><FalsePositiveClosure>
+    <Item>Legitimate script/API confirmed; documented.</Item>
+  </FalsePositiveClosure><TruePositiveClosure>
+    <Item>Payload captured; destination blocked; peers hunted.</Item>
+  </TruePositiveClosure></ClosureCriteria>
+</Playbook>

@@ -1,0 +1,80 @@
+{
+  "rule_id": "jcb-fim-win-driver-created",
+  "name": "Windows — Kernel Driver (.sys) Created in a System Directory",
+  "version": 1,
+  "enabled": true,
+  "interval": "1h",
+  "from": "now-90m",
+  "to": "now",
+  "description": "Attacker objective\nLoad malicious kernel code or a vulnerable driver (bring-your-own-vulnerable-driver) to gain kernel-level control, disable security tooling, or hide activity (rootkit).\n\nAttack logic\nKernel drivers (.sys) placed in the system drivers directory can execute in kernel mode. Attackers drop a malicious or known-vulnerable driver there as a precursor to loading it. New driver files in this location are rare and high-risk.\n\nWhy this detection works\nFile-integrity monitoring records the creation of .sys files in the drivers directory, surfacing driver drops at the filesystem level even without process context.\n\nFalse positives\nLegitimate driver installation via Windows Update, an OEM/hardware driver package, or a software installer.\n\nTuning\nAllowlist verified driver-deployment/patch processes; correlate with driver-load events and signature status; prioritise unsigned or unexpected driver names.\n\nRequired telemetry\nFile Integrity Monitoring (fim.event): file.path (drivers directory), file.extension, event.action, file.hash, host.name.",
+  "tags": [
+    "JCB",
+    "FIM",
+    "Phase3",
+    "Tactic: Persistence",
+    "Use Case: Threat Detection"
+  ],
+  "author": [
+    "raadabujaish"
+  ],
+  "license": "",
+  "threat": [
+    {
+      "framework": "MITRE ATT&CK",
+      "tactic": {
+        "id": "TA0003",
+        "name": "Persistence",
+        "reference": "https://attack.mitre.org/tactics/TA0003/"
+      },
+      "technique": [
+        {
+          "id": "T1543",
+          "name": "Create or Modify System Process",
+          "reference": "https://attack.mitre.org/techniques/T1543/",
+          "subtechnique": [
+            {
+              "id": "T1543.003",
+              "name": "Windows Service",
+              "reference": "https://attack.mitre.org/techniques/T1543/003/"
+            }
+          ]
+        }
+      ]
+    }
+  ],
+  "investigation_fields": {
+    "field_names": [
+      "host.name",
+      "file.path",
+      "file.extension",
+      "event.action",
+      "user.name",
+      "process.name",
+      "event.dataset"
+    ]
+  },
+  "related_integrations": [],
+  "required_fields": [],
+  "setup": "",
+  "note": "## Investigation guide\n1. file.name/file.hash identify the driver and host.name the system; check the hash reputation and signature.\n2. Confirm whether the driver came from a legitimate update/installer; an unknown or unsigned driver is high-risk (BYOVD/rootkit).\n3. Correlate the hash with Kaspersky/Defender and hunt for the driver being loaded.",
+  "false_positives": [
+    "Legitimate driver installation via Windows Update, an OEM/hardware driver package, or a software installer."
+  ],
+  "references": [
+    "https://attack.mitre.org/techniques/T1543/"
+  ],
+  "risk_score": 75,
+  "risk_score_mapping": [],
+  "severity": "high",
+  "severity_mapping": [],
+  "output_index": "",
+  "max_signals": 100,
+  "exceptions_list": [],
+  "actions": [],
+  "type": "query",
+  "language": "kuery",
+  "index": [
+    "logs-fim.event-*"
+  ],
+  "query": "event.dataset:\"fim.event\" and event.action:\"created\" and file.extension:(\"sys\" or \"SYS\") and file.path:*drivers*"
+}

@@ -1,0 +1,82 @@
+{
+  "rule_id": "jcb-corr-fp-compromised-endpoint-exfil",
+  "name": "Correlation — Compromised Endpoint with Active Data Exfiltration",
+  "version": 1,
+  "enabled": true,
+  "interval": "1h",
+  "from": "now-24h",
+  "to": "now",
+  "description": "Attacker objective\nOperate a compromised endpoint and steal data from it — the same host shows both an active compromise (malware, behavioral block, network attack, or a Windows/AD attack technique) and a data-loss-prevention exfiltration event.\n\nAttack logic\nA malware or behavioral detection on a host is a compromise signal; a DLP incident on the same host is a data-loss signal. When the same endpoint produces both within a short window, it is a confirmed compromised endpoint that is also moving sensitive data out.\n\nWhy this detection works\nCorrelating an endpoint-security/EDR compromise alert and a DLP exfiltration alert on the same normalized host name confirms, across two independent telemetry domains, that a breach and data loss are occurring together — something neither alert proves alone.\n\nFalse positives\nVery low: requires two independent detection classes on the same host. A benign host that coincidentally has a low-severity DLP event and an unrelated behavioral block; the shared syslog-collector host name is excluded.\n\nTuning\nExclude verified administration/test hosts; raise the required compromise or DLP alert count for higher confidence; the collector host name is already excluded.\n\nRequired telemetry\nThe endpoint-security/EDR compromise alerts and the DLP exfiltration alerts, joined on the normalized short host name (Kaspersky device, Windows/Defender host, Forcepoint endpoint host).",
+  "tags": [
+    "JCB",
+    "Correlation",
+    "Forcepoint-DLP",
+    "Phase3",
+    "Tactic: Exfiltration",
+    "Use Case: Threat Detection"
+  ],
+  "author": [
+    "raadabujaish"
+  ],
+  "license": "",
+  "threat": [
+    {
+      "framework": "MITRE ATT&CK",
+      "tactic": {
+        "id": "TA0010",
+        "name": "Exfiltration",
+        "reference": "https://attack.mitre.org/tactics/TA0010/"
+      },
+      "technique": [
+        {
+          "id": "T1567",
+          "name": "Exfiltration Over Web Service",
+          "reference": "https://attack.mitre.org/techniques/T1567/"
+        }
+      ]
+    }
+  ],
+  "investigation_fields": {
+    "field_names": [
+      "norm_host",
+      "kibana.alert.rule.name",
+      "kibana.alert.severity",
+      "host.name",
+      "user.name",
+      "source.ip",
+      "destination.ip",
+      "message"
+    ]
+  },
+  "related_integrations": [],
+  "required_fields": [],
+  "setup": "",
+  "note": "## Investigation guide\n1. norm_host = the compromised endpoint; review compromise_detections and dlp_detections in the alert.\n2. Treat as a confirmed compromised endpoint with active data loss — isolate the host, preserve evidence, and begin incident response and data-breach handling.\n3. Identify the user(s) and the data moved (DLP files/destination); involve fraud/compliance.",
+  "false_positives": [
+    "Very low: requires two independent detection classes on the same host. A benign host that coincidentally has a low-severity DLP event and an unrelated behavioral block; the shared syslog-collector host name is excluded."
+  ],
+  "references": [
+    "https://attack.mitre.org/techniques/T1567/"
+  ],
+  "risk_score": 95,
+  "risk_score_mapping": [],
+  "severity": "critical",
+  "severity_mapping": [],
+  "output_index": "",
+  "max_signals": 100,
+  "exceptions_list": [],
+  "actions": [],
+  "type": "esql",
+  "language": "esql",
+  "query": "FROM .alerts-security.alerts-* METADATA _id, _index, _version\n| WHERE kibana.alert.rule.name IN (\"Kaspersky — Malware or Malicious Object Detected on an Endpoint\", \"Kaspersky — Behavioral Threat Blocked (Adaptive Anomaly Control)\", \"Kaspersky — Network Attack Detected Against an Endpoint\", \"Kaspersky — Multiple Threat Detections on One Endpoint\", \"Defender — High-Confidence Endpoint/Identity/Office Attack Alert\", \"Defender — Endpoint Incident Spanning Multiple Attack Tactics\", \"Defender — New Host Exhibiting Malware or Hacktool Activity\", \"Defender — User Flagged by Multiple Defender Products\", \"Windows — UAC Bypass via Auto-Elevated LOLBin\", \"Windows — Inhibit System Recovery (Ransomware Precursor)\", \"Windows — Registry Persistence: IFEO / Winlogon / AppInit\", \"Windows — Scheduled Task Created with Suspicious Action\", \"AD — Kerberoasting: RC4 Service Ticket Requested\", \"AD — Shadow Credentials (msDS-KeyCredentialLink Modified)\", \"AD — SPN Added by Non-Computer Principal (Kerberoast Setup)\", \"AD — Object Security Descriptor Modified (DACL Backdoor)\", \"AD — Member Added to a Privileged (Tier-0) Group\", \"AD — KRBTGT Account Password Reset (Golden Ticket Prep / Remediation)\", \"Forcepoint DLP — Bulk Sensitive Data to Personal / Public Email by One User\", \"Forcepoint DLP — Sensitive Data Transfer Outside Working Hours\", \"Forcepoint DLP — Sensitive Data Sent to a Personal / Public Email Domain\", \"Forcepoint DLP — Cardholder / PCI Data Transfer\")\n| EVAL norm_host = TO_LOWER(COALESCE(destination.domain, host.name))\n| WHERE norm_host IS NOT NULL AND norm_host != \"\" AND NOT norm_host LIKE \"jcb-agent*\"\n| EVAL is_dlp = kibana.alert.rule.name IN (\"Forcepoint DLP — Bulk Sensitive Data to Personal / Public Email by One User\", \"Forcepoint DLP — Sensitive Data Transfer Outside Working Hours\", \"Forcepoint DLP — Sensitive Data Sent to a Personal / Public Email Domain\", \"Forcepoint DLP — Cardholder / PCI Data Transfer\")\n| STATS compromise_alerts = COUNT(CASE(NOT is_dlp, kibana.alert.rule.name, null)), dlp_alerts = COUNT(CASE(is_dlp, kibana.alert.rule.name, null)), compromise_detections = VALUES(CASE(NOT is_dlp, kibana.alert.rule.name, null)), dlp_detections = VALUES(CASE(is_dlp, kibana.alert.rule.name, null)), users = VALUES(user.name), first_seen = MIN(@timestamp), last_seen = MAX(@timestamp) BY norm_host\n| WHERE compromise_alerts >= 1 AND dlp_alerts >= 1",
+  "alert_suppression": {
+    "group_by": [
+      "host.name"
+    ],
+    "duration": {
+      "value": 24,
+      "unit": "h"
+    },
+    "missing_fields_strategy": "suppress"
+  }
+}

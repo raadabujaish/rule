@@ -1,0 +1,80 @@
+{
+  "rule_id": "jcb-ad-audit-policy-tampering",
+  "name": "AD/Windows — Audit Policy Changed by Interactive Account",
+  "version": 1,
+  "enabled": true,
+  "interval": "30m",
+  "from": "now-1h",
+  "to": "now",
+  "description": "Attacker objective\nDisable audit subcategories to blind the SOC.\n\nAttack logic\nAudit-policy changes are normally applied by the machine/SYSTEM context via Group Policy. A change made under an interactive (human) account is anomalous.\n\nWhy this detection works\nEvent 4719 records audit-policy changes with the acting subject, so excluding machine/SYSTEM isolates human-driven changes.\n\nFalse positives\nAn authorised interactive administrative change.\n\nTuning\nCorrelate with change control; investigate any interactive audit-policy change.\n\nRequired telemetry\nWindows Security 4719 (SubjectUserName).",
+  "tags": [
+    "JCB",
+    "ActiveDirectory",
+    "Phase3",
+    "Use Case: Threat Detection",
+    "Tactic: Defense Evasion"
+  ],
+  "author": [
+    "raadabujaish"
+  ],
+  "threat": [
+    {
+      "framework": "MITRE ATT&CK",
+      "tactic": {
+        "id": "TA0005",
+        "name": "Defense Evasion",
+        "reference": "https://attack.mitre.org/tactics/TA0005/"
+      },
+      "technique": [
+        {
+          "id": "T1562",
+          "name": "Impair Defenses",
+          "reference": "https://attack.mitre.org/techniques/T1562/",
+          "subtechnique": [
+            {
+              "id": "T1562.002",
+              "name": "Disable Windows Event Logging",
+              "reference": "https://attack.mitre.org/techniques/T1562/002/"
+            }
+          ]
+        }
+      ]
+    }
+  ],
+  "investigation_fields": {
+    "field_names": [
+      "winlog.event_data.SubjectUserName",
+      "winlog.event_data.TargetUserName",
+      "winlog.event_data.ServiceName",
+      "winlog.event_data.AttributeLDAPDisplayName",
+      "winlog.event_data.ObjectDN",
+      "winlog.computer_name",
+      "winlog.event_data.IpAddress"
+    ]
+  },
+  "related_integrations": [],
+  "required_fields": [],
+  "setup": "",
+  "note": "## Investigation guide\n1. An interactive account changed audit policy.\n2. Verify authorisation; attackers disable auditing to evade detection — check what subcategory was disabled and on which host.",
+  "false_positives": [
+    "An authorised interactive administrative change."
+  ],
+  "references": [
+    "https://attack.mitre.org/techniques/T1562/",
+    "https://attack.mitre.org/techniques/T1562/002/"
+  ],
+  "risk_score": 73,
+  "risk_score_mapping": [],
+  "severity": "high",
+  "severity_mapping": [],
+  "output_index": "",
+  "max_signals": 100,
+  "exceptions_list": [],
+  "actions": [],
+  "type": "query",
+  "language": "kuery",
+  "index": [
+    "logs-system.security-*"
+  ],
+  "query": "event.code:\"4719\" and not winlog.event_data.SubjectUserName:*$ and not winlog.event_data.SubjectUserName:(\"SYSTEM\" or \"LOCAL SERVICE\" or \"NETWORK SERVICE\")"
+}

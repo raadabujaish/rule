@@ -1,0 +1,73 @@
+{
+  "rule_id": "jcb-rec-potential-memory-seeking-activity",
+  "name": "Linux — Potential Memory Seeking Activity",
+  "version": 1,
+  "enabled": true,
+  "interval": "5m",
+  "from": "now-9m",
+  "to": "now",
+  "description": "Monitors for the execution of Unix utilities that may be leveraged as memory address seekers. Attackers may leverage built-in utilities to seek specific memory addresses, allowing for potential future manipulation/exploitation.",
+  "tags": [
+    "JCB",
+    "Linux"
+  ],
+  "author": [
+    "raadabujaish"
+  ],
+  "threat": [
+    {
+      "framework": "MITRE ATT&CK",
+      "tactic": {
+        "id": "TA0007",
+        "name": "Discovery",
+        "reference": "https://attack.mitre.org/tactics/TA0007/"
+      },
+      "technique": [
+        {
+          "id": "T1057",
+          "name": "Process Discovery",
+          "reference": "https://attack.mitre.org/techniques/T1057/"
+        }
+      ]
+    }
+  ],
+  "investigation_fields": {
+    "field_names": [
+      "host.name",
+      "user.name",
+      "user.id",
+      "process.name",
+      "process.executable",
+      "process.args",
+      "process.parent.name",
+      "file.path",
+      "event.action",
+      "event.outcome",
+      "message",
+      "host.os.type",
+      "event.type"
+    ]
+  },
+  "related_integrations": [],
+  "required_fields": [],
+  "setup": "",
+  "false_positives": [],
+  "references": [
+    "https://github.com/arget13/DDexec"
+  ],
+  "risk_score": 21,
+  "risk_score_mapping": [],
+  "severity": "low",
+  "severity_mapping": [],
+  "output_index": "",
+  "max_signals": 100,
+  "exceptions_list": [],
+  "actions": [],
+  "type": "eql",
+  "language": "eql",
+  "index": [
+    "logs-auditd.log-*",
+    "logs-auditd_manager.auditd-*"
+  ],
+  "query": "process where host.os.type == \"linux\" and event.type == \"start\" and event.action in (\"exec\", \"exec_event\") and (\n  (process.name == \"tail\" and process.args == \"-c\") or\n  (process.name == \"cmp\" and process.args == \"-i\") or\n  (process.name in (\"hexdump\", \"xxd\") and process.args == \"-s\") or\n  (process.name == \"dd\" and process.args : (\"skip*\", \"seek*\"))\n)\n"
+}

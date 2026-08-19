@@ -1,0 +1,147 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<Playbook xmlns="https://soc.example/playbooks" id="PB-KAS-008" name="Endpoint — Security Agent (AV/EDR) Files Deleted or Replaced - SOC Playbook" version="1.0" status="Production" classification="TLP:AMBER">
+  <Metadata>
+    <Owner>JCB Detection Engineering (WatchWave)</Owner>
+    <LastUpdated>2026-08-14</LastUpdated>
+    <Severity default="High">High</Severity>
+    <Confidence default="Medium">Medium</Confidence>
+    <Category>Defense Evasion / Impair Defenses</Category>
+    <MitreAttack>
+      <Technique id="T1562.001" name="Disable or Modify Tools"/>
+      <Tactic id="TA0005" name="Defense Evasion"/>
+    </MitreAttack>
+    <References>
+      <Reference title="MITRE ATT and CK" url="https://attack.mitre.org/techniques/T1562/"/>
+    </References>
+  </Metadata>
+  <ExecutiveSummary>
+    <Overview>AV/EDR agent files (Kaspersky/Defender/EDR install paths) were deleted or created/replaced (FIM). Triage: an attacker removing/replacing the security agent to disable protection, or a legitimate agent update/uninstall?</Overview>
+    <BusinessImpact>Deleting or replacing security-agent files disables endpoint protection - a direct defense-evasion step.</BusinessImpact>
+  </ExecutiveSummary>
+  <Scope><Assets>
+    <AssetType>AV/EDR-protected Windows endpoints</AssetType>
+  </Assets><LogSources>
+    <LogSource>Windows FIM - logs-fim.event-*</LogSource>
+  </LogSources></Scope>
+  <Prerequisites><TelemetryRequirements>
+    <Requirement>Windows FIM (verified; monitors Windows paths). Agent install paths for Kaspersky/Defender/EDR.</Requirement>
+  </TelemetryRequirements><DetectionSignals>
+    <Signal><Name>Security Agent (AV/EDR) Files Deleted or</Name><Details>AV/EDR agent files deleted/replaced (fim.event).</Details></Signal>
+  </DetectionSignals></Prerequisites>
+  <Inputs>
+    <Input name="$hostname" description="Host where agent files changed."/>
+    <Input name="$path" description="Affected file path if scoped."/>
+  </Inputs>
+  <Triage><ImmediateCapture>
+    <Item>$hostname: $hostname</Item>
+  </ImmediateCapture><InitialAssessment>
+    <Rule>Weigh the full evidence story per the ClassificationGuidance, not any single fact.</Rule>
+  </InitialAssessment></Triage>
+  <Investigation>
+    <Goal>Determine whether the agent-file change is malicious tampering or a legitimate update/uninstall.</Goal>
+    <Workflow>
+      <Step order="1" name="Agent files changed on the host">
+        <Purpose>Which agent files were deleted/replaced and by what action reveals tampering vs update.</Purpose>
+        <Query platform="Elastic" language="ES|QL" id="INV-01-AGENTFILE-CHANGE">
+          <![CDATA[
+FROM logs-fim.event-*
+| WHERE event.dataset == "fim.event" AND host.name == "$hostname" AND event.action IN ("deleted","created","updated") AND @timestamp >= NOW() - 4 hours
+| WHERE file.path RLIKE "(?i).*(kaspersky|windows defender|sense|sentinel|crowdstrike|endpoint).*"
+| KEEP @timestamp, event.action, file.path, file.name
+| SORT @timestamp DESC
+| LIMIT 25
+          ]]>
+        </Query>
+        <ExpectedOutput>
+          <Field name="event.action"/>
+          <Field name="file.path"/>
+          <Field name="file.name"/>
+        </ExpectedOutput>
+        <AnalystNotes>Deletion of agent binaries (not during an update) = tampering. Creation/replacement with modified binaries = agent replacement. An update replaces files under a version change window; a delete-without-reinstall is suspicious.</AnalystNotes>
+      </Step>
+      <Step order="2" name="Did the host show other tampering/suspicious activity">
+        <Purpose>Agent-file deletion alongside other suspicious activity confirms defense evasion.</Purpose>
+        <Query platform="Elastic" language="ES|QL" id="INV-02-AGENTFILE-CONTEXT" optional="true">
+          <![CDATA[
+FROM logs-system.security-*
+| WHERE host.name == "$hostname" AND event.code IN ("4688","1102","7045","4624") AND @timestamp >= NOW() - 4 hours
+| STATS c = COUNT(*), codes = VALUES(event.code)
+| LIMIT 5
+          ]]>
+        </Query>
+        <ExpectedOutput>
+          <Field name="codes"/>
+          <Field name="c"/>
+        </ExpectedOutput>
+        <AnalystNotes>Process execution, log-clear or service install around the agent-file change supports active tampering.</AnalystNotes>
+      </Step>
+      <Step order="3" name="Finalize classification">
+        <DecisionTree>
+          <Node><Condition>Agent binaries deleted without a reinstall, or replaced with modified files, especially amid other suspicious activity.</Condition><Result>True Positive (Agent Tampering - IR, restore protection)</Result></Node>
+          <Node><Condition>A documented agent update/upgrade replacing files under a version window.</Condition><Result>False Positive</Result></Node>
+          <Node><Condition>A sanctioned agent uninstall (decommission) under a change.</Condition><Result>Benign Activity</Result></Node>
+          <Node><Condition>Agent-file change with unclear cause.</Condition><Result>Needs Escalation</Result></Node>
+        </DecisionTree>
+        <DocumentationChecklist>
+          <Item>Attach outputs of INV-01-AGENTFILE-CHANGE, INV-02-AGENTFILE-CONTEXT to the case.</Item>
+        </DocumentationChecklist>
+      </Step>
+    </Workflow>
+  </Investigation>
+  <ClassificationGuidance>
+    <FalsePositive>
+      <Definition>A legitimate agent update/upgrade.</Definition>
+      <Indicators>
+        <Item>Version-change window.</Item>
+        <Item>Files replaced then agent healthy.</Item>
+        <Item>Known deployment.</Item>
+      </Indicators>
+      <SOCAction>
+        <Item>Confirm the update; close as false_positive.</Item>
+      </SOCAction>
+    </FalsePositive>
+    <TruePositive>
+      <Definition>An attacker removing/replacing the security agent.</Definition>
+      <Indicators>
+        <Item>Binaries deleted without reinstall.</Item>
+        <Item>Modified replacement files.</Item>
+        <Item>Other tampering nearby.</Item>
+      </Indicators>
+      <SOCAction>
+        <Item>Restore the agent; isolate the host; open IR.</Item>
+        <Item>Reconstruct the unprotected window; hunt peers.</Item>
+      </SOCAction>
+    </TruePositive>
+    <Misconfiguration>
+      <Definition>A sanctioned uninstall/decommission.</Definition>
+      <Indicators>
+        <Item>Planned decommission.</Item>
+        <Item>Change record.</Item>
+      </Indicators>
+      <SOCAction>
+        <Item>Confirm decommission; document.</Item>
+      </SOCAction>
+    </Misconfiguration>
+  </ClassificationGuidance>
+  <Response><IRForHumans>
+    <Phase name="Immediate Actions (0-30 minutes)">
+      <Action priority="1">Identify the affected endpoint (destination.domain) and the threat.</Action>
+      <Action priority="2">If malware active/uncured or spreading, isolate the endpoint.</Action>
+    </Phase>
+    <Phase name="Containment and Eradication (hours)">
+      <Action>Restore the agent; isolate the host; reconstruct the unprotected window.</Action>
+      <Action>Hunt the same tampering on peers.</Action>
+    </Phase>
+    <Phase name="Recovery and Hardening (days)">
+      <Action>Ensure agent self-protection/tamper-protection is enabled; alert on agent-file changes.</Action>
+    </Phase>
+  </IRForHumans></Response>
+  <QualityChecks>
+    <Check>Windows FIM monitors these paths; Linux agent paths are not covered (no Linux FIM).</Check>
+  </QualityChecks>
+  <ClosureCriteria><FalsePositiveClosure>
+    <Item>Legitimate update confirmed; documented.</Item>
+  </FalsePositiveClosure><TruePositiveClosure>
+    <Item>Agent restored; host contained; unprotected window reconstructed.</Item>
+  </TruePositiveClosure></ClosureCriteria>
+</Playbook>

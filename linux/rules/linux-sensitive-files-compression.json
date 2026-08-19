@@ -1,0 +1,109 @@
+{
+  "rule_id": "jcb-rec-sensitive-files-compression",
+  "name": "Linux — Sensitive Files Compression",
+  "version": 1,
+  "enabled": true,
+  "interval": "5m",
+  "from": "now-9m",
+  "to": "now",
+  "description": "Identifies the use of a compression utility to collect known files containing sensitive information, such as credentials and system configurations.",
+  "tags": [
+    "JCB",
+    "Linux"
+  ],
+  "author": [
+    "raadabujaish"
+  ],
+  "threat": [
+    {
+      "framework": "MITRE ATT&CK",
+      "tactic": {
+        "id": "TA0006",
+        "name": "Credential Access",
+        "reference": "https://attack.mitre.org/tactics/TA0006/"
+      },
+      "technique": [
+        {
+          "id": "T1552",
+          "name": "Unsecured Credentials",
+          "reference": "https://attack.mitre.org/techniques/T1552/",
+          "subtechnique": [
+            {
+              "id": "T1552.001",
+              "name": "Credentials In Files",
+              "reference": "https://attack.mitre.org/techniques/T1552/001/"
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "framework": "MITRE ATT&CK",
+      "tactic": {
+        "id": "TA0009",
+        "name": "Collection",
+        "reference": "https://attack.mitre.org/tactics/TA0009/"
+      },
+      "technique": [
+        {
+          "id": "T1560",
+          "name": "Archive Collected Data",
+          "reference": "https://attack.mitre.org/techniques/T1560/",
+          "subtechnique": [
+            {
+              "id": "T1560.001",
+              "name": "Archive via Utility",
+              "reference": "https://attack.mitre.org/techniques/T1560/001/"
+            }
+          ]
+        }
+      ]
+    }
+  ],
+  "investigation_fields": {
+    "field_names": [
+      "host.name",
+      "user.name",
+      "user.id",
+      "process.name",
+      "process.executable",
+      "process.args",
+      "process.parent.name",
+      "file.path",
+      "event.action",
+      "event.outcome",
+      "message",
+      "event.category",
+      "host.os.type",
+      "event.type"
+    ]
+  },
+  "related_integrations": [],
+  "required_fields": [],
+  "setup": "",
+  "false_positives": [],
+  "references": [
+    "https://www.trendmicro.com/en_ca/research/20/l/teamtnt-now-deploying-ddos-capable-irc-bot-tntbotinger.html"
+  ],
+  "risk_score": 47,
+  "risk_score_mapping": [],
+  "severity": "medium",
+  "severity_mapping": [],
+  "output_index": "",
+  "max_signals": 100,
+  "exceptions_list": [],
+  "actions": [],
+  "type": "new_terms",
+  "query": "event.category:process and host.os.type:linux and event.type:start and\n  process.name:(zip or tar or gzip or hdiutil or 7z) and\n  process.args:\n    (\n      /root/.ssh/id_rsa or\n      /root/.ssh/id_rsa.pub or\n      /root/.ssh/id_ed25519 or\n      /root/.ssh/id_ed25519.pub or\n      /root/.ssh/authorized_keys or\n      /root/.ssh/authorized_keys2 or\n      /root/.ssh/known_hosts or\n      /root/.bash_history or\n      /etc/hosts or\n      /home/*/.ssh/id_rsa or\n      /home/*/.ssh/id_rsa.pub or\n      /home/*/.ssh/id_ed25519 or\n      /home/*/.ssh/id_ed25519.pub or\n      /home/*/.ssh/authorized_keys or\n      /home/*/.ssh/authorized_keys2 or\n      /home/*/.ssh/known_hosts or\n      /home/*/.bash_history or\n      /root/.aws/credentials or\n      /root/.aws/config or\n      /home/*/.aws/credentials or\n      /home/*/.aws/config or\n      /root/.docker/config.json or\n      /home/*/.docker/config.json or\n      /etc/group or\n      /etc/passwd or\n      /etc/shadow or\n      /etc/gshadow\n    )\n",
+  "new_terms_fields": [
+    "host.id",
+    "process.command_line",
+    "process.parent.executable"
+  ],
+  "history_window_start": "now-10d",
+  "index": [
+    "logs-auditd.log-*",
+    "logs-auditd_manager.auditd-*"
+  ],
+  "language": "kuery"
+}

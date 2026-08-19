@@ -1,0 +1,157 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<Playbook xmlns="https://soc.example/playbooks" id="PB-F5-002" name="F5 WAF — Authentication/Authorization Attack Reaching Internet Banking - SOC Playbook" version="1.0" status="Production" classification="TLP:AMBER">
+  <Metadata>
+    <Owner>JCB Detection Engineering (WatchWave)</Owner>
+    <LastUpdated>2026-08-14</LastUpdated>
+    <Severity default="High">High</Severity>
+    <Confidence default="Medium">Medium</Confidence>
+    <Category>Credential Access / Exploit Public-Facing Application</Category>
+    <MitreAttack>
+      <Technique id="T1190" name="Exploit Public-Facing Application"/>
+      <Tactic id="TA0001" name="Initial Access"/>
+    </MitreAttack>
+    <References>
+      <Reference title="MITRE ATT and CK" url="https://attack.mitre.org/techniques/T1190/"/>
+    </References>
+  </Metadata>
+  <ExecutiveSummary>
+    <Overview>The WAF flagged Authentication/Authorization-class attacks (rating&gt;=4, not blocked) against the internet-banking application - forced-browsing to authenticated resources, session/token manipulation, auth bypass attempts. Triage question: is a source trying to bypass authN/authZ on internet banking, and did any attempt succeed at reaching a protected resource?</Overview>
+    <BusinessImpact>Auth/authz bypass on internet banking risks account takeover, unauthorized transactions and access to other customers' data.</BusinessImpact>
+  </ExecutiveSummary>
+  <Scope><Assets>
+    <AssetType>F5 BIG-IP ASM / Advanced WAF fronting JCB internet banking and public web apps</AssetType>
+    <AssetType>Published banking applications and their backend servers</AssetType>
+  </Assets><LogSources>
+    <LogSource>F5 ASM CEF events via syslog -&gt; logs-cef.log-* (observer.vendor F5)</LogSource>
+  </LogSources></Scope>
+  <Prerequisites><TelemetryRequirements>
+    <Requirement>F5 ASM logging to CEF over syslog, parsed into logs-cef.log-* (verified live).</Requirement>
+    <Requirement>CEF fields: deviceCustomString4=attack_type, deviceCustomNumber2=violation_rating (&gt;=4 = real attack), deviceCustomString1=security policy, requestUrl, requestMethod, deviceCustomNumber1=HTTP response code, deviceCustomString6=source geo, cef.name=violation name, event.action=passed|alerted|blocked.</Requirement>
+  </TelemetryRequirements><DetectionSignals>
+    <Signal><Name>Auth/authz attack on banking</Name><Details>deviceCustomString4 = Authentication/Authorization Attacks, rating&gt;=4, action != blocked.</Details></Signal>
+  </DetectionSignals></Prerequisites>
+  <Inputs>
+    <Input name="$source_ip" description="Source attempting the auth/authz attack."/>
+    <Input name="$dest_app" description="Targeted policy/application (deviceCustomString1) if in the alert."/>
+  </Inputs>
+  <Triage><ImmediateCapture>
+    <Item>Source: $source_ip</Item>
+    <Item>Target app/policy: $dest_app</Item>
+  </ImmediateCapture><InitialAssessment>
+    <Rule>Auth/authz probing of banking is high-priority even when blocked; a passed attempt with a 2xx response is an emergency.</Rule>
+    <Rule>A single mislabeled event from a normal user session is possible - confirm the attack subtype and response.</Rule>
+  </InitialAssessment></Triage>
+  <Investigation>
+    <Goal>Determine whether the source is attempting authentication/authorization bypass on internet banking and whether any protected resource responded.</Goal>
+    <Workflow>
+      <Step order="1" name="Detail the auth/authz attempts and enforcement">
+        <Purpose>See the specific auth attack subtypes, the URLs, and whether they were passed or only alerted.</Purpose>
+        <Query platform="Elastic" language="ES|QL" id="INV-01-F5AUTH-DETAIL">
+          <![CDATA[
+FROM logs-cef.log-*
+| WHERE observer.vendor == "F5" AND source.ip == "$source_ip" AND cef.extensions.deviceCustomString4 == "Authentication/Authorization Attacks" AND @timestamp >= NOW() - 4 hours
+| KEEP @timestamp, event.action, cef.name, cef.extensions.requestUrl, cef.extensions.requestMethod, cef.extensions.deviceCustomNumber1, cef.extensions.deviceCustomString1
+| SORT @timestamp DESC
+| LIMIT 30
+          ]]>
+        </Query>
+        <ExpectedOutput>
+          <Field name="cef.name"/>
+          <Field name="cef.extensions.requestUrl"/>
+          <Field name="event.action"/>
+          <Field name="cef.extensions.deviceCustomNumber1"/>
+        </ExpectedOutput>
+        <AnalystNotes>cef.name gives the precise violation (e.g. 'Access from disallowed User/Session', 'Modified domain cookie'). requestUrl shows the protected resource targeted. deviceCustomNumber1 200 = the resource responded.</AnalystNotes>
+      </Step>
+      <Step order="2" name="Did this source also attempt logins / touch auth endpoints broadly">
+        <Purpose>A source combining auth/authz attacks with a burst of requests to login/token URLs is running an account-takeover attempt.</Purpose>
+        <Query platform="Elastic" language="ES|QL" id="INV-02-F5AUTH-SCOPE">
+          <![CDATA[
+FROM logs-cef.log-*
+| WHERE observer.vendor == "F5" AND source.ip == "$source_ip" AND @timestamp >= NOW() - 4 hours
+| STATS events = COUNT(*), attack_types = VALUES(cef.extensions.deviceCustomString4), apps = VALUES(cef.extensions.deviceCustomString1), passed = COUNT(CASE(event.action == "passed", 1, null)), geo = VALUES(cef.extensions.deviceCustomString6)
+| LIMIT 1
+          ]]>
+        </Query>
+        <ExpectedOutput>
+          <Field name="events"/>
+          <Field name="attack_types"/>
+          <Field name="passed"/>
+          <Field name="geo"/>
+        </ExpectedOutput>
+        <AnalystNotes>Auth attacks alongside brute-force-shaped request volume and other injection types indicates a determined takeover attempt. External geo raises priority.</AnalystNotes>
+      </Step>
+      <Step order="3" name="Finalize classification">
+        <DecisionTree>
+          <Node><Condition>INV-01 shows an auth/authz attack URL with an HTTP 2xx response (protected resource returned content).</Condition><Result>True Positive (Auth Bypass Reached Protected Resource - IR, force session invalidation)</Result></Node>
+          <Node><Condition>INV-01 shows repeated auth/authz violations (passed/alerted) against banking from an external source.</Condition><Result>True Positive (Auth/Authz Attack Attempt - escalate, enforce blocking)</Result></Node>
+          <Node><Condition>Single event that cef.name shows is a benign session-timeout/cookie quirk from a legitimate user IP.</Condition><Result>False Positive</Result></Node>
+          <Node><Condition>ASM policy in transparent mode marking normal app behavior as auth violations.</Condition><Result>Misconfiguration</Result></Node>
+          <Node><Condition>Auth attack from an external source but resource-reach cannot be confirmed.</Condition><Result>Needs Escalation</Result></Node>
+        </DecisionTree>
+        <DocumentationChecklist>
+          <Item>Attach outputs of INV-01-F5AUTH-DETAIL, INV-02-F5AUTH-SCOPE to the case.</Item>
+        </DocumentationChecklist>
+      </Step>
+    </Workflow>
+  </Investigation>
+  <ClassificationGuidance>
+    <FalsePositive>
+      <Definition>A legitimate user's session quirk (expired cookie, re-auth) mislabeled as an auth violation.</Definition>
+      <Indicators>
+        <Item>Single/low-volume event from a normal customer IP.</Item>
+        <Item>cef.name is a benign session/cookie condition.</Item>
+        <Item>No pattern of other attack types.</Item>
+      </Indicators>
+      <SOCAction>
+        <Item>Confirm the benign violation type; tune the policy if it over-flags.</Item>
+        <Item>Close as false_positive.</Item>
+      </SOCAction>
+    </FalsePositive>
+    <TruePositive>
+      <Definition>A source attempting to bypass authentication/authorization on internet banking.</Definition>
+      <Indicators>
+        <Item>Repeated auth/authz violations from one source.</Item>
+        <Item>Forced-browsing to authenticated URLs.</Item>
+        <Item>A protected resource returned 2xx to an attack request.</Item>
+      </Indicators>
+      <SOCAction>
+        <Item>Escalate to IR; invalidate affected sessions; enforce blocking on the banking policy.</Item>
+        <Item>Review app auth logs for the source; block the source.</Item>
+        <Item>Check for unauthorized transactions/access.</Item>
+      </SOCAction>
+    </TruePositive>
+    <Misconfiguration>
+      <Definition>A staging/transparent policy or a broken app auth flow generating auth-violation noise.</Definition>
+      <Indicators>
+        <Item>Bulk auth violations of the same benign type across many normal users.</Item>
+        <Item>Recent app/policy change.</Item>
+      </Indicators>
+      <SOCAction>
+        <Item>Engage app + WAF teams to fix the auth flow or tune the policy.</Item>
+        <Item>Re-assess if a real bypass is hidden in the noise.</Item>
+      </SOCAction>
+    </Misconfiguration>
+  </ClassificationGuidance>
+  <Response><IRForHumans>
+    <Phase name="Immediate Actions (0-30 minutes)">
+      <Action priority="1">If a protected resource returned 2xx: invalidate sessions and engage IR now.</Action>
+      <Action priority="2">Confirm the banking policy is in blocking mode.</Action>
+    </Phase>
+    <Phase name="Containment and Eradication (hours)">
+      <Action>Block the source; review app auth logs; check for unauthorized access/transactions.</Action>
+    </Phase>
+    <Phase name="Recovery and Hardening (days)">
+      <Action>Enforce blocking on banking policies; add rate-limits and bot defense on auth endpoints.</Action>
+    </Phase>
+  </IRForHumans></Response>
+  <QualityChecks>
+    <Check>deviceCustomString4 Authentication/Authorization Attacks verified present (3,001/90d).</Check>
+    <Check>cef.name carries the precise violation - use it, not just the category.</Check>
+  </QualityChecks>
+  <ClosureCriteria><FalsePositiveClosure>
+    <Item>Benign session quirk confirmed; no bypass; documented.</Item>
+  </FalsePositiveClosure><TruePositiveClosure>
+    <Item>Sessions invalidated; no unauthorized access found; policy enforced; source blocked.</Item>
+  </TruePositiveClosure></ClosureCriteria>
+</Playbook>

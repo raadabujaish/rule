@@ -1,0 +1,197 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<Playbook xmlns="https://soc.example/playbooks" id="PB-JCB-F5-02" name="F5 WAF — Sustained RCE Campaign Reaching a Banking App (Code Injection / Command Execution) - SOC Playbook" version="2.1" status="Production" classification="TLP:AMBER">
+  <Metadata>
+    <Owner>JCB Detection Engineering (WatchWave)</Owner>
+    <LastUpdated>2026-08-19</LastUpdated>
+    <Severity default="High">High</Severity>
+    <Confidence default="Medium">Medium</Confidence>
+    <Category>Initial Access / Exploit Public-Facing Application</Category>
+    <MitreAttack>
+      <Technique id="T1190" name="Exploit Public-Facing Application"/>
+      <Tactic id="TA0001" name="Initial Access"/>
+    </MitreAttack>
+    <References>
+      <Reference title="MITRE ATT&amp;CK T1190 Exploit Public-Facing Application" url="https://attack.mitre.org/techniques/T1190/"/>
+      <Reference title="OWASP Command Injection" url="https://owasp.org/www-community/attacks/Command_Injection"/>
+      <Reference title="F5 BIG-IP ASM / Advanced WAF violation rating and enforcement" url="https://techdocs.f5.com/en-us/bigip-15-1-0/big-ip-asm-implementations.html"/>
+    </References>
+  </Metadata>
+  <ExecutiveSummary>
+    <Overview>One source produced a sustained run of high-severity (violation rating 4 or 5) remote-code-execution attempts — Server Side Code Injection and/or Command Execution — against JCB banking applications, and the F5 WAF did NOT block them (threshold analytic keyed on source.ip). Unlike injection that reads data, RCE that passes the WAF can execute attacker code on the app server itself. The triage question: were these forwarded (alerted/passed) rather than blocked, and did any request draw a backend HTTP response indicating the code path was reached? At JCB (verified live) rating-4/5 RCE is normally blocked, so a sustained not-blocked stream is a meaningful enforcement gap.</Overview>
+    <BusinessImpact>RCE reaching an internet-banking backend can give an attacker command execution in the DMZ: web-shell installation, credential and key theft from the host, pivot toward core banking, or manipulation of application logic and transactions. A sustained campaign raises the odds that at least one request succeeded.</BusinessImpact>
+  </ExecutiveSummary>
+  <Scope>
+    <Assets>
+      <AssetType>F5 BIG-IP ASM / Advanced WAF fronting JCB internet banking and public web apps (verified live: appliance F5-FRNT-WAF-01.JCBank.com.jo)</AssetType>
+      <AssetType>Banking application backend servers behind the targeted ASM policies (DMZ)</AssetType>
+    </Assets>
+    <LogSources>
+      <LogSource>F5 ASM CEF events via syslog - logs-cef.log-* (observer.vendor == "F5"; verified live)</LogSource>
+    </LogSources>
+  </Scope>
+  <Prerequisites>
+    <TelemetryRequirements>
+      <Requirement>F5 ASM logging to CEF over syslog, parsed into logs-cef.log-* (verified live).</Requirement>
+      <Requirement>CEF fields (verified live populated for F5): cef.extensions.deviceCustomString4 = attack type; cef.extensions.deviceCustomNumber2 = violation rating; cef.extensions.deviceCustomString1 = ASM policy; url.original = request URL; http.request.method = method; cef.extensions.deviceCustomNumber1 = backend HTTP response code; cef.extensions.deviceAction = passed | alerted | blocked; source.geo.country_name and source.as.organization.name = attribution.</Requirement>
+    </TelemetryRequirements>
+    <DetectionSignals>
+      <Signal><Name>Sustained unblocked RCE</Name><Details>observer.vendor F5, cef.extensions.deviceCustomString4 in (Server Side Code Injection, Command Execution), cef.extensions.deviceCustomNumber2 of 4 or higher, cef.extensions.deviceAction not equal to "blocked", volume threshold on source.ip.</Details></Signal>
+      <Signal><Name>Reached-target confirmation</Name><Details>A backend HTTP response (cef.extensions.deviceCustomNumber1 of 2xx/3xx/5xx) on an unblocked RCE request indicates the request reached the application code path.</Details></Signal>
+    </DetectionSignals>
+  </Prerequisites>
+  <Inputs>
+    <Input name="$source_ip" description="Attacking source IP from the alert (source.ip, threshold group key). Primary investigation pivot."/>
+  </Inputs>
+  <Triage>
+    <ImmediateCapture>
+      <Item>Source: $source_ip (with source.geo.country_name and source.as.organization.name)</Item>
+      <Item>RCE class(es) seen (cef.extensions.deviceCustomString4), rating (cef.extensions.deviceCustomNumber2), and enforcement (cef.extensions.deviceAction)</Item>
+      <Item>Targeted ASM policy / banking app (cef.extensions.deviceCustomString1) and the request URLs (url.original)</Item>
+    </ImmediateCapture>
+    <InitialAssessment>
+      <Rule>If any unblocked RCE request returned a backend HTTP response (cef.extensions.deviceCustomNumber1 of 2xx/3xx/5xx), treat as reached-target and escalate immediately — assume potential code execution on the app server.</Rule>
+      <Rule>If the stream is sustained and non-blocked from an external source (foreign geo / hosting ASN), escalate as a bypassed-enforcement RCE campaign even without a confirmed backend response.</Rule>
+      <Rule>If $source_ip is an authorised internal scanner / pentest host on schedule AND nothing reached the backend, lean False Positive (authorised) after confirming the engagement window.</Rule>
+    </InitialAssessment>
+  </Triage>
+  <Investigation>
+    <Goal>Determine, for $source_ip, the RCE classes attempted, whether enforcement forwarded rather than blocked them, whether any request reached the banking backend, and whether the activity is sustained across the window (campaign) versus a brief burst.</Goal>
+    <Workflow>
+      <Step order="1" name="RCE attack-type and enforcement breakdown for this source">
+        <Purpose>Separate "alerted"/"passed" from "blocked" for Server Side Code Injection and Command Execution, and surface any backend response codes already present.</Purpose>
+        <Query platform="Elastic" language="ES|QL" id="INV-01-F5-RCE-PROFILE">
+          <![CDATA[
+FROM logs-cef.log-*
+| WHERE observer.vendor == "F5" AND source.ip == "$source_ip" AND @timestamp >= NOW() - 4 hours AND cef.extensions.deviceCustomString4 IN ("Server Side Code Injection","Command Execution")
+| STATS events = COUNT(*), max_rating = MAX(cef.extensions.deviceCustomNumber2), backend_responses = VALUES(cef.extensions.deviceCustomNumber1), policies = VALUES(cef.extensions.deviceCustomString1) BY cef.extensions.deviceCustomString4, cef.extensions.deviceAction
+| SORT events DESC
+| LIMIT 40
+          ]]>
+        </Query>
+        <ExpectedOutput>
+          <Field name="cef.extensions.deviceCustomString4"/>
+          <Field name="cef.extensions.deviceAction"/>
+          <Field name="events"/>
+          <Field name="max_rating"/>
+          <Field name="backend_responses"/>
+        </ExpectedOutput>
+        <AnalystNotes>action = passed forwards to the backend (worst for RCE); action = alerted means a transparent/staging policy detected but forwarded. At JCB, rating-4/5 RCE is normally blocked (verified live), so any non-blocked row is the anomaly. backend_responses other than 0 on these rows is a reached-target indicator — pivot to INV-02.</AnalystNotes>
+      </Step>
+      <Step order="2" name="Exact unblocked RCE requests and backend responses">
+        <Purpose>Retrieve the specific unblocked rating-4/5 RCE requests with URL, method, matched signature and backend HTTP response — the attempt-versus-reached-target evidence.</Purpose>
+        <Query platform="Elastic" language="ES|QL" id="INV-02-F5-RCE-REACHED">
+          <![CDATA[
+FROM logs-cef.log-*
+| WHERE observer.vendor == "F5" AND source.ip == "$source_ip" AND cef.extensions.deviceAction != "blocked" AND cef.extensions.deviceCustomNumber2 >= 4 AND @timestamp >= NOW() - 4 hours AND cef.extensions.deviceCustomString4 IN ("Server Side Code Injection","Command Execution")
+| KEEP @timestamp, cef.extensions.deviceCustomString4, http.request.method, url.original, cef.extensions.deviceCustomNumber1, cef.extensions.deviceCustomString1, cef.name
+| SORT @timestamp DESC
+| LIMIT 25
+          ]]>
+        </Query>
+        <ExpectedOutput>
+          <Field name="url.original"/>
+          <Field name="cef.extensions.deviceCustomNumber1"/>
+          <Field name="cef.extensions.deviceCustomString4"/>
+          <Field name="cef.extensions.deviceCustomString1"/>
+        </ExpectedOutput>
+        <AnalystNotes>Inspect url.original for the command/code payload (shell metacharacters, interpreter calls, pipes to curl/wget). A backend response (cef.extensions.deviceCustomNumber1) of 200/302/500 means the app processed it — treat as potential code execution and scope the host behind cef.extensions.deviceCustomString1 for a web-shell.</AnalystNotes>
+      </Step>
+      <Step order="3" name="Sustained-ness over time and targeted policies">
+        <Purpose>Confirm the campaign is sustained (spread across the window, not one spike) and identify which banking policies bore the not-blocked RCE load.</Purpose>
+        <Query platform="Elastic" language="ES|QL" id="INV-03-F5-RCE-TEMPORAL">
+          <![CDATA[
+FROM logs-cef.log-*
+| WHERE observer.vendor == "F5" AND source.ip == "$source_ip" AND @timestamp >= NOW() - 4 hours AND cef.extensions.deviceCustomString4 IN ("Server Side Code Injection","Command Execution")
+| STATS events = COUNT(*), not_blocked = COUNT(CASE(cef.extensions.deviceAction != "blocked", 1, null)), max_rating = MAX(cef.extensions.deviceCustomNumber2) BY hour = DATE_TRUNC(1 hour, @timestamp), cef.extensions.deviceCustomString1
+| SORT hour DESC
+| LIMIT 40
+          ]]>
+        </Query>
+        <ExpectedOutput>
+          <Field name="hour"/>
+          <Field name="cef.extensions.deviceCustomString1"/>
+          <Field name="events"/>
+          <Field name="not_blocked"/>
+          <Field name="max_rating"/>
+        </ExpectedOutput>
+        <AnalystNotes>not_blocked spread across multiple hourly buckets confirms a sustained campaign rather than a single misfire, and raises the probability at least one request succeeded. A single policy carrying all the not_blocked load points at one app whose policy is transparent/under-tuned — prioritise that backend for inspection.</AnalystNotes>
+      </Step>
+    </Workflow>
+  </Investigation>
+  <DecisionTree>
+    <Node><Condition>INV-02 shows an unblocked rating-4/5 RCE request (Code Injection / Command Execution) with a backend HTTP response (cef.extensions.deviceCustomNumber1 of 2xx/3xx/5xx) — the request reached the application code path.</Condition><Result>True Positive (RCE Reached Application - escalate to IR; treat the app server as potentially compromised, hunt for web-shell)</Result></Node>
+    <Node><Condition>INV-01 and INV-03 show sustained not-blocked RCE across multiple hourly buckets from an external source (foreign geo / hosting ASN), even without a confirmed backend response.</Condition><Result>True Positive (Sustained RCE Campaign Bypassing Enforcement - escalate, drive the ASM policy to blocking, block the source)</Result></Node>
+    <Node><Condition>INV-03 shows $source_ip is a documented internal scanner / contracted-pentest host on an authorised schedule AND INV-02 confirms nothing reached the backend.</Condition><Result>False Positive (Authorised vulnerability scan / penetration test - exception the tester for the engagement window only)</Result></Node>
+    <Node><Condition>The targeted policy is in transparent/staging so the RCE class is detected but forwarded, and on inspection the payloads are benign application traffic mislabeled by an immature signature.</Condition><Result>Misconfiguration (ASM policy in transparent/staging or over-eager staging signature - engage the WAF team to enforce/tune)</Result></Node>
+    <Node><Condition>External source with sustained unblocked RCE, but backend reach cannot be confirmed or refuted from available fields and the source is not an authorised tester.</Condition><Result>Needs Escalation</Result></Node>
+  </DecisionTree>
+  <ClassificationGuidance>
+    <FalsePositive>
+      <Definition>Authorised vulnerability scanning or penetration testing exercising RCE payloads, where the WAF enforced or nothing reached the backend — an approved activity, not benign background noise.</Definition>
+      <Indicators>
+        <Item>Internal or contracted-pentest source on a documented, in-window engagement.</Item>
+        <Item>Coverage matches the authorised scope; INV-02 shows no backend responses.</Item>
+        <Item>Payloads are canned scanner probes rather than tailored to a JCB app.</Item>
+      </Indicators>
+      <SOCAction>
+        <Item>Confirm the engagement window and tester source with the owning team.</Item>
+        <Item>Exception the tester source for the engagement duration only.</Item>
+        <Item>Close as false_positive with the ticket reference attached.</Item>
+      </SOCAction>
+    </FalsePositive>
+    <TruePositive>
+      <Definition>A real, sustained RCE campaign the WAF did not block, potentially executing attacker code on a banking app server.</Definition>
+      <Indicators>
+        <Item>Sustained rating-4/5 Server Side Code Injection / Command Execution from an external source (INV-01, INV-03).</Item>
+        <Item>Enforcement passed/alerted, not blocked, across multiple hourly buckets.</Item>
+        <Item>Backend HTTP 2xx/3xx/5xx responses on RCE URLs (INV-02) = reached code path.</Item>
+      </Indicators>
+      <SOCAction>
+        <Item>Escalate to IR; scope the app server behind the targeted policy for web-shell, unexpected child processes, and outbound connections.</Item>
+        <Item>Drive the affected ASM policy to blocking; block $source_ip at the WAF/edge.</Item>
+        <Item>Preserve full requests and matched signatures (cef.name); capture host forensics on the backend.</Item>
+      </SOCAction>
+    </TruePositive>
+    <Misconfiguration>
+      <Definition>The ASM policy protecting the targeted app is in transparent/staging mode, so genuine RCE attempts are detected but forwarded rather than blocked.</Definition>
+      <Indicators>
+        <Item>Nothing blocked across the RCE classes and time (INV-01, INV-03).</Item>
+        <Item>The policy (cef.extensions.deviceCustomString1) was recently deployed or is in staging.</Item>
+      </Indicators>
+      <SOCAction>
+        <Item>Engage the WAF team to move the policy to blocking/enforcement.</Item>
+        <Item>Re-triage as True Positive if backend reach is confirmed in the meantime.</Item>
+      </SOCAction>
+    </Misconfiguration>
+  </ClassificationGuidance>
+  <Response>
+    <IRForHumans>
+      <Phase name="Immediate Actions (0-30 minutes)">
+        <Action priority="1">Check INV-02 for any backend HTTP response on an unblocked RCE request — reached-target is an active-incident trigger; assume possible code execution.</Action>
+        <Action priority="2">Confirm whether the targeted ASM policy is enforcing or transparent; if reached-target, engage IR and isolate/inspect the app server behind that policy.</Action>
+      </Phase>
+      <Phase name="Containment and Eradication (hours)">
+        <Action>Move the affected ASM policy to blocking; block $source_ip; hunt for web-shell, anomalous child processes and outbound C2 on the backend host.</Action>
+        <Action>Add virtual-patch signatures for the observed RCE payloads; preserve full request evidence and host artefacts.</Action>
+      </Phase>
+      <Phase name="Recovery and Hardening (days)">
+        <Action>Enforce blocking mode on all internet-banking ASM policies; rebuild or verify integrity of any host suspected of code execution.</Action>
+        <Action>Add a correlated backend-response analytic and endpoint-side process-anomaly detection for the app servers behind the WAF.</Action>
+      </Phase>
+    </IRForHumans>
+  </Response>
+  <Escalation>
+    <Trigger>Any confirmed backend HTTP response on an unblocked RCE request, sustained not-blocked RCE from an external source, or a banking-app policy found in transparent mode against live RCE attempts.</Trigger>
+    <To>SOC L2 / IR</To>
+  </Escalation>
+  <Closure>
+    <FalsePositiveClosure>
+      <Item>Authorised scan/pentest confirmed against $source_ip; INV-02 shows no backend reach; engagement ticket attached.</Item>
+      <Item>Outputs of INV-01, INV-02, INV-03 attached to the case.</Item>
+    </FalsePositiveClosure>
+    <TruePositiveClosure>
+      <Item>App server behind the targeted policy inspected and cleared or remediated; affected ASM policy enforced; $source_ip blocked.</Item>
+      <Item>Reached-target determination, host forensics and virtual-patch actions documented.</Item>
+    </TruePositiveClosure>
+  </Closure>
+</Playbook>

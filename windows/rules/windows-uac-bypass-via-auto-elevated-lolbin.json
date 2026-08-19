@@ -1,0 +1,110 @@
+{
+  "rule_id": "jcb-win-uac-bypass-lolbin",
+  "name": "Windows — UAC Bypass via Auto-Elevated LOLBin",
+  "version": 1,
+  "enabled": true,
+  "interval": "1h",
+  "from": "now-90m",
+  "to": "now",
+  "description": "Attacker objective\nElevate from a medium-integrity to a high-integrity process without a consent prompt by abusing a Windows auto-elevating binary (UAC bypass).\n\nAttack logic\nSeveral trusted Windows binaries auto-elevate and can be hijacked (via registry/COM manipulation) to launch an attacker process elevated. The tell is an auto-elevating binary spawning a command interpreter or scripting host.\n\nWhy this detection works\nProcess-creation lineage links the auto-elevating parent to a shell/scripting child on the same event, a combination that does not occur in normal use.\n\nFalse positives\nRare legitimate automation that launches a shell from one of these binaries.\n\nTuning\nAllowlist verified parent/child pairs if a legitimate workflow triggers it.\n\nRequired telemetry\nProcess creation with parent process: Sysmon Event ID 1 and Windows Security 4688 (process.parent.name).",
+  "tags": [
+    "JCB",
+    "Windows",
+    "Phase3",
+    "Use Case: Threat Detection",
+    "Tactic: Privilege Escalation",
+    "Tactic: Defense Evasion"
+  ],
+  "author": [
+    "raadabujaish"
+  ],
+  "license": "",
+  "threat": [
+    {
+      "framework": "MITRE ATT&CK",
+      "tactic": {
+        "id": "TA0004",
+        "name": "Privilege Escalation",
+        "reference": "https://attack.mitre.org/tactics/TA0004/"
+      },
+      "technique": [
+        {
+          "id": "T1548",
+          "name": "Abuse Elevation Control Mechanism",
+          "reference": "https://attack.mitre.org/techniques/T1548/",
+          "subtechnique": [
+            {
+              "id": "T1548.002",
+              "name": "Bypass User Account Control",
+              "reference": "https://attack.mitre.org/techniques/T1548/002/"
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "framework": "MITRE ATT&CK",
+      "tactic": {
+        "id": "TA0005",
+        "name": "Defense Evasion",
+        "reference": "https://attack.mitre.org/tactics/TA0005/"
+      },
+      "technique": [
+        {
+          "id": "T1548",
+          "name": "Abuse Elevation Control Mechanism",
+          "reference": "https://attack.mitre.org/techniques/T1548/",
+          "subtechnique": [
+            {
+              "id": "T1548.002",
+              "name": "Bypass User Account Control",
+              "reference": "https://attack.mitre.org/techniques/T1548/002/"
+            }
+          ]
+        }
+      ]
+    }
+  ],
+  "investigation_fields": {
+    "field_names": [
+      "host.name",
+      "user.name",
+      "user.domain",
+      "process.name",
+      "process.executable",
+      "process.command_line",
+      "process.args",
+      "process.parent.name",
+      "process.parent.executable",
+      "event.code",
+      "event.action",
+      "powershell.exe"
+    ]
+  },
+  "related_integrations": [],
+  "required_fields": [],
+  "setup": "",
+  "note": "## Investigation guide\n1. The parent (auto-elevated binary) launched a shell/scripting child — a UAC-bypass pattern.\n2. Review the child command line for the follow-on action; investigate the user and host.\n3. Confirm whether elevation was legitimate; if not, treat the host as compromised.",
+  "false_positives": [
+    "Rare legitimate automation that launches a shell from one of these binaries."
+  ],
+  "references": [
+    "https://attack.mitre.org/techniques/T1548/",
+    "https://attack.mitre.org/techniques/T1548/"
+  ],
+  "risk_score": 73,
+  "risk_score_mapping": [],
+  "severity": "high",
+  "severity_mapping": [],
+  "output_index": "",
+  "max_signals": 100,
+  "exceptions_list": [],
+  "actions": [],
+  "type": "eql",
+  "language": "eql",
+  "index": [
+    "logs-windows.sysmon_operational-*",
+    "logs-system.security-*"
+  ],
+  "query": "process where event.code in (\"1\",\"4688\") and process.parent.name in~ (\"fodhelper.exe\",\"eventvwr.exe\",\"sdclt.exe\",\"computerdefaults.exe\",\"cmstp.exe\",\"wsreset.exe\",\"slui.exe\",\"changepk.exe\",\"dccw.exe\") and process.name in~ (\"cmd.exe\",\"powershell.exe\",\"pwsh.exe\",\"mshta.exe\",\"rundll32.exe\",\"regsvr32.exe\",\"wscript.exe\",\"cscript.exe\",\"hh.exe\")"
+}

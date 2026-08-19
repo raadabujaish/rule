@@ -1,0 +1,150 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<Playbook xmlns="https://soc.example/playbooks" id="PB-WIN-051" name="Windows — Execution of an Unsigned Service - SOC Playbook" version="1.0" status="Production" classification="TLP:AMBER">
+  <Metadata>
+    <Owner>JCB Detection Engineering (WatchWave)</Owner>
+    <LastUpdated>2026-08-14</LastUpdated>
+    <Severity default="Medium">Medium</Severity>
+    <Confidence default="Medium">Medium</Confidence>
+    <Category>Persistence / Privilege Escalation - Create Service</Category>
+    <MitreAttack>
+      <Technique id="T1543.003" name="Windows Service"/>
+      <Tactic id="TA0003" name="Persistence"/>
+    </MitreAttack>
+    <References>
+      <Reference title="MITRE ATT and CK" url="https://attack.mitre.org/techniques/T1543/"/>
+    </References>
+  </Metadata>
+  <ExecutiveSummary>
+    <Overview>A service binary's trustworthiness is in question. The original detection keyed on process.code_signature (NOT collected in JCB). RECOVERED: Sysmon collects process.hash.sha256 and process.pe.company/product (verified live), and 4697/7045 give the service image path - together a strong trust assessment without the signature field.</Overview>
+    <BusinessImpact>An unsigned/untrusted service running as SYSTEM is a persistence and privilege mechanism.</BusinessImpact>
+  </ExecutiveSummary>
+  <Scope><Assets>
+    <AssetType>Windows servers/endpoints</AssetType>
+  </Assets><LogSources>
+    <LogSource>Windows Security/System + Sysmon - logs-system.security-*, logs-system.system-*, logs-windows.sysmon_operational-*</LogSource>
+  </LogSources></Scope>
+  <Prerequisites><TelemetryRequirements>
+    <Requirement>Sysmon collects process.hash.sha256 (318k docs) and process.pe.company/product (verified live); process.code_signature is NOT collected. Service installs in 4697/7045.</Requirement>
+  </TelemetryRequirements><DetectionSignals>
+    <Signal><Name>Execution of an Unsigned Service</Name><Details>Service binary trust assessed via hash + PE publisher (code_signature not collected).</Details></Signal>
+  </DetectionSignals></Prerequisites>
+  <Inputs>
+    <Input name="$hostname" description="Host where the service ran."/>
+    <Input name="$service" description="Service name / binary if scoped."/>
+  </Inputs>
+  <Triage><ImmediateCapture>
+    <Item>$hostname: $hostname</Item>
+  </ImmediateCapture><InitialAssessment>
+    <Rule>Weigh the full evidence story per the ClassificationGuidance, not any single fact.</Rule>
+  </InitialAssessment></Triage>
+  <Investigation>
+    <Goal>Determine whether a service binary is trustworthy using hash reputation + PE publisher metadata + image path, since code_signature is not collected.</Goal>
+    <Workflow>
+      <Step order="1" name="Service installs and their binaries on the host">
+        <Purpose>4697/7045 give the service name and image path - the binary to assess.</Purpose>
+        <Query platform="Elastic" language="ES|QL" id="INV-01-SVC-INSTALL">
+          <![CDATA[
+FROM logs-system.security-*,logs-system.system-*
+| WHERE event.code IN ("4697","7045") AND host.name == "$hostname" AND @timestamp >= NOW() - 4 hours
+| KEEP @timestamp, event.code, winlog.event_data.ServiceName, winlog.event_data.ServiceFileName, winlog.event_data.ImagePath
+| SORT @timestamp DESC
+| LIMIT 15
+          ]]>
+        </Query>
+        <ExpectedOutput>
+          <Field name="winlog.event_data.ServiceName"/>
+          <Field name="winlog.event_data.ServiceFileName"/>
+          <Field name="winlog.event_data.ImagePath"/>
+        </ExpectedOutput>
+        <AnalystNotes>A service image in temp/appdata/user-writable path is suspicious. Take the image path to INV-02 for hash + publisher.</AnalystNotes>
+      </Step>
+      <Step order="2" name="Hash + PE publisher for services.exe child binaries (trust evidence)">
+        <Purpose>process.hash.sha256 (for reputation lookup) and process.pe.company/product (publisher legitimacy) replace the missing signature field.</Purpose>
+        <Query platform="Elastic" language="ES|QL" id="INV-02-SVC-TRUST">
+          <![CDATA[
+FROM logs-windows.sysmon_operational-*
+| WHERE event.code == "1" AND host.name == "$hostname" AND process.parent.name == "services.exe" AND @timestamp >= NOW() - 4 hours
+| KEEP @timestamp, process.name, process.executable, process.hash.sha256, process.pe.company, process.pe.product, user.name
+| SORT @timestamp DESC
+| LIMIT 20
+          ]]>
+        </Query>
+        <ExpectedOutput>
+          <Field name="process.name"/>
+          <Field name="process.executable"/>
+          <Field name="process.hash.sha256"/>
+          <Field name="process.pe.company"/>
+        </ExpectedOutput>
+        <AnalystNotes>A service binary with a KNOWN publisher (process.pe.company e.g. Microsoft/Veritas) is likely legitimate. NO/blank company + a temp path + an unknown hash = likely unsigned malware. Look up process.hash.sha256 in threat intel/VirusTotal for the verdict. This is the trust assessment the code_signature field would have given.</AnalystNotes>
+      </Step>
+      <Step order="3" name="Finalize classification">
+        <DecisionTree>
+          <Node><Condition>A services.exe child binary with no PE publisher, a temp/user path, and an unknown/malicious hash reputation.</Condition><Result>True Positive (Unsigned Malicious Service - IR)</Result></Node>
+          <Node><Condition>A service binary with a known legitimate PE publisher and good hash reputation.</Condition><Result>False Positive</Result></Node>
+          <Node><Condition>A legitimately-unsigned in-house tool with a known hash but no publisher.</Condition><Result>Benign Activity</Result></Node>
+          <Node><Condition>Trust indeterminate from telemetry (no PE company, hash reputation unknown) - verify signature on host.</Condition><Result>Needs Escalation</Result></Node>
+        </DecisionTree>
+        <DocumentationChecklist>
+          <Item>Attach outputs of INV-01-SVC-INSTALL, INV-02-SVC-TRUST to the case.</Item>
+        </DocumentationChecklist>
+      </Step>
+    </Workflow>
+  </Investigation>
+  <ClassificationGuidance>
+    <FalsePositive>
+      <Definition>A legitimate service (known publisher / good hash).</Definition>
+      <Indicators>
+        <Item>process.pe.company is a known vendor.</Item>
+        <Item>Program Files path.</Item>
+        <Item>Good hash reputation.</Item>
+      </Indicators>
+      <SOCAction>
+        <Item>Confirm the software; close as false_positive.</Item>
+      </SOCAction>
+    </FalsePositive>
+    <TruePositive>
+      <Definition>An unsigned malicious service.</Definition>
+      <Indicators>
+        <Item>No PE publisher + temp/user path.</Item>
+        <Item>Unknown/malicious hash reputation.</Item>
+        <Item>Suspicious install context.</Item>
+      </Indicators>
+      <SOCAction>
+        <Item>Stop/remove the service; isolate the host; open IR.</Item>
+        <Item>Hunt the hash estate-wide.</Item>
+      </SOCAction>
+    </TruePositive>
+    <Misconfiguration>
+      <Definition>A legitimately-unsigned in-house binary.</Definition>
+      <Indicators>
+        <Item>Known in-house tool.</Item>
+        <Item>Known hash, no publisher.</Item>
+        <Item>Documented.</Item>
+      </Indicators>
+      <SOCAction>
+        <Item>Document the exception; consider signing the binary.</Item>
+      </SOCAction>
+    </Misconfiguration>
+  </ClassificationGuidance>
+  <Response><IRForHumans>
+    <Phase name="Immediate Actions (0-30 minutes)">
+      <Action priority="1">Assess the service binary via hash reputation + PE publisher + image path.</Action>
+      <Action priority="2">If untrusted, stop/remove the service and isolate.</Action>
+    </Phase>
+    <Phase name="Containment and Eradication (hours)">
+      <Action>Stop/remove the service; isolate the host; hunt the hash.</Action>
+    </Phase>
+    <Phase name="Recovery and Hardening (days)">
+      <Action>Enable Sysmon ProcessCreate signature fields for direct signature verdicts; meanwhile hash+PE publisher is the working substitute; consider redesigning the detection to key on PE-publisher-absence + suspicious path.</Action>
+    </Phase>
+  </IRForHumans></Response>
+  <QualityChecks>
+    <Check>RECOVERED: hash+PE publisher replace the uncollected code_signature for the trust assessment. The paired new_terms detection (on code_signature) cannot fire; redesign it to key on process.pe.company absence + services.exe parent + non-standard path.</Check>
+    <Check>Hash reputation lookup is an analyst step (external), not in-SIEM.</Check>
+  </QualityChecks>
+  <ClosureCriteria><FalsePositiveClosure>
+    <Item>Legitimate publisher/hash confirmed; documented.</Item>
+  </FalsePositiveClosure><TruePositiveClosure>
+    <Item>Malicious service removed; hash hunted; host contained.</Item>
+  </TruePositiveClosure></ClosureCriteria>
+</Playbook>

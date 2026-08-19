@@ -1,0 +1,152 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<Playbook xmlns="https://soc.example/playbooks" id="PB-WIN-002" name="Change Audit — Windows Privileged Group Membership Changed - SOC Playbook" version="1.0" status="Production" classification="TLP:AMBER">
+  <Metadata>
+    <Owner>JCB Detection Engineering (WatchWave)</Owner>
+    <LastUpdated>2026-08-14</LastUpdated>
+    <Severity default="High">High</Severity>
+    <Confidence default="Medium">Medium</Confidence>
+    <Category>Privilege Escalation / Account Manipulation</Category>
+    <MitreAttack>
+      <Technique id="T1098" name="Account Manipulation"/>
+      <Tactic id="TA0004" name="Privilege Escalation"/>
+    </MitreAttack>
+    <References>
+      <Reference title="MITRE ATT and CK" url="https://attack.mitre.org/techniques/T1098/"/>
+    </References>
+  </Metadata>
+  <ExecutiveSummary>
+    <Overview>Membership of a privileged group (any *Admins/*Administrators/*Operators, Remote Desktop/Management Users, DnsAdmins, GPO Creator Owners) changed via 4728/4729/4732/4733/4756/4757. Broader than the Tier-0 rule - includes operator and remote-access groups. Triage question: authorised group administration, or unexpected privilege grant/removal?</Overview>
+    <BusinessImpact>These groups confer elevated or remote-access rights; unauthorised membership changes enable escalation, lateral access or persistence.</BusinessImpact>
+  </ExecutiveSummary>
+  <Scope><Assets>
+    <AssetType>Windows servers and workstations (INTDOM domain)</AssetType>
+    <AssetType>Domain controllers</AssetType>
+  </Assets><LogSources>
+    <LogSource>Windows Security event log - logs-system.security-*</LogSource>
+  </LogSources></Scope>
+  <Prerequisites><TelemetryRequirements>
+    <Requirement>Windows Security + Sysmon + PowerShell logs via Elastic Agent (verified live). Sysmon event.code 1=process(command_line/parent populated), 11=file, 13/12=registry(registry.path populated); process.code_signature NOT collected.</Requirement>
+  </TelemetryRequirements><DetectionSignals>
+    <Signal><Name>Privileged group change</Name><Details>4728/4729/4732/4733/4756/4757 targeting a privileged group.</Details></Signal>
+  </DetectionSignals></Prerequisites>
+  <Inputs>
+    <Input name="$username" description="Actor (SubjectUserName)."/>
+    <Input name="$target_user" description="Member added/removed (MemberName)."/>
+    <Input name="$group" description="Group name (TargetUserName)."/>
+  </Inputs>
+  <Triage><ImmediateCapture>
+    <Item>Host: $hostname</Item>
+  </ImmediateCapture><InitialAssessment>
+    <Rule>Weigh the evidence story, not any single fact - see ClassificationGuidance.</Rule>
+  </InitialAssessment></Triage>
+  <Investigation>
+    <Goal>Determine whether the privileged-group change is authorised administration or an unexpected grant/removal, and whether the added member then used the access.</Goal>
+    <Workflow>
+      <Step order="1" name="Reconstruct the group change">
+        <Purpose>Capture actor, member, group, add-vs-remove for the change-record comparison.</Purpose>
+        <Query platform="Elastic" language="ES|QL" id="INV-01-PGRP-CHANGE">
+          <![CDATA[
+FROM logs-system.security-*
+| WHERE event.code IN ("4728","4729","4732","4733","4756","4757") AND winlog.event_data.SubjectUserName == "$username" AND @timestamp >= NOW() - 4 hours
+| KEEP @timestamp, event.code, winlog.event_data.SubjectUserName, winlog.event_data.MemberName, winlog.event_data.TargetUserName, host.name
+| SORT @timestamp DESC
+| LIMIT 25
+          ]]>
+        </Query>
+        <ExpectedOutput>
+          <Field name="event.code"/>
+          <Field name="winlog.event_data.MemberName"/>
+          <Field name="winlog.event_data.TargetUserName"/>
+        </ExpectedOutput>
+        <AnalystNotes>Add codes 4728/4732/4756; remove codes 4729/4733/4757. Adds to Admins/Remote Desktop Users are the escalation cases. A remove may be an attacker covering tracks or normal offboarding.</AnalystNotes>
+      </Step>
+      <Step order="2" name="Did the added member then log on or use privilege">
+        <Purpose>Immediate use of new group rights (logon to new hosts, special privileges) turns a paperwork gap into an active incident.</Purpose>
+        <Query platform="Elastic" language="ES|QL" id="INV-02-PGRP-USE" optional="true">
+          <![CDATA[
+FROM logs-system.security-*
+| WHERE winlog.event_data.TargetUserName == "$target_user" AND event.code IN ("4624","4672") AND @timestamp >= NOW() - 2 hours
+| EVAL src = COALESCE(TO_STRING(source.ip), "local")
+| STATS logons = COUNT(*), codes = VALUES(event.code), hosts = VALUES(host.name) BY src
+| SORT logons DESC
+| LIMIT 10
+          ]]>
+        </Query>
+        <ExpectedOutput>
+          <Field name="src"/>
+          <Field name="codes"/>
+          <Field name="hosts"/>
+        </ExpectedOutput>
+        <AnalystNotes>RDP/interactive logon or 4672 special privileges by the added member right after being added indicates the grant was exercised.</AnalystNotes>
+      </Step>
+      <Step order="3" name="Finalize classification">
+        <DecisionTree>
+          <Node><Condition>Actor is not an established group admin, or no change record exists.</Condition><Result>True Positive (Unauthorised Privilege Grant - escalate)</Result></Node>
+          <Node><Condition>INV-02 shows the added member immediately used the new access.</Condition><Result>True Positive (Privilege Exercised - IR)</Result></Node>
+          <Node><Condition>Known admin making the change under an approved ticket.</Condition><Result>False Positive</Result></Node>
+          <Node><Condition>Plausible admin, no change record.</Condition><Result>Needs Escalation</Result></Node>
+        </DecisionTree>
+        <DocumentationChecklist>
+          <Item>Attach outputs of INV-01-PGRP-CHANGE, INV-02-PGRP-USE to the case.</Item>
+        </DocumentationChecklist>
+      </Step>
+    </Workflow>
+  </Investigation>
+  <ClassificationGuidance>
+    <FalsePositive>
+      <Definition>Authorised group administration.</Definition>
+      <Indicators>
+        <Item>Recognised admin.</Item>
+        <Item>Approved ticket.</Item>
+        <Item>Expected member.</Item>
+      </Indicators>
+      <SOCAction>
+        <Item>Verify the ticket; close as false_positive.</Item>
+      </SOCAction>
+    </FalsePositive>
+    <TruePositive>
+      <Definition>Unexpected privilege grant/removal.</Definition>
+      <Indicators>
+        <Item>Unfamiliar actor.</Item>
+        <Item>No ticket.</Item>
+        <Item>Added member uses access or is a service/normal account.</Item>
+      </Indicators>
+      <SOCAction>
+        <Item>Reverse if unauthorised; disable involved accounts; open IR.</Item>
+        <Item>Review the actor's recent changes.</Item>
+      </SOCAction>
+    </TruePositive>
+    <Misconfiguration>
+      <Definition>A provisioning tool over-managing membership.</Definition>
+      <Indicators>
+        <Item>Automation per a broken mapping.</Item>
+        <Item>Owner confirms.</Item>
+      </Indicators>
+      <SOCAction>
+        <Item>Fix the mapping; remove errors; document.</Item>
+      </SOCAction>
+    </Misconfiguration>
+  </ClassificationGuidance>
+  <Response><IRForHumans>
+    <Phase name="Immediate Actions (0-30 minutes)">
+      <Action priority="1">Confirm the activity on the host; if malicious indicators, isolate the host.</Action>
+      <Action priority="2">Identify the responsible account/process and its origin.</Action>
+    </Phase>
+    <Phase name="Containment and Eradication (hours)">
+      <Action>Isolate the host; capture volatile evidence; hunt the same pattern across the estate.</Action>
+      <Action>Reset credentials used on the host if compromise is confirmed.</Action>
+    </Phase>
+    <Phase name="Recovery and Hardening (days)">
+      <Action>Remediate the root cause; add/verify EDR coverage; apply relevant hardening.</Action>
+    </Phase>
+  </IRForHumans></Response>
+  <QualityChecks>
+    <Check>Confirm the required telemetry (Sysmon/Security auditing) is present on the host.</Check>
+    <Check>Tune known-benign administrative sources via exceptions, not by disabling the rule.</Check>
+  </QualityChecks>
+  <ClosureCriteria><FalsePositiveClosure>
+    <Item>Activity confirmed benign/authorised and documented.</Item>
+  </FalsePositiveClosure><TruePositiveClosure>
+    <Item>Host contained and triaged; root cause eradicated; estate swept; findings recorded.</Item>
+  </TruePositiveClosure></ClosureCriteria>
+</Playbook>

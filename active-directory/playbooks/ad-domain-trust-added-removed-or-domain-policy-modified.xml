@@ -1,0 +1,147 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<Playbook xmlns="https://soc.example/playbooks" id="PB-AD-019" name="AD — Domain Trust Added/Removed or Domain Policy Modified - SOC Playbook" version="1.0" status="Production" classification="TLP:AMBER">
+  <Metadata>
+    <Owner>JCB Detection Engineering (WatchWave)</Owner>
+    <LastUpdated>2026-08-14</LastUpdated>
+    <Severity default="High">High</Severity>
+    <Confidence default="Medium">Medium</Confidence>
+    <Category>Defense Evasion / Domain Trust Modification</Category>
+    <MitreAttack>
+      <Technique id="T1484.002" name="Domain Trust Modification"/>
+      <Tactic id="TA0005" name="Defense Evasion"/>
+    </MitreAttack>
+    <References>
+      <Reference title="MITRE ATT and CK" url="https://attack.mitre.org/techniques/T1484/"/>
+    </References>
+  </Metadata>
+  <ExecutiveSummary>
+    <Overview>A domain-level trust or policy change occurred (4706/4707 trust created/removed, 4713 Kerberos policy, 4716 trust info modified, 4739 domain policy changed). In JCB only 4739 occurs today (65/90d). Triage question: sanctioned domain/forest administration, or trust manipulation to enable cross-domain attacks?</Overview>
+    <BusinessImpact>Trust and domain-policy changes affect authentication across the whole forest; malicious changes enable SID-history injection and cross-domain compromise.</BusinessImpact>
+  </ExecutiveSummary>
+  <Scope><Assets>
+    <AssetType>Active Directory domain controllers (INTDOM)</AssetType>
+    <AssetType>Windows member servers and workstations</AssetType>
+  </Assets><LogSources>
+    <LogSource>Windows Security event log - logs-system.security-*</LogSource>
+  </LogSources></Scope>
+  <Prerequisites><TelemetryRequirements>
+    <Requirement>Windows Security auditing shipped via Elastic Agent to logs-system.security-* (verified live).</Requirement>
+  </TelemetryRequirements><DetectionSignals>
+    <Signal><Name>Domain trust/policy change</Name><Details>4706/4707/4713/4716/4739.</Details></Signal>
+  </DetectionSignals></Prerequisites>
+  <Inputs>
+    <Input name="$username" description="Principal that made the change (SubjectUserName)."/>
+    <Input name="$hostname" description="DC where recorded."/>
+  </Inputs>
+  <Triage><ImmediateCapture>
+    <Item>Actor: $username</Item>
+    <Item>DC: $hostname</Item>
+  </ImmediateCapture><InitialAssessment>
+    <Rule>Domain policy changes (4739) are extremely rare and almost always deliberate admin actions; every instance should be tied to a change record.</Rule>
+  </InitialAssessment></Triage>
+  <Investigation>
+    <Goal>Determine whether the domain trust/policy change is a sanctioned administrative action or unauthorised manipulation of the trust fabric.</Goal>
+    <Workflow>
+      <Step order="1" name="Detail the trust/policy change">
+        <Purpose>Capture exactly which change occurred and by whom for change-record comparison.</Purpose>
+        <Query platform="Elastic" language="ES|QL" id="INV-01-TRUST-CHANGE">
+          <![CDATA[
+FROM logs-system.security-*
+| WHERE event.code IN ("4706","4707","4713","4716","4739") AND @timestamp >= NOW() - 4 hours
+| KEEP @timestamp, event.code, host.name, winlog.event_data.SubjectUserName, winlog.event_data.DomainName, winlog.event_data.TargetUserName
+| SORT @timestamp DESC
+| LIMIT 20
+          ]]>
+        </Query>
+        <ExpectedOutput>
+          <Field name="event.code"/>
+          <Field name="winlog.event_data.SubjectUserName"/>
+          <Field name="winlog.event_data.DomainName"/>
+        </ExpectedOutput>
+        <AnalystNotes>4707 (trust removed) can break authentication - operationally urgent even if benign. 4706 (trust created) to an unexpected domain is a cross-domain attack setup.</AnalystNotes>
+      </Step>
+      <Step order="2" name="Actor's concurrent privileged directory activity">
+        <Purpose>Trust changes alongside group/DACL/replication activity indicate a domain-takeover campaign.</Purpose>
+        <Query platform="Elastic" language="ES|QL" id="INV-02-TRUST-ACTOR">
+          <![CDATA[
+FROM logs-system.security-*
+| WHERE winlog.event_data.SubjectUserName == "$username" AND event.code IN ("4662","4728","4732","4756","5136","4724") AND @timestamp >= NOW() - 4 hours
+| STATS ops = COUNT(*), codes = VALUES(event.code)
+| LIMIT 1
+          ]]>
+        </Query>
+        <ExpectedOutput>
+          <Field name="ops"/>
+          <Field name="codes"/>
+        </ExpectedOutput>
+        <AnalystNotes>Any co-occurring Tier-0/replication/krbtgt activity by the same actor escalates this to a coordinated attack.</AnalystNotes>
+      </Step>
+      <Step order="3" name="Finalize classification">
+        <DecisionTree>
+          <Node><Condition>INV-01 shows a trust created to/removed from an unexpected domain by an unrecognised actor, or INV-02 shows a concurrent privileged campaign.</Condition><Result>True Positive (Trust Manipulation - IR immediately)</Result></Node>
+          <Node><Condition>INV-01 shows a recognised domain admin making the change under an approved forest-level change record.</Condition><Result>False Positive</Result></Node>
+          <Node><Condition>Change by a plausible admin but no change record located.</Condition><Result>Needs Escalation</Result></Node>
+        </DecisionTree>
+        <DocumentationChecklist>
+          <Item>Attach outputs of INV-01-TRUST-CHANGE, INV-02-TRUST-ACTOR to the case.</Item>
+        </DocumentationChecklist>
+      </Step>
+    </Workflow>
+  </Investigation>
+  <ClassificationGuidance>
+    <FalsePositive>
+      <Definition>Sanctioned forest/domain administration (trust or policy) under change control.</Definition>
+      <Indicators>
+        <Item>Recognised enterprise/domain admin.</Item>
+        <Item>Matches an approved forest-level change.</Item>
+        <Item>Expected partner domain.</Item>
+      </Indicators>
+      <SOCAction>
+        <Item>Verify the change record; close as false_positive.</Item>
+      </SOCAction>
+    </FalsePositive>
+    <TruePositive>
+      <Definition>Manipulation of the trust fabric or domain policy to enable cross-domain attack.</Definition>
+      <Indicators>
+        <Item>Trust to/from an unexpected domain.</Item>
+        <Item>Unrecognised actor.</Item>
+        <Item>Concurrent Tier-0/replication activity.</Item>
+      </Indicators>
+      <SOCAction>
+        <Item>Engage IR; review and revert the trust/policy change.</Item>
+        <Item>Audit for SID-history injection and cross-domain access.</Item>
+      </SOCAction>
+    </TruePositive>
+    <Misconfiguration>
+      <Definition>A domain-management tool making a policy change unexpectedly.</Definition>
+      <Indicators>
+        <Item>A known automation account per a broken job.</Item>
+        <Item>Owner confirms benign.</Item>
+      </Indicators>
+      <SOCAction>
+        <Item>Correct the automation; document.</Item>
+      </SOCAction>
+    </Misconfiguration>
+  </ClassificationGuidance>
+  <Response><IRForHumans>
+    <Phase name="Immediate Actions (0-30 minutes)">
+      <Action priority="1">Verify the change against forest change management.</Action>
+      <Action priority="2">If unauthorised: engage IR, plan reversion.</Action>
+    </Phase>
+    <Phase name="Containment and Eradication (hours)">
+      <Action>Audit trust relationships and SID history; review cross-domain access.</Action>
+    </Phase>
+    <Phase name="Recovery and Hardening (days)">
+      <Action>Restrict trust/policy edit rights; alert on every trust change; back up trust config.</Action>
+    </Phase>
+  </IRForHumans></Response>
+  <QualityChecks>
+    <Check>Only 4739 occurs in JCB today - the other codes are covered pre-emptively.</Check>
+    <Check>Trust changes are near-zero frequency; treat any as high-signal.</Check>
+  </QualityChecks>
+  <ClosureCriteria><FalsePositiveClosure>
+    <Item>Authorised forest change confirmed and recorded.</Item>
+  </FalsePositiveClosure><TruePositiveClosure>
+    <Item>Trust fabric reverted/validated; SID history audited; actor eradicated.</Item>
+  </TruePositiveClosure></ClosureCriteria>
+</Playbook>

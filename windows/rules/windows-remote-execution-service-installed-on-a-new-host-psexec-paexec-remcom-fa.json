@@ -1,0 +1,115 @@
+{
+  "rule_id": "a707059d-3f1c-4bd0-be03-eb56dffdd30b",
+  "name": "Windows — Remote-Execution Service Installed on a New Host (PsExec / PAExec / RemCom Family)",
+  "version": 1,
+  "enabled": true,
+  "interval": "30m",
+  "from": "now-40m",
+  "to": "now",
+  "description": "Detects installation of a service whose name matches the remote-execution tool families used for lateral movement: Sysinternals PsExec (PSEXESVC), PAExec, RemCom, CSExec, winexe and Impacket. Uses System-channel event 7045, which records ServiceName, ImagePath and the account the service runs as. This complements the existing 4697-based image-path rule by keying on the tool's service name instead, and covers hosts where Security-channel service auditing is not enabled.\n\n**Why new_terms rather than a plain query:** the authenticated Nessus scanner installs PSEXESVC across the estate as part of its credentialed checks — 110 events on 51 hosts in 7 days. Event 7045 carries no actor field, so the scanner cannot be excluded by account name the way it can on event 5145. Keying on a previously unseen host/service pair over a 14-day history suppresses the recurring scan targets while still alerting the first time PsExec lands on a host that has not seen it before.",
+  "tags": [
+    "JCB",
+    "ScanWave",
+    "Windows",
+    "Lateral Movement",
+    "PsExec",
+    "MITRE T1569.002"
+  ],
+  "author": [
+    "ScanWave"
+  ],
+  "license": "ScanWave — JCB Managed Detection",
+  "threat": [
+    {
+      "framework": "MITRE ATT&CK",
+      "tactic": {
+        "id": "TA0002",
+        "name": "Execution",
+        "reference": "https://attack.mitre.org/tactics/TA0002/"
+      },
+      "technique": [
+        {
+          "id": "T1569",
+          "name": "System Services",
+          "reference": "https://attack.mitre.org/techniques/T1569/",
+          "subtechnique": [
+            {
+              "id": "T1569.002",
+              "name": "Service Execution",
+              "reference": "https://attack.mitre.org/techniques/T1569/002/"
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "framework": "MITRE ATT&CK",
+      "tactic": {
+        "id": "TA0008",
+        "name": "Lateral Movement",
+        "reference": "https://attack.mitre.org/tactics/TA0008/"
+      },
+      "technique": [
+        {
+          "id": "T1021",
+          "name": "Remote Services",
+          "reference": "https://attack.mitre.org/techniques/T1021/",
+          "subtechnique": [
+            {
+              "id": "T1021.002",
+              "name": "SMB/Windows Admin Shares",
+              "reference": "https://attack.mitre.org/techniques/T1021/002/"
+            }
+          ]
+        }
+      ]
+    }
+  ],
+  "investigation_fields": {
+    "field_names": [
+      "host.name",
+      "user.name",
+      "user.domain",
+      "process.name",
+      "process.executable",
+      "process.command_line",
+      "process.args",
+      "process.parent.name",
+      "process.parent.executable",
+      "event.code",
+      "event.action",
+      "winlog.event_data.ServiceName"
+    ]
+  },
+  "related_integrations": [],
+  "required_fields": [],
+  "setup": "",
+  "note": "### Triage\n1. `winlog.event_data.ImagePath` shows the binary; `winlog.event_data.AccountName` shows the run-as context (usually LocalSystem).\n2. Identify who created it: correlate with 4697 and with 5145 `svcctl`/`PSEXESVC` access on the same host and timeframe.\n3. PsExec-family services are normally installed and removed within seconds — look for a matching 7036/7045 delete.\n4. Establish whether the bank's IT team uses PsExec for support; if not, treat as hands-on-keyboard intrusion.",
+  "false_positives": [
+    "IT administrators using Sysinternals PsExec for legitimate remote administration.",
+    "Authenticated vulnerability scanning that installs a temporary service.",
+    "Remote support tooling built on the PsExec service model."
+  ],
+  "references": [
+    "https://attack.mitre.org/techniques/T1569/002/"
+  ],
+  "risk_score": 73,
+  "risk_score_mapping": [],
+  "severity": "high",
+  "severity_mapping": [],
+  "output_index": "",
+  "max_signals": 100,
+  "exceptions_list": [],
+  "actions": [],
+  "type": "new_terms",
+  "query": "event.code:\"7045\" and winlog.event_data.ServiceName:(\"PSEXESVC\" or \"PAExec*\" or \"RemCom*\" or \"CSExec*\" or \"BTOBTO\" or \"winexesvc\" or \"PsExec*\" or \"impacket*\" or \"SecretsDump*\")",
+  "new_terms_fields": [
+    "host.name",
+    "winlog.event_data.ServiceName"
+  ],
+  "history_window_start": "now-14d",
+  "index": [
+    "logs-system.system-*"
+  ],
+  "language": "kuery"
+}

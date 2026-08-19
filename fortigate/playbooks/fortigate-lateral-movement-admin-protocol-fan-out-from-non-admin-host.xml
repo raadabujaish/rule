@@ -1,0 +1,148 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<Playbook xmlns="https://soc.example/playbooks" id="PB-FG-007" name="FortiGate — Lateral Movement: Admin-Protocol Fan-Out from Non-Admin Host - SOC Playbook" version="1.0" status="Production" classification="TLP:AMBER">
+  <Metadata>
+    <Owner>JCB Detection Engineering (WatchWave)</Owner>
+    <LastUpdated>2026-08-14</LastUpdated>
+    <Severity default="High">High</Severity>
+    <Confidence default="Medium">Medium</Confidence>
+    <Category>Lateral Movement / Remote Services</Category>
+    <MitreAttack>
+      <Technique id="T1021" name="Remote Services"/>
+      <Tactic id="TA0008" name="Lateral Movement"/>
+    </MitreAttack>
+    <References>
+      <Reference title="MITRE ATT and CK" url="https://attack.mitre.org/techniques/T1021/"/>
+    </References>
+  </Metadata>
+  <ExecutiveSummary>
+    <Overview>One internal host made accepted connections on admin protocols (SMB 445, RPC 135, RDP 3389, WinRM, SSH) to many internal destinations - admin-protocol fan-out, a lateral-movement signature. Triage question: is this a compromised host spreading, or a legitimate management/admin system doing its job?</Overview>
+    <BusinessImpact>Fan-out on admin protocols is how attackers pivot across a network after initial access; catching it early limits blast radius.</BusinessImpact>
+  </ExecutiveSummary>
+  <Scope><Assets>
+    <AssetType>FortiGate perimeter and internal firewalls (HQ + DR)</AssetType>
+    <AssetType>Internal server and user segments behind the FortiGate</AssetType>
+  </Assets><LogSources>
+    <LogSource>FortiGate traffic - logs-fortinet_fortigate.traffic-*</LogSource>
+  </LogSources></Scope>
+  <Prerequisites><TelemetryRequirements>
+    <Requirement>FortiGate logs shipped via Elastic Agent to logs-fortinet_fortigate.* (verified live).</Requirement>
+    <Requirement>Fields: fortinet.firewall.subtype (ips/dns/...), fortinet.firewall.action, fortinet.firewall.severity, fortinet.firewall.attack, fortinet.firewall.srccountry/dstcountry ('Reserved' = RFC1918 internal), fortinet.firewall.cfgpath, dns.question.name, source.ip, destination.ip, destination.port.</Requirement>
+  </TelemetryRequirements><DetectionSignals>
+    <Signal><Name>Admin-protocol fan-out</Name><Details>internal-to-internal accept on admin ports to many destinations.</Details></Signal>
+  </DetectionSignals></Prerequisites>
+  <Inputs>
+    <Input name="$source_ip" description="Internal source fanning out."/>
+  </Inputs>
+  <Triage><ImmediateCapture>
+    <Item>Source: $source_ip</Item>
+  </ImmediateCapture><InitialAssessment>
+    <Rule>Management servers (SCCM, monitoring, backup, PAM jump hosts) legitimately fan out on admin protocols; a user workstation or app server doing so is the lateral-movement concern.</Rule>
+  </InitialAssessment></Triage>
+  <Investigation>
+    <Goal>Determine whether the fan-out source is a legitimate management system or an unexpected host moving laterally.</Goal>
+    <Workflow>
+      <Step order="1" name="Fan-out breadth and protocol mix">
+        <Purpose>How many destinations on which admin ports - broad SMB/RDP fan-out from one host is the signature.</Purpose>
+        <Query platform="Elastic" language="ES|QL" id="INV-01-FGFAN-SHAPE">
+          <![CDATA[
+FROM logs-fortinet_fortigate.traffic-*
+| WHERE source.ip == "$source_ip" AND fortinet.firewall.action == "accept" AND destination.port IN (445, 135, 3389, 5985, 5986, 22) AND @timestamp >= NOW() - 4 hours
+| STATS conns = COUNT(*), targets = COUNT_DISTINCT(destination.ip), target_list = VALUES(destination.ip) BY destination.port
+| SORT conns DESC
+| LIMIT 15
+          ]]>
+        </Query>
+        <ExpectedOutput>
+          <Field name="destination.port"/>
+          <Field name="conns"/>
+          <Field name="targets"/>
+        </ExpectedOutput>
+        <AnalystNotes>Broad SMB(445)/RDP(3389) fan-out to many hosts = lateral movement. A management host shows a consistent, known target set; a compromised host shows new, broad targets.</AnalystNotes>
+      </Step>
+      <Step order="2" name="Does the source normally do this / what is it">
+        <Purpose>Compare against the host's broader profile to separate a management system from an anomalous fan-out.</Purpose>
+        <Query platform="Elastic" language="ES|QL" id="INV-02-FGFAN-ROLE">
+          <![CDATA[
+FROM logs-fortinet_fortigate.traffic-*
+| WHERE source.ip == "$source_ip" AND @timestamp >= NOW() - 4 hours
+| STATS total = COUNT(*), distinct_dsts = COUNT_DISTINCT(destination.ip), admin_conns = COUNT(CASE(destination.port IN (445,135,3389,5985,5986,22), 1, null))
+| LIMIT 1
+          ]]>
+        </Query>
+        <ExpectedOutput>
+          <Field name="total"/>
+          <Field name="distinct_dsts"/>
+          <Field name="admin_conns"/>
+        </ExpectedOutput>
+        <AnalystNotes>A host whose traffic is overwhelmingly admin-protocol fan-out is either a management system or actively spreading. Correlate the IP with CMDB role.</AnalystNotes>
+      </Step>
+      <Step order="3" name="Finalize classification">
+        <DecisionTree>
+          <Node><Condition>INV-01 shows broad admin-protocol fan-out from a host that is NOT a documented management system.</Condition><Result>True Positive (Lateral Movement - isolate source, IR)</Result></Node>
+          <Node><Condition>INV-01 shows fan-out combined with prior exploit/IPS activity from the same source (pivot from PB-FG-006).</Condition><Result>True Positive (Active Lateral Movement - IR)</Result></Node>
+          <Node><Condition>Source is a documented management/PAM/backup/monitoring server with a known target set.</Condition><Result>False Positive</Result></Node>
+          <Node><Condition>Fan-out from a server with an unclear role.</Condition><Result>Needs Escalation</Result></Node>
+        </DecisionTree>
+        <DocumentationChecklist>
+          <Item>Attach outputs of INV-01-FGFAN-SHAPE, INV-02-FGFAN-ROLE to the case.</Item>
+        </DocumentationChecklist>
+      </Step>
+    </Workflow>
+  </Investigation>
+  <ClassificationGuidance>
+    <FalsePositive>
+      <Definition>A legitimate management system (SCCM, monitoring, backup, PAM jump host).</Definition>
+      <Indicators>
+        <Item>Documented management-host IP.</Item>
+        <Item>Consistent, known target set.</Item>
+        <Item>Expected admin-protocol usage.</Item>
+      </Indicators>
+      <SOCAction>
+        <Item>Confirm the management role; baseline the host; close as false_positive.</Item>
+      </SOCAction>
+    </FalsePositive>
+    <TruePositive>
+      <Definition>A compromised host pivoting across the network on admin protocols.</Definition>
+      <Indicators>
+        <Item>Broad fan-out from a non-management host.</Item>
+        <Item>New/unusual target set.</Item>
+        <Item>Correlated with prior exploitation.</Item>
+      </Indicators>
+      <SOCAction>
+        <Item>Isolate the source; open IR; scope which targets it reached.</Item>
+        <Item>Reset credentials used from the host; hunt the spread.</Item>
+      </SOCAction>
+    </TruePositive>
+    <Misconfiguration>
+      <Definition>A misconfigured tool performing broad admin connections unnecessarily.</Definition>
+      <Indicators>
+        <Item>A known tool over-connecting due to misconfig.</Item>
+        <Item>Owner confirms benign.</Item>
+      </Indicators>
+      <SOCAction>
+        <Item>Fix the tool scope; document and baseline.</Item>
+      </SOCAction>
+    </Misconfiguration>
+  </ClassificationGuidance>
+  <Response><IRForHumans>
+    <Phase name="Immediate Actions (0-30 minutes)">
+      <Action priority="1">Isolate the source if not a management host.</Action>
+      <Action priority="2">Scope the reached targets.</Action>
+    </Phase>
+    <Phase name="Containment and Eradication (hours)">
+      <Action>Reset credentials used from the host; triage targets; eradicate.</Action>
+    </Phase>
+    <Phase name="Recovery and Hardening (days)">
+      <Action>Restrict admin protocols to management hosts; enforce PAM; segment east-west.</Action>
+    </Phase>
+  </IRForHumans></Response>
+  <QualityChecks>
+    <Check>Admin ports 445/135/3389/5985/5986/22 matched. Internal-to-internal ('Reserved' both).</Check>
+    <Check>Management-host allowlist is the key triage input - maintain it.</Check>
+  </QualityChecks>
+  <ClosureCriteria><FalsePositiveClosure>
+    <Item>Management role confirmed; target set known; documented.</Item>
+  </FalsePositiveClosure><TruePositiveClosure>
+    <Item>Source isolated; spread scoped; credentials reset; eradicated.</Item>
+  </TruePositiveClosure></ClosureCriteria>
+</Playbook>

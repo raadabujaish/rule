@@ -1,0 +1,148 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<Playbook xmlns="https://soc.example/playbooks" id="PB-WIN-003" name="Change Audit — Windows System Time Changed by an Interactive Account - SOC Playbook" version="1.0" status="Production" classification="TLP:AMBER">
+  <Metadata>
+    <Owner>JCB Detection Engineering (WatchWave)</Owner>
+    <LastUpdated>2026-08-14</LastUpdated>
+    <Severity default="Medium">Medium</Severity>
+    <Confidence default="Low">Low</Confidence>
+    <Category>Defense Evasion / Indicator Removal</Category>
+    <MitreAttack>
+      <Technique id="T1070.006" name="Timestomp"/>
+      <Tactic id="TA0005" name="Defense Evasion"/>
+    </MitreAttack>
+    <References>
+      <Reference title="MITRE ATT and CK" url="https://attack.mitre.org/techniques/T1070/"/>
+    </References>
+  </Metadata>
+  <ExecutiveSummary>
+    <Overview>System time was changed (4616) by an interactive account (machine/SYSTEM/service excluded). Triage question: benign time-sync/admin action, or an attacker skewing time to disrupt logs/Kerberos/forensics?</Overview>
+    <BusinessImpact>Time manipulation can break Kerberos, misalign logs to frustrate forensics, and trigger security-control failures.</BusinessImpact>
+  </ExecutiveSummary>
+  <Scope><Assets>
+    <AssetType>Windows servers and workstations (INTDOM domain)</AssetType>
+    <AssetType>Domain controllers</AssetType>
+  </Assets><LogSources>
+    <LogSource>Windows Security event log - logs-system.security-*</LogSource>
+  </LogSources></Scope>
+  <Prerequisites><TelemetryRequirements>
+    <Requirement>Windows Security + Sysmon + PowerShell logs via Elastic Agent (verified live). Sysmon event.code 1=process(command_line/parent populated), 11=file, 13/12=registry(registry.path populated); process.code_signature NOT collected.</Requirement>
+  </TelemetryRequirements><DetectionSignals>
+    <Signal><Name>Interactive time change</Name><Details>4616, SubjectUserName not machine/SYSTEM/service.</Details></Signal>
+  </DetectionSignals></Prerequisites>
+  <Inputs>
+    <Input name="$hostname" description="Host where time changed."/>
+    <Input name="$username" description="Interactive account (SubjectUserName)."/>
+  </Inputs>
+  <Triage><ImmediateCapture>
+    <Item>Host: $hostname</Item>
+  </ImmediateCapture><InitialAssessment>
+    <Rule>Weigh the evidence story, not any single fact - see ClassificationGuidance.</Rule>
+  </InitialAssessment></Triage>
+  <Investigation>
+    <Goal>Determine whether the time change is a benign admin/sync action or deliberate time skew.</Goal>
+    <Workflow>
+      <Step order="1" name="Time-change detail and magnitude">
+        <Purpose>A small adjustment is benign sync; a large jump (hours/days) is suspicious.</Purpose>
+        <Query platform="Elastic" language="ES|QL" id="INV-01-TIME-CHANGE">
+          <![CDATA[
+FROM logs-system.security-*
+| WHERE event.code == "4616" AND host.name == "$hostname" AND @timestamp >= NOW() - 4 hours
+| KEEP @timestamp, winlog.event_data.SubjectUserName, winlog.event_data.PreviousTime, winlog.event_data.NewTime, winlog.event_data.ProcessName
+| SORT @timestamp DESC
+| LIMIT 15
+          ]]>
+        </Query>
+        <ExpectedOutput>
+          <Field name="winlog.event_data.SubjectUserName"/>
+          <Field name="winlog.event_data.PreviousTime"/>
+          <Field name="winlog.event_data.NewTime"/>
+          <Field name="winlog.event_data.ProcessName"/>
+        </ExpectedOutput>
+        <AnalystNotes>Compare PreviousTime vs NewTime: seconds = benign sync; a large jump is suspicious. ProcessName tells you the tool (w32tm/svchost = sync; cmd/powershell = manual).</AnalystNotes>
+      </Step>
+      <Step order="2" name="Did suspicious activity surround the time change on this host">
+        <Purpose>Time skew paired with security-relevant activity (log clear, privilege use) indicates anti-forensics.</Purpose>
+        <Query platform="Elastic" language="ES|QL" id="INV-02-TIME-CONTEXT" optional="true">
+          <![CDATA[
+FROM logs-system.security-*
+| WHERE host.name == "$hostname" AND event.code IN ("1102","4672","4688","7045") AND @timestamp >= NOW() - 4 hours
+| STATS c = COUNT(*), codes = VALUES(event.code)
+| LIMIT 5
+          ]]>
+        </Query>
+        <ExpectedOutput>
+          <Field name="codes"/>
+          <Field name="c"/>
+        </ExpectedOutput>
+        <AnalystNotes>A log clear (1102) or service install near the time change supports anti-forensics; a quiet host supports benign sync.</AnalystNotes>
+      </Step>
+      <Step order="3" name="Finalize classification">
+        <DecisionTree>
+          <Node><Condition>Large time jump by an interactive account via a manual tool, especially near a log-clear/privilege event.</Condition><Result>True Positive (Time Skew / Anti-forensics - escalate)</Result></Node>
+          <Node><Condition>Small adjustment by w32tm/sync process, or an admin correcting drift under a ticket.</Condition><Result>False Positive</Result></Node>
+          <Node><Condition>Time changed by an admin with no ticket and unclear magnitude.</Condition><Result>Needs Escalation</Result></Node>
+        </DecisionTree>
+        <DocumentationChecklist>
+          <Item>Attach outputs of INV-01-TIME-CHANGE, INV-02-TIME-CONTEXT to the case.</Item>
+        </DocumentationChecklist>
+      </Step>
+    </Workflow>
+  </Investigation>
+  <ClassificationGuidance>
+    <FalsePositive>
+      <Definition>Benign time synchronisation or an authorised correction.</Definition>
+      <Indicators>
+        <Item>Small delta.</Item>
+        <Item>Sync process (w32tm/svchost).</Item>
+        <Item>Known admin / ticket.</Item>
+      </Indicators>
+      <SOCAction>
+        <Item>Confirm; close as false_positive.</Item>
+      </SOCAction>
+    </FalsePositive>
+    <TruePositive>
+      <Definition>Deliberate time skew to disrupt logs/Kerberos/forensics.</Definition>
+      <Indicators>
+        <Item>Large jump.</Item>
+        <Item>Manual tool.</Item>
+        <Item>Paired with log clear/privilege activity.</Item>
+      </Indicators>
+      <SOCAction>
+        <Item>Restore correct time; isolate if anti-forensics; open IR.</Item>
+        <Item>Reconstruct the affected window from SIEM.</Item>
+      </SOCAction>
+    </TruePositive>
+    <Misconfiguration>
+      <Definition>A misconfigured NTP client causing repeated corrections.</Definition>
+      <Indicators>
+        <Item>Repeated small corrections.</Item>
+        <Item>Broken NTP config.</Item>
+      </Indicators>
+      <SOCAction>
+        <Item>Fix NTP; document.</Item>
+      </SOCAction>
+    </Misconfiguration>
+  </ClassificationGuidance>
+  <Response><IRForHumans>
+    <Phase name="Immediate Actions (0-30 minutes)">
+      <Action priority="1">Confirm the activity on the host; if malicious indicators, isolate the host.</Action>
+      <Action priority="2">Identify the responsible account/process and its origin.</Action>
+    </Phase>
+    <Phase name="Containment and Eradication (hours)">
+      <Action>Isolate the host; capture volatile evidence; hunt the same pattern across the estate.</Action>
+      <Action>Reset credentials used on the host if compromise is confirmed.</Action>
+    </Phase>
+    <Phase name="Recovery and Hardening (days)">
+      <Action>Remediate the root cause; add/verify EDR coverage; apply relevant hardening.</Action>
+    </Phase>
+  </IRForHumans></Response>
+  <QualityChecks>
+    <Check>Confirm the required telemetry (Sysmon/Security auditing) is present on the host.</Check>
+    <Check>Tune known-benign administrative sources via exceptions, not by disabling the rule.</Check>
+  </QualityChecks>
+  <ClosureCriteria><FalsePositiveClosure>
+    <Item>Activity confirmed benign/authorised and documented.</Item>
+  </FalsePositiveClosure><TruePositiveClosure>
+    <Item>Host contained and triaged; root cause eradicated; estate swept; findings recorded.</Item>
+  </TruePositiveClosure></ClosureCriteria>
+</Playbook>

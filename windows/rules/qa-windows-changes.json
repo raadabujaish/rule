@@ -1,0 +1,315 @@
+{
+  "rule_id": "7f3f868d-2d7c-4b56-90d3-928fa39b709f",
+  "name": "QA - Windows Changes",
+  "version": 1,
+  "enabled": true,
+  "interval": "1h",
+  "from": "now-2h",
+  "to": "now",
+  "description": "Windows Changes",
+  "tags": [
+    "IRM",
+    "QA",
+    "Windows"
+  ],
+  "author": [
+    "Sinareet Tsay"
+  ],
+  "license": "",
+  "threat": [],
+  "investigation_fields": {
+    "field_names": [
+      "host.name",
+      "winlog.event_data.SubjectUserName",
+      "winlog.event_data.SubjectDomainName",
+      "winlog.event_data.TargetUserName",
+      "winlog.event_data.TargetDomainName",
+      "winlog.event_data.MemberName",
+      "winlog.event_data.MemberSid",
+      "event.code",
+      "event.action",
+      "message",
+      "related.user"
+    ]
+  },
+  "related_integrations": [],
+  "required_fields": [],
+  "setup": "",
+  "false_positives": [],
+  "references": [],
+  "risk_score": 47,
+  "risk_score_mapping": [],
+  "severity": "medium",
+  "severity_mapping": [],
+  "output_index": "",
+  "max_signals": 100,
+  "exceptions_list": [],
+  "actions": [],
+  "meta": {
+    "from": "1h",
+    "kibana_siem_app_url": "https://jcb.scanwave.local:8008/app/security"
+  },
+  "type": "query",
+  "language": "kuery",
+  "index": [
+    "apm-*-transaction*",
+    "auditbeat-*",
+    "endgame-*",
+    "filebeat-*",
+    "logs-*",
+    "packetbeat-*",
+    "traces-apm*",
+    "winlogbeat-*",
+    "-*elastic-cloud-logs-*"
+  ],
+  "query": "NOT (\"192.168.166.1\" OR related.user:*$)",
+  "filters": [
+    {
+      "meta": {
+        "index": "dbc25823-5f55-4d8b-9099-3c3327a41ca7",
+        "type": "custom",
+        "disabled": false,
+        "negate": false,
+        "alias": null,
+        "key": "query",
+        "value": "{\"bool\":{\"minimum_should_match\":1,\"should\":[{\"match_phrase\":{\"event.code\":\"4720\"}},{\"match_phrase\":{\"event.code\":\"4722\"}},{\"match_phrase\":{\"event.code\":\"4723\"}},{\"match_phrase\":{\"event.code\":\"4724\"}},{\"match_phrase\":{\"event.code\":\"4725\"}},{\"match_phrase\":{\"event.code\":\"4726\"}},{\"match_phrase\":{\"event.code\":\"4738\"}},{\"match_phrase\":{\"event.code\":\"4740\"}},{\"match_phrase\":{\"event.code\":\"4767\"}},{\"match_phrase\":{\"event.code\":\"4781\"}},{\"match_phrase\":{\"event.code\":\"1100\"}},{\"match_phrase\":{\"event.code\":\"4727\"}},{\"match_phrase\":{\"event.code\":\"4728\"}},{\"match_phrase\":{\"event.code\":\"4729\"}},{\"match_phrase\":{\"event.code\":\"4730\"}},{\"match_phrase\":{\"event.code\":\"4731\"}},{\"match_phrase\":{\"event.code\":\"4732\"}},{\"match_phrase\":{\"event.code\":\"4733\"}},{\"match_phrase\":{\"event.code\":\"4734\"}},{\"match_phrase\":{\"event.code\":\"4737\"}},{\"match_phrase\":{\"event.code\":\"4754\"}},{\"match_phrase\":{\"event.code\":\"4755\"}},{\"match_phrase\":{\"event.code\":\"4756\"}},{\"match_phrase\":{\"event.code\":\"4757\"}},{\"match_phrase\":{\"event.code\":\"4758\"}},{\"match_phrase\":{\"event.code\":\"4764\"}},{\"match_phrase\":{\"event.code\":\"4739\"}},{\"match_phrase\":{\"event.code\":\"4715\"}},{\"match_phrase\":{\"event.code\":\"4719\"}},{\"match_phrase\":{\"event.code\":\"4817\"}},{\"match_phrase\":{\"event.code\":\"4912\"}},{\"match_phrase\":{\"event.code\":\"4717\"}},{\"match_phrase\":{\"event.code\":\"4716\"}},{\"match_phrase\":{\"event.code\":\"4720\"}},{\"match_phrase\":{\"event.code\":\"4722\"}},{\"match_phrase\":{\"event.code\":\"4725\"}},{\"match_phrase\":{\"event.code\":\"4726\"}},{\"match_phrase\":{\"event.code\":\"9999\"}},{\"match_phrase\":{\"event.code\":\"4707\"}}]}}"
+      },
+      "query": {
+        "bool": {
+          "minimum_should_match": 1,
+          "should": [
+            {
+              "match_phrase": {
+                "event.code": "4720"
+              }
+            },
+            {
+              "match_phrase": {
+                "event.code": "4722"
+              }
+            },
+            {
+              "match_phrase": {
+                "event.code": "4723"
+              }
+            },
+            {
+              "match_phrase": {
+                "event.code": "4724"
+              }
+            },
+            {
+              "match_phrase": {
+                "event.code": "4725"
+              }
+            },
+            {
+              "match_phrase": {
+                "event.code": "4726"
+              }
+            },
+            {
+              "match_phrase": {
+                "event.code": "4738"
+              }
+            },
+            {
+              "match_phrase": {
+                "event.code": "4740"
+              }
+            },
+            {
+              "match_phrase": {
+                "event.code": "4767"
+              }
+            },
+            {
+              "match_phrase": {
+                "event.code": "4781"
+              }
+            },
+            {
+              "match_phrase": {
+                "event.code": "1100"
+              }
+            },
+            {
+              "match_phrase": {
+                "event.code": "4727"
+              }
+            },
+            {
+              "match_phrase": {
+                "event.code": "4728"
+              }
+            },
+            {
+              "match_phrase": {
+                "event.code": "4729"
+              }
+            },
+            {
+              "match_phrase": {
+                "event.code": "4730"
+              }
+            },
+            {
+              "match_phrase": {
+                "event.code": "4731"
+              }
+            },
+            {
+              "match_phrase": {
+                "event.code": "4732"
+              }
+            },
+            {
+              "match_phrase": {
+                "event.code": "4733"
+              }
+            },
+            {
+              "match_phrase": {
+                "event.code": "4734"
+              }
+            },
+            {
+              "match_phrase": {
+                "event.code": "4737"
+              }
+            },
+            {
+              "match_phrase": {
+                "event.code": "4754"
+              }
+            },
+            {
+              "match_phrase": {
+                "event.code": "4755"
+              }
+            },
+            {
+              "match_phrase": {
+                "event.code": "4756"
+              }
+            },
+            {
+              "match_phrase": {
+                "event.code": "4757"
+              }
+            },
+            {
+              "match_phrase": {
+                "event.code": "4758"
+              }
+            },
+            {
+              "match_phrase": {
+                "event.code": "4764"
+              }
+            },
+            {
+              "match_phrase": {
+                "event.code": "4739"
+              }
+            },
+            {
+              "match_phrase": {
+                "event.code": "4715"
+              }
+            },
+            {
+              "match_phrase": {
+                "event.code": "4719"
+              }
+            },
+            {
+              "match_phrase": {
+                "event.code": "4817"
+              }
+            },
+            {
+              "match_phrase": {
+                "event.code": "4912"
+              }
+            },
+            {
+              "match_phrase": {
+                "event.code": "4717"
+              }
+            },
+            {
+              "match_phrase": {
+                "event.code": "4716"
+              }
+            },
+            {
+              "match_phrase": {
+                "event.code": "4720"
+              }
+            },
+            {
+              "match_phrase": {
+                "event.code": "4722"
+              }
+            },
+            {
+              "match_phrase": {
+                "event.code": "4725"
+              }
+            },
+            {
+              "match_phrase": {
+                "event.code": "4726"
+              }
+            },
+            {
+              "match_phrase": {
+                "event.code": "9999"
+              }
+            },
+            {
+              "match_phrase": {
+                "event.code": "4707"
+              }
+            }
+          ]
+        }
+      },
+      "$state": {
+        "store": "appState"
+      }
+    },
+    {
+      "meta": {
+        "index": "dbc25823-5f55-4d8b-9099-3c3327a41ca7",
+        "type": "custom",
+        "disabled": false,
+        "negate": true,
+        "alias": null,
+        "key": "query",
+        "value": "{\"bool\":{\"minimum_should_match\":1,\"should\":[{\"match_phrase\":{\"event.action\":\"locked-out-user-account\"}},{\"match_phrase\":{\"event.action\":\"user-member-enumerated\"}}]}}"
+      },
+      "query": {
+        "bool": {
+          "minimum_should_match": 1,
+          "should": [
+            {
+              "match_phrase": {
+                "event.action": "locked-out-user-account"
+              }
+            },
+            {
+              "match_phrase": {
+                "event.action": "user-member-enumerated"
+              }
+            }
+          ]
+        }
+      },
+      "$state": {
+        "store": "appState"
+      }
+    }
+  ]
+}

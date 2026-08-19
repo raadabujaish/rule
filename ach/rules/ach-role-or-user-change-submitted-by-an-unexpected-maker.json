@@ -1,0 +1,80 @@
+{
+  "rule_id": "jcb-ach-privilege-change-new-maker",
+  "name": "ACH — Role or User Change Submitted by an Unexpected Maker",
+  "version": 1,
+  "enabled": true,
+  "interval": "1h",
+  "from": "now-90m",
+  "to": "now",
+  "description": "Attacker objective\nEscalate privilege or plant an accomplice account in the ACH payment system by submitting a role assignment, role revocation, or user addition as an unauthorized maker.\n\nAttack logic\nACH privilege changes follow a maker-checker workflow performed by a small, fixed set of authorized makers. A change submitted by a maker never seen before is outside the sanctioned administration set and may be a compromised account or a control bypass.\n\nWhy this detection works\nA new-terms model over the maker identity auto-baselines the authorized makers and fires only when a genuinely new maker submits an ACH privilege change.\n\nFalse positives\nOnboarding of a new authorized ACH administrator.\n\nTuning\nVerify and allowlist new authorized makers; pair with the maker-checker self-approval detection; review the role/user change and the checker.\n\nRequired telemetry\nACH application audit (apps-*, type=ACHAPP): USERNAME_MAKER, USERNAME_CHECKER, ACTION_TASK, USERNAME_UPDATED.",
+  "tags": [
+    "JCB",
+    "BankingSystem",
+    "Change-Control",
+    "Phase3",
+    "Tactic: Privilege Escalation",
+    "Use Case: Threat Detection"
+  ],
+  "author": [
+    "raadabujaish"
+  ],
+  "license": "",
+  "threat": [
+    {
+      "framework": "MITRE ATT&CK",
+      "tactic": {
+        "id": "TA0004",
+        "name": "Privilege Escalation",
+        "reference": "https://attack.mitre.org/tactics/TA0004/"
+      },
+      "technique": [
+        {
+          "id": "T1098",
+          "name": "Account Manipulation",
+          "reference": "https://attack.mitre.org/techniques/T1098/"
+        }
+      ]
+    }
+  ],
+  "investigation_fields": {
+    "field_names": [
+      "host.name",
+      "user.name",
+      "source.ip",
+      "destination.ip",
+      "event.action",
+      "event.code",
+      "event.outcome",
+      "message"
+    ]
+  },
+  "related_integrations": [],
+  "required_fields": [],
+  "setup": "",
+  "note": "## Investigation guide\n1. USERNAME_MAKER = the submitting operator; ACTION_TASK/USERNAME_UPDATED show the change and target.\n2. Confirm the maker is an authorized ACH administrator; an unexpected maker on the payment system is high-risk — involve fraud/risk.\n3. Check whether the same change was self-approved (maker == checker).",
+  "false_positives": [
+    "Onboarding of a new authorized ACH administrator."
+  ],
+  "references": [
+    "https://attack.mitre.org/techniques/T1098/"
+  ],
+  "risk_score": 73,
+  "risk_score_mapping": [],
+  "severity": "high",
+  "severity_mapping": [],
+  "output_index": "",
+  "max_signals": 100,
+  "exceptions_list": [],
+  "actions": [],
+  "type": "new_terms",
+  "query": "type:\"ACHAPP\" and USERNAME_MAKER:*",
+  "new_terms_fields": [
+    "USERNAME_MAKER.keyword"
+  ],
+  "history_window_start": "now-30d",
+  "index": [
+    "apps-*",
+    "-apps-*-2025"
+  ],
+  "language": "kuery"
+}

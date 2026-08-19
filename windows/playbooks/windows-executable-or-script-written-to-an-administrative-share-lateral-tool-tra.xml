@@ -1,0 +1,152 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<Playbook xmlns="https://soc.example/playbooks" id="PB-WIN-008" name="Windows — Executable or Script Written to an Administrative Share (Lateral Tool Transfer) - SOC Playbook" version="1.0" status="Production" classification="TLP:AMBER">
+  <Metadata>
+    <Owner>JCB Detection Engineering (WatchWave)</Owner>
+    <LastUpdated>2026-08-14</LastUpdated>
+    <Severity default="High">High</Severity>
+    <Confidence default="Medium">Medium</Confidence>
+    <Category>Lateral Movement / Lateral Tool Transfer</Category>
+    <MitreAttack>
+      <Technique id="T1570" name="Lateral Tool Transfer"/>
+      <Tactic id="TA0008" name="Lateral Movement"/>
+    </MitreAttack>
+    <References>
+      <Reference title="MITRE ATT and CK" url="https://attack.mitre.org/techniques/T1570/"/>
+    </References>
+  </Metadata>
+  <ExecutiveSummary>
+    <Overview>An executable or script was written to an administrative share (C$/ADMIN$) via SMB (5145 with WriteData to an .exe/.dll/.ps1/etc.). Triage question: is this an attacker staging a tool for remote execution (lateral movement), or a legitimate software-deployment/admin action?</Overview>
+    <BusinessImpact>Writing a binary to a remote admin share is the staging step of PsExec-style lateral movement - a tool is placed before it is run remotely.</BusinessImpact>
+  </ExecutiveSummary>
+  <Scope><Assets>
+    <AssetType>Windows servers and workstations (INTDOM domain)</AssetType>
+    <AssetType>Domain controllers</AssetType>
+  </Assets><LogSources>
+    <LogSource>Windows Security event log - logs-system.security-*</LogSource>
+  </LogSources></Scope>
+  <Prerequisites><TelemetryRequirements>
+    <Requirement>Windows Security + Sysmon + PowerShell logs via Elastic Agent (verified live). Sysmon event.code 1=process(command_line/parent populated), 11=file, 13/12=registry(registry.path populated); process.code_signature NOT collected.</Requirement>
+  </TelemetryRequirements><DetectionSignals>
+    <Signal><Name>Tool written to admin share</Name><Details>5145, ShareName C$/ADMIN$, WriteData, executable/script RelativeTargetName.</Details></Signal>
+  </DetectionSignals></Prerequisites>
+  <Inputs>
+    <Input name="$hostname" description="Destination host (where the file was written)."/>
+    <Input name="$username" description="Writing principal (SubjectUserName)."/>
+    <Input name="$source_ip" description="Source of the SMB write."/>
+  </Inputs>
+  <Triage><ImmediateCapture>
+    <Item>Host: $hostname</Item>
+  </ImmediateCapture><InitialAssessment>
+    <Rule>Weigh the evidence story, not any single fact - see ClassificationGuidance.</Rule>
+  </InitialAssessment></Triage>
+  <Investigation>
+    <Goal>Determine whether the file write to the admin share is lateral-movement tool staging or a legitimate deployment.</Goal>
+    <Workflow>
+      <Step order="1" name="What was written, from where, by whom">
+        <Purpose>The file name/type, source and account reveal tool-staging vs software deployment.</Purpose>
+        <Query platform="Elastic" language="ES|QL" id="INV-01-ADMSHARE-WRITE">
+          <![CDATA[
+FROM logs-system.security-*
+| WHERE event.code == "5145" AND host.name == "$hostname" AND winlog.event_data.ShareName LIKE "*$" AND @timestamp >= NOW() - 4 hours
+| EVAL src = COALESCE(TO_STRING(source.ip), "local")
+| KEEP @timestamp, src, winlog.event_data.SubjectUserName, winlog.event_data.ShareName, winlog.event_data.RelativeTargetName
+| SORT @timestamp DESC
+| LIMIT 25
+          ]]>
+        </Query>
+        <ExpectedOutput>
+          <Field name="src"/>
+          <Field name="winlog.event_data.SubjectUserName"/>
+          <Field name="winlog.event_data.RelativeTargetName"/>
+        </ExpectedOutput>
+        <AnalystNotes>A randomly-named .exe written to ADMIN$ from a workstation = tool staging. A signed installer to C$ from a deployment server = software push. Note the source and account.</AnalystNotes>
+      </Step>
+      <Step order="2" name="Was a remote service/task then created on this host (execution)">
+        <Purpose>Tool staging followed by remote service/task creation is the PsExec lateral-execution chain completing.</Purpose>
+        <Query platform="Elastic" language="ES|QL" id="INV-02-ADMSHARE-EXEC" optional="true">
+          <![CDATA[
+FROM logs-system.security-*,logs-system.system-*
+| WHERE host.name == "$hostname" AND event.code IN ("7045","4697","4698") AND @timestamp >= NOW() - 1 hours
+| KEEP @timestamp, event.code, winlog.event_data.ServiceName, winlog.event_data.ServiceFileName, winlog.event_data.TaskName
+| SORT @timestamp DESC
+| LIMIT 10
+          ]]>
+        </Query>
+        <ExpectedOutput>
+          <Field name="event.code"/>
+          <Field name="winlog.event_data.ServiceName"/>
+          <Field name="winlog.event_data.ServiceFileName"/>
+        </ExpectedOutput>
+        <AnalystNotes>A new service/task referencing the just-written file right after the write confirms lateral execution - escalate to IR. Empty = staging only (still investigate).</AnalystNotes>
+      </Step>
+      <Step order="3" name="Finalize classification">
+        <DecisionTree>
+          <Node><Condition>A tool/binary written to an admin share from a workstation/unexpected source, especially followed by remote service/task creation.</Condition><Result>True Positive (Lateral Tool Transfer / Remote Exec - IR)</Result></Node>
+          <Node><Condition>A signed software package pushed by a documented deployment system.</Condition><Result>False Positive</Result></Node>
+          <Node><Condition>Admin manually copying a legitimate tool for a known task.</Condition><Result>Benign Activity</Result></Node>
+          <Node><Condition>Write from an unclear source with no follow-on.</Condition><Result>Needs Escalation</Result></Node>
+        </DecisionTree>
+        <DocumentationChecklist>
+          <Item>Attach outputs of INV-01-ADMSHARE-WRITE, INV-02-ADMSHARE-EXEC to the case.</Item>
+        </DocumentationChecklist>
+      </Step>
+    </Workflow>
+  </Investigation>
+  <ClassificationGuidance>
+    <FalsePositive>
+      <Definition>Legitimate software deployment or admin file copy.</Definition>
+      <Indicators>
+        <Item>Deployment server source.</Item>
+        <Item>Signed/known package.</Item>
+        <Item>Expected admin task.</Item>
+      </Indicators>
+      <SOCAction>
+        <Item>Confirm the deployment; close as false_positive/benign_activity.</Item>
+      </SOCAction>
+    </FalsePositive>
+    <TruePositive>
+      <Definition>Lateral-movement tool staging for remote execution.</Definition>
+      <Indicators>
+        <Item>Random/unsigned binary to an admin share.</Item>
+        <Item>Workstation/unexpected source.</Item>
+        <Item>Followed by remote service/task creation.</Item>
+      </Indicators>
+      <SOCAction>
+        <Item>Isolate source and destination; open IR; remove the staged tool.</Item>
+        <Item>Reset credentials used; hunt the source's other targets.</Item>
+      </SOCAction>
+    </TruePositive>
+    <Misconfiguration>
+      <Definition>A backup/sync tool writing executables to shares by design.</Definition>
+      <Indicators>
+        <Item>A known sync/backup account.</Item>
+        <Item>Consistent, expected files.</Item>
+      </Indicators>
+      <SOCAction>
+        <Item>Baseline the tool; document/exception.</Item>
+      </SOCAction>
+    </Misconfiguration>
+  </ClassificationGuidance>
+  <Response><IRForHumans>
+    <Phase name="Immediate Actions (0-30 minutes)">
+      <Action priority="1">Confirm the activity on the host; if malicious indicators, isolate the host.</Action>
+      <Action priority="2">Identify the responsible account/process and its origin.</Action>
+    </Phase>
+    <Phase name="Containment and Eradication (hours)">
+      <Action>Isolate the host; capture volatile evidence; hunt the same pattern across the estate.</Action>
+      <Action>Reset credentials used on the host if compromise is confirmed.</Action>
+    </Phase>
+    <Phase name="Recovery and Hardening (days)">
+      <Action>Remediate the root cause; add/verify EDR coverage; apply relevant hardening.</Action>
+    </Phase>
+  </IRForHumans></Response>
+  <QualityChecks>
+    <Check>Confirm the required telemetry (Sysmon/Security auditing) is present on the host.</Check>
+    <Check>Tune known-benign administrative sources via exceptions, not by disabling the rule.</Check>
+  </QualityChecks>
+  <ClosureCriteria><FalsePositiveClosure>
+    <Item>Activity confirmed benign/authorised and documented.</Item>
+  </FalsePositiveClosure><TruePositiveClosure>
+    <Item>Host contained and triaged; root cause eradicated; estate swept; findings recorded.</Item>
+  </TruePositiveClosure></ClosureCriteria>
+</Playbook>

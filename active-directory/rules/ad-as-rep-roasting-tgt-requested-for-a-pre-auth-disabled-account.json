@@ -1,0 +1,88 @@
+{
+  "rule_id": "jcb-ad-asrep-roastable-tgt",
+  "name": "AD — AS-REP Roasting: TGT Requested for a Pre-Auth-Disabled Account",
+  "version": 1,
+  "enabled": true,
+  "interval": "1h",
+  "from": "now-90m",
+  "to": "now",
+  "description": "Attacker objective\nObtain an AS-REP for an account that does not require Kerberos pre-authentication, then crack its password offline (AS-REP Roasting).\n\nAttack logic\nWhen 'do not require Kerberos pre-authentication' is set on an account, a Domain Controller returns an AS-REP encrypted with the account's password to any requester. In a hardened domain pre-authentication is enforced, so a pre-auth-disabled TGT request is anomalous.\n\nWhy this detection works\nThe AS-REQ event (4768) records the pre-authentication type; a value indicating no pre-authentication surfaces roastable requests directly.\n\nFalse positives\nA legacy application account that genuinely requires pre-authentication disabled.\n\nTuning\nAllowlist verified legacy accounts; better, re-enable pre-authentication on them. Investigate any new occurrence.\n\nRequired telemetry\nWindows Security 4768 (PreAuthType).",
+  "tags": [
+    "JCB",
+    "ActiveDirectory",
+    "Phase3",
+    "Use Case: Threat Detection",
+    "Tactic: Credential Access"
+  ],
+  "author": [
+    "raadabujaish"
+  ],
+  "license": "",
+  "threat": [
+    {
+      "framework": "MITRE ATT&CK",
+      "tactic": {
+        "id": "TA0006",
+        "name": "Credential Access",
+        "reference": "https://attack.mitre.org/tactics/TA0006/"
+      },
+      "technique": [
+        {
+          "id": "T1558",
+          "name": "Steal or Forge Kerberos Tickets",
+          "reference": "https://attack.mitre.org/techniques/T1558/",
+          "subtechnique": [
+            {
+              "id": "T1558.004",
+              "name": "AS-REP Roasting",
+              "reference": "https://attack.mitre.org/techniques/T1558/004/"
+            }
+          ]
+        }
+      ]
+    }
+  ],
+  "investigation_fields": {
+    "field_names": [
+      "host.name",
+      "winlog.computer_name",
+      "user.name",
+      "user.domain",
+      "winlog.event_data.TargetUserName",
+      "winlog.event_data.TargetDomainName",
+      "source.ip",
+      "winlog.event_data.LogonType",
+      "winlog.event_data.Status",
+      "winlog.event_data.SubStatus",
+      "winlog.event_data.ServiceName",
+      "winlog.event_data.TicketOptions",
+      "event.code",
+      "event.action",
+      "winlog.event_data.PreAuthType"
+    ]
+  },
+  "related_integrations": [],
+  "required_fields": [],
+  "setup": "",
+  "note": "## Investigation guide\n1. TargetUserName is the roastable account. Confirm whether pre-authentication was disabled deliberately.\n2. Re-enable pre-authentication and reset the account password (long/complex); hunt for offline cracking.",
+  "false_positives": [
+    "A legacy application account that genuinely requires pre-authentication disabled."
+  ],
+  "references": [
+    "https://attack.mitre.org/techniques/T1558/"
+  ],
+  "risk_score": 56,
+  "risk_score_mapping": [],
+  "severity": "medium",
+  "severity_mapping": [],
+  "output_index": "",
+  "max_signals": 100,
+  "exceptions_list": [],
+  "actions": [],
+  "type": "query",
+  "language": "kuery",
+  "index": [
+    "logs-system.security-*"
+  ],
+  "query": "event.code:\"4768\" and winlog.event_data.PreAuthType:\"0\""
+}

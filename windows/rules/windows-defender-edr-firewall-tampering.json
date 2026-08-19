@@ -1,0 +1,83 @@
+{
+  "rule_id": "jcb-win-defender-security-tamper",
+  "name": "Windows — Defender / EDR / Firewall Tampering",
+  "version": 1,
+  "enabled": true,
+  "interval": "1h",
+  "from": "now-90m",
+  "to": "now",
+  "description": "Attacker objective\nDisable or blind endpoint defenses — Microsoft Defender, the EDR sensor, or the host firewall — to evade detection before further action.\n\nAttack logic\nAttackers disable real-time protection, add exclusions, remove signatures, stop the AV/EDR service, unload minifilter drivers, or turn off the host firewall.\n\nWhy this detection works\nProcess command-line auditing records the tamper commands (Set-MpPreference, MpCmdRun, service stop of the defender/EDR services, netsh firewall off, fltmc unload), independent of case.\n\nFalse positives\nAn administrator legitimately reconfiguring Defender or the firewall during maintenance.\n\nTuning\nCorrelate with change control; allowlist sanctioned management automation identities; investigate unexpected actors.\n\nRequired telemetry\nProcess creation with command line: Sysmon Event ID 1 and Windows Security 4688.",
+  "tags": [
+    "JCB",
+    "Windows",
+    "Phase3",
+    "Use Case: Threat Detection",
+    "Tactic: Defense Evasion"
+  ],
+  "author": [
+    "raadabujaish"
+  ],
+  "license": "",
+  "threat": [
+    {
+      "framework": "MITRE ATT&CK",
+      "tactic": {
+        "id": "TA0005",
+        "name": "Defense Evasion",
+        "reference": "https://attack.mitre.org/tactics/TA0005/"
+      },
+      "technique": [
+        {
+          "id": "T1562",
+          "name": "Impair Defenses",
+          "reference": "https://attack.mitre.org/techniques/T1562/",
+          "subtechnique": [
+            {
+              "id": "T1562.001",
+              "name": "Disable or Modify Tools",
+              "reference": "https://attack.mitre.org/techniques/T1562/001/"
+            }
+          ]
+        }
+      ]
+    }
+  ],
+  "investigation_fields": {
+    "field_names": [
+      "@timestamp",
+      "host.name",
+      "user.name",
+      "process.name",
+      "process.parent.name",
+      "process.command_line",
+      "event.code",
+      "winlog.event_data.SubjectUserName",
+      "user.domain",
+      "process.executable",
+      "process.args",
+      "process.parent.executable",
+      "event.action"
+    ]
+  },
+  "related_integrations": [],
+  "required_fields": [],
+  "setup": "",
+  "note": "## Investigation guide\n1. Identify the host/user and the exact tamper command.\n2. Verify against change control; unexplained defense-tampering is a strong pre-attack indicator — treat the host as suspect.\n3. Check whether protection was re-enabled and hunt for activity in the blind window.",
+  "false_positives": [
+    "An administrator legitimately reconfiguring Defender or the firewall during maintenance."
+  ],
+  "references": [
+    "https://attack.mitre.org/techniques/T1562/"
+  ],
+  "risk_score": 73,
+  "risk_score_mapping": [],
+  "severity": "high",
+  "severity_mapping": [],
+  "output_index": "",
+  "max_signals": 100,
+  "exceptions_list": [],
+  "actions": [],
+  "type": "esql",
+  "language": "esql",
+  "query": "FROM logs-windows.sysmon_operational-*,logs-system.security-* METADATA _id, _index, _version\n| WHERE (event.code == \"1\" OR event.code == \"4688\") AND process.command_line IS NOT NULL\n| EVAL cl = TO_LOWER(process.command_line)\n| WHERE (cl LIKE \"*set-mppreference*\" AND cl LIKE \"*disable*\")\n   OR (cl LIKE \"*add-mppreference*\" AND cl LIKE \"*exclusion*\")\n   OR (cl LIKE \"*set-mppreference*\" AND cl LIKE \"*exclusion*\")\n   OR (cl LIKE \"*mpcmdrun*\" AND cl LIKE \"*removedefinitions*\")\n   OR (cl LIKE \"*stop*\" AND (cl LIKE \"*windefend*\" OR cl LIKE \"*wdnissvc*\" OR cl LIKE \"*sense*\" OR cl LIKE \"*mssense*\"))\n   OR (cl LIKE \"*netsh*\" AND cl LIKE \"*advfirewall*\" AND cl LIKE \"*state off*\")\n   OR (cl LIKE \"*netsh*\" AND cl LIKE \"*firewall*\" AND cl LIKE \"*opmode*\" AND cl LIKE \"*disable*\")\n   OR (cl LIKE \"*fltmc*\" AND cl LIKE \"*unload*\")\n| KEEP @timestamp, host.name, user.name, process.name, process.parent.name, process.command_line, event.code, winlog.event_data.SubjectUserName"
+}

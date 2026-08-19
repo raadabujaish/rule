@@ -1,0 +1,174 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<Playbook xmlns="https://soc.example/playbooks" id="PB-AD-009" name="AD — Member Added to a Privileged (Tier-0) Group - SOC Playbook" version="1.0" status="Production" classification="TLP:AMBER">
+  <Metadata>
+    <Owner>JCB Detection Engineering (WatchWave)</Owner>
+    <LastUpdated>2026-08-14</LastUpdated>
+    <Severity default="High">High</Severity>
+    <Confidence default="Medium">Medium</Confidence>
+    <Category>Privilege Escalation / Account Manipulation</Category>
+    <MitreAttack>
+      <Technique id="T1098" name="Account Manipulation"/>
+      <Tactic id="TA0004" name="Privilege Escalation"/>
+    </MitreAttack>
+    <References>
+      <Reference title="MITRE ATT and CK" url="https://attack.mitre.org/techniques/T1098/"/>
+    </References>
+  </Metadata>
+  <ExecutiveSummary>
+    <Overview>An account was added to a Tier-0 / high-privilege group (Domain Admins, Enterprise Admins, Schema Admins, GPO Creator Owners, DnsAdmins, Cert Publishers, Exchange privileged groups) via 4728/4732/4756. Triage question: was this a change-controlled administrative action, or an unexpected principal granting privilege?</Overview>
+    <BusinessImpact>Membership in these groups is effectively domain control; unauthorised addition is a direct path to full compromise and persistence.</BusinessImpact>
+  </ExecutiveSummary>
+  <Scope><Assets>
+    <AssetType>Active Directory domain controllers (INTDOM)</AssetType>
+    <AssetType>Windows member servers and workstations</AssetType>
+  </Assets><LogSources>
+    <LogSource>Windows Security event log - logs-system.security-*</LogSource>
+  </LogSources></Scope>
+  <Prerequisites><TelemetryRequirements>
+    <Requirement>Windows Security auditing shipped via Elastic Agent to logs-system.security-* (verified live).</Requirement>
+  </TelemetryRequirements><DetectionSignals>
+    <Signal><Name>Tier-0 group add</Name><Details>4728/4732/4756 with a privileged group as target.</Details></Signal>
+  </DetectionSignals></Prerequisites>
+  <Inputs>
+    <Input name="$username" description="Principal who performed the add (SubjectUserName)."/>
+    <Input name="$target_user" description="Account added (MemberName/MemberSid)."/>
+    <Input name="$group" description="Privileged group name (TargetUserName)."/>
+  </Inputs>
+  <Triage><ImmediateCapture>
+    <Item>Actor: $username</Item>
+    <Item>Added member: $target_user</Item>
+    <Item>Group: $group</Item>
+  </ImmediateCapture><InitialAssessment>
+    <Rule>Change during an approved window by a known Tier-0 admin: likely benign - verify against change ticket.</Rule>
+    <Rule>Actor is not a recognised directory admin, or the added member is a service/normal user: escalate.</Rule>
+  </InitialAssessment></Triage>
+  <Investigation>
+    <Goal>Determine whether the actor is an authorised Tier-0 admin acting under change control, and whether the addition is normal for this environment.</Goal>
+    <Workflow>
+      <Step order="1" name="Reconstruct the change: actor, member, group, time">
+        <Purpose>Capture exactly who added whom to which group for the change-record comparison.</Purpose>
+        <Query platform="Elastic" language="ES|QL" id="INV-01-T0-CHANGE">
+          <![CDATA[
+FROM logs-system.security-*
+| WHERE event.code IN ("4728","4732","4756") AND @timestamp >= NOW() - 4 hours
+  AND winlog.event_data.SubjectUserName == "$username"
+| KEEP @timestamp, host.name, winlog.event_data.SubjectUserName, winlog.event_data.MemberName, winlog.event_data.TargetUserName, event.code
+| SORT @timestamp DESC
+| LIMIT 25
+          ]]>
+        </Query>
+        <ExpectedOutput>
+          <Field name="winlog.event_data.MemberName"/>
+          <Field name="winlog.event_data.TargetUserName"/>
+          <Field name="@timestamp"/>
+        </ExpectedOutput>
+        <AnalystNotes>Confirm the group is truly Tier-0 and note whether the actor made several such additions in a row (bulk grant = higher concern).</AnalystNotes>
+      </Step>
+      <Step order="2" name="Is this actor an established privileged-group manager">
+        <Purpose>An actor who routinely administers groups differs from a first-time or unexpected principal.</Purpose>
+        <Query platform="Elastic" language="ES|QL" id="INV-02-T0-ACTOR-HISTORY">
+          <![CDATA[
+FROM logs-system.security-*
+| WHERE winlog.event_data.SubjectUserName == "$username" AND event.code IN ("4728","4732","4756","4729","4733","4757") AND @timestamp >= NOW() - 4 hours
+| STATS ops = COUNT(*), adds = VALUES(event.code), groups = VALUES(winlog.event_data.TargetUserName)
+| LIMIT 1
+          ]]>
+        </Query>
+        <ExpectedOutput>
+          <Field name="ops"/>
+          <Field name="groups"/>
+        </ExpectedOutput>
+        <AnalystNotes>Established admins show routine add/remove operations; a principal whose only group action is this single privileged add is suspicious.</AnalystNotes>
+      </Step>
+      <Step order="3" name="What did the ADDED account do next">
+        <Purpose>Immediate use of the new privilege (logon to DC, sensitive access) turns a paperwork gap into an active incident.</Purpose>
+        <Query platform="Elastic" language="ES|QL" id="INV-03-T0-MEMBER-USE">
+          <![CDATA[
+FROM logs-system.security-*
+| WHERE winlog.event_data.TargetUserName == "$target_user" AND event.code IN ("4624","4672","4662") AND @timestamp >= NOW() - 2 hours
+| EVAL src = COALESCE(TO_STRING(source.ip), "local")
+| STATS c = COUNT(*), codes = VALUES(event.code), hosts = VALUES(host.name) BY src
+| SORT c DESC
+| LIMIT 10
+          ]]>
+        </Query>
+        <ExpectedOutput>
+          <Field name="src"/>
+          <Field name="codes"/>
+          <Field name="hosts"/>
+        </ExpectedOutput>
+        <AnalystNotes>4672 (special privileges) or 4662 (directory access) by the added account right after being added shows the privilege was exercised - escalate.</AnalystNotes>
+      </Step>
+      <Step order="4" name="Finalize classification">
+        <DecisionTree>
+          <Node><Condition>INV-01/02 show the actor is not an established Tier-0 admin, or no change ticket exists for the addition.</Condition><Result>True Positive (Unauthorised Privilege Grant - escalate, likely remove)</Result></Node>
+          <Node><Condition>INV-03 shows the added account immediately exercised the privilege (DC logon, special privileges, directory access).</Condition><Result>True Positive (Privilege Escalation Exercised - IR)</Result></Node>
+          <Node><Condition>INV-01/02 show a known Tier-0 admin performing the change during an approved window matching a change ticket.</Condition><Result>False Positive</Result></Node>
+          <Node><Condition>Actor is a delegated admin but no change ticket can be located.</Condition><Result>Needs Escalation</Result></Node>
+        </DecisionTree>
+        <DocumentationChecklist>
+          <Item>Attach outputs of INV-01-T0-CHANGE, INV-02-T0-ACTOR-HISTORY, INV-03-T0-MEMBER-USE to the case.</Item>
+        </DocumentationChecklist>
+      </Step>
+    </Workflow>
+  </Investigation>
+  <ClassificationGuidance>
+    <FalsePositive>
+      <Definition>Authorised, change-controlled privileged-group administration.</Definition>
+      <Indicators>
+        <Item>Actor is a recognised Tier-0/identity admin.</Item>
+        <Item>Change matches an approved ticket/window.</Item>
+        <Item>Added member is an expected admin account.</Item>
+      </Indicators>
+      <SOCAction>
+        <Item>Verify the change ticket.</Item>
+        <Item>Close as false_positive; ensure the change is recorded.</Item>
+      </SOCAction>
+    </FalsePositive>
+    <TruePositive>
+      <Definition>Privilege granted by or to an unexpected principal - escalation/persistence.</Definition>
+      <Indicators>
+        <Item>Actor is not an established group admin.</Item>
+        <Item>No change record.</Item>
+        <Item>Added account immediately uses the privilege or is a normal/service account.</Item>
+      </Indicators>
+      <SOCAction>
+        <Item>Remove the member if unauthorised; disable involved accounts.</Item>
+        <Item>Investigate the actor's session/foothold; open IR.</Item>
+        <Item>Review all recent Tier-0 changes by the actor.</Item>
+      </SOCAction>
+    </TruePositive>
+    <Misconfiguration>
+      <Definition>An automation/provisioning tool over-adding members due to a misconfigured rule.</Definition>
+      <Indicators>
+        <Item>A provisioning service account making the change per a broken group-mapping rule.</Item>
+        <Item>Owner confirms intent but wrong scope.</Item>
+      </Indicators>
+      <SOCAction>
+        <Item>Fix the provisioning rule; remove erroneous members.</Item>
+        <Item>Document.</Item>
+      </SOCAction>
+    </Misconfiguration>
+  </ClassificationGuidance>
+  <Response><IRForHumans>
+    <Phase name="Immediate Actions (0-30 minutes)">
+      <Action priority="1">If unauthorised: remove the member and disable involved accounts now.</Action>
+      <Action priority="2">Snapshot current Tier-0 membership.</Action>
+    </Phase>
+    <Phase name="Containment and Eradication (hours)">
+      <Action>Investigate actor foothold; review all recent privileged changes; revoke sessions.</Action>
+    </Phase>
+    <Phase name="Recovery and Hardening (days)">
+      <Action>Enforce PAM/approval workflow for Tier-0 changes; alert on every Tier-0 delta.</Action>
+    </Phase>
+  </IRForHumans></Response>
+  <QualityChecks>
+    <Check>Group list in the rule covers the core Tier-0 set - confirm JCB-specific privileged groups (e.g. custom admin groups) are included.</Check>
+    <Check>4756 covers universal groups (Enterprise/Schema Admins).</Check>
+  </QualityChecks>
+  <ClosureCriteria><FalsePositiveClosure>
+    <Item>Change ticket verified; membership matches approved state.</Item>
+  </FalsePositiveClosure><TruePositiveClosure>
+    <Item>Unauthorised member removed; actor investigated; Tier-0 membership reconciled.</Item>
+  </TruePositiveClosure></ClosureCriteria>
+</Playbook>

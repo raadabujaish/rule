@@ -1,0 +1,98 @@
+{
+  "rule_id": "jcb-kav-behavioral-block",
+  "name": "Kaspersky — Behavioral Threat Blocked (Adaptive Anomaly Control)",
+  "version": 1,
+  "enabled": true,
+  "interval": "1h",
+  "from": "now-90m",
+  "to": "now",
+  "description": "Attacker objective\nExecute code through a living-off-the-land chain — for example a scripting interpreter launched from an unusual parent (WMI, Office) with an encoded command — that deviates from the endpoint's normal behaviour.\n\nAttack logic\nKaspersky Adaptive Anomaly Control learns each host's normal behaviour and blocks anomalous process actions such as an interpreter being spawned from an atypical parent process. A block indicates behaviour abnormal for that endpoint.\n\nWhy this detection works\nThe behavioural rule name, together with the source and target process paths and the target command line, identifies the exact LOLBin/interpreter chain that was blocked.\n\nFalse positives\nLegitimate management or monitoring tooling that uses the same chain (e.g. WMI-based administration) on a host where it is not part of the learned baseline.\n\nTuning\nExclude verified management/monitoring hosts and service accounts; review the target command line (often encoded) before dismissing.\n\nRequired telemetry\nKaspersky Security Center CEF (GNRL_EV_ADSEC_DETECT): RuleName, SrcProcPath, TrgProcPath, target command line, destination.domain, destination.user.name.",
+  "tags": [
+    "JCB",
+    "Kaspersky",
+    "Phase3",
+    "Tactic: Execution",
+    "Use Case: Threat Detection"
+  ],
+  "author": [
+    "raadabujaish"
+  ],
+  "license": "",
+  "threat": [
+    {
+      "framework": "MITRE ATT&CK",
+      "tactic": {
+        "id": "TA0002",
+        "name": "Execution",
+        "reference": "https://attack.mitre.org/tactics/TA0002/"
+      },
+      "technique": [
+        {
+          "id": "T1059",
+          "name": "Command and Scripting Interpreter",
+          "reference": "https://attack.mitre.org/techniques/T1059/",
+          "subtechnique": [
+            {
+              "id": "T1059.001",
+              "name": "PowerShell",
+              "reference": "https://attack.mitre.org/techniques/T1059/001/"
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "framework": "MITRE ATT&CK",
+      "tactic": {
+        "id": "TA0002",
+        "name": "Execution",
+        "reference": "https://attack.mitre.org/tactics/TA0002/"
+      },
+      "technique": [
+        {
+          "id": "T1047",
+          "name": "Windows Management Instrumentation",
+          "reference": "https://attack.mitre.org/techniques/T1047/"
+        }
+      ]
+    }
+  ],
+  "investigation_fields": {
+    "field_names": [
+      "destination.domain",
+      "destination.user.name",
+      "destination.ip",
+      "cef.name",
+      "cef.device.event_class_id",
+      "cef.severity",
+      "message",
+      "observer.product",
+      "observer.vendor"
+    ]
+  },
+  "related_integrations": [],
+  "required_fields": [],
+  "setup": "",
+  "note": "## Investigation guide\n1. Examine the source process → target process and the target command line; decode any encoded command.\n2. An encoded interpreter launch from WMI, Office or another unusual parent is likely malicious — investigate the host.\n3. Confirm whether the host runs sanctioned management tooling that would explain the chain.",
+  "false_positives": [
+    "Legitimate management or monitoring tooling that uses the same chain (e.g. WMI-based administration) on a host where it is not part of the learned baseline."
+  ],
+  "references": [
+    "https://attack.mitre.org/techniques/T1059/",
+    "https://attack.mitre.org/techniques/T1047/"
+  ],
+  "risk_score": 73,
+  "risk_score_mapping": [],
+  "severity": "high",
+  "severity_mapping": [],
+  "output_index": "",
+  "max_signals": 100,
+  "exceptions_list": [],
+  "actions": [],
+  "type": "query",
+  "language": "kuery",
+  "index": [
+    "logs-cef.log-*"
+  ],
+  "query": "observer.vendor:\"KasperskyLab\" and cef.device.event_class_id:\"GNRL_EV_ADSEC_DETECT\""
+}

@@ -1,0 +1,99 @@
+{
+  "rule_id": "b39408f3-ec73-4261-b06b-e20e9682ed28",
+  "name": " USB Allowed Plugins",
+  "version": 1,
+  "enabled": true,
+  "interval": "10m",
+  "from": "now-1200s",
+  "to": "now",
+  "description": " USB Allowed Plugins",
+  "tags": [],
+  "author": [],
+  "license": "",
+  "threat": [],
+  "investigation_fields": {
+    "field_names": [
+      "host.name",
+      "user.name",
+      "winlog.event_data.DeviceDescription",
+      "winlog.event_data.ClassName",
+      "winlog.event_data.DeviceId",
+      "event.code",
+      "event.action",
+      "event.provider"
+    ]
+  },
+  "related_integrations": [],
+  "required_fields": [],
+  "setup": "",
+  "false_positives": [],
+  "references": [],
+  "risk_score": 73,
+  "risk_score_mapping": [],
+  "severity": "high",
+  "severity_mapping": [],
+  "output_index": "",
+  "max_signals": 100,
+  "exceptions_list": [],
+  "actions": [],
+  "meta": {
+    "from": "10m",
+    "kibana_siem_app_url": "https://jcb.scanwave.local:8008/app/security"
+  },
+  "type": "query",
+  "language": "kuery",
+  "index": [
+    "apm-*-transaction*",
+    "auditbeat-*",
+    "endgame-*",
+    "filebeat-*",
+    "logs-*",
+    "packetbeat-*",
+    "traces-apm*",
+    "winlogbeat-*",
+    "-*elastic-cloud-logs-*",
+    ".alerts-security.alerts-default"
+  ],
+  "query": "",
+  "filters": [
+    {
+      "meta": {
+        "index": "1b8c52bf-61bb-4921-943c-77faca40725c",
+        "type": "custom",
+        "disabled": false,
+        "negate": false,
+        "alias": null,
+        "key": "query",
+        "value": "{\"bool\":{\"minimum_should_match\":1,\"should\":[{\"bool\":{\"must\":[{\"match_phrase\":{\"event.provider\":\"Microsoft-Windows-Security-Auditing\"}},{\"terms\":{\"event.code\":[\"6416\"]}}]}}]}}"
+      },
+      "$state": {
+        "store": "appState"
+      },
+      "query": {
+        "bool": {
+          "minimum_should_match": 1,
+          "should": [
+            {
+              "bool": {
+                "must": [
+                  {
+                    "match_phrase": {
+                      "event.provider": "Microsoft-Windows-Security-Auditing"
+                    }
+                  },
+                  {
+                    "terms": {
+                      "event.code": [
+                        "6416"
+                      ]
+                    }
+                  }
+                ]
+              }
+            }
+          ]
+        }
+      }
+    }
+  ]
+}

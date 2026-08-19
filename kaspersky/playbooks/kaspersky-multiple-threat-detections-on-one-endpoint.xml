@@ -1,0 +1,146 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<Playbook xmlns="https://soc.example/playbooks" id="PB-KAS-006" name="Kaspersky — Multiple Threat Detections on One Endpoint - SOC Playbook" version="1.0" status="Production" classification="TLP:AMBER">
+  <Metadata>
+    <Owner>JCB Detection Engineering (WatchWave)</Owner>
+    <LastUpdated>2026-08-14</LastUpdated>
+    <Severity default="High">High</Severity>
+    <Confidence default="Medium">Medium</Confidence>
+    <Category>Malware / Active Compromise</Category>
+    <MitreAttack>
+      <Technique id="T1204.002" name="Malicious File"/>
+      <Tactic id="TA0002" name="Execution"/>
+    </MitreAttack>
+    <References>
+      <Reference title="MITRE ATT and CK" url="https://attack.mitre.org/techniques/T1204/"/>
+    </References>
+  </Metadata>
+  <ExecutiveSummary>
+    <Overview>Kaspersky reported multiple distinct threat detections on one endpoint in the window (ES|QL aggregate) - a pattern of active compromise rather than a single caught object. Triage: an actively-compromised endpoint, or repeated detections of one benign-flagged item?</Overview>
+    <BusinessImpact>Multiple threats on one endpoint indicates an active infection dropping/executing several malicious objects.</BusinessImpact>
+  </ExecutiveSummary>
+  <Scope><Assets>
+    <AssetType>Windows/Linux endpoints managed by Kaspersky</AssetType>
+    <AssetType>Kaspersky Security Center</AssetType>
+  </Assets><LogSources>
+    <LogSource>Kaspersky CEF via syslog - logs-cef.log-*</LogSource>
+  </LogSources></Scope>
+  <Prerequisites><TelemetryRequirements>
+    <Requirement>Kaspersky Security Center CEF (verified live). Fields: destination.domain (the affected ENDPOINT, not the collector), destination.user.name, cef.device.event_class_id, cef.name, message (malware name/path/SHA256), source.ip. Use destination.domain as the host of interest.</Requirement>
+  </TelemetryRequirements><DetectionSignals>
+    <Signal><Name>Multiple Threat Detections on One Endpoi</Name><Details>endpoint with multiple distinct Kaspersky threat detections.</Details></Signal>
+  </DetectionSignals></Prerequisites>
+  <Inputs>
+    <Input name="$endpoint" description="Affected endpoint (destination.domain)."/>
+  </Inputs>
+  <Triage><ImmediateCapture>
+    <Item>$endpoint: $endpoint</Item>
+  </ImmediateCapture><InitialAssessment>
+    <Rule>Weigh the full evidence story per the ClassificationGuidance, not any single fact.</Rule>
+  </InitialAssessment></Triage>
+  <Investigation>
+    <Goal>Determine whether the endpoint is actively compromised (multiple real threats) or repeatedly flagging one benign item.</Goal>
+    <Workflow>
+      <Step order="1" name="Distinct threats on the endpoint">
+        <Purpose>The variety and names of threats distinguish active compromise from one repeated false-positive.</Purpose>
+        <Query platform="Elastic" language="ES|QL" id="INV-01-KASMULTI-THREATS">
+          <![CDATA[
+FROM logs-cef.log-*
+| WHERE cef.device.vendor == "KasperskyLab" AND destination.domain == "$endpoint" AND cef.device.event_class_id RLIKE "(?i).*(virus|object_blocked|notcured|attack|adsec).*" AND @timestamp >= NOW() - 4 hours
+| STATS detections = COUNT(*), distinct_threats = COUNT_DISTINCT(cef.name), threats = VALUES(cef.name), classes = VALUES(cef.device.event_class_id)
+| LIMIT 1
+          ]]>
+        </Query>
+        <ExpectedOutput>
+          <Field name="detections"/>
+          <Field name="distinct_threats"/>
+          <Field name="threats"/>
+          <Field name="classes"/>
+        </ExpectedOutput>
+        <AnalystNotes>Several DISTINCT threat names/classes = active compromise (multiple payloads). Many detections of ONE name = a single item repeatedly flagged (possibly benign or a persistent uncured object).</AnalystNotes>
+      </Step>
+      <Step order="2" name="Disposition - was any threat uncured/active">
+        <Purpose>Uncured/blocked-but-recurring threats among the set confirm active infection.</Purpose>
+        <Query platform="Elastic" language="ES|QL" id="INV-02-KASMULTI-DISPOSITION" optional="true">
+          <![CDATA[
+FROM logs-cef.log-*
+| WHERE cef.device.vendor == "KasperskyLab" AND destination.domain == "$endpoint" AND cef.device.event_class_id RLIKE "(?i).*notcured.*" AND @timestamp >= NOW() - 4 hours
+| STATS uncured = COUNT(*), names = VALUES(cef.name)
+| LIMIT 1
+          ]]>
+        </Query>
+        <ExpectedOutput>
+          <Field name="uncured"/>
+          <Field name="names"/>
+        </ExpectedOutput>
+        <AnalystNotes>Any uncured threat among multiple detections = active infection - isolate.</AnalystNotes>
+      </Step>
+      <Step order="3" name="Finalize classification">
+        <DecisionTree>
+          <Node><Condition>Multiple distinct real threats, or any uncured threat, on the endpoint.</Condition><Result>True Positive (Active Compromise - isolate + IR)</Result></Node>
+          <Node><Condition>Many detections of a single benign-flagged item (all cured).</Condition><Result>False Positive</Result></Node>
+          <Node><Condition>A test/EICAR or security-exercise generating multiple benign detections.</Condition><Result>Benign Activity</Result></Node>
+          <Node><Condition>Multiple detections with unclear disposition.</Condition><Result>Needs Escalation</Result></Node>
+        </DecisionTree>
+        <DocumentationChecklist>
+          <Item>Attach outputs of INV-01-KASMULTI-THREATS, INV-02-KASMULTI-DISPOSITION to the case.</Item>
+        </DocumentationChecklist>
+      </Step>
+    </Workflow>
+  </Investigation>
+  <ClassificationGuidance>
+    <FalsePositive>
+      <Definition>One benign item flagged repeatedly.</Definition>
+      <Indicators>
+        <Item>Single threat name repeated.</Item>
+        <Item>All cured/blocked.</Item>
+        <Item>Benign file.</Item>
+      </Indicators>
+      <SOCAction>
+        <Item>Confirm reputation; tune; close.</Item>
+      </SOCAction>
+    </FalsePositive>
+    <TruePositive>
+      <Definition>An actively-compromised endpoint with multiple payloads.</Definition>
+      <Indicators>
+        <Item>Multiple distinct threats.</Item>
+        <Item>Any uncured.</Item>
+        <Item>Follow-on activity.</Item>
+      </Indicators>
+      <SOCAction>
+        <Item>Isolate the endpoint; full IR; hunt the payloads/hashes across the estate.</Item>
+      </SOCAction>
+    </TruePositive>
+    <Misconfiguration>
+      <Definition>A security test (EICAR) or exercise.</Definition>
+      <Indicators>
+        <Item>EICAR/test files.</Item>
+        <Item>Known exercise.</Item>
+      </Indicators>
+      <SOCAction>
+        <Item>Confirm the test; document.</Item>
+      </SOCAction>
+    </Misconfiguration>
+  </ClassificationGuidance>
+  <Response><IRForHumans>
+    <Phase name="Immediate Actions (0-30 minutes)">
+      <Action priority="1">Identify the affected endpoint (destination.domain) and the threat.</Action>
+      <Action priority="2">If malware active/uncured or spreading, isolate the endpoint.</Action>
+    </Phase>
+    <Phase name="Containment and Eradication (hours)">
+      <Action>Isolate the endpoint; run a full scan; capture the sample; open IR.</Action>
+      <Action>Hunt the same malware/hash across endpoints.</Action>
+    </Phase>
+    <Phase name="Recovery and Hardening (days)">
+      <Action>Ensure Kaspersky is enforcing + updated; add the hash/IOC to blocklists; verify EDR coverage.</Action>
+    </Phase>
+  </IRForHumans></Response>
+  <QualityChecks>
+    <Check>Kaspersky reports the endpoint in destination.domain (host.* is the collector pod) - always pivot on destination.domain.</Check>
+    <Check>The CEF pipeline occasionally mislabels events - see the pipeline health note in the phase-1 report.</Check>
+  </QualityChecks>
+  <ClosureCriteria><FalsePositiveClosure>
+    <Item>Benign item confirmed; documented.</Item>
+  </FalsePositiveClosure><TruePositiveClosure>
+    <Item>Endpoint isolated + cleaned; payloads hunted.</Item>
+  </TruePositiveClosure></ClosureCriteria>
+</Playbook>

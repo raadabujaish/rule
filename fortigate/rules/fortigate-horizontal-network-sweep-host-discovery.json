@@ -1,0 +1,81 @@
+{
+  "rule_id": "jcb-fgt-network-sweep",
+  "name": "FortiGate — Horizontal Network Sweep (Host Discovery)",
+  "version": 1,
+  "enabled": true,
+  "interval": "1h",
+  "from": "now-1h",
+  "to": "now",
+  "description": "Attacker objective\nEnumerate live internal hosts (a ping/connection sweep) to build a lateral-movement target list.\n\nAttack logic\nA source generating denied connections to a large number of distinct internal hosts in a short window is sweeping. This is distinct from a vertical port scan (many ports, few hosts). Known infrastructure, resolvers and proxies are excluded.\n\nWhy this detection works\nCounting distinct denied destination hosts per source isolates horizontal discovery.\n\nFalse positives\nMonitoring/discovery tooling; a busy gateway not yet excluded.\n\nTuning\nRaise the threshold or add infrastructure to the exclusion.\n\nRequired telemetry\nFortiGate traffic logs (source.ip, destination.ip, action).",
+  "tags": [
+    "JCB",
+    "Perimeter",
+    "Phase3",
+    "Use Case: Threat Detection",
+    "Tactic: Discovery"
+  ],
+  "author": [
+    "raadabujaish"
+  ],
+  "threat": [
+    {
+      "framework": "MITRE ATT&CK",
+      "tactic": {
+        "id": "TA0007",
+        "name": "Discovery",
+        "reference": "https://attack.mitre.org/tactics/TA0007/"
+      },
+      "technique": [
+        {
+          "id": "T1046",
+          "name": "Network Service Discovery",
+          "reference": "https://attack.mitre.org/techniques/T1046/"
+        }
+      ]
+    }
+  ],
+  "investigation_fields": {
+    "field_names": [
+      "source.ip",
+      "destination.ip",
+      "destination.port",
+      "fortinet.firewall.action"
+    ]
+  },
+  "related_integrations": [],
+  "required_fields": [],
+  "setup": "",
+  "note": "## Investigation guide\n1. source.ip sweeping many hosts (denied) indicates reconnaissance.\n2. Correlate with the port-scan / lateral-movement rules on the same source.",
+  "false_positives": [
+    "Monitoring/discovery tooling; a busy gateway not yet excluded."
+  ],
+  "references": [
+    "https://attack.mitre.org/techniques/T1046/"
+  ],
+  "risk_score": 70,
+  "risk_score_mapping": [],
+  "severity": "high",
+  "severity_mapping": [],
+  "output_index": "",
+  "max_signals": 100,
+  "exceptions_list": [],
+  "actions": [],
+  "type": "threshold",
+  "language": "kuery",
+  "index": [
+    "logs-fortinet_fortigate.traffic-*"
+  ],
+  "query": "fortinet.firewall.srccountry:\"Reserved\" and fortinet.firewall.action:\"deny\" and not source.ip:(\"192.168.166.1\" or \"192.168.25.1\" or \"192.168.25.2\" or \"172.17.25.1\" or \"192.168.112.222\" or \"192.168.112.223\" or \"192.168.215.109\" or \"192.168.220.1\")",
+  "threshold": {
+    "field": [
+      "source.ip"
+    ],
+    "value": 1,
+    "cardinality": [
+      {
+        "field": "destination.ip",
+        "value": 300
+      }
+    ]
+  }
+}

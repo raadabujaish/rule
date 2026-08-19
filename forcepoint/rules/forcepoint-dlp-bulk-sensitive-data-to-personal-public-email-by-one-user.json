@@ -1,0 +1,71 @@
+{
+  "rule_id": "jcb-fp-bulk-sensitive-personal-email",
+  "name": "Forcepoint DLP — Bulk Sensitive Data to Personal / Public Email by One User",
+  "version": 1,
+  "enabled": true,
+  "interval": "1h",
+  "from": "now-24h",
+  "to": "now",
+  "description": "Attacker objective\nMass-exfiltrate sensitive data by emailing many distinct sensitive documents to a personal or public webmail account within a short window — a classic pre-departure or insider data theft.\n\nAttack logic\nA single sensitive email to a personal address may be incidental; one user sending several distinct sensitive documents to public-mail domains in a short window is deliberate bulk exfiltration.\n\nWhy this detection works\nAggregating distinct deduplicated DLP incidents (by incident ID) per user, scoped to sensitive content to public-mail domains, separates bulk exfiltration from the occasional single message.\n\nFalse positives\nA user with a legitimate one-off bulk task (e.g. an authorised transfer to a partner on a public domain).\n\nTuning\nRaise the per-user incident threshold to the local routine rate; allowlist sanctioned bulk-processing/service accounts; review the document list and recipients.\n\nRequired telemetry\nForcepoint DLP CEF: eventId (incident dedup key), deviceEventCategory, loginName, destinationUserName, filename.",
+  "tags": [
+    "JCB",
+    "Forcepoint-DLP",
+    "Phase3",
+    "Tactic: Exfiltration",
+    "Use Case: Insider Threat",
+    "Use Case: Threat Detection"
+  ],
+  "author": [
+    "raadabujaish"
+  ],
+  "license": "",
+  "threat": [
+    {
+      "framework": "MITRE ATT&CK",
+      "tactic": {
+        "id": "TA0010",
+        "name": "Exfiltration",
+        "reference": "https://attack.mitre.org/tactics/TA0010/"
+      },
+      "technique": [
+        {
+          "id": "T1567",
+          "name": "Exfiltration Over Web Service",
+          "reference": "https://attack.mitre.org/techniques/T1567/"
+        }
+      ]
+    }
+  ],
+  "investigation_fields": {
+    "field_names": [
+      "user.name",
+      "source.ip",
+      "destination.ip",
+      "destination.port",
+      "event.action",
+      "message",
+      "observer.product"
+    ]
+  },
+  "related_integrations": [],
+  "required_fields": [],
+  "setup": "",
+  "note": "## Investigation guide\n1. Review the user's distinct sensitive documents and recipients listed in the alert.\n2. Confirm whether this is authorised bulk business or insider exfiltration; correlate with HR/leaver status where available.\n3. Escalate to fraud/compliance and consider disabling the account pending investigation.",
+  "false_positives": [
+    "A user with a legitimate one-off bulk task (e.g. an authorised transfer to a partner on a public domain)."
+  ],
+  "references": [
+    "https://attack.mitre.org/techniques/T1567/"
+  ],
+  "risk_score": 73,
+  "risk_score_mapping": [],
+  "severity": "high",
+  "severity_mapping": [],
+  "output_index": "",
+  "max_signals": 100,
+  "exceptions_list": [],
+  "actions": [],
+  "type": "esql",
+  "language": "esql",
+  "query": "FROM logs-cef.log-* METADATA _id, _index, _version\n| WHERE observer.vendor == \"Forcepoint\" AND cef.extensions.loginName LIKE \"INTDOM*\"\n| WHERE cef.extensions.deviceEventCategory LIKE \"*Public Mail Domain*\" AND (cef.extensions.deviceEventCategory LIKE \"*Sensitive words*\" OR cef.extensions.deviceEventCategory LIKE \"*PCI*\" OR cef.extensions.deviceEventCategory LIKE \"*Files Outbound*\")\n| EVAL user.name = TO_LOWER(MV_LAST(SPLIT(cef.extensions.loginName, \"\\\\\")))\n| STATS incidents = COUNT_DISTINCT(cef.extensions.eventId), recipients = VALUES(cef.extensions.destinationUserName), files = VALUES(cef.extensions.filename), hosts = VALUES(cef.extensions.sourceHost) BY user.name\n| WHERE incidents >= 3"
+}

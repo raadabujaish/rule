@@ -1,0 +1,85 @@
+{
+  "rule_id": "jcb-win-service-suspicious-image",
+  "name": "Windows — Service Installed with Suspicious Image Path",
+  "version": 1,
+  "enabled": true,
+  "interval": "1h",
+  "from": "now-90m",
+  "to": "now",
+  "description": "Attacker objective\nInstall a new Windows service whose image is a command interpreter, script, or a binary in a user-writable path — for persistence or remote code execution.\n\nAttack logic\nLegitimate services run vendor executables from Program Files/System32. A service configured to launch cmd/powershell, a scripting host, an encoded command, or a binary under Temp/AppData is a persistence or lateral-execution mechanism (also used by PsExec-style tools).\n\nWhy this detection works\nService-installation auditing (4697) records the service image path; matching interpreter/encoded/user-writable-path patterns isolates malicious services, independent of case.\n\nFalse positives\nA poorly packaged legitimate service that runs a script (rare in a managed estate).\n\nTuning\nAllowlist verified service names/paths; correlate with the installing account and source host.\n\nRequired telemetry\nWindows Security 4697 (ServiceName, ServiceFileName).",
+  "tags": [
+    "JCB",
+    "Windows",
+    "Phase3",
+    "Use Case: Threat Detection",
+    "Tactic: Persistence"
+  ],
+  "author": [
+    "raadabujaish"
+  ],
+  "license": "",
+  "threat": [
+    {
+      "framework": "MITRE ATT&CK",
+      "tactic": {
+        "id": "TA0003",
+        "name": "Persistence",
+        "reference": "https://attack.mitre.org/tactics/TA0003/"
+      },
+      "technique": [
+        {
+          "id": "T1543",
+          "name": "Create or Modify System Process",
+          "reference": "https://attack.mitre.org/techniques/T1543/",
+          "subtechnique": [
+            {
+              "id": "T1543.003",
+              "name": "Windows Service",
+              "reference": "https://attack.mitre.org/techniques/T1543/003/"
+            }
+          ]
+        }
+      ]
+    }
+  ],
+  "investigation_fields": {
+    "field_names": [
+      "@timestamp",
+      "host.name",
+      "winlog.event_data.ServiceName",
+      "winlog.event_data.ServiceFileName",
+      "winlog.event_data.SubjectUserName",
+      "user.name",
+      "user.domain",
+      "process.name",
+      "process.executable",
+      "process.command_line",
+      "process.args",
+      "process.parent.name",
+      "process.parent.executable",
+      "event.code",
+      "event.action"
+    ]
+  },
+  "related_integrations": [],
+  "required_fields": [],
+  "setup": "",
+  "note": "## Investigation guide\n1. Review the service name, image path and installing account.\n2. A shell/encoded/temp-path service is persistence or remote execution — isolate and remove if unauthorised.\n3. Correlate with a network logon (PsExec-style lateral) or preceding compromise.",
+  "false_positives": [
+    "A poorly packaged legitimate service that runs a script (rare in a managed estate)."
+  ],
+  "references": [
+    "https://attack.mitre.org/techniques/T1543/"
+  ],
+  "risk_score": 73,
+  "risk_score_mapping": [],
+  "severity": "high",
+  "severity_mapping": [],
+  "output_index": "",
+  "max_signals": 100,
+  "exceptions_list": [],
+  "actions": [],
+  "type": "esql",
+  "language": "esql",
+  "query": "FROM logs-system.security-* METADATA _id, _index, _version\n| WHERE event.code == \"4697\" AND winlog.event_data.ServiceFileName IS NOT NULL\n| EVAL svc = TO_LOWER(winlog.event_data.ServiceFileName)\n| WHERE svc LIKE \"*cmd.exe*\" OR svc LIKE \"*powershell*\" OR svc LIKE \"*pwsh*\" OR svc LIKE \"*rundll32*\" OR svc LIKE \"*regsvr32*\" OR svc LIKE \"*mshta*\" OR svc LIKE \"*cscript*\" OR svc LIKE \"*wscript*\" OR svc LIKE \"*windows*temp*\" OR svc LIKE \"*appdata*\" OR svc LIKE \"*-enc*\" OR svc LIKE \"*frombase64*\" OR svc LIKE \"*downloadstring*\" OR svc LIKE \"*comspec*\"\n| KEEP @timestamp, host.name, winlog.event_data.ServiceName, winlog.event_data.ServiceFileName, winlog.event_data.SubjectUserName"
+}

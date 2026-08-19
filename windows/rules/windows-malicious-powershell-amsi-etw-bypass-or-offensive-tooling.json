@@ -1,0 +1,104 @@
+{
+  "rule_id": "jcb-win-powershell-offensive-tooling",
+  "name": "Windows — Malicious PowerShell: AMSI/ETW Bypass or Offensive Tooling",
+  "version": 1,
+  "enabled": true,
+  "interval": "1h",
+  "from": "now-90m",
+  "to": "now",
+  "description": "Attacker objective\nRun offensive PowerShell in memory — bypassing AMSI/ETW inspection, dumping credentials, roasting Kerberos, or enumerating the domain.\n\nAttack logic\nAttacker frameworks disable AMSI/ETW and load credential-theft, Kerberos-abuse, enumeration and injection modules. Script-block logging records the expanded script even when it was launched obfuscated or base64-encoded.\n\nWhy this detection works\nPowerShell 4104 captures the decoded script-block text, so matching known offensive markers detects the activity despite encoding or obfuscation.\n\nFalse positives\nSecurity testing, or a defensive script that references these strings by name. Bare Net.WebClient/download usage is excluded as too common.\n\nTuning\nAllowlist sanctioned red-team/testing windows; treat production hits as incidents.\n\nRequired telemetry\nPowerShell Operational 4104 (script-block logging must be enabled).",
+  "tags": [
+    "JCB",
+    "Windows",
+    "Phase3",
+    "Use Case: Threat Detection",
+    "Tactic: Execution",
+    "Tactic: Defense Evasion"
+  ],
+  "author": [
+    "raadabujaish"
+  ],
+  "license": "",
+  "threat": [
+    {
+      "framework": "MITRE ATT&CK",
+      "tactic": {
+        "id": "TA0002",
+        "name": "Execution",
+        "reference": "https://attack.mitre.org/tactics/TA0002/"
+      },
+      "technique": [
+        {
+          "id": "T1059",
+          "name": "Command and Scripting Interpreter",
+          "reference": "https://attack.mitre.org/techniques/T1059/",
+          "subtechnique": [
+            {
+              "id": "T1059.001",
+              "name": "PowerShell",
+              "reference": "https://attack.mitre.org/techniques/T1059/001/"
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "framework": "MITRE ATT&CK",
+      "tactic": {
+        "id": "TA0005",
+        "name": "Defense Evasion",
+        "reference": "https://attack.mitre.org/tactics/TA0005/"
+      },
+      "technique": [
+        {
+          "id": "T1562",
+          "name": "Impair Defenses",
+          "reference": "https://attack.mitre.org/techniques/T1562/",
+          "subtechnique": [
+            {
+              "id": "T1562.001",
+              "name": "Disable or Modify Tools",
+              "reference": "https://attack.mitre.org/techniques/T1562/001/"
+            }
+          ]
+        }
+      ]
+    }
+  ],
+  "investigation_fields": {
+    "field_names": [
+      "host.name",
+      "user.name",
+      "powershell.file.script_block_text",
+      "file.path",
+      "file.directory",
+      "event.code",
+      "process.name"
+    ]
+  },
+  "related_integrations": [],
+  "required_fields": [],
+  "setup": "",
+  "note": "## Investigation guide\n1. Read the full script-block text to confirm intent (AMSI bypass, credential theft, enumeration).\n2. Identify the host/user; if malicious, isolate and rotate credentials used on that host.\n3. Correlate with process-creation, logon and outbound-network telemetry for the same host/time.",
+  "false_positives": [
+    "Security testing, or a defensive script that references these strings by name. Bare Net.WebClient/download usage is excluded as too common."
+  ],
+  "references": [
+    "https://attack.mitre.org/techniques/T1059/",
+    "https://attack.mitre.org/techniques/T1562/"
+  ],
+  "risk_score": 78,
+  "risk_score_mapping": [],
+  "severity": "high",
+  "severity_mapping": [],
+  "output_index": "",
+  "max_signals": 100,
+  "exceptions_list": [],
+  "actions": [],
+  "type": "query",
+  "language": "kuery",
+  "index": [
+    "logs-windows.powershell_operational-*"
+  ],
+  "query": "event.code:\"4104\" and powershell.file.script_block_text:(\"amsiInitFailed\" or \"AmsiUtils\" or \"amsiContext\" or \"AmsiScanBuffer\" or \"EtwEventWrite\" or \"sekurlsa\" or \"logonpasswords\" or \"Invoke-Mimikatz\" or \"Invoke-Kerberoast\" or \"Rubeus\" or \"Invoke-BloodHound\" or \"SharpHound\" or \"Get-DomainUser\" or \"Get-NetComputer\" or \"PowerView\" or \"Invoke-ReflectivePEInjection\" or \"Invoke-DllInjection\" or \"Out-Minidump\" or \"Invoke-TokenManipulation\")"
+}

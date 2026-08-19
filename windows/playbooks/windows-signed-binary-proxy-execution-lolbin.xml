@@ -1,0 +1,152 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<Playbook xmlns="https://soc.example/playbooks" id="PB-WIN-021" name="Windows — Signed Binary Proxy Execution (LOLBin) - SOC Playbook" version="1.0" status="Production" classification="TLP:AMBER">
+  <Metadata>
+    <Owner>JCB Detection Engineering (WatchWave)</Owner>
+    <LastUpdated>2026-08-14</LastUpdated>
+    <Severity default="Medium">Medium</Severity>
+    <Confidence default="Medium">Medium</Confidence>
+    <Category>Defense Evasion / Signed Binary Proxy Execution</Category>
+    <MitreAttack>
+      <Technique id="T1218" name="System Binary Proxy Execution"/>
+      <Tactic id="TA0005" name="Defense Evasion"/>
+    </MitreAttack>
+    <References>
+      <Reference title="MITRE ATT and CK" url="https://attack.mitre.org/techniques/T1218/"/>
+    </References>
+  </Metadata>
+  <ExecutiveSummary>
+    <Overview>A signed Windows binary was used to proxy execution - regsvr32 scrobj/remote, rundll32 with a suspicious export, mshta with script, or msiexec from a URL. Triage question: is this defense-evasion proxy execution of attacker code, or legitimate use of these binaries?</Overview>
+    <BusinessImpact>LOLBins run attacker code under a trusted signed binary to bypass application allowlisting and evade detection.</BusinessImpact>
+  </ExecutiveSummary>
+  <Scope><Assets>
+    <AssetType>Windows servers and workstations (INTDOM domain)</AssetType>
+    <AssetType>Domain controllers</AssetType>
+  </Assets><LogSources>
+    <LogSource>Sysmon process + Windows Security 4688 - logs-windows.sysmon_operational-*,logs-system.security-*</LogSource>
+  </LogSources></Scope>
+  <Prerequisites><TelemetryRequirements>
+    <Requirement>Windows Security + Sysmon + PowerShell logs via Elastic Agent (verified live). Sysmon event.code 1=process(command_line/parent populated), 11=file, 13/12=registry(registry.path populated); process.code_signature NOT collected.</Requirement>
+  </TelemetryRequirements><DetectionSignals>
+    <Signal><Name>Signed-binary proxy exec</Name><Details>regsvr32/rundll32/mshta/msiexec used with remote/script/suspicious arguments.</Details></Signal>
+  </DetectionSignals></Prerequisites>
+  <Inputs>
+    <Input name="$hostname" description="Host where the LOLBin ran."/>
+    <Input name="$username" description="Account (user.name)."/>
+  </Inputs>
+  <Triage><ImmediateCapture>
+    <Item>Host: $hostname</Item>
+  </ImmediateCapture><InitialAssessment>
+    <Rule>Weigh the evidence story, not any single fact - see ClassificationGuidance.</Rule>
+  </InitialAssessment></Triage>
+  <Investigation>
+    <Goal>Determine whether the signed-binary execution proxies attacker code or is legitimate.</Goal>
+    <Workflow>
+      <Step order="1" name="Confirm the LOLBin command and arguments">
+        <Purpose>The arguments reveal proxy-execution intent (remote scriptlet, URL, suspicious export).</Purpose>
+        <Query platform="Elastic" language="ES|QL" id="INV-01-LOLBIN-CMD">
+          <![CDATA[
+FROM logs-windows.sysmon_operational-*,logs-system.security-*
+| WHERE event.code IN ("1","4688") AND host.name == "$hostname" AND process.command_line IS NOT NULL AND @timestamp >= NOW() - 4 hours
+| EVAL cl = TO_LOWER(process.command_line)
+| WHERE (cl LIKE "*regsvr32*" AND (cl LIKE "*scrobj*" OR cl LIKE "*/i:http*" OR cl LIKE "*.sct*")) OR (cl LIKE "*mshta*" AND (cl LIKE "*http*" OR cl LIKE "*javascript*" OR cl LIKE "*vbscript*")) OR (cl LIKE "*msiexec*" AND cl LIKE "*http*") OR (cl LIKE "*rundll32*" AND (cl LIKE "*javascript*" OR cl LIKE "*url.dll*openurl*"))
+| KEEP @timestamp, process.name, process.parent.name, user.name, process.command_line
+| SORT @timestamp DESC
+| LIMIT 20
+          ]]>
+        </Query>
+        <ExpectedOutput>
+          <Field name="process.name"/>
+          <Field name="process.parent.name"/>
+          <Field name="user.name"/>
+          <Field name="process.command_line"/>
+        </ExpectedOutput>
+        <AnalystNotes>regsvr32 /i:http scrobj.dll (Squiblydoo) and mshta http/javascript are classic proxy-exec. A URL argument to msiexec/mshta fetching remote code is malicious. Legitimate rundll32/regsvr32 use points at local signed DLLs with normal exports.</AnalystNotes>
+      </Step>
+      <Step order="2" name="Process origin and account on the host">
+        <Purpose>The parent process and account reveal whether this was interactive attacker activity or an automated/service context.</Purpose>
+        <Query platform="Elastic" language="ES|QL" id="INV-02-PROC-TREE" optional="true">
+          <![CDATA[
+FROM logs-windows.sysmon_operational-*,logs-system.security-*
+| WHERE event.code IN ("1","4688") AND host.name == "$hostname" AND @timestamp >= NOW() - 2 hours
+| STATS runs = COUNT(*), parents = VALUES(process.parent.name), users = VALUES(user.name) BY process.name
+| SORT runs DESC
+| LIMIT 15
+          ]]>
+        </Query>
+        <ExpectedOutput>
+          <Field name="process.name"/>
+          <Field name="parents"/>
+          <Field name="users"/>
+        </ExpectedOutput>
+        <AnalystNotes>A suspicious process spawned by an office app/browser/script interpreter, run by a normal user, is more concerning than one under a known admin/automation parent.</AnalystNotes>
+      </Step>
+      <Step order="3" name="Finalize classification">
+        <DecisionTree>
+          <Node><Condition>A LOLBin fetching/executing remote scriptlets or code (regsvr32 scrobj http, mshta http/javascript, msiexec http).</Condition><Result>True Positive (Proxy Execution of Attacker Code - IR)</Result></Node>
+          <Node><Condition>Legitimate local use (regsvr32 registering a signed DLL, rundll32 with a normal export) by an installer/admin.</Condition><Result>False Positive</Result></Node>
+          <Node><Condition>LOLBin use with ambiguous arguments.</Condition><Result>Needs Escalation</Result></Node>
+        </DecisionTree>
+        <DocumentationChecklist>
+          <Item>Attach outputs of INV-01-LOLBIN-CMD, INV-02-PROC-TREE to the case.</Item>
+        </DocumentationChecklist>
+      </Step>
+    </Workflow>
+  </Investigation>
+  <ClassificationGuidance>
+    <FalsePositive>
+      <Definition>Legitimate use of the signed binary.</Definition>
+      <Indicators>
+        <Item>Local signed DLL / normal export.</Item>
+        <Item>Installer/admin context.</Item>
+        <Item>No remote fetch.</Item>
+      </Indicators>
+      <SOCAction>
+        <Item>Confirm the usage; close as false_positive.</Item>
+      </SOCAction>
+    </FalsePositive>
+    <TruePositive>
+      <Definition>Proxy execution of attacker code via a signed binary.</Definition>
+      <Indicators>
+        <Item>Remote scriptlet/URL argument.</Item>
+        <Item>Squiblydoo/mshta-http pattern.</Item>
+        <Item>Suspicious parent/child.</Item>
+      </Indicators>
+      <SOCAction>
+        <Item>Isolate the host; open IR; capture the fetched code.</Item>
+        <Item>Hunt the pattern estate-wide; block the remote source.</Item>
+      </SOCAction>
+    </TruePositive>
+    <Misconfiguration>
+      <Definition>A management tool using a LOLBin pattern by design.</Definition>
+      <Indicators>
+        <Item>A known tool.</Item>
+        <Item>Consistent expected arguments.</Item>
+      </Indicators>
+      <SOCAction>
+        <Item>Baseline; document/exception.</Item>
+      </SOCAction>
+    </Misconfiguration>
+  </ClassificationGuidance>
+  <Response><IRForHumans>
+    <Phase name="Immediate Actions (0-30 minutes)">
+      <Action priority="1">Confirm the activity on the host; if malicious indicators, isolate the host.</Action>
+      <Action priority="2">Identify the responsible account/process and its origin.</Action>
+    </Phase>
+    <Phase name="Containment and Eradication (hours)">
+      <Action>Isolate the host; capture volatile evidence; hunt the same pattern across the estate.</Action>
+      <Action>Reset credentials used on the host if compromise is confirmed.</Action>
+    </Phase>
+    <Phase name="Recovery and Hardening (days)">
+      <Action>Remediate the root cause; add/verify EDR coverage; apply relevant hardening.</Action>
+    </Phase>
+  </IRForHumans></Response>
+  <QualityChecks>
+    <Check>Confirm the required telemetry (Sysmon/Security auditing) is present on the host.</Check>
+    <Check>Tune known-benign administrative sources via exceptions, not by disabling the rule.</Check>
+  </QualityChecks>
+  <ClosureCriteria><FalsePositiveClosure>
+    <Item>Activity confirmed benign/authorised and documented.</Item>
+  </FalsePositiveClosure><TruePositiveClosure>
+    <Item>Host contained and triaged; root cause eradicated; estate swept; findings recorded.</Item>
+  </TruePositiveClosure></ClosureCriteria>
+</Playbook>

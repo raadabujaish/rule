@@ -1,0 +1,147 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<Playbook xmlns="https://soc.example/playbooks" id="PB-FP-005" name="Forcepoint DLP — Sensitive Data Uploaded to a New External Web Destination - SOC Playbook" version="1.0" status="Production" classification="TLP:AMBER">
+  <Metadata>
+    <Owner>JCB Detection Engineering (WatchWave)</Owner>
+    <LastUpdated>2026-08-14</LastUpdated>
+    <Severity default="Medium">Medium</Severity>
+    <Confidence default="Medium">Medium</Confidence>
+    <Category>Exfiltration / Data Transfer</Category>
+    <MitreAttack>
+      <Technique id="T1567" name="Exfiltration Over Web Service"/>
+      <Tactic id="TA0010" name="Exfiltration"/>
+    </MitreAttack>
+    <References>
+      <Reference title="MITRE ATT and CK" url="https://attack.mitre.org/techniques/T1567/"/>
+    </References>
+  </Metadata>
+  <ExecutiveSummary>
+    <Overview>Forcepoint DLP flagged sensitive data uploaded to an external web destination first-seen for this user/context (new_terms). Triage: exfil to a new/unusual destination, or first legitimate use of a new service?</Overview>
+    <BusinessImpact>A new external destination for sensitive data can be attacker-controlled exfil infrastructure.</BusinessImpact>
+  </ExecutiveSummary>
+  <Scope><Assets>
+    <AssetType>Forcepoint DLP endpoints and web/email gateways</AssetType>
+  </Assets><LogSources>
+    <LogSource>Forcepoint DLP CEF - logs-cef.log-*</LogSource>
+  </LogSources></Scope>
+  <Prerequisites><TelemetryRequirements>
+    <Requirement>Forcepoint DLP CEF (verified live). Fields: cef.extensions.loginName (user), cef.extensions.sourceHost, cef.extensions.sourceIp, cef.extensions.destinationHosts (destination URL/host), cef.extensions.deviceAction (Permitted/Blocked), cef.extensions.filename, cef.extensions.deviceEventCategory (data type), cef.extensions.severityType, cef.extensions.sourceServiceName (channel: Content Gateway/Email).</Requirement>
+  </TelemetryRequirements><DetectionSignals>
+    <Signal><Name>Sensitive Data Uploaded to a New Externa</Name><Details>Forcepoint DLP Sensitive Data Uploaded to a New External Web Destination.</Details></Signal>
+  </DetectionSignals></Prerequisites>
+  <Inputs>
+    <Input name="$user" description="User (cef.extensions.loginName)."/>
+    <Input name="$dest" description="Destination host/URL if scoped."/>
+  </Inputs>
+  <Triage><ImmediateCapture>
+    <Item>$user: $user</Item>
+  </ImmediateCapture><InitialAssessment>
+    <Rule>Weigh the full evidence story per the ClassificationGuidance, not any single fact.</Rule>
+  </InitialAssessment></Triage>
+  <Investigation>
+    <Goal>Determine whether the Forcepoint DLP transfer is data exfiltration or legitimate business data handling.</Goal>
+    <Workflow>
+      <Step order="1" name="Confirm the DLP transfer: user, data, destination, action">
+        <Purpose>Identify who moved what to where, and whether it was Permitted (completed) or Blocked.</Purpose>
+        <Query platform="Elastic" language="ES|QL" id="INV-01-FP-TRANSFER">
+          <![CDATA[
+FROM logs-cef.log-*
+| WHERE observer.vendor == "Forcepoint" AND cef.extensions.sourceServiceName RLIKE "(?i).*(content gateway|email).*" AND @timestamp >= NOW() - 4 hours
+| KEEP @timestamp, cef.extensions.loginName, cef.extensions.sourceHost, cef.extensions.destinationHosts, cef.extensions.deviceAction, cef.extensions.filename, cef.extensions.deviceEventCategory, cef.extensions.severityType
+| SORT @timestamp DESC
+| LIMIT 25
+          ]]>
+        </Query>
+        <ExpectedOutput>
+          <Field name="cef.extensions.loginName"/>
+          <Field name="cef.extensions.destinationHosts"/>
+          <Field name="cef.extensions.deviceAction"/>
+          <Field name="cef.extensions.filename"/>
+        </ExpectedOutput>
+        <AnalystNotes>Sensitive data to a first-seen external destination, Permitted, warrants review - it may be attacker infrastructure or a new personal service. A newly-approved corporate service is benign. Note the destination reputation.</AnalystNotes>
+      </Step>
+      <Step order="2" name="Volume/pattern for this user">
+        <Purpose>A burst of sensitive transfers by one user indicates exfil vs a single incidental transfer.</Purpose>
+        <Query platform="Elastic" language="ES|QL" id="INV-02-FP-VOLUME" optional="true">
+          <![CDATA[
+FROM logs-cef.log-*
+| WHERE observer.vendor == "Forcepoint" AND cef.extensions.loginName == "$user" AND @timestamp >= NOW() - 4 hours
+| STATS transfers = COUNT(*), permitted = COUNT(CASE(cef.extensions.deviceAction RLIKE "(?i).*permit.*", 1, null)), destinations = COUNT_DISTINCT(cef.extensions.destinationHosts)
+| LIMIT 1
+          ]]>
+        </Query>
+        <ExpectedOutput>
+          <Field name="transfers"/>
+          <Field name="permitted"/>
+          <Field name="destinations"/>
+        </ExpectedOutput>
+        <AnalystNotes>Many permitted sensitive transfers to varied external destinations = exfil. One blocked transfer = policy working.</AnalystNotes>
+      </Step>
+      <Step order="3" name="Finalize classification">
+        <DecisionTree>
+          <Node><Condition>Sensitive data Permitted to a new, unusual/suspicious external destination.</Condition><Result>True Positive (Exfil to New Destination - escalate, compliance)</Result></Node>
+          <Node><Condition>A legitimate business transfer to an approved destination, or a blocked attempt (policy working).</Condition><Result>False Positive / Benign Activity</Result></Node>
+          <Node><Condition>A DLP policy over-classifying benign data.</Condition><Result>Misconfiguration</Result></Node>
+          <Node><Condition>Transfer with unclear sensitivity/destination.</Condition><Result>Needs Escalation</Result></Node>
+        </DecisionTree>
+        <DocumentationChecklist>
+          <Item>Attach outputs of INV-01-FP-TRANSFER, INV-02-FP-VOLUME to the case.</Item>
+        </DocumentationChecklist>
+      </Step>
+    </Workflow>
+  </Investigation>
+  <ClassificationGuidance>
+    <FalsePositive>
+      <Definition>First legitimate use of a newly-approved corporate service.</Definition>
+      <Indicators>
+        <Item>Newly-approved corporate service.</Item>
+        <Item>Business justification.</Item>
+        <Item>Blocked attempt.</Item>
+      </Indicators>
+      <SOCAction>
+        <Item>Confirm business justification; close as benign_activity.</Item>
+      </SOCAction>
+    </FalsePositive>
+    <TruePositive>
+      <Definition>Exfiltration to a new external destination.</Definition>
+      <Indicators>
+        <Item>First-seen external destination.</Item>
+        <Item>Sensitive data.</Item>
+        <Item>Permitted; suspicious destination.</Item>
+      </Indicators>
+      <SOCAction>
+        <Item>Involve DLP/compliance; review the data; interview the user; reset the account if compromised; open IR.</Item>
+      </SOCAction>
+    </TruePositive>
+    <Misconfiguration>
+      <Definition>A DLP policy over-classifying benign data.</Definition>
+      <Indicators>
+        <Item>Benign data flagged.</Item>
+        <Item>Inflated matches.</Item>
+      </Indicators>
+      <SOCAction>
+        <Item>Tune the DLP policy; document.</Item>
+      </SOCAction>
+    </Misconfiguration>
+  </ClassificationGuidance>
+  <Response><IRForHumans>
+    <Phase name="Immediate Actions (0-30 minutes)">
+      <Action priority="1">Identify the user (loginName), the data and the destination.</Action>
+      <Action priority="2">If exfil, involve DLP/compliance and review the transfer.</Action>
+    </Phase>
+    <Phase name="Containment and Eradication (hours)">
+      <Action>Review the transferred data with DLP/compliance; interview the user; reset the account if compromised.</Action>
+    </Phase>
+    <Phase name="Recovery and Hardening (days)">
+      <Action>Tune DLP policies; enforce egress controls; educate users; block risky destinations.</Action>
+    </Phase>
+  </IRForHumans></Response>
+  <QualityChecks>
+    <Check>Forcepoint deviceAction Permitted vs Blocked distinguishes a completed transfer from a blocked one; loginName is the user.</Check>
+    <Check>severityType HIGH is the reshaped rule's focus.</Check>
+  </QualityChecks>
+  <ClosureCriteria><FalsePositiveClosure>
+    <Item>Legitimate transfer/blocked attempt confirmed; documented.</Item>
+  </FalsePositiveClosure><TruePositiveClosure>
+    <Item>Exfil scoped with compliance; user addressed; account secured.</Item>
+  </TruePositiveClosure></ClosureCriteria>
+</Playbook>

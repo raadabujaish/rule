@@ -1,0 +1,115 @@
+{
+  "rule_id": "8d2a7488-9415-4716-813b-5fa6437d1234",
+  "name": "Potential Destribution Denial of Service (DDoS) Attack",
+  "version": 1,
+  "enabled": true,
+  "interval": "5m",
+  "from": "now-3600s",
+  "to": "now",
+  "description": "This rule detects an anomalously high volume of traffic originating from a Multiple source IP address targeting a specific Service. A large number of requests in a short period can indicate an attempt For a DDoS attack, rendering it unavailable for legitimate traffic.",
+  "tags": [],
+  "author": [],
+  "license": "",
+  "threat": [
+    {
+      "framework": "MITRE ATT&CK",
+      "tactic": {
+        "id": "TA0040",
+        "name": "Impact",
+        "reference": "https://attack.mitre.org/tactics/TA0040"
+      },
+      "technique": [
+        {
+          "id": "T1498",
+          "name": "Network Denial of Service",
+          "reference": "https://attack.mitre.org/techniques/T1498",
+          "subtechnique": []
+        }
+      ]
+    }
+  ],
+  "investigation_fields": {
+    "field_names": [
+      "source.ip",
+      "cef.extensions.deviceCustomString6",
+      "cef.extensions.deviceCustomString4",
+      "cef.extensions.deviceCustomNumber2",
+      "event.action",
+      "cef.name",
+      "cef.extensions.requestUrl",
+      "cef.extensions.requestMethod",
+      "cef.extensions.deviceCustomString1",
+      "destination.ip",
+      "destination.port",
+      "cef.extensions.deviceCustomString5",
+      "cef.extensions.deviceHostName",
+      "cef.severity"
+    ]
+  },
+  "related_integrations": [],
+  "required_fields": [],
+  "setup": "",
+  "false_positives": [],
+  "references": [],
+  "risk_score": 99,
+  "risk_score_mapping": [],
+  "severity": "critical",
+  "severity_mapping": [],
+  "output_index": "",
+  "max_signals": 100,
+  "exceptions_list": [],
+  "actions": [],
+  "meta": {
+    "from": "55m",
+    "kibana_siem_app_url": "https://172.31.14.118:16462/app/security"
+  },
+  "type": "threshold",
+  "language": "kuery",
+  "data_view_id": "logs-*",
+  "query": "",
+  "filters": [
+    {
+      "meta": {
+        "index": "logs-*",
+        "type": "custom",
+        "disabled": false,
+        "negate": false,
+        "alias": null,
+        "key": "query",
+        "value": "{\"bool\":{\"minimum_should_match\":1,\"should\":[{\"match_phrase\":{\"tags\":\"F5-WAFv8\"}},{\"match_phrase\":{\"tags\":\"ForcePointv8\"}},{\"match_phrase\":{\"tags\":\"fortinet-firewall\"}}]}}"
+      },
+      "$state": {
+        "store": "appState"
+      },
+      "query": {
+        "bool": {
+          "minimum_should_match": 1,
+          "should": [
+            {
+              "match_phrase": {
+                "tags": "F5-WAFv8"
+              }
+            },
+            {
+              "match_phrase": {
+                "tags": "ForcePointv8"
+              }
+            },
+            {
+              "match_phrase": {
+                "tags": "fortinet-firewall"
+              }
+            }
+          ]
+        }
+      }
+    }
+  ],
+  "threshold": {
+    "field": [
+      "destination.ip"
+    ],
+    "value": 10000,
+    "cardinality": []
+  }
+}

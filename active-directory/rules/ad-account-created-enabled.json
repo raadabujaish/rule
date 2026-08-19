@@ -1,0 +1,84 @@
+{
+  "rule_id": "ce770f45-0487-4195-8e0b-ab2881baa05d",
+  "name": "AD – Account Created / Enabled",
+  "version": 1,
+  "enabled": true,
+  "interval": "10m",
+  "from": "now-1200s",
+  "to": "now",
+  "description": "AD – Account Created / Enabled",
+  "tags": [],
+  "author": [],
+  "license": "",
+  "threat": [],
+  "investigation_fields": {
+    "field_names": [
+      "host.name",
+      "winlog.event_data.SubjectUserName",
+      "winlog.event_data.SubjectDomainName",
+      "winlog.event_data.TargetUserName",
+      "winlog.event_data.TargetDomainName",
+      "winlog.event_data.MemberName",
+      "winlog.event_data.MemberSid",
+      "event.code",
+      "event.action",
+      "message"
+    ]
+  },
+  "related_integrations": [],
+  "required_fields": [],
+  "setup": "",
+  "false_positives": [],
+  "references": [],
+  "risk_score": 47,
+  "risk_score_mapping": [],
+  "severity": "medium",
+  "severity_mapping": [],
+  "output_index": "",
+  "max_signals": 100,
+  "exceptions_list": [],
+  "actions": [],
+  "meta": {
+    "from": "10m",
+    "kibana_siem_app_url": "https://jcb.scanwave.local:8008/app/security"
+  },
+  "type": "query",
+  "language": "kuery",
+  "index": [
+    "logs-system.security-*"
+  ],
+  "query": "",
+  "filters": [
+    {
+      "meta": {
+        "index": "d2855587-9346-4e65-a9ad-e65a320caab4",
+        "type": "custom",
+        "disabled": false,
+        "negate": false,
+        "alias": null,
+        "key": "query",
+        "value": "{\"bool\":{\"minimum_should_match\":1,\"should\":[{\"match_phrase\":{\"event.code\":\"4720\"}},{\"match_phrase\":{\"event.code\":\"4722\"}}]}}"
+      },
+      "$state": {
+        "store": "appState"
+      },
+      "query": {
+        "bool": {
+          "minimum_should_match": 1,
+          "should": [
+            {
+              "match_phrase": {
+                "event.code": "4720"
+              }
+            },
+            {
+              "match_phrase": {
+                "event.code": "4722"
+              }
+            }
+          ]
+        }
+      }
+    }
+  ]
+}

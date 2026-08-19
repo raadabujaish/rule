@@ -1,0 +1,146 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<Playbook xmlns="https://soc.example/playbooks" id="PB-WIN-006" name="Windows — DPAPI Master Key Backup Retrieved from a New Host - SOC Playbook" version="1.0" status="Production" classification="TLP:AMBER">
+  <Metadata>
+    <Owner>JCB Detection Engineering (WatchWave)</Owner>
+    <LastUpdated>2026-08-14</LastUpdated>
+    <Severity default="High">High</Severity>
+    <Confidence default="Medium">Medium</Confidence>
+    <Category>Credential Access / DPAPI</Category>
+    <MitreAttack>
+      <Technique id="T1555" name="Credentials from Password Stores"/>
+      <Tactic id="TA0006" name="Credential Access"/>
+    </MitreAttack>
+    <References>
+      <Reference title="MITRE ATT and CK" url="https://attack.mitre.org/techniques/T1555/"/>
+    </References>
+  </Metadata>
+  <ExecutiveSummary>
+    <Overview>A DPAPI domain backup key was retrieved (4692) from a host not seen doing this before (new_terms). Attackers retrieve the DPAPI backup key to decrypt any user's protected secrets domain-wide. Triage question: legitimate backup/credential operation, or DPAPI backdoor abuse?</Overview>
+    <BusinessImpact>The DPAPI domain backup key decrypts every domain user's DPAPI-protected secrets (browser passwords, saved credentials) - a master skeleton key.</BusinessImpact>
+  </ExecutiveSummary>
+  <Scope><Assets>
+    <AssetType>Windows servers and workstations (INTDOM domain)</AssetType>
+    <AssetType>Domain controllers</AssetType>
+  </Assets><LogSources>
+    <LogSource>Windows Security event log - logs-system.security-*</LogSource>
+  </LogSources></Scope>
+  <Prerequisites><TelemetryRequirements>
+    <Requirement>Windows Security + Sysmon + PowerShell logs via Elastic Agent (verified live). Sysmon event.code 1=process(command_line/parent populated), 11=file, 13/12=registry(registry.path populated); process.code_signature NOT collected.</Requirement>
+  </TelemetryRequirements><DetectionSignals>
+    <Signal><Name>DPAPI backup retrieval</Name><Details>4692 from a first-seen host.</Details></Signal>
+  </DetectionSignals></Prerequisites>
+  <Inputs>
+    <Input name="$hostname" description="Host that retrieved the backup key."/>
+    <Input name="$username" description="Principal (SubjectUserName)."/>
+  </Inputs>
+  <Triage><ImmediateCapture>
+    <Item>Host: $hostname</Item>
+  </ImmediateCapture><InitialAssessment>
+    <Rule>Weigh the evidence story, not any single fact - see ClassificationGuidance.</Rule>
+  </InitialAssessment></Triage>
+  <Investigation>
+    <Goal>Determine whether the DPAPI backup-key retrieval is a legitimate operation or credential-theft abuse from an unexpected host.</Goal>
+    <Workflow>
+      <Step order="1" name="Who retrieved the DPAPI key and from where">
+        <Purpose>Legitimate retrieval comes from known credential-management infrastructure; a workstation/unexpected host is the finding.</Purpose>
+        <Query platform="Elastic" language="ES|QL" id="INV-01-DPAPI-WHO">
+          <![CDATA[
+FROM logs-system.security-*
+| WHERE event.code == "4692" AND host.name == "$hostname" AND @timestamp >= NOW() - 4 hours
+| KEEP @timestamp, host.name, winlog.event_data.SubjectUserName, winlog.event_data.MasterKeyId
+| SORT @timestamp DESC
+| LIMIT 15
+          ]]>
+        </Query>
+        <ExpectedOutput>
+          <Field name="winlog.event_data.SubjectUserName"/>
+          <Field name="winlog.event_data.MasterKeyId"/>
+        </ExpectedOutput>
+        <AnalystNotes>An interactive user or an endpoint retrieving the DPAPI backup key is abnormal; legitimate use is rare and tied to specific admin operations. new_terms fired because this host is first-seen for it.</AnalystNotes>
+      </Step>
+      <Step order="2" name="What else is this principal/host doing (credential-theft context)">
+        <Purpose>DPAPI abuse usually sits in a credential-theft chain (LSASS access, mimikatz, mass secret decryption).</Purpose>
+        <Query platform="Elastic" language="ES|QL" id="INV-02-DPAPI-CONTEXT" optional="true">
+          <![CDATA[
+FROM logs-system.security-*
+| WHERE host.name == "$hostname" AND event.code IN ("4672","4688","4624") AND @timestamp >= NOW() - 2 hours
+| STATS c = COUNT(*), codes = VALUES(event.code), users = VALUES(winlog.event_data.TargetUserName)
+| LIMIT 5
+          ]]>
+        </Query>
+        <ExpectedOutput>
+          <Field name="codes"/>
+          <Field name="c"/>
+          <Field name="users"/>
+        </ExpectedOutput>
+        <AnalystNotes>Privileged logon/process activity around the retrieval supports an attack chain; a quiet host with a documented admin operation supports benign.</AnalystNotes>
+      </Step>
+      <Step order="3" name="Finalize classification">
+        <DecisionTree>
+          <Node><Condition>An endpoint/workstation or unfamiliar principal retrieved the DPAPI backup key, especially amid other credential activity.</Condition><Result>True Positive (DPAPI Backdoor Abuse - IR immediately)</Result></Node>
+          <Node><Condition>Retrieval by a documented credential-management/backup operation from expected infrastructure.</Condition><Result>False Positive</Result></Node>
+          <Node><Condition>Retrieval from a server whose role for this operation is unclear.</Condition><Result>Needs Escalation</Result></Node>
+        </DecisionTree>
+        <DocumentationChecklist>
+          <Item>Attach outputs of INV-01-DPAPI-WHO, INV-02-DPAPI-CONTEXT to the case.</Item>
+        </DocumentationChecklist>
+      </Step>
+    </Workflow>
+  </Investigation>
+  <ClassificationGuidance>
+    <FalsePositive>
+      <Definition>A legitimate, documented credential/backup operation.</Definition>
+      <Indicators>
+        <Item>Known credential-management host/principal.</Item>
+        <Item>Documented operation.</Item>
+      </Indicators>
+      <SOCAction>
+        <Item>Confirm the operation; baseline the host; close as false_positive.</Item>
+      </SOCAction>
+    </FalsePositive>
+    <TruePositive>
+      <Definition>Abuse of the DPAPI backup key to decrypt domain secrets.</Definition>
+      <Indicators>
+        <Item>Endpoint/unfamiliar principal retrieving the key.</Item>
+        <Item>Credential-theft context.</Item>
+        <Item>First-seen host.</Item>
+      </Indicators>
+      <SOCAction>
+        <Item>Isolate the host; open IR; treat all DPAPI-protected secrets as exposed.</Item>
+        <Item>Consider DPAPI backup key rotation; reset widely-exposed credentials.</Item>
+      </SOCAction>
+    </TruePositive>
+    <Misconfiguration>
+      <Definition>A backup tool mis-scoped to retrieve the key.</Definition>
+      <Indicators>
+        <Item>A backup service doing so unexpectedly.</Item>
+        <Item>Vendor confirms benign but over-scoped.</Item>
+      </Indicators>
+      <SOCAction>
+        <Item>Restrict the tool; document.</Item>
+      </SOCAction>
+    </Misconfiguration>
+  </ClassificationGuidance>
+  <Response><IRForHumans>
+    <Phase name="Immediate Actions (0-30 minutes)">
+      <Action priority="1">Confirm the activity on the host; if malicious indicators, isolate the host.</Action>
+      <Action priority="2">Identify the responsible account/process and its origin.</Action>
+    </Phase>
+    <Phase name="Containment and Eradication (hours)">
+      <Action>Isolate the host; capture volatile evidence; hunt the same pattern across the estate.</Action>
+      <Action>Reset credentials used on the host if compromise is confirmed.</Action>
+    </Phase>
+    <Phase name="Recovery and Hardening (days)">
+      <Action>Remediate the root cause; add/verify EDR coverage; apply relevant hardening.</Action>
+    </Phase>
+  </IRForHumans></Response>
+  <QualityChecks>
+    <Check>Confirm the required telemetry (Sysmon/Security auditing) is present on the host.</Check>
+    <Check>Tune known-benign administrative sources via exceptions, not by disabling the rule.</Check>
+  </QualityChecks>
+  <ClosureCriteria><FalsePositiveClosure>
+    <Item>Activity confirmed benign/authorised and documented.</Item>
+  </FalsePositiveClosure><TruePositiveClosure>
+    <Item>Host contained and triaged; root cause eradicated; estate swept; findings recorded.</Item>
+  </TruePositiveClosure></ClosureCriteria>
+</Playbook>

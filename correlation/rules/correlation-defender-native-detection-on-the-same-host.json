@@ -1,0 +1,71 @@
+{
+  "rule_id": "jcb-corr-defender-native-host",
+  "name": "Correlation — Defender + Native Detection on the Same Host",
+  "version": 1,
+  "enabled": true,
+  "interval": "1h",
+  "from": "now-24h",
+  "to": "now",
+  "description": "Attacker objective\nCompromise a host — Microsoft Defender detects malware, exploitation or suspicious behaviour on the device while the JCB Windows analytics independently detect an attack technique (credential dumping, persistence, lateral execution, ransomware behaviour) on the same host.\n\nAttack logic\nA single host independently flagged by Microsoft Defender and by a JCB-native Windows detection within a short window is a corroborated endpoint compromise — for example a Defender malware/exploitation alert alongside native service creation, LSASS dumping or WMI/WinRM execution on the same device.\n\nWhy this detection works\nCorrelating a Defender-sourced alert and a native JCB detection on the same host over the alert stream confirms endpoint compromise across two independent telemetry sources, joined on the device name.\n\nFalse positives\nA busy administration/test host that legitimately trips both sources.\n\nTuning\nExclude verified administration/test hosts; require a specific high-value native technique if noisy.\n\nRequired telemetry\nThe Defender detection alerts (host.name, derived from the device) and the JCB Windows detection alerts (host.name).",
+  "tags": [
+    "JCB",
+    "Defender",
+    "Correlation",
+    "Phase3",
+    "Tactic: Lateral Movement",
+    "Use Case: Threat Detection"
+  ],
+  "author": [
+    "raadabujaish"
+  ],
+  "license": "",
+  "threat": [
+    {
+      "framework": "MITRE ATT&CK",
+      "tactic": {
+        "id": "TA0008",
+        "name": "Lateral Movement",
+        "reference": "https://attack.mitre.org/tactics/TA0008/"
+      },
+      "technique": [
+        {
+          "id": "T1210",
+          "name": "Exploitation of Remote Services",
+          "reference": "https://attack.mitre.org/techniques/T1210/"
+        }
+      ]
+    }
+  ],
+  "investigation_fields": {
+    "field_names": [
+      "host.name",
+      "kibana.alert.rule.name",
+      "kibana.alert.severity",
+      "user.name",
+      "source.ip",
+      "destination.ip",
+      "message"
+    ]
+  },
+  "related_integrations": [],
+  "required_fields": [],
+  "setup": "",
+  "note": "## Investigation guide\n1. The host was flagged by both Microsoft Defender and a native Windows detection — review both.\n2. This is corroborated endpoint compromise — isolate the host, rotate credentials used on it, and begin IR.\n3. Correlate the involved user(s) and reconstruct the timeline from both sources.",
+  "false_positives": [
+    "A busy administration/test host that legitimately trips both sources."
+  ],
+  "references": [
+    "https://attack.mitre.org/techniques/T1210/"
+  ],
+  "risk_score": 90,
+  "risk_score_mapping": [],
+  "severity": "critical",
+  "severity_mapping": [],
+  "output_index": "",
+  "max_signals": 100,
+  "exceptions_list": [],
+  "actions": [],
+  "type": "esql",
+  "language": "esql",
+  "query": "FROM .alerts-security.alerts-* METADATA _id, _index, _version\n| WHERE host.name IS NOT NULL AND NOT host.name IN (\"-\",\"\") AND (kibana.alert.rule.name LIKE \"Defender*\" OR kibana.alert.rule.name IN (\"Windows — LSASS Memory Dump via Known Credential-Theft Tooling\", \"Windows — Credential Theft: Registry Hive or NTDS.dit Extraction\", \"Windows — Malicious PowerShell: AMSI/ETW Bypass or Offensive Tooling\", \"Windows — Pass-the-Hash / Overpass-the-Hash Logon Pattern\", \"Windows — Ingress Tool Transfer via LOLBin\", \"Windows — Signed Binary Proxy Execution (LOLBin)\", \"Windows — UAC Bypass via Auto-Elevated LOLBin\", \"Windows — Remote Execution via WMI or WinRM\", \"Windows — Service Installed with Suspicious Image Path\", \"Windows — Inhibit System Recovery (Ransomware Precursor)\", \"Windows — Defender / EDR / Firewall Tampering\", \"Windows — Registry Persistence: IFEO / Winlogon / AppInit\", \"Windows — Scheduled Task Created with Suspicious Action\", \"AD — DCSync: Directory Replication by an Unexpected Principal\", \"AD — Kerberoasting: RC4 Service Ticket Requested\", \"AD — AS-REP Roasting: TGT Requested for a Pre-Auth-Disabled Account\", \"AD — Shadow Credentials (msDS-KeyCredentialLink Modified)\", \"AD — SPN Added by Non-Computer Principal (Kerberoast Setup)\", \"AD — Object Security Descriptor Modified (DACL Backdoor)\", \"AD — Member Added to a Privileged (Tier-0) Group\", \"AD — KRBTGT Account Password Reset (Golden Ticket Prep / Remediation)\", \"AD — Group Policy Object Modified by an Unexpected Principal\", \"AD — Domain Reconnaissance via LOLBins / BloodHound\", \"AD — New Computer (Machine) Account Created\", \"AD/Windows — Security Event Log Cleared\", \"AD/Windows — Audit Policy Changed by Interactive Account\"))\n| EVAL src = CASE(kibana.alert.rule.name LIKE \"Defender*\", \"defender\", \"native\")\n| STATS sources = COUNT_DISTINCT(src), detections = VALUES(kibana.alert.rule.name), counterparties = VALUES(user.name) BY host.name\n| WHERE sources >= 2"
+}

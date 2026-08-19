@@ -1,0 +1,97 @@
+{
+  "rule_id": "ed3181b0-eea1-4266-9db0-1122a09391cd",
+  "name": "Brute Force - O365 Failed Logins",
+  "version": 1,
+  "enabled": true,
+  "interval": "10m",
+  "from": "now-45m",
+  "to": "now",
+  "description": "Triggers when an IP address fails to log in to O365 more than 10 times within 5 minutes.",
+  "tags": [],
+  "author": [
+    "Anas - Scanwave"
+  ],
+  "license": "",
+  "threat": [
+    {
+      "framework": "MITRE ATT&CK",
+      "tactic": {
+        "id": "TA0006",
+        "name": "Credential Access",
+        "reference": "https://attack.mitre.org/tactics/TA0006"
+      },
+      "technique": [
+        {
+          "id": "T1110",
+          "name": "Brute Force",
+          "reference": "https://attack.mitre.org/techniques/T1110",
+          "subtechnique": []
+        }
+      ]
+    }
+  ],
+  "investigation_fields": {
+    "field_names": [
+      "o365.audit.ActorIpAddress",
+      "event.action",
+      "related.user"
+    ]
+  },
+  "related_integrations": [],
+  "required_fields": [],
+  "setup": "",
+  "note": "1. Check if the source IP has multiple failed logins for different accounts.\n2. Verify if the IP is associated with known attackers (threat intelligence lookup).\n3. Check if any successful login follows the failed attempts.\n4. Correlate with firewall or endpoint logs to see if other suspicious activity exists.\n5. If necessary, block the IP and reset compromised accounts.",
+  "false_positives": [
+    "Service accounts attempting to authenticate automatically.",
+    "Failed logins due to expired passwords.",
+    "Users with mistyped passwords multiple times."
+  ],
+  "references": [],
+  "risk_score": 75,
+  "risk_score_mapping": [],
+  "severity": "high",
+  "severity_mapping": [],
+  "timestamp_override": "event.ingested",
+  "output_index": "",
+  "max_signals": 100,
+  "exceptions_list": [],
+  "actions": [
+    {
+      "id": "8ab6bdc0-fa59-11ef-aeb6-33e8a09f73bb",
+      "params": {
+        "documents": [
+          {
+            "timestamp": "{{@timestamp}}",
+            "ip": "{{o365.audit.ActorIpAddress}}",
+            "user": "{{related.user}}",
+            "event": "{{event.action}}"
+          }
+        ]
+      },
+      "action_type_id": ".index",
+      "uuid": "ebce566b-6a40-4bda-85fc-2c81781b998d",
+      "frequency": {
+        "summary": false,
+        "notifyWhen": "onActiveAlert",
+        "throttle": null
+      },
+      "group": "default"
+    }
+  ],
+  "meta": {
+    "from": "5m",
+    "kibana_siem_app_url": "https://172.31.14.118:16462/app/security"
+  },
+  "type": "threshold",
+  "language": "kuery",
+  "data_view_id": "logs-*",
+  "query": "event.action:\"UserLoginFailed\" and o365.audit.ActorIpAddress:* and not o365.audit.LogonError:\"DeviceAuthenticationFailed\"",
+  "filters": [],
+  "threshold": {
+    "field": [
+      "o365.audit.ActorIpAddress"
+    ],
+    "value": 10,
+    "cardinality": []
+  }
+}

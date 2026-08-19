@@ -1,0 +1,85 @@
+{
+  "rule_id": "jcb-swift-new-interactive-logon",
+  "name": "SWIFT — New Interactive or Remote Logon to a SWIFT Server",
+  "version": 1,
+  "enabled": true,
+  "interval": "1h",
+  "from": "now-90m",
+  "to": "now",
+  "description": "Attacker objective\nGain hands-on access to the SWIFT payment platform by logging on interactively or over RDP with a new or unauthorized account, to view or manipulate international payments.\n\nDetection logic\nThe SWIFT servers are Tier-0 payment assets accessed interactively by a small, fixed set of administrators and monitoring accounts. An interactive (type 2), RDP (type 10) or unlock (type 7) logon by an account never seen before on the SWIFT estate is a high-risk access event.\n\nWhy this detection works\nA new-terms model over the interactive/RDP logon account, scoped to the SWIFT servers and excluding known monitoring/system accounts, fires only when a genuinely new operator touches the payment platform.\n\nFalse positives\nOnboarding of a new authorized SWIFT administrator; a new monitoring/service account performing an interactive logon.\n\nTuning\nAllowlist verified new SWIFT administrators after review; keep the monitoring-account exclusions current; treat any unexpected interactive logon to SWIFT as an incident.\n\nRequired telemetry\nWindows Security on the SWIFT servers: event.code 4624, LogonType 2/7/10, TargetUserName, IpAddress, host.name.",
+  "tags": [
+    "JCB",
+    "SWIFT",
+    "Banking-Critical",
+    "Phase3",
+    "Tactic: Initial Access",
+    "Use Case: Threat Detection"
+  ],
+  "author": [
+    "raadabujaish"
+  ],
+  "license": "",
+  "threat": [
+    {
+      "framework": "MITRE ATT&CK",
+      "tactic": {
+        "id": "TA0001",
+        "name": "Initial Access",
+        "reference": "https://attack.mitre.org/tactics/TA0001/"
+      },
+      "technique": [
+        {
+          "id": "T1078",
+          "name": "Valid Accounts",
+          "reference": "https://attack.mitre.org/techniques/T1078/"
+        }
+      ]
+    }
+  ],
+  "investigation_fields": {
+    "field_names": [
+      "host.name",
+      "winlog.computer_name",
+      "user.name",
+      "user.domain",
+      "winlog.event_data.TargetUserName",
+      "winlog.event_data.TargetDomainName",
+      "source.ip",
+      "winlog.event_data.LogonType",
+      "winlog.event_data.Status",
+      "winlog.event_data.SubStatus",
+      "winlog.event_data.ServiceName",
+      "winlog.event_data.TicketOptions",
+      "event.code",
+      "event.action"
+    ]
+  },
+  "related_integrations": [],
+  "required_fields": [],
+  "setup": "",
+  "note": "## Investigation guide\n1. TargetUserName = the new account; host.name = which SWIFT server; IpAddress = source of the logon.\n2. Confirm the account is an authorized SWIFT operator/admin and the access was expected; an unexpected interactive logon to SWIFT is a suspected fraud/intrusion event — escalate.\n3. Review what the session did (process execution, config/system changes) on the SWIFT server.",
+  "false_positives": [
+    "Onboarding of a new authorized SWIFT administrator; a new monitoring/service account performing an interactive logon."
+  ],
+  "references": [
+    "https://attack.mitre.org/techniques/T1078/"
+  ],
+  "risk_score": 88,
+  "risk_score_mapping": [],
+  "severity": "critical",
+  "severity_mapping": [],
+  "output_index": "",
+  "max_signals": 100,
+  "exceptions_list": [],
+  "actions": [],
+  "type": "new_terms",
+  "query": "(host.name:*sw-app* or host.name:saa* or host.name:*swift*) and event.code:\"4624\" and winlog.event_data.LogonType:(\"2\" or \"7\" or \"10\") and not winlog.event_data.TargetUserName:(\"SolarWinds\" or \"NCM\" or \"*$\" or \"DWM-*\" or \"UMFD-*\" or \"SYSTEM\")",
+  "new_terms_fields": [
+    "winlog.event_data.TargetUserName"
+  ],
+  "history_window_start": "now-30d",
+  "index": [
+    "logs-system.security-*"
+  ],
+  "language": "kuery"
+}

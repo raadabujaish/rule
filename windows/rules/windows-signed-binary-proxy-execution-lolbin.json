@@ -1,0 +1,76 @@
+{
+  "rule_id": "jcb-win-signed-binary-proxy-exec",
+  "name": "Windows — Signed Binary Proxy Execution (LOLBin)",
+  "version": 1,
+  "enabled": true,
+  "interval": "1h",
+  "from": "now-90m",
+  "to": "now",
+  "description": "Attacker objective\nExecute attacker code through a trusted, signed Windows binary to bypass application control and evade defenses.\n\nAttack logic\nregsvr32 (scrobj/COM scriptlets), rundll32/mshta (inline javascript/vbscript), InstallUtil and MSBuild can run attacker-supplied code while appearing as trusted system binaries.\n\nWhy this detection works\nProcess command-line auditing records the proxy-execution argument patterns (scriptlet URLs, inline script protocols, uninstall-method abuse), independent of case.\n\nFalse positives\nRare legitimate use of these binaries with scriptlet/inline-script arguments.\n\nTuning\nAllowlist verified administrative scripts; review the referenced scriptlet/URL.\n\nRequired telemetry\nProcess creation with command line: Sysmon Event ID 1 and Windows Security 4688.",
+  "tags": [
+    "JCB",
+    "Windows",
+    "Phase3",
+    "Use Case: Threat Detection",
+    "Tactic: Defense Evasion"
+  ],
+  "author": [
+    "raadabujaish"
+  ],
+  "license": "",
+  "threat": [
+    {
+      "framework": "MITRE ATT&CK",
+      "tactic": {
+        "id": "TA0005",
+        "name": "Defense Evasion",
+        "reference": "https://attack.mitre.org/tactics/TA0005/"
+      },
+      "technique": [
+        {
+          "id": "T1218",
+          "name": "System Binary Proxy Execution",
+          "reference": "https://attack.mitre.org/techniques/T1218/"
+        }
+      ]
+    }
+  ],
+  "investigation_fields": {
+    "field_names": [
+      "@timestamp",
+      "host.name",
+      "user.name",
+      "process.name",
+      "process.parent.name",
+      "process.command_line",
+      "event.code",
+      "winlog.event_data.SubjectUserName",
+      "user.domain",
+      "process.executable",
+      "process.args",
+      "process.parent.executable",
+      "event.action"
+    ]
+  },
+  "related_integrations": [],
+  "required_fields": [],
+  "setup": "",
+  "note": "## Investigation guide\n1. Inspect the scriptlet/URL or inline script the binary was told to execute.\n2. If malicious, isolate the host and hunt for the follow-on payload and parent process.",
+  "false_positives": [
+    "Rare legitimate use of these binaries with scriptlet/inline-script arguments."
+  ],
+  "references": [
+    "https://attack.mitre.org/techniques/T1218/"
+  ],
+  "risk_score": 68,
+  "risk_score_mapping": [],
+  "severity": "high",
+  "severity_mapping": [],
+  "output_index": "",
+  "max_signals": 100,
+  "exceptions_list": [],
+  "actions": [],
+  "type": "esql",
+  "language": "esql",
+  "query": "FROM logs-windows.sysmon_operational-*,logs-system.security-* METADATA _id, _index, _version\n| WHERE (event.code == \"1\" OR event.code == \"4688\") AND process.command_line IS NOT NULL\n| EVAL cl = TO_LOWER(process.command_line)\n| WHERE (cl LIKE \"*regsvr32*\" AND (cl LIKE \"*scrobj*\" OR cl LIKE \"*/i:http*\" OR cl LIKE \"*-i:http*\" OR cl LIKE \"*.sct*\"))\n   OR (cl LIKE \"*rundll32*\" AND (cl LIKE \"*javascript:*\" OR cl LIKE \"*vbscript:*\"))\n   OR (cl LIKE \"*mshta*\" AND (cl LIKE \"*javascript:*\" OR cl LIKE \"*vbscript:*\"))\n   OR (cl LIKE \"*installutil*\" AND cl LIKE \"*/logfile=*\" AND cl LIKE \"*/u*\")\n   OR (cl LIKE \"*msbuild*\" AND cl LIKE \"*http*\")\n| KEEP @timestamp, host.name, user.name, process.name, process.parent.name, process.command_line, event.code, winlog.event_data.SubjectUserName"
+}

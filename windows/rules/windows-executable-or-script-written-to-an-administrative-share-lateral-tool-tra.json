@@ -1,0 +1,106 @@
+{
+  "rule_id": "3e77da85-741f-44aa-982b-34ce1f137ea9",
+  "name": "Windows — Executable or Script Written to an Administrative Share (Lateral Tool Transfer)",
+  "version": 1,
+  "enabled": true,
+  "interval": "10m",
+  "from": "now-20m",
+  "to": "now",
+  "description": "Detects a remote write of an executable, library or script onto the C$ or ADMIN$ administrative share. This is the staging half of lateral movement (ATT&CK T1570 Lateral Tool Transfer) and immediately precedes remote service or scheduled-task execution. Built on Windows Security event 5145 with the WriteData access mask, so it requires neither Sysmon nor Elastic Defend. Over the validation window the only accounts performing this were the Nessus scanner and ManageEngine, both excluded, leaving a clean zero baseline.",
+  "tags": [
+    "JCB",
+    "ScanWave",
+    "Windows",
+    "Lateral Movement",
+    "MITRE T1570",
+    "MITRE T1021.002"
+  ],
+  "author": [
+    "ScanWave"
+  ],
+  "license": "ScanWave — JCB Managed Detection",
+  "threat": [
+    {
+      "framework": "MITRE ATT&CK",
+      "tactic": {
+        "id": "TA0008",
+        "name": "Lateral Movement",
+        "reference": "https://attack.mitre.org/tactics/TA0008/"
+      },
+      "technique": [
+        {
+          "id": "T1570",
+          "name": "Lateral Tool Transfer",
+          "reference": "https://attack.mitre.org/techniques/T1570/"
+        }
+      ]
+    },
+    {
+      "framework": "MITRE ATT&CK",
+      "tactic": {
+        "id": "TA0008",
+        "name": "Lateral Movement",
+        "reference": "https://attack.mitre.org/tactics/TA0008/"
+      },
+      "technique": [
+        {
+          "id": "T1021",
+          "name": "Remote Services",
+          "reference": "https://attack.mitre.org/techniques/T1021/",
+          "subtechnique": [
+            {
+              "id": "T1021.002",
+              "name": "SMB/Windows Admin Shares",
+              "reference": "https://attack.mitre.org/techniques/T1021/002/"
+            }
+          ]
+        }
+      ]
+    }
+  ],
+  "investigation_fields": {
+    "field_names": [
+      "host.name",
+      "user.name",
+      "user.domain",
+      "process.name",
+      "process.executable",
+      "process.command_line",
+      "process.args",
+      "process.parent.name",
+      "process.parent.executable",
+      "event.code",
+      "event.action",
+      "winlog.event_data.ShareName",
+      "winlog.event_data.AccessList",
+      "winlog.event_data.RelativeTargetName",
+      "winlog.event_data.SubjectUserName"
+    ]
+  },
+  "related_integrations": [],
+  "required_fields": [],
+  "setup": "",
+  "note": "### Triage\n1. `winlog.event_data.RelativeTargetName` is the file dropped, relative to the share root; `host.name` is the **destination**.\n2. Recover the source IP by joining `winlog.event_data.SubjectLogonId` to event 4624 on the same host.\n3. Check for execution of the dropped file: 4688/Sysmon 1 on the destination, or a new service (7045/4697) referencing it.\n4. A `.exe` or `.dll` written into `System32`, `SysWOW64` or `Windows\\Temp` by an interactive user account is high-confidence malicious.\n\n### Tuning\nExclude specific deployment service accounts by name; do not remove the extension filter.",
+  "false_positives": [
+    "Authenticated vulnerability scanning and agent deployment (Nessus, ManageEngine) — excluded by account.",
+    "Software distribution platforms pushing binaries over admin shares.",
+    "Backup or patch tooling staging files remotely."
+  ],
+  "references": [
+    "https://attack.mitre.org/techniques/T1570/"
+  ],
+  "risk_score": 73,
+  "risk_score_mapping": [],
+  "severity": "high",
+  "severity_mapping": [],
+  "output_index": "",
+  "max_signals": 100,
+  "exceptions_list": [],
+  "actions": [],
+  "type": "query",
+  "language": "kuery",
+  "index": [
+    "logs-system.security-*"
+  ],
+  "query": "event.code:\"5145\" and winlog.event_data.ShareName:(*C$ or *ADMIN$) and winlog.event_data.AccessList:*WriteData* and winlog.event_data.RelativeTargetName:(*.exe or *.dll or *.bat or *.cmd or *.ps1 or *.vbs or *.js or *.scr or *.msi or *.jar or *.hta) and not winlog.event_data.SubjectUserName:(\"Nessus\" or \"manageengine\" or \"svc_nessus\" or \"scanuser\") and not winlog.event_data.SubjectUserName:*$"
+}

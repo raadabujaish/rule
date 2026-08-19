@@ -1,0 +1,72 @@
+{
+  "rule_id": "jcb-def-dlp-bulk-exfil",
+  "name": "Defender DLP — Bulk Sensitive-Data Movement by a Single User",
+  "version": 1,
+  "enabled": true,
+  "interval": "1h",
+  "from": "now-24h",
+  "to": "now",
+  "description": "Attacker objective\nExfiltrate a large volume of sensitive data — here, cardholder/PCI documents — by copying or uploading many distinct files, whether by a malicious insider or a compromised account.\n\nAttack logic\nRoutine business use produces a small number of DLP matches per user. A single user triggering DLP on many distinct sensitive documents within a short window indicates bulk data movement, not incidental handling.\n\nWhy this detection works\nAggregating distinct DLP-matched documents per user over the alert stream distinguishes bulk exfiltration from the routine single-document matches that make per-alert DLP rules unusable.\n\nFalse positives\nA user performing a legitimate bulk migration/reporting task; a shared account.\n\nTuning\nSet the distinct-document threshold above the routine per-user rate; allowlist sanctioned bulk-processing accounts; correlate with the destination (upload/USB/print) in the DLP evidence.\n\nRequired telemetry\nm365_defender.alert (detection_source=DLP, title=document, user.name, evidence.device_dns_name).",
+  "tags": [
+    "JCB",
+    "Defender",
+    "Phase3",
+    "Tactic: Exfiltration",
+    "Use Case: Threat Detection"
+  ],
+  "author": [
+    "raadabujaish"
+  ],
+  "license": "",
+  "threat": [
+    {
+      "framework": "MITRE ATT&CK",
+      "tactic": {
+        "id": "TA0010",
+        "name": "Exfiltration",
+        "reference": "https://attack.mitre.org/tactics/TA0010/"
+      },
+      "technique": [
+        {
+          "id": "T1567",
+          "name": "Exfiltration Over Web Service",
+          "reference": "https://attack.mitre.org/techniques/T1567/"
+        }
+      ]
+    }
+  ],
+  "investigation_fields": {
+    "field_names": [
+      "user.name",
+      "message",
+      "m365_defender.incident.severity",
+      "m365_defender.incident.status",
+      "m365_defender.alert.title",
+      "m365_defender.alert.severity",
+      "m365_defender.alert.detection_source",
+      "host.name",
+      "event.action"
+    ]
+  },
+  "related_integrations": [],
+  "required_fields": [],
+  "setup": "",
+  "note": "## Investigation guide\n1. The user moved many distinct sensitive documents; review the document list and the DLP action (block/audit).\n2. Confirm business justification; if none, treat as insider data exfiltration and involve fraud/risk and HR.\n3. Check the user's device and account for compromise (correlate with Defender/Windows detections).",
+  "false_positives": [
+    "A user performing a legitimate bulk migration/reporting task; a shared account."
+  ],
+  "references": [
+    "https://attack.mitre.org/techniques/T1567/"
+  ],
+  "risk_score": 73,
+  "risk_score_mapping": [],
+  "severity": "high",
+  "severity_mapping": [],
+  "output_index": "",
+  "max_signals": 100,
+  "exceptions_list": [],
+  "actions": [],
+  "type": "esql",
+  "language": "esql",
+  "query": "FROM logs-m365_defender.alert* METADATA _id, _index, _version\n| WHERE m365_defender.alert.detection_source == \"microsoftDataLossPrevention\" AND user.name IS NOT NULL AND NOT user.name IN (\"Unknown\",\"LOGIN\",\"-\")\n| STATS documents = COUNT_DISTINCT(m365_defender.alert.title), alerts = COUNT(), devices = VALUES(m365_defender.alert.evidence.device_dns_name) BY user.name\n| WHERE documents >= 10"
+}

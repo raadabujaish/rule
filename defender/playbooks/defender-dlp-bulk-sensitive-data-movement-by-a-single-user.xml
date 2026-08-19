@@ -1,0 +1,143 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<Playbook xmlns="https://soc.example/playbooks" id="PB-DEF-002" name="Defender DLP — Bulk Sensitive-Data Movement by a Single User - SOC Playbook" version="1.0" status="Production" classification="TLP:AMBER">
+  <Metadata>
+    <Owner>JCB Detection Engineering (WatchWave)</Owner>
+    <LastUpdated>2026-08-14</LastUpdated>
+    <Severity default="High">High</Severity>
+    <Confidence default="Medium">Medium</Confidence>
+    <Category>Exfiltration / Data Transfer</Category>
+    <MitreAttack>
+      <Technique id="T1567" name="Exfiltration Over Web Service"/>
+      <Tactic id="TA0010" name="Exfiltration"/>
+    </MitreAttack>
+    <References>
+      <Reference title="MITRE ATT and CK" url="https://attack.mitre.org/techniques/T1567/"/>
+    </References>
+  </Metadata>
+  <ExecutiveSummary>
+    <Overview>Microsoft DLP flagged one user moving many distinct sensitive documents (&gt;=10 titles). Triage: data exfiltration, or heavy legitimate document work by a data-role user?</Overview>
+    <BusinessImpact>Bulk sensitive-data movement is exfiltration of regulated/confidential banking data.</BusinessImpact>
+  </ExecutiveSummary>
+  <Scope><Assets>
+    <AssetType>Defender for Endpoint/Identity/Office/DLP protected assets</AssetType>
+  </Assets><LogSources>
+    <LogSource>Microsoft Defender XDR alerts - logs-m365_defender.alert*</LogSource>
+  </LogSources></Scope>
+  <Prerequisites><TelemetryRequirements>
+    <Requirement>Defender XDR alerts via Elastic Agent (verified live). Fields: m365_defender.alert.detection_source, .severity, .status, .title, .category, threat.tactic.name, user.name, host.name, m365_defender.alert.evidence.device_dns_name. INGEST LAG ~26 min - 4h windows + event.ingested override.</Requirement>
+  </TelemetryRequirements><DetectionSignals>
+    <Signal><Name>Bulk Sensitive-Data Movement by a Single</Name><Details>user with &gt;=10 distinct DLP-flagged documents.</Details></Signal>
+  </DetectionSignals></Prerequisites>
+  <Inputs>
+    <Input name="$user" description="User moving the data (user.name)."/>
+  </Inputs>
+  <Triage><ImmediateCapture>
+    <Item>$user: $user</Item>
+  </ImmediateCapture><InitialAssessment>
+    <Rule>Weigh the full evidence story per the ClassificationGuidance, not any single fact.</Rule>
+  </InitialAssessment></Triage>
+  <Investigation>
+    <Goal>Determine whether the bulk DLP activity is exfiltration or legitimate data-role work.</Goal>
+    <Workflow>
+      <Step order="1" name="DLP documents and devices for the user">
+        <Purpose>The document count, titles and devices distinguish exfil from routine work.</Purpose>
+        <Query platform="Elastic" language="ES|QL" id="INV-01-DEFDLP-VOLUME">
+          <![CDATA[
+FROM logs-m365_defender.alert*
+| WHERE m365_defender.alert.detection_source == "microsoftDataLossPrevention" AND user.name == "$user" AND @timestamp >= NOW() - 4 hours
+| KEEP @timestamp, m365_defender.alert.title, m365_defender.alert.evidence.device_dns_name
+| SORT @timestamp DESC
+| LIMIT 25
+          ]]>
+        </Query>
+        <ExpectedOutput>
+          <Field name="m365_defender.alert.title"/>
+          <Field name="m365_defender.alert.evidence.device_dns_name"/>
+        </ExpectedOutput>
+        <AnalystNotes>Many distinct sensitive titles moved in a short window, especially to removable/cloud/personal destinations, suggests exfil. A data-analyst/finance role handling many documents routinely is benign. Note the device.</AnalystNotes>
+      </Step>
+      <Step order="2" name="Is this outside the user's normal pattern">
+        <Purpose>A spike vs a consistently high-volume role user distinguishes exfil from routine work.</Purpose>
+        <Query platform="Elastic" language="ES|QL" id="INV-02-DEFDLP-CONTEXT" optional="true">
+          <![CDATA[
+FROM logs-m365_defender.alert*
+| WHERE m365_defender.alert.detection_source == "microsoftDataLossPrevention" AND user.name == "$user" AND @timestamp >= NOW() - 4 hours
+| KEEP @timestamp, m365_defender.alert.title, m365_defender.alert.severity
+| SORT @timestamp DESC
+| LIMIT 25
+          ]]>
+        </Query>
+        <ExpectedOutput>
+          <Field name="m365_defender.alert.title"/>
+          <Field name="m365_defender.alert.severity"/>
+        </ExpectedOutput>
+        <AnalystNotes>Correlate with the user's role and history. A sudden spike, or movement after a compromise indicator, is exfil.</AnalystNotes>
+      </Step>
+      <Step order="3" name="Finalize classification">
+        <DecisionTree>
+          <Node><Condition>Bulk sensitive-document movement to removable/cloud/personal destinations, or outside the user's role.</Condition><Result>True Positive (Data Exfiltration - escalate, DLP/compliance)</Result></Node>
+          <Node><Condition>A data-role user (analyst/finance) with routine high-volume document work.</Condition><Result>False Positive / Benign Activity</Result></Node>
+          <Node><Condition>A DLP policy over-classifying benign documents.</Condition><Result>Misconfiguration</Result></Node>
+          <Node><Condition>Bulk movement with unclear role/intent.</Condition><Result>Needs Escalation</Result></Node>
+        </DecisionTree>
+        <DocumentationChecklist>
+          <Item>Attach outputs of INV-01-DEFDLP-VOLUME, INV-02-DEFDLP-CONTEXT to the case.</Item>
+        </DocumentationChecklist>
+      </Step>
+    </Workflow>
+  </Investigation>
+  <ClassificationGuidance>
+    <FalsePositive>
+      <Definition>Routine high-volume document work by a data role.</Definition>
+      <Indicators>
+        <Item>Analyst/finance role.</Item>
+        <Item>Business destinations.</Item>
+        <Item>Consistent with history.</Item>
+      </Indicators>
+      <SOCAction>
+        <Item>Confirm the role/work; close as benign_activity.</Item>
+      </SOCAction>
+    </FalsePositive>
+    <TruePositive>
+      <Definition>Data exfiltration by or via the user.</Definition>
+      <Indicators>
+        <Item>Bulk sensitive docs to risky destinations.</Item>
+        <Item>Outside the user's role.</Item>
+        <Item>Post-compromise timing.</Item>
+      </Indicators>
+      <SOCAction>
+        <Item>Engage DLP/compliance; review the moved data; reset the account if compromised; open IR.</Item>
+      </SOCAction>
+    </TruePositive>
+    <Misconfiguration>
+      <Definition>A DLP policy over-classifying benign documents.</Definition>
+      <Indicators>
+        <Item>Benign docs flagged.</Item>
+        <Item>Inflated volume.</Item>
+      </Indicators>
+      <SOCAction>
+        <Item>Tune the DLP policy; document.</Item>
+      </SOCAction>
+    </Misconfiguration>
+  </ClassificationGuidance>
+  <Response><IRForHumans>
+    <Phase name="Immediate Actions (0-30 minutes)">
+      <Action priority="1">Identify the user and destinations; if exfil, involve DLP/compliance.</Action>
+      <Action priority="2">Reset the account if compromise is indicated.</Action>
+    </Phase>
+    <Phase name="Containment and Eradication (hours)">
+      <Action>Review the moved data with DLP/compliance; reset the account if compromised; open IR.</Action>
+    </Phase>
+    <Phase name="Recovery and Hardening (days)">
+      <Action>Tune DLP policies; enforce egress controls; educate data-role users.</Action>
+    </Phase>
+  </IRForHumans></Response>
+  <QualityChecks>
+    <Check>Defender ingest lag ~26 min - 4h window + override.</Check>
+  </QualityChecks>
+  <ClosureCriteria><FalsePositiveClosure>
+    <Item>Legitimate data-role work confirmed; documented.</Item>
+  </FalsePositiveClosure><TruePositiveClosure>
+    <Item>Exfil scoped with compliance; account secured; data reviewed.</Item>
+  </TruePositiveClosure></ClosureCriteria>
+</Playbook>

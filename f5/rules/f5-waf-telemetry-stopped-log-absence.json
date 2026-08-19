@@ -1,0 +1,51 @@
+{
+  "rule_id": "jcb-f5-telemetry-absence",
+  "name": "F5 WAF — Telemetry Stopped (Log Absence)",
+  "version": 1,
+  "enabled": true,
+  "interval": "15m",
+  "from": "now-16m",
+  "to": "now",
+  "description": "Fires when NO F5 WAF events arrive in 15 minutes — the correct replacement for F5-WAF Connectivity Monitor, which alerted every minute that logs EXISTED (8.5k noise alerts). Suppression: 2h so an outage pages once.",
+  "tags": [
+    "JCB",
+    "Detection-QA-2026-08",
+    "Health"
+  ],
+  "author": [
+    "JCB Detection Engineering"
+  ],
+  "license": "internal",
+  "threat": [],
+  "investigation_fields": {
+    "field_names": [
+      "f5_events"
+    ]
+  },
+  "related_integrations": [],
+  "required_fields": [],
+  "setup": "",
+  "false_positives": [],
+  "references": [],
+  "risk_score": 73,
+  "risk_score_mapping": [],
+  "severity": "high",
+  "severity_mapping": [],
+  "output_index": "",
+  "max_signals": 100,
+  "exceptions_list": [],
+  "actions": [],
+  "type": "esql",
+  "language": "esql",
+  "query": "FROM logs-cef.log-* METADATA _id, _index, _version | WHERE observer.vendor == \"F5\" AND @timestamp >= NOW() - 15 minutes | STATS f5_events = COUNT() | WHERE f5_events == 0",
+  "alert_suppression": {
+    "group_by": [
+      "f5_events"
+    ],
+    "duration": {
+      "value": 2,
+      "unit": "h"
+    },
+    "missing_fields_strategy": "suppress"
+  }
+}

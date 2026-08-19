@@ -1,0 +1,55 @@
+{
+  "rule_id": "jcb-fgt-admin-login-new-terms",
+  "name": "Change Audit — FortiGate Administrator Login from a New Source",
+  "version": 1,
+  "enabled": true,
+  "interval": "1h",
+  "from": "now-70m",
+  "to": "now",
+  "description": "First time an admin+source combination logs into a FortiGate in 30 days. Replaces the admin-login share of QA - Potential Unauthorized Changes (which promoted every login 1:1) with novelty-only alerting.",
+  "tags": [
+    "JCB",
+    "Detection-QA-2026-08",
+    "Change Audit",
+    "FortiGate"
+  ],
+  "author": [
+    "JCB Detection Engineering"
+  ],
+  "license": "internal",
+  "threat": [],
+  "investigation_fields": {
+    "field_names": [
+      "user.name",
+      "source.ip",
+      "fortinet.firewall.status",
+      "observer.name",
+      "event.outcome",
+      "message"
+    ]
+  },
+  "related_integrations": [],
+  "required_fields": [],
+  "setup": "",
+  "false_positives": [],
+  "references": [],
+  "risk_score": 21,
+  "risk_score_mapping": [],
+  "severity": "low",
+  "severity_mapping": [],
+  "output_index": "",
+  "max_signals": 100,
+  "exceptions_list": [],
+  "actions": [],
+  "type": "new_terms",
+  "query": "fortinet.firewall.action:\"login\" and user.name:*",
+  "new_terms_fields": [
+    "user.name",
+    "source.ip"
+  ],
+  "history_window_start": "now-30d",
+  "index": [
+    "logs-fortinet_fortigate.log-*"
+  ],
+  "language": "kuery"
+}

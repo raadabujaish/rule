@@ -1,0 +1,80 @@
+{
+  "rule_id": "882132e1-9e71-45db-baa6-5f83d898afc8",
+  "name": "Brute Force Attacks - Windows",
+  "version": 1,
+  "enabled": true,
+  "interval": "10m",
+  "from": "now-1200s",
+  "to": "now",
+  "description": "Brute Force Attacks - Windows",
+  "tags": [],
+  "author": [],
+  "license": "",
+  "threat": [],
+  "investigation_fields": {
+    "field_names": [
+      "kibana.alert.rule.name",
+      "kibana.alert.severity",
+      "host.name",
+      "user.name",
+      "source.ip",
+      "destination.ip",
+      "message"
+    ]
+  },
+  "related_integrations": [],
+  "required_fields": [],
+  "setup": "",
+  "false_positives": [],
+  "references": [],
+  "risk_score": 73,
+  "risk_score_mapping": [],
+  "severity": "high",
+  "severity_mapping": [],
+  "output_index": "",
+  "max_signals": 100,
+  "exceptions_list": [],
+  "actions": [],
+  "meta": {
+    "from": "10m",
+    "kibana_siem_app_url": "https://jcb.scanwave.local:8008/app/security"
+  },
+  "type": "query",
+  "language": "kuery",
+  "index": [
+    "apm-*-transaction*",
+    "auditbeat-*",
+    "endgame-*",
+    "filebeat-*",
+    "logs-*",
+    "packetbeat-*",
+    "traces-apm*",
+    "winlogbeat-*",
+    "-*elastic-cloud-logs-*",
+    ".alerts-security.alerts-default"
+  ],
+  "query": "",
+  "filters": [
+    {
+      "meta": {
+        "index": "0a232640-a838-4d21-a480-5136ff3f7295",
+        "type": "phrase",
+        "disabled": false,
+        "negate": false,
+        "alias": null,
+        "key": "kibana.alert.rule.threat.technique.name",
+        "params": {
+          "query": "Brute Force"
+        }
+      },
+      "$state": {
+        "store": "appState"
+      },
+      "query": {
+        "match_phrase": {
+          "kibana.alert.rule.threat.technique.name": "Brute Force"
+        }
+      }
+    }
+  ]
+}

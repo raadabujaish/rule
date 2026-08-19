@@ -1,18 +1,24 @@
-# NBI Custom Detection Rules — Detection-as-Code
+# Custom Detection Rules — Detection-as-Code (NBI + JCB)
 
-Portable, importable **Elastic Security** custom detection rules for the NBI environment, exported as
-code and paired with their SOC investigation playbooks. Organized by platform so rule sets can be
-distributed, version-controlled, and imported into another Elastic cluster.
+Portable, importable **Elastic Security** custom detection rules for the **NBI** and **JCB** environments,
+exported as code and paired with their SOC investigation playbooks. Organized by platform so rule sets can
+be distributed, version-controlled, and imported into another Elastic cluster.
 
-> ⚠️ **CONFIDENTIAL — customer security content.** These are NBI's production detection rules and
-> investigation playbooks. **Keep this repository PRIVATE.** Pushing to a public remote publishes NBI's
-> detection logic (queries, thresholds, coverage, and gaps) externally.
+> ⚠️ **CONFIDENTIAL — multi-customer security content.** This repository contains **two customers'**
+> (NBI and JCB) production detection rules and investigation playbooks. **Keep this repository PRIVATE.**
+> Pushing to a public remote publishes their detection logic (queries, thresholds, coverage, and gaps).
 
 ## What's here
 
-- **122 custom detection rules** (every custom rule that has a matching investigation playbook), exported
-  read-only from NBI on **2026-08-19**.
-- Each rule paired with its **deep investigation playbook** in both Markdown (`.md`) and v2 XML (`.xml`).
+- **315 custom detection rules** total — **NBI: 122** (exported 2026-08-19) + **JCB: 193** — each paired
+  with its SOC investigation playbook where one exists.
+- NBI playbooks: deep Markdown (`.md`) + v2 XML (`.xml`). JCB playbooks: WatchWave XML (`.xml`).
+- **Naming / dedup:** one file per rule, kebab-case slug. When a rule slug already existed (a *similar*
+  detection across customers/duplicates), the newer one is suffixed `-2`, `-3`, … (e.g.
+  `windows/playbooks/windows-execution-via-microsoft-dotnet-clickonce-host-2.xml`).
+- **Platforms** (22 dirs): NBI + JCB share `active-directory, windows, windows-fim, fortigate, defender,
+  kaspersky, linux, oracle, correlation, cisco, mssql, fortiweb, vsphere`; JCB adds
+  `f5, panos, o365, forcepoint, netscout, ach, core, swift, other`.
 
 ```
 <platform>/

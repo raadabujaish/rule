@@ -1,0 +1,206 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<Playbook xmlns="https://soc.example/playbooks" id="PB-JCB-NEW-1" name="Correlation — Possible BEC / Cloud-Account Compromise with Sensitive Data Loss - SOC Playbook" version="2.1" status="Production" classification="TLP:AMBER">
+  <Metadata>
+    <Owner>JCB Detection Engineering (WatchWave)</Owner>
+    <LastUpdated>2026-08-19</LastUpdated>
+    <Severity default="Critical">Critical</Severity>
+    <Confidence default="Medium">Medium</Confidence>
+    <Category>Initial Access / BEC / Exfiltration</Category>
+    <MitreAttack>
+      <Technique id="T1078" name="Valid Accounts"/>
+      <Technique id="T1567" name="Exfiltration Over Web Service"/>
+      <Tactic id="TA0001" name="Initial Access"/>
+      <Tactic id="TA0010" name="Exfiltration"/>
+    </MitreAttack>
+    <References>
+      <Reference title="MITRE ATT and CK T1078 Valid Accounts" url="https://attack.mitre.org/techniques/T1078/"/>
+      <Reference title="MITRE ATT and CK T1567 Exfiltration Over Web Service" url="https://attack.mitre.org/techniques/T1567/"/>
+    </References>
+  </Metadata>
+  <ExecutiveSummary>
+    <Overview>This correlation fires when ONE account carries both a cloud-account-compromise indicator (Entra credential or privileged-role add, OAuth consent, mailbox forwarding or delegation, transport rule, anonymous SharePoint sharing) AND a sensitive-data-loss indicator (a High or Medium Microsoft Purview / DLP alert, or a bulk data-movement signal) within a short window. Triage question: is this a genuine Business Email Compromise where a compromised cloud identity is being used to move sensitive data, or are the constituent cloud alerts coincidental and individually benign?</Overview>
+    <BusinessImpact>For a bank, a compromised M365 identity that is also tripping DLP (SWIFT, card, national-ID policies at JCB) is simultaneously account takeover, financial-fraud enablement and a reportable data breach. Confirmed cases require identity containment, IR and compliance notification.</BusinessImpact>
+  </ExecutiveSummary>
+  <Scope>
+    <Assets>
+      <AssetType>Microsoft 365 / Entra ID tenant (JCB) — mailboxes, SharePoint/OneDrive, Entra directory</AssetType>
+      <AssetType>Correlated across JCB Elastic Security detections on a shared account</AssetType>
+    </Assets>
+    <LogSources>
+      <LogSource>Elastic Security detection alerts — .alerts-security.alerts-*</LogSource>
+      <LogSource>Microsoft 365 unified audit log — logs-o365.audit-*</LogSource>
+    </LogSources>
+  </Scope>
+  <Prerequisites>
+    <TelemetryRequirements>
+      <Requirement>Elastic Security alerts index (.alerts-security.alerts-*) — verified live at JCB (4.1M alerts/30d). Fields used: kibana.alert.rule.name, kibana.alert.severity, kibana.alert.risk_score, user.name, source.ip, host.name, @timestamp. Correlation must rest on a SHARED ACCOUNT, not mere time-proximity.</Requirement>
+      <Requirement>M365 unified audit via Elastic Agent — verified live (8.1M docs/30d). JCB-specific facts: o365.audit.Operation is NOT populated at JCB (0 of 8.1M) — the operation is carried in event.action. The affected user of a Purview/DLP alert appears in o365.audit.ObjectId as an email (case varies, e.g. jcbank.com.jo vs JCBANK.COM.JO) — match case-insensitively. rule.name on those alerts is the DLP policy name.</Requirement>
+      <Requirement>O365 ingest lag is typically 20-60 min; all queries use a 4h window. norm_user referenced by the source rule is a computed field and is not stored on the alerts index — pivots here key on the stored user.name.</Requirement>
+    </TelemetryRequirements>
+    <DetectionSignals>
+      <Signal><Name>Possible BEC / Cloud-Account Compromise with Sensitive Data Loss</Name><Details>A cloud-compromise alert and a sensitive-data-loss alert are correlated on the same account within the window.</Details></Signal>
+    </DetectionSignals>
+  </Prerequisites>
+  <Inputs>
+    <Input name="$entity" description="The correlated account as it appears on the alerts (user.name)."/>
+    <Input name="$entity_email" description="The same account's M365 UPN / primary email (matches o365.audit.ObjectId on DLP/compliance alerts)."/>
+  </Inputs>
+  <Triage>
+    <ImmediateCapture>
+      <Item>$entity: $entity</Item>
+      <Item>$entity_email: $entity_email</Item>
+    </ImmediateCapture>
+    <InitialAssessment>
+      <Rule>Weigh the full evidence story per the ClassificationGuidance — a real incident needs BOTH a compromise leg and a data-loss leg on the same account, not any single alert.</Rule>
+    </InitialAssessment>
+  </Triage>
+  <Investigation>
+    <Goal>Determine whether the alerts correlated on this account form a genuine BEC / cloud-account compromise with sensitive data loss, or a coincidental cluster of individually benign cloud alerts.</Goal>
+    <Workflow>
+      <Step order="1" name="List every alert that fired on this account">
+        <Purpose>The set of distinct rules, severities and risk on the shared account shows whether a real multi-signal story exists (correlation by ACCOUNT, not time). Look for a compromise-leg rule and a data-loss-leg rule together.</Purpose>
+        <Query platform="Elastic" language="ES|QL" id="INV-01">
+          <![CDATA[
+FROM .alerts-security.alerts-*
+| WHERE user.name == "$entity" AND @timestamp >= NOW() - 4 hours
+| STATS hits = COUNT(*), first_seen = MIN(@timestamp), last_seen = MAX(@timestamp), max_risk = MAX(kibana.alert.risk_score), severities = VALUES(kibana.alert.severity) BY kibana.alert.rule.name
+| SORT max_risk DESC
+| LIMIT 30
+          ]]>
+        </Query>
+        <ExpectedOutput>
+          <Field name="kibana.alert.rule.name"/>
+          <Field name="hits"/>
+          <Field name="max_risk"/>
+          <Field name="severities"/>
+        </ExpectedOutput>
+        <AnalystNotes>A cloud-compromise rule (Entra credential/role add, OAuth consent, mailbox forwarding/delegation, transport rule, anonymous sharing) together with a data-loss rule (Purview/DLP, QA Office 365 High/Medium Severity) on the same account is the incident. A single low-fidelity rule repeating is not.</AnalystNotes>
+      </Step>
+      <Step order="2" name="Confirm the sensitive-data-loss leg in the M365 audit log">
+        <Purpose>Pull the High/Medium Microsoft Security and Compliance (Purview/DLP) alerts for this account directly from the audit log — this is the data-loss evidence and names the policy that matched (e.g. SWIFT, card, national-ID).</Purpose>
+        <Query platform="Elastic" language="ES|QL" id="INV-02">
+          <![CDATA[
+FROM logs-o365.audit-*
+| WHERE @timestamp >= NOW() - 4 hours AND event.code IN ("SecurityComplianceAlerts","SecurityComplianceInsights") AND o365.audit.Severity IN ("High","Medium") AND TO_LOWER(o365.audit.ObjectId) == TO_LOWER("$entity_email")
+| KEEP @timestamp, o365.audit.Severity, rule.name, event.action, o365.audit.ObjectId, o365.audit.AlertId
+| SORT @timestamp DESC
+| LIMIT 25
+          ]]>
+        </Query>
+        <ExpectedOutput>
+          <Field name="o365.audit.Severity"/>
+          <Field name="rule.name"/>
+          <Field name="event.action"/>
+          <Field name="o365.audit.AlertId"/>
+        </ExpectedOutput>
+        <AnalystNotes>rule.name is the DLP/compliance policy. A High-severity SWIFT or card/national-ID policy match on the same account as a compromise indicator is a bank-grade data breach. No matching rows means the data-loss leg is not in M365 audit — the correlation may be resting on a non-M365 DLP source (Forcepoint) or is weaker.</AnalystNotes>
+      </Step>
+      <Step order="3" name="Confirm the cloud-account-compromise leg (mailbox / identity changes)">
+        <Purpose>Identify persistence or takeover actions on or by this account — inbox rules, mailbox permission or delegation grants, transport rules, password or conditional-access changes, privileged group adds — the hallmarks of BEC.</Purpose>
+        <Query platform="Elastic" language="ES|QL" id="INV-03">
+          <![CDATA[
+FROM logs-o365.audit-*
+| WHERE @timestamp >= NOW() - 4 hours AND (TO_LOWER(user.name) == TO_LOWER("$entity") OR TO_LOWER(o365.audit.ObjectId) == TO_LOWER("$entity_email")) AND (event.action LIKE "*InboxRule*" OR event.action LIKE "Set-Mailbox*" OR event.action LIKE "Add-MailboxPermission" OR event.action LIKE "Add-RecipientPermission" OR event.action LIKE "*TransportRule*" OR event.action == "Change user password" OR event.action LIKE "Update PasswordProfile*" OR event.action LIKE "Set-ConditionalAccessPolicy" OR event.action LIKE "Add member to*")
+| KEEP @timestamp, event.action, user.name, o365.audit.ObjectId, source.ip
+| SORT @timestamp DESC
+| LIMIT 25
+          ]]>
+        </Query>
+        <ExpectedOutput>
+          <Field name="event.action"/>
+          <Field name="user.name"/>
+          <Field name="o365.audit.ObjectId"/>
+          <Field name="source.ip"/>
+        </ExpectedOutput>
+        <AnalystNotes>A new external-forwarding inbox rule, a delegation grant or a transport rule alongside the DLP hit is a classic BEC exfil setup. If none appear, the compromise leg may be an Entra sign-in / OAuth signal instead — corroborate against INV-01 and INV-04.</AnalystNotes>
+      </Step>
+      <Step order="4" name="Where is the activity coming from">
+        <Purpose>Summarise the source IPs seen across this account's alerts to spot an unfamiliar or external origin behind the correlated behaviour.</Purpose>
+        <Query platform="Elastic" language="ES|QL" id="INV-04">
+          <![CDATA[
+FROM .alerts-security.alerts-*
+| WHERE user.name == "$entity" AND @timestamp >= NOW() - 4 hours
+| STATS alerts = COUNT(*), distinct_rules = COUNT_DISTINCT(kibana.alert.rule.name) BY source.ip
+| SORT alerts DESC
+| LIMIT 20
+          ]]>
+        </Query>
+        <ExpectedOutput>
+          <Field name="source.ip"/>
+          <Field name="alerts"/>
+          <Field name="distinct_rules"/>
+        </ExpectedOutput>
+        <AnalystNotes>JCB egress NAT is 94.249.88.0/24 — internal users appear from it. An external or unfamiliar source IP driving several distinct alert rules strengthens the compromise verdict.</AnalystNotes>
+      </Step>
+    </Workflow>
+  </Investigation>
+  <DecisionTree>
+    <Node><Condition>A cloud-account-compromise indicator (INV-01/INV-03: forwarding or delegation, transport rule, Entra credential/role/OAuth, anonymous sharing, password/CA change) AND a sensitive-data-loss indicator (INV-01/INV-02: High or Medium DLP/Purview policy match) on the SAME account within the window.</Condition><Result>True Positive (BEC / Cloud-Account Compromise with Data Loss — contain identity, open IR, notify compliance)</Result></Node>
+    <Node><Condition>The constituent alerts are all authorised or proven-blocked — the DLP policy blocked the transfer and the "compromise" actions are an approved admin/change ticket for this account.</Condition><Result>False Positive (authorised or proven-blocked)</Result></Node>
+    <Node><Condition>The correlation is inflated by a known-noisy constituent rule pending tuning, or by an identity-mapping quirk (norm_user collision) — no genuine compromise+data-loss pairing exists.</Condition><Result>Misconfiguration (tune the constituent rule / correlation join)</Result></Node>
+    <Node><Condition>A real compromise-and-data-loss pairing is plausible but the scope, the actor or the data sensitivity cannot be confirmed from telemetry alone.</Condition><Result>Needs Escalation</Result></Node>
+  </DecisionTree>
+  <ClassificationGuidance>
+    <FalsePositive>
+      <Definition>The correlated alerts are individually authorised or proven-blocked: an approved admin change on the account plus a DLP event that the policy blocked, with no compromise.</Definition>
+      <Indicators>
+        <Item>DLP alert shows the transfer was blocked, and the recipient/context is legitimate business.</Item>
+        <Item>The identity/mailbox change maps to an approved change ticket and a recognised admin.</Item>
+        <Item>Source IP is JCB egress NAT 94.249.88.0/24 and the account's behaviour is otherwise normal.</Item>
+      </Indicators>
+      <SOCAction>
+        <Item>Confirm each constituent alert is authorised or blocked; document the tickets/owners; close as false_positive.</Item>
+      </SOCAction>
+    </FalsePositive>
+    <TruePositive>
+      <Definition>A compromised M365 identity is being used to move sensitive data — a BEC / cloud-account compromise with data loss.</Definition>
+      <Indicators>
+        <Item>Compromise leg (forwarding/delegation/transport rule/OAuth/role add) and data-loss leg (High/Medium DLP policy match) on the same account.</Item>
+        <Item>Related timing and an unfamiliar or external source IP.</Item>
+        <Item>DLP policy touches regulated data (SWIFT, card, national ID).</Item>
+      </Indicators>
+      <SOCAction>
+        <Item>Contain the identity: disable/reset the account, revoke sessions and refresh tokens, remove attacker inbox rules / delegations / transport rules.</Item>
+        <Item>Open IR; reconstruct the chain from the constituent alerts; scope what data left and notify compliance.</Item>
+      </SOCAction>
+    </TruePositive>
+    <Misconfiguration>
+      <Definition>A known-noisy constituent rule or an identity-join quirk inflated the correlation with no genuine multi-stage story.</Definition>
+      <Indicators>
+        <Item>One constituent rule is a high-volume low-fidelity signal pending tuning.</Item>
+        <Item>The paired alerts belong to different real people mapped to one norm_user.</Item>
+      </Indicators>
+      <SOCAction>
+        <Item>Tune the noisy constituent rule or correct the correlation join; re-evaluate; document.</Item>
+      </SOCAction>
+    </Misconfiguration>
+  </ClassificationGuidance>
+  <Response>
+    <IRForHumans>
+      <Phase name="Immediate Actions (0-30 minutes)">
+        <Action priority="1">Review the constituent alerts (INV-01); confirm a compromise leg and a data-loss leg on the same account.</Action>
+        <Action priority="2">If confirmed, contain the identity: disable the account, revoke sessions and refresh tokens.</Action>
+      </Phase>
+      <Phase name="Containment and Eradication (hours)">
+        <Action>Remove attacker persistence: external-forwarding and inbox rules, mailbox FullAccess/SendAs delegations, malicious transport rules, illicit OAuth grants.</Action>
+        <Action>Reconstruct the exfil path from INV-02/INV-03; scope the sensitive data exposed; open formal IR.</Action>
+      </Phase>
+      <Phase name="Recovery and Hardening (days)">
+        <Action>Restore the account under new credentials and MFA; enforce conditional access; tighten admin-consent and privileged-role governance (PIM).</Action>
+        <Action>Tune noisy constituent rules to sharpen correlation fidelity; complete compliance/breach notification as required.</Action>
+      </Phase>
+    </IRForHumans>
+  </Response>
+  <Escalation>
+    <Trigger>Confirmed compromise-plus-data-loss pairing, a regulated-data DLP policy match (SWIFT/card/national ID), or unconfirmed scope of what data left.</Trigger>
+    <To>SOC L2 / IR</To>
+  </Escalation>
+  <Closure>
+    <FalsePositiveClosure>
+      <Item>Every constituent alert confirmed authorised or proven-blocked; tickets/owners documented; no compromise.</Item>
+    </FalsePositiveClosure>
+    <TruePositiveClosure>
+      <Item>Identity contained and restored; attacker persistence removed; exfil chain reconstructed; data exposure scoped and compliance notified.</Item>
+    </TruePositiveClosure>
+  </Closure>
+</Playbook>

@@ -1,0 +1,84 @@
+{
+  "rule_id": "jcb-fim-security-agent-tamper",
+  "name": "Endpoint — Security Agent (AV/EDR) Files Deleted or Replaced",
+  "version": 1,
+  "enabled": true,
+  "interval": "1h",
+  "from": "now-90m",
+  "to": "now",
+  "description": "Attacker objective\nEvade detection by deleting, replacing or tampering with the endpoint antivirus / EDR agent's files so protection and telemetry stop.\n\nAttack logic\nAntivirus and EDR agents install their binaries and configuration under known program directories. Deleting or replacing those files is a direct attempt to disable endpoint protection — a common early defense-evasion step.\n\nWhy this detection works\nFile-integrity monitoring records deletion and creation of files in the security-agent directories, surfacing agent tampering at the filesystem level even without process context.\n\nFalse positives\nLegitimate agent auto-update, upgrade or reinstall (which deletes and recreates agent files).\n\nTuning\nAllowlist verified agent-update/maintenance windows and deployment tooling; prioritise deletions on hosts with no concurrent update; correlate with the agent's own health/heartbeat and with a loss of endpoint telemetry.\n\nRequired telemetry\nFile Integrity Monitoring (fim.event): file.path (security-agent program directories), event.action, host.name.",
+  "tags": [
+    "JCB",
+    "FIM",
+    "Phase3",
+    "Tactic: Defense Evasion",
+    "Use Case: Threat Detection"
+  ],
+  "author": [
+    "raadabujaish"
+  ],
+  "license": "",
+  "threat": [
+    {
+      "framework": "MITRE ATT&CK",
+      "tactic": {
+        "id": "TA0005",
+        "name": "Defense Evasion",
+        "reference": "https://attack.mitre.org/tactics/TA0005/"
+      },
+      "technique": [
+        {
+          "id": "T1562",
+          "name": "Impair Defenses",
+          "reference": "https://attack.mitre.org/techniques/T1562/",
+          "subtechnique": [
+            {
+              "id": "T1562.001",
+              "name": "Disable or Modify Tools",
+              "reference": "https://attack.mitre.org/techniques/T1562/001/"
+            }
+          ]
+        }
+      ]
+    }
+  ],
+  "investigation_fields": {
+    "field_names": [
+      "destination.domain",
+      "destination.user.name",
+      "destination.ip",
+      "cef.name",
+      "cef.device.event_class_id",
+      "cef.severity",
+      "message",
+      "observer.product",
+      "event.dataset",
+      "event.action",
+      "file.path"
+    ]
+  },
+  "related_integrations": [],
+  "required_fields": [],
+  "setup": "",
+  "note": "## Investigation guide\n1. host.name is the affected endpoint; review which agent files were deleted/created and whether an update was scheduled.\n2. Correlate with the agent's own status (e.g. Kaspersky 'endpoint unmanaged') and with any loss of EDR/AV telemetry from the host.\n3. Unexplained deletion of agent files is defense evasion — isolate and investigate the host.",
+  "false_positives": [
+    "Legitimate agent auto-update, upgrade or reinstall (which deletes and recreates agent files)."
+  ],
+  "references": [
+    "https://attack.mitre.org/techniques/T1562/001/"
+  ],
+  "risk_score": 66,
+  "risk_score_mapping": [],
+  "severity": "high",
+  "severity_mapping": [],
+  "output_index": "",
+  "max_signals": 100,
+  "exceptions_list": [],
+  "actions": [],
+  "type": "query",
+  "language": "kuery",
+  "index": [
+    "logs-fim.event-*"
+  ],
+  "query": "event.dataset:\"fim.event\" and event.action:(\"deleted\" or \"created\") and (file.path:*Kaspersky* or file.path:*Elastic* or file.path:*Defender* or file.path:*Endgame*)"
+}

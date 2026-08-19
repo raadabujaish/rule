@@ -1,0 +1,77 @@
+{
+  "rule_id": "jcb-chg-win-share",
+  "name": "Change Audit — Windows Network Share Created, Modified or Deleted",
+  "version": 1,
+  "enabled": true,
+  "interval": "1h",
+  "from": "now-70m",
+  "to": "now",
+  "description": "Change objective\nAudit creation, modification and deletion of Windows network shares (and share permissions) for change control — new shares can expose data or enable lateral movement.\n\nDetection logic\nWindows logs share create/modify/delete with the share name/path and the acting subject. This rule surfaces all share changes as an auditable change feed.\n\nWhy this works\nShare change events are low-volume and structured, giving a clean change-audit trail for a control that directly affects data exposure.\n\nFalse positives\nLegitimate administrative share management or software installation that creates shares.\n\nTuning\nCorrelate each share change with a ticket; escalate new shares on servers hosting sensitive data or unusual share paths.\n\nRequired telemetry\nWindows Security: event.code 5142 (share created), 5143 (share/permissions modified), 5144 (share deleted); winlog.event_data.ShareName, ShareLocalPath, SubjectUserName.",
+  "tags": [
+    "JCB",
+    "Change-Monitoring",
+    "Use Case: Change Audit",
+    "Phase3",
+    "Tactic: Lateral Movement"
+  ],
+  "author": [
+    "raadabujaish"
+  ],
+  "license": "",
+  "threat": [
+    {
+      "framework": "MITRE ATT&CK",
+      "tactic": {
+        "id": "TA0008",
+        "name": "Lateral Movement",
+        "reference": "https://attack.mitre.org/tactics/TA0008/"
+      },
+      "technique": [
+        {
+          "id": "T1135",
+          "name": "Network Share Discovery",
+          "reference": "https://attack.mitre.org/techniques/T1135/"
+        }
+      ]
+    }
+  ],
+  "investigation_fields": {
+    "field_names": [
+      "host.name",
+      "user.name",
+      "user.domain",
+      "process.name",
+      "process.executable",
+      "process.command_line",
+      "process.args",
+      "process.parent.name",
+      "process.parent.executable",
+      "event.code",
+      "event.action"
+    ]
+  },
+  "related_integrations": [],
+  "required_fields": [],
+  "setup": "",
+  "note": "## Investigation / audit guide\n1. event.code = create/modify/delete; ShareName/ShareLocalPath = the share; SubjectUserName = actor.\n2. Confirm authorization; a new share on a sensitive server, or a permission change opening a share, is higher priority.",
+  "false_positives": [
+    "Legitimate administrative share management or software installation that creates shares."
+  ],
+  "references": [
+    "https://attack.mitre.org/techniques/T1135/"
+  ],
+  "risk_score": 30,
+  "risk_score_mapping": [],
+  "severity": "low",
+  "severity_mapping": [],
+  "output_index": "",
+  "max_signals": 100,
+  "exceptions_list": [],
+  "actions": [],
+  "type": "query",
+  "language": "kuery",
+  "index": [
+    "logs-system.security-*"
+  ],
+  "query": "event.code:(\"5142\" or \"5143\" or \"5144\")"
+}

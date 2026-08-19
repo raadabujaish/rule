@@ -1,0 +1,96 @@
+{
+  "rule_id": "jcb-rec-remote-file-download-via-powershell",
+  "name": "Windows — Remote File Download via PowerShell",
+  "version": 1,
+  "enabled": true,
+  "interval": "5m",
+  "from": "now-9m",
+  "to": "now",
+  "description": "Identifies powershell.exe being used to download an executable file from an untrusted remote destination.",
+  "tags": [
+    "JCB",
+    "Windows"
+  ],
+  "author": [
+    "raadabujaish"
+  ],
+  "threat": [
+    {
+      "framework": "MITRE ATT&CK",
+      "tactic": {
+        "id": "TA0011",
+        "name": "Command and Control",
+        "reference": "https://attack.mitre.org/tactics/TA0011/"
+      },
+      "technique": [
+        {
+          "id": "T1105",
+          "name": "Ingress Tool Transfer",
+          "reference": "https://attack.mitre.org/techniques/T1105/"
+        }
+      ]
+    },
+    {
+      "framework": "MITRE ATT&CK",
+      "tactic": {
+        "id": "TA0002",
+        "name": "Execution",
+        "reference": "https://attack.mitre.org/tactics/TA0002/"
+      },
+      "technique": [
+        {
+          "id": "T1059",
+          "name": "Command and Scripting Interpreter",
+          "reference": "https://attack.mitre.org/techniques/T1059/",
+          "subtechnique": [
+            {
+              "id": "T1059.001",
+              "name": "PowerShell",
+              "reference": "https://attack.mitre.org/techniques/T1059/001/"
+            }
+          ]
+        }
+      ]
+    }
+  ],
+  "investigation_fields": {
+    "field_names": [
+      "user.name",
+      "user.id",
+      "source.ip",
+      "event.action",
+      "event.code",
+      "event.outcome",
+      "o365.audit.Operation",
+      "o365.audit.ResultStatus",
+      "o365.audit.ObjectId",
+      "o365.audit.Severity",
+      "message",
+      "process.entity_id",
+      "host.os.type",
+      "process.name",
+      "powershell.exe"
+    ]
+  },
+  "related_integrations": [],
+  "required_fields": [],
+  "setup": "",
+  "false_positives": [],
+  "references": [],
+  "risk_score": 47,
+  "risk_score_mapping": [],
+  "severity": "medium",
+  "severity_mapping": [],
+  "output_index": "",
+  "max_signals": 100,
+  "exceptions_list": [],
+  "actions": [],
+  "type": "eql",
+  "language": "eql",
+  "index": [
+    "logs-windows.sysmon_operational-*",
+    "logs-system.security-*",
+    "logs-windows.powershell_operational-*"
+  ],
+  "query": "sequence by process.entity_id with maxspan=30s\n\n[network where host.os.type == \"windows\" and\n  process.name : (\"powershell.exe\", \"pwsh.exe\", \"powershell_ise.exe\") and network.protocol == \"dns\" and\n   not dns.question.name : (\n          \"localhost\", \"*.microsoft.com\", \"*.azureedge.net\", \"*.powershellgallery.com\",\n          \"*.windowsupdate.com\", \"metadata.google.internal\", \"dist.nuget.org\",\n          \"artifacts.elastic.co\", \"*.digicert.com\", \"packages.chocolatey.org\",\n          \"outlook.office365.com\"\n       ) and not user.id : \"S-1-5-18\"]\n[file where host.os.type == \"windows\" and event.type == \"creation\" and\n  process.name : \"powershell.exe\" and file.extension : (\"exe\", \"dll\", \"ps1\", \"bat\") and\n  not file.name : \"__PSScriptPolicy*.ps1\"]\n"
+}

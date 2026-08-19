@@ -1,0 +1,151 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<Playbook xmlns="https://soc.example/playbooks" id="PB-WIN-023" name="Windows — Query Registry using Built-in Tools - SOC Playbook" version="1.0" status="Production" classification="TLP:AMBER">
+  <Metadata>
+    <Owner>JCB Detection Engineering (WatchWave)</Owner>
+    <LastUpdated>2026-08-14</LastUpdated>
+    <Severity default="Low">Low</Severity>
+    <Confidence default="Low">Low</Confidence>
+    <Category>Discovery / Query Registry</Category>
+    <MitreAttack>
+      <Technique id="T1012" name="Query Registry"/>
+      <Tactic id="TA0007" name="Discovery"/>
+    </MitreAttack>
+    <References>
+      <Reference title="MITRE ATT and CK" url="https://attack.mitre.org/techniques/T1012/"/>
+    </References>
+  </Metadata>
+  <ExecutiveSummary>
+    <Overview>A host queried the registry via reg.exe query or PowerShell registry access for the first time in the baseline window (new_terms) - reconnaissance of stored configuration/credentials. Triage question: is this attacker registry recon, or normal admin/software activity?</Overview>
+    <BusinessImpact>Registry queries can reveal stored credentials, installed security products and configuration an attacker uses to plan the next step.</BusinessImpact>
+  </ExecutiveSummary>
+  <Scope><Assets>
+    <AssetType>Windows servers and workstations (INTDOM domain)</AssetType>
+    <AssetType>Domain controllers</AssetType>
+  </Assets><LogSources>
+    <LogSource>Sysmon process + Windows Security 4688 - logs-windows.sysmon_operational-*,logs-system.security-*</LogSource>
+  </LogSources></Scope>
+  <Prerequisites><TelemetryRequirements>
+    <Requirement>Windows Security + Sysmon + PowerShell logs via Elastic Agent (verified live). Sysmon event.code 1=process(command_line/parent populated), 11=file, 13/12=registry(registry.path populated); process.code_signature NOT collected.</Requirement>
+  </TelemetryRequirements><DetectionSignals>
+    <Signal><Name>Registry query</Name><Details>reg query / PowerShell registry read, first-seen entity.</Details></Signal>
+  </DetectionSignals></Prerequisites>
+  <Inputs>
+    <Input name="$hostname" description="Host running the query."/>
+    <Input name="$username" description="Account (user.name)."/>
+  </Inputs>
+  <Triage><ImmediateCapture>
+    <Item>Host: $hostname</Item>
+  </ImmediateCapture><InitialAssessment>
+    <Rule>Weigh the evidence story, not any single fact - see ClassificationGuidance.</Rule>
+  </InitialAssessment></Triage>
+  <Investigation>
+    <Goal>Determine whether the registry query is attacker reconnaissance or benign admin/software activity.</Goal>
+    <Workflow>
+      <Step order="1" name="What registry paths were queried and by whom">
+        <Purpose>Queries of credential/security-product keys by a suspicious parent are recon; software config reads are benign.</Purpose>
+        <Query platform="Elastic" language="ES|QL" id="INV-01-REGQUERY-DETAIL">
+          <![CDATA[
+FROM logs-windows.sysmon_operational-*,logs-system.security-*
+| WHERE event.code IN ("1","4688") AND host.name == "$hostname" AND process.command_line IS NOT NULL AND @timestamp >= NOW() - 4 hours
+| EVAL cl = TO_LOWER(process.command_line)
+| WHERE (process.name RLIKE "(?i)reg(.exe)?" AND cl LIKE "*query*") OR (process.name RLIKE "(?i)(powershell|pwsh).*" AND cl LIKE "*hklm:*")
+| KEEP @timestamp, process.name, process.parent.name, process.command_line, user.name
+| SORT @timestamp DESC
+| LIMIT 20
+          ]]>
+        </Query>
+        <ExpectedOutput>
+          <Field name="process.name"/>
+          <Field name="process.parent.name"/>
+          <Field name="process.command_line"/>
+          <Field name="user.name"/>
+        </ExpectedOutput>
+        <AnalystNotes>Queries of Winlogon/LSA/credential-provider/security-product keys by a script or unusual parent = recon. Reads of an app's own config keys by that app are benign. Note the parent.</AnalystNotes>
+      </Step>
+      <Step order="2" name="Process origin and account on the host">
+        <Purpose>The parent process and account reveal whether this was interactive attacker activity or an automated/service context.</Purpose>
+        <Query platform="Elastic" language="ES|QL" id="INV-02-PROC-TREE" optional="true">
+          <![CDATA[
+FROM logs-windows.sysmon_operational-*,logs-system.security-*
+| WHERE event.code IN ("1","4688") AND host.name == "$hostname" AND @timestamp >= NOW() - 2 hours
+| STATS runs = COUNT(*), parents = VALUES(process.parent.name), users = VALUES(user.name) BY process.name
+| SORT runs DESC
+| LIMIT 15
+          ]]>
+        </Query>
+        <ExpectedOutput>
+          <Field name="process.name"/>
+          <Field name="parents"/>
+          <Field name="users"/>
+        </ExpectedOutput>
+        <AnalystNotes>A suspicious process spawned by an office app/browser/script interpreter, run by a normal user, is more concerning than one under a known admin/automation parent.</AnalystNotes>
+      </Step>
+      <Step order="3" name="Finalize classification">
+        <DecisionTree>
+          <Node><Condition>Registry queries of credential/security-product keys by a suspicious parent, or part of broader discovery.</Condition><Result>True Positive (Registry Reconnaissance - investigate)</Result></Node>
+          <Node><Condition>Admin/software reading expected configuration keys.</Condition><Result>False Positive / Benign Activity</Result></Node>
+          <Node><Condition>New registry query with unclear intent.</Condition><Result>Needs Escalation</Result></Node>
+        </DecisionTree>
+        <DocumentationChecklist>
+          <Item>Attach outputs of INV-01-REGQUERY-DETAIL, INV-02-PROC-TREE to the case.</Item>
+        </DocumentationChecklist>
+      </Step>
+    </Workflow>
+  </Investigation>
+  <ClassificationGuidance>
+    <FalsePositive>
+      <Definition>Normal admin or software configuration access.</Definition>
+      <Indicators>
+        <Item>Admin/known-software parent.</Item>
+        <Item>Expected keys.</Item>
+        <Item>Interactive/known context.</Item>
+      </Indicators>
+      <SOCAction>
+        <Item>Confirm; close as benign_activity; new_terms learns the entity.</Item>
+      </SOCAction>
+    </FalsePositive>
+    <TruePositive>
+      <Definition>Attacker registry reconnaissance.</Definition>
+      <Indicators>
+        <Item>Credential/security-key queries.</Item>
+        <Item>Suspicious parent.</Item>
+        <Item>Part of a discovery burst.</Item>
+      </Indicators>
+      <SOCAction>
+        <Item>Investigate the parent/host; correlate with other discovery; open IR if warranted.</Item>
+      </SOCAction>
+    </TruePositive>
+    <Misconfiguration>
+      <Definition>A monitoring/inventory tool reading the registry.</Definition>
+      <Indicators>
+        <Item>A known inventory agent.</Item>
+        <Item>Consistent expected keys.</Item>
+      </Indicators>
+      <SOCAction>
+        <Item>Baseline; document.</Item>
+      </SOCAction>
+    </Misconfiguration>
+  </ClassificationGuidance>
+  <Response><IRForHumans>
+    <Phase name="Immediate Actions (0-30 minutes)">
+      <Action priority="1">Confirm the activity on the host; if malicious indicators, isolate the host.</Action>
+      <Action priority="2">Identify the responsible account/process and its origin.</Action>
+    </Phase>
+    <Phase name="Containment and Eradication (hours)">
+      <Action>Isolate the host; capture volatile evidence; hunt the same pattern across the estate.</Action>
+      <Action>Reset credentials used on the host if compromise is confirmed.</Action>
+    </Phase>
+    <Phase name="Recovery and Hardening (days)">
+      <Action>Remediate the root cause; add/verify EDR coverage; apply relevant hardening.</Action>
+    </Phase>
+  </IRForHumans></Response>
+  <QualityChecks>
+    <Check>Confirm the required telemetry (Sysmon/Security auditing) is present on the host.</Check>
+    <Check>Tune known-benign administrative sources via exceptions, not by disabling the rule.</Check>
+  </QualityChecks>
+  <ClosureCriteria><FalsePositiveClosure>
+    <Item>Activity confirmed benign/authorised and documented.</Item>
+  </FalsePositiveClosure><TruePositiveClosure>
+    <Item>Host contained and triaged; root cause eradicated; estate swept; findings recorded.</Item>
+  </TruePositiveClosure></ClosureCriteria>
+</Playbook>

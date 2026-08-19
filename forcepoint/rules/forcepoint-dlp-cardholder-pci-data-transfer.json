@@ -1,0 +1,79 @@
+{
+  "rule_id": "jcb-fp-pci-data-transfer",
+  "name": "Forcepoint DLP — Cardholder / PCI Data Transfer",
+  "version": 1,
+  "enabled": true,
+  "interval": "1h",
+  "from": "now-90m",
+  "to": "now",
+  "description": "Attacker objective\nExfiltrate regulated cardholder / payment-card (PCI) data out of the bank via email, web upload, print or removable media.\n\nAttack logic\nThe DLP engine classifies content against a payment-card (PCI) data classifier. A transfer that matches this classifier means regulated cardholder data was moving through a monitored channel — the highest-value data-loss event for a bank.\n\nWhy this detection works\nThe PCI content classifier is a structured, high-precision label; any transfer carrying it is inherently sensitive and warrants review regardless of channel or severity.\n\nFalse positives\nAuthorised card-operations staff handling cardholder data as part of their role; an internal transfer to a sanctioned system.\n\nTuning\nAllowlist verified card-operations workflows and internal sanctioned destinations; prioritise transfers to external destinations (personal email, web upload, USB).\n\nRequired telemetry\nForcepoint DLP CEF: deviceEventCategory (data classifier), sourceServiceName (channel), loginName/sourceHost (user/endpoint), destinationHosts/destinationUserName (destination).",
+  "tags": [
+    "JCB",
+    "Forcepoint-DLP",
+    "Phase3",
+    "Tactic: Exfiltration",
+    "Use Case: Insider Threat",
+    "Use Case: Threat Detection"
+  ],
+  "author": [
+    "raadabujaish"
+  ],
+  "license": "",
+  "threat": [
+    {
+      "framework": "MITRE ATT&CK",
+      "tactic": {
+        "id": "TA0010",
+        "name": "Exfiltration",
+        "reference": "https://attack.mitre.org/tactics/TA0010/"
+      },
+      "technique": [
+        {
+          "id": "T1567",
+          "name": "Exfiltration Over Web Service",
+          "reference": "https://attack.mitre.org/techniques/T1567/"
+        }
+      ]
+    }
+  ],
+  "investigation_fields": {
+    "field_names": [
+      "@timestamp",
+      "host.name",
+      "source.ip",
+      "user.name",
+      "cef.extensions.loginName",
+      "cef.extensions.deviceEventCategory",
+      "cef.extensions.sourceServiceName",
+      "cef.extensions.destinationHosts",
+      "cef.extensions.destinationUserName",
+      "cef.extensions.filename",
+      "cef.extensions.eventId",
+      "destination.ip",
+      "destination.port",
+      "event.action",
+      "message"
+    ]
+  },
+  "related_integrations": [],
+  "required_fields": [],
+  "setup": "",
+  "note": "## Investigation guide\n1. Identify the user (loginName), endpoint (sourceHost), channel (sourceServiceName) and destination.\n2. Confirm whether the destination is external and whether the transfer was authorised card-operations work.\n3. Treat cardholder data leaving to an external/personal destination as a data-breach incident — escalate to fraud/compliance.",
+  "false_positives": [
+    "Authorised card-operations staff handling cardholder data as part of their role; an internal transfer to a sanctioned system."
+  ],
+  "references": [
+    "https://attack.mitre.org/techniques/T1567/"
+  ],
+  "risk_score": 75,
+  "risk_score_mapping": [],
+  "severity": "high",
+  "severity_mapping": [],
+  "output_index": "",
+  "max_signals": 100,
+  "exceptions_list": [],
+  "actions": [],
+  "type": "esql",
+  "language": "esql",
+  "query": "FROM logs-cef.log-* METADATA _id, _index, _version\n| WHERE observer.vendor == \"Forcepoint\" AND cef.extensions.deviceEventCategory LIKE \"*PCI*\"\n| EVAL host.name = CASE(cef.extensions.sourceHost != \"N/A\" AND cef.extensions.sourceHost IS NOT NULL, TO_LOWER(MV_FIRST(SPLIT(cef.extensions.sourceHost, \".\"))), null), source.ip = CASE(cef.extensions.sourceIp != \"N/A\" AND cef.extensions.sourceIp IS NOT NULL, TO_IP(cef.extensions.sourceIp), null), user.name = CASE(cef.extensions.loginName LIKE \"INTDOM*\", TO_LOWER(MV_LAST(SPLIT(cef.extensions.loginName, \"\\\\\"))), null)\n| KEEP @timestamp, host.name, source.ip, user.name, cef.extensions.loginName, cef.extensions.deviceEventCategory, cef.extensions.sourceServiceName, cef.extensions.destinationHosts, cef.extensions.destinationUserName, cef.extensions.filename, cef.extensions.eventId"
+}

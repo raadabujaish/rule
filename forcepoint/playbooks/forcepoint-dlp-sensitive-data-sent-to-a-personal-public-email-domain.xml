@@ -1,0 +1,179 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<Playbook xmlns="https://soc.example/playbooks" id="PB-JCB-NEW-02" name="Forcepoint DLP — Sensitive Data Sent to a Personal / Public Email Domain - SOC Playbook" version="2.1" status="Production" classification="TLP:AMBER">
+  <Metadata>
+    <Owner>JCB Detection Engineering (WatchWave)</Owner>
+    <LastUpdated>2026-08-19</LastUpdated>
+    <Severity default="Medium">Medium</Severity>
+    <Confidence default="Medium">Medium</Confidence>
+    <Category>Exfiltration / Data Transfer</Category>
+    <MitreAttack>
+      <Technique id="T1567" name="Exfiltration Over Web Service"/>
+      <Tactic id="TA0010" name="Exfiltration"/>
+    </MitreAttack>
+    <References>
+      <Reference title="MITRE ATT and CK T1567 Exfiltration Over Web Service" url="https://attack.mitre.org/techniques/T1567/"/>
+    </References>
+  </Metadata>
+  <ExecutiveSummary>
+    <Overview>Forcepoint DLP flagged sensitive-classified content (PCI / Sensitive Words-Outbound / Files Outbound) sent to a destination classified "Public Mail Domain" - typically an "Endpoint Email" send where the recipient list (cef.extensions.destinationUserName) mixes personal webmail (gmail / hotmail / yahoo / outlook) with internal or partner addresses. This is the single-event sibling of the bulk rule; triage: is a sensitive attachment genuinely leaving to a personal inbox, or is this a routine business email that also happens to CC a personal address?</Overview>
+    <BusinessImpact>Sending account-opening forms, passport copies, financial statements or PCI-scoped data to a personal inbox is a data-protection and PCI-DSS exposure for the bank, and a common insider / careless-handling pattern. Under Monitor Mode the mail is delivered, so the exposure is real once confirmed.</BusinessImpact>
+  </ExecutiveSummary>
+  <Scope><Assets>
+    <AssetType>Forcepoint DLP endpoints and email gateway (Endpoint Email / Content Gateway)</AssetType>
+    <AssetType>User workstations in intdom.local</AssetType>
+  </Assets><LogSources>
+    <LogSource>Forcepoint DLP CEF via syslog - logs-cef.log-*</LogSource>
+  </LogSources></Scope>
+  <Prerequisites><TelemetryRequirements>
+    <Requirement>Forcepoint DLP CEF (verified live on logs-cef.log-*, observer.vendor == "Forcepoint"). Fields: cef.extensions.loginName (INTDOM\user), cef.extensions.deviceEventCategory (classification incl. "Public Mail Domain", "PCI", "Sensitive Words-Outbound", "Files Outbound"), cef.extensions.destinationUserName (recipient email list; on the email channel this is the true destination - destinationHosts is often "N/A"), cef.extensions.filename (attachment names and sizes), cef.extensions.deviceAction ("Permitted" / "Permitted, Monitor Mode" / "Blocked"), cef.extensions.sourceServiceName (channel: "Endpoint Email" vs web), cef.extensions.sourceHost (workstation), cef.extensions.eventId. Derived entity user.name = TO_LOWER(last token of loginName split on backslash).</Requirement>
+  </TelemetryRequirements><DetectionSignals>
+    <Signal><Name>Sensitive Data Sent to a Personal / Public Email Domain</Name><Details>Forcepoint DLP incident where the destination is a Public Mail Domain AND the content is classified PCI / Sensitive Words-Outbound / Files Outbound.</Details></Signal>
+  </DetectionSignals></Prerequisites>
+  <Inputs>
+    <Input name="$user" description="Derived user.name = lowercased login without domain (e.g. katiaf). Matches the alert entity user.name (the sender)."/>
+  </Inputs>
+  <Triage><ImmediateCapture>
+    <Item>$user: $user</Item>
+    <Item>Read the recipient list and the attachment names before judging - the classification alone is not the verdict.</Item>
+  </ImmediateCapture><InitialAssessment>
+    <Rule>Weigh the full evidence story per the ClassificationGuidance, not any single fact. A personal recipient + a genuinely sensitive attachment + permitted delivery is the concern.</Rule>
+  </InitialAssessment></Triage>
+  <Investigation>
+    <Goal>Determine whether a genuinely sensitive attachment left to a personal / public inbox, or whether this is routine business mail incidentally classified.</Goal>
+    <Workflow>
+      <Step order="1" name="Summarise this user's sensitive-to-public-mail incidents">
+        <Purpose>Count incidents, list recipients, categories, channels and action for the sender in the window.</Purpose>
+        <Query platform="Elastic" language="ES|QL" id="INV-01">
+          <![CDATA[
+FROM logs-cef.log-*
+| WHERE observer.vendor == "Forcepoint" AND cef.extensions.deviceEventCategory LIKE "*Public Mail Domain*"
+    AND (cef.extensions.deviceEventCategory LIKE "*PCI*" OR cef.extensions.deviceEventCategory LIKE "*Sensitive Words-Outbound*" OR cef.extensions.deviceEventCategory LIKE "*Files Outbound*")
+    AND @timestamp >= NOW() - 4 hours
+| EVAL user.name = TO_LOWER(MV_LAST(SPLIT(cef.extensions.loginName, "\\")))
+| WHERE user.name == "$user"
+| STATS incidents = COUNT(*), recipients = VALUES(cef.extensions.destinationUserName), categories = VALUES(cef.extensions.deviceEventCategory), actions = VALUES(cef.extensions.deviceAction), channels = VALUES(cef.extensions.sourceServiceName), hosts = VALUES(cef.extensions.sourceHost)
+| LIMIT 1
+          ]]>
+        </Query>
+        <ExpectedOutput>
+          <Field name="incidents"/>
+          <Field name="recipients"/>
+          <Field name="categories"/>
+          <Field name="actions"/>
+        </ExpectedOutput>
+        <AnalystNotes>One incident to a single personal recipient can still be a real leak if the attachment is sensitive. Many incidents / many personal recipients raises this toward the bulk-exfil playbook (PB-JCB-NEW-1).</AnalystNotes>
+      </Step>
+      <Step order="2" name="Enumerate each send: recipients, attachments, action">
+        <Purpose>Show the concrete evidence - who received what file, on which channel, permitted or blocked.</Purpose>
+        <Query platform="Elastic" language="ES|QL" id="INV-02">
+          <![CDATA[
+FROM logs-cef.log-*
+| WHERE observer.vendor == "Forcepoint" AND cef.extensions.deviceEventCategory LIKE "*Public Mail Domain*"
+    AND (cef.extensions.deviceEventCategory LIKE "*PCI*" OR cef.extensions.deviceEventCategory LIKE "*Sensitive Words-Outbound*" OR cef.extensions.deviceEventCategory LIKE "*Files Outbound*")
+    AND @timestamp >= NOW() - 4 hours
+| EVAL user.name = TO_LOWER(MV_LAST(SPLIT(cef.extensions.loginName, "\\")))
+| WHERE user.name == "$user"
+| KEEP @timestamp, cef.extensions.destinationUserName, cef.extensions.destinationHosts, cef.extensions.deviceEventCategory, cef.extensions.deviceAction, cef.extensions.filename, cef.extensions.sourceServiceName, cef.extensions.sourceHost, cef.extensions.eventId
+| SORT @timestamp DESC
+| LIMIT 50
+          ]]>
+        </Query>
+        <ExpectedOutput>
+          <Field name="cef.extensions.destinationUserName"/>
+          <Field name="cef.extensions.filename"/>
+          <Field name="cef.extensions.deviceEventCategory"/>
+          <Field name="cef.extensions.deviceAction"/>
+        </ExpectedOutput>
+        <AnalystNotes>Read the recipient list: internal / known-partner addresses only = likely routine. A personal webmail address receiving a sensitive attachment = the leak. Read the filename: account-opening forms, passports, statements are genuinely sensitive; embedded signature images (image001.jpg) are not.</AnalystNotes>
+      </Step>
+      <Step order="3" name="Confirm delivery to a genuinely personal inbox">
+        <Purpose>Isolate the sends whose recipient list actually contains a personal webmail domain - the decisive evidence, filtering out partner-only business mail.</Purpose>
+        <Query platform="Elastic" language="ES|QL" id="INV-03">
+          <![CDATA[
+FROM logs-cef.log-*
+| WHERE observer.vendor == "Forcepoint" AND cef.extensions.deviceEventCategory LIKE "*Public Mail Domain*"
+    AND (cef.extensions.deviceEventCategory LIKE "*PCI*" OR cef.extensions.deviceEventCategory LIKE "*Sensitive Words-Outbound*" OR cef.extensions.deviceEventCategory LIKE "*Files Outbound*")
+    AND @timestamp >= NOW() - 4 hours
+| EVAL user.name = TO_LOWER(MV_LAST(SPLIT(cef.extensions.loginName, "\\")))
+| WHERE user.name == "$user"
+| EVAL rcpt = TO_LOWER(cef.extensions.destinationUserName)
+| WHERE rcpt LIKE "*gmail*" OR rcpt LIKE "*hotmail*" OR rcpt LIKE "*yahoo*" OR rcpt LIKE "*outlook*" OR rcpt LIKE "*proton*" OR rcpt LIKE "*icloud*"
+| KEEP @timestamp, cef.extensions.destinationUserName, cef.extensions.deviceEventCategory, cef.extensions.filename, cef.extensions.deviceAction
+| SORT @timestamp DESC
+| LIMIT 25
+          ]]>
+        </Query>
+        <ExpectedOutput>
+          <Field name="cef.extensions.destinationUserName"/>
+          <Field name="cef.extensions.filename"/>
+          <Field name="cef.extensions.deviceAction"/>
+        </ExpectedOutput>
+        <AnalystNotes>Rows here = sensitive content confirmed to a personal inbox. Zero rows = the "Public Mail Domain" classification did not resolve to a genuine personal recipient in the recipient list (lean towards misconfiguration / benign). Extend the domain list if the org sees other personal providers.</AnalystNotes>
+      </Step>
+    </Workflow>
+  </Investigation>
+  <DecisionTree>
+    <Node><Condition>A genuinely sensitive attachment (PCI / account form / passport / statement) was permitted to a personal webmail recipient (INV-03 returns rows).</Condition><Result>True Positive (Sensitive Data to Personal Email - data-handling / possible exfiltration)</Result></Node>
+    <Node><Condition>Forcepoint Blocked the send, OR the recipients are all internal / approved-partner addresses and the transfer is business-justified.</Condition><Result>False Positive (Authorised business mail or proven blocked by policy)</Result></Node>
+    <Node><Condition>The "Public Mail Domain" or sensitivity classification is a false match (e.g. only embedded signature images, or a partner domain mislabeled), with no real personal recipient.</Condition><Result>Misconfiguration (DLP classification tuning)</Result></Node>
+    <Node><Condition>Attachment sensitivity or recipient legitimacy cannot be determined from the logs alone.</Condition><Result>Needs Escalation (data-handling review with the sender's manager)</Result></Node>
+  </DecisionTree>
+  <ClassificationGuidance>
+    <FalsePositive>
+      <Definition>Authorised business mail, or a send that Forcepoint proved it Blocked.</Definition>
+      <Indicators>
+        <Item>Recipients are internal or approved-partner domains only.</Item>
+        <Item>deviceAction shows Blocked.</Item>
+        <Item>Business justification exists for the send.</Item>
+      </Indicators>
+      <SOCAction>
+        <Item>Confirm the recipients / justification or the block outcome; document; close as authorised_or_blocked (not "benign").</Item>
+      </SOCAction>
+    </FalsePositive>
+    <TruePositive>
+      <Definition>A sensitive attachment reached a personal / public inbox.</Definition>
+      <Indicators>
+        <Item>Personal webmail recipient in destinationUserName.</Item>
+        <Item>Genuinely sensitive attachment (PCI / forms / IDs / statements).</Item>
+        <Item>Permitted (Monitor Mode) delivery.</Item>
+      </Indicators>
+      <SOCAction>
+        <Item>Confirm the content with DLP / compliance; interview the sender; assess whether it was error or intent; if a pattern or intent, escalate to the bulk-exfil workflow and open IR.</Item>
+      </SOCAction>
+    </TruePositive>
+    <Misconfiguration>
+      <Definition>Classification false match - no genuine personal recipient or no genuine sensitive content.</Definition>
+      <Indicators>
+        <Item>Only embedded images / boilerplate matched.</Item>
+        <Item>Partner domain mislabeled as public mail.</Item>
+      </Indicators>
+      <SOCAction>
+        <Item>Raise a DLP classification-tuning request; document; suppress the specific benign match.</Item>
+      </SOCAction>
+    </Misconfiguration>
+  </ClassificationGuidance>
+  <Response><IRForHumans>
+    <Phase name="Immediate Actions (0-30 minutes)">
+      <Action priority="1">Read the recipient list and attachment names; determine whether a personal inbox received genuinely sensitive content and whether the send was permitted or blocked.</Action>
+      <Action priority="2">If a sensitive attachment was permitted to a personal inbox, preserve the incident record and engage DLP / compliance.</Action>
+    </Phase>
+    <Phase name="Containment and Eradication (hours)">
+      <Action>Review the attachment content with compliance; interview the sender to establish intent vs error; if intentional or repeated, restrict the account and escalate to IR.</Action>
+    </Phase>
+    <Phase name="Recovery and Hardening (days)">
+      <Action>Consider Block mode for sensitive categories to personal-mail destinations; reinforce data-handling training for the individual / team; tune classification to cut false matches.</Action>
+    </Phase>
+  </IRForHumans></Response>
+  <Escalation>
+    <Trigger>A genuinely sensitive attachment confirmed permitted to a personal inbox, a repeated pattern by the same sender, or any indication of intent or account compromise.</Trigger>
+    <To>SOC L2 / IR</To>
+  </Escalation>
+  <Closure>
+    <FalsePositiveClosure>
+      <Item>Recipients / justification or block outcome confirmed and documented; classification false-match (if any) raised for tuning.</Item>
+    </FalsePositiveClosure>
+    <TruePositiveClosure>
+      <Item>Content reviewed with compliance; sender addressed; intent vs error established; controls tightened; case recorded (IR opened if intentional / repeated).</Item>
+    </TruePositiveClosure>
+  </Closure>
+</Playbook>

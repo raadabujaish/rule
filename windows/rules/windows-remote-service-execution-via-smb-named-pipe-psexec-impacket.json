@@ -1,0 +1,114 @@
+{
+  "rule_id": "699c2bbe-32e1-4ec7-9177-69390877270d",
+  "name": "Windows — Remote Service Execution via SMB Named Pipe (PsExec / Impacket)",
+  "version": 1,
+  "enabled": true,
+  "interval": "10m",
+  "from": "now-20m",
+  "to": "now",
+  "description": "Detects remote access to the Service Control Manager (svcctl), the PsExec service pipe (PSEXESVC) or the Task Scheduler ATSVC pipe over SMB. This is the core mechanism behind PsExec, Impacket smbexec/atexec/psexec and most hands-on-keyboard lateral movement. Detection is based on Windows Security event 5145 (detailed file share access), so it works on every host that audits share access and does NOT require Sysmon or command-line auditing — both of which are only partially deployed at JCB. Known vulnerability-scanner and monitoring service accounts, and machine accounts, are excluded.",
+  "tags": [
+    "JCB",
+    "ScanWave",
+    "Windows",
+    "Lateral Movement",
+    "PsExec",
+    "Impacket",
+    "MITRE T1021.002",
+    "MITRE T1569.002"
+  ],
+  "author": [
+    "ScanWave"
+  ],
+  "license": "ScanWave — JCB Managed Detection",
+  "threat": [
+    {
+      "framework": "MITRE ATT&CK",
+      "tactic": {
+        "id": "TA0008",
+        "name": "Lateral Movement",
+        "reference": "https://attack.mitre.org/tactics/TA0008/"
+      },
+      "technique": [
+        {
+          "id": "T1021",
+          "name": "Remote Services",
+          "reference": "https://attack.mitre.org/techniques/T1021/",
+          "subtechnique": [
+            {
+              "id": "T1021.002",
+              "name": "SMB/Windows Admin Shares",
+              "reference": "https://attack.mitre.org/techniques/T1021/002/"
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "framework": "MITRE ATT&CK",
+      "tactic": {
+        "id": "TA0002",
+        "name": "Execution",
+        "reference": "https://attack.mitre.org/tactics/TA0002/"
+      },
+      "technique": [
+        {
+          "id": "T1569",
+          "name": "System Services",
+          "reference": "https://attack.mitre.org/techniques/T1569/",
+          "subtechnique": [
+            {
+              "id": "T1569.002",
+              "name": "Service Execution",
+              "reference": "https://attack.mitre.org/techniques/T1569/002/"
+            }
+          ]
+        }
+      ]
+    }
+  ],
+  "investigation_fields": {
+    "field_names": [
+      "host.name",
+      "user.name",
+      "user.domain",
+      "process.name",
+      "process.executable",
+      "process.command_line",
+      "process.args",
+      "process.parent.name",
+      "process.parent.executable",
+      "event.code",
+      "event.action",
+      "winlog.event_data.RelativeTargetName",
+      "winlog.event_data.SubjectUserName"
+    ]
+  },
+  "related_integrations": [],
+  "required_fields": [],
+  "setup": "",
+  "note": "### Triage\n1. Identify the **source** of the SMB session: correlate `winlog.event_data.SubjectLogonId` with event 4624 on the same host to recover `source.ip` and the logon type (expect Type 3 / Network).\n2. Check the destination host for a **new service** immediately afterwards: events 7045 (System channel) and 4697 (Security channel).\n3. Look for a matching binary drop on `C$`/`ADMIN$` — see the companion rule *Windows — Executable or Script Written to an Administrative Share*.\n4. `PSEXESVC` or `svcctl` from a **user** account (not a machine account, not Nessus/ManageEngine) toward a server is treated as confirmed interactive lateral movement until proven otherwise.\n\n### Tuning\nAdd legitimate admin jump hosts or deployment service accounts to an exception list rather than widening the query.",
+  "false_positives": [
+    "Authenticated vulnerability scans (Nessus) and ManageEngine agent deployment — already excluded by account name.",
+    "SCCM/Intune or other software-deployment tooling that installs services remotely.",
+    "IT administrators using Sysinternals PsExec for legitimate remote support."
+  ],
+  "references": [
+    "https://attack.mitre.org/techniques/T1021/002/",
+    "https://attack.mitre.org/techniques/T1569/002/"
+  ],
+  "risk_score": 73,
+  "risk_score_mapping": [],
+  "severity": "high",
+  "severity_mapping": [],
+  "output_index": "",
+  "max_signals": 100,
+  "exceptions_list": [],
+  "actions": [],
+  "type": "query",
+  "language": "kuery",
+  "index": [
+    "logs-system.security-*"
+  ],
+  "query": "event.code:\"5145\" and winlog.event_data.RelativeTargetName:(\"svcctl\" or \"PSEXESVC\" or \"atsvc\") and not winlog.event_data.SubjectUserName:(\"Nessus\" or \"manageengine\" or \"svc_nessus\" or \"scanuser\") and not winlog.event_data.SubjectUserName:*$"
+}

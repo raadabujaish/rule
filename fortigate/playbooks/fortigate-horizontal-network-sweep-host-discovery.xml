@@ -1,0 +1,149 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<Playbook xmlns="https://soc.example/playbooks" id="PB-FG-003" name="FortiGate — Horizontal Network Sweep (Host Discovery) - SOC Playbook" version="1.0" status="Production" classification="TLP:AMBER">
+  <Metadata>
+    <Owner>JCB Detection Engineering (WatchWave)</Owner>
+    <LastUpdated>2026-08-14</LastUpdated>
+    <Severity default="High">High</Severity>
+    <Confidence default="Medium">Medium</Confidence>
+    <Category>Discovery / Network Service Discovery</Category>
+    <MitreAttack>
+      <Technique id="T1046" name="Network Service Scanning"/>
+      <Tactic id="TA0007" name="Discovery"/>
+    </MitreAttack>
+    <References>
+      <Reference title="MITRE ATT and CK" url="https://attack.mitre.org/techniques/T1046/"/>
+    </References>
+  </Metadata>
+  <ExecutiveSummary>
+    <Overview>One internal source was denied connections to 300+ distinct destinations in an hour - a horizontal sweep mapping live hosts. Triage question: is an internal host performing reconnaissance (possible compromise or rogue scanner), or is it an approved vulnerability scanner?</Overview>
+    <BusinessImpact>Internal host discovery is an early lateral-movement / recon step; from a non-scanner host it can indicate a compromised machine mapping the network.</BusinessImpact>
+  </ExecutiveSummary>
+  <Scope><Assets>
+    <AssetType>FortiGate perimeter and internal firewalls (HQ + DR)</AssetType>
+    <AssetType>Internal server and user segments behind the FortiGate</AssetType>
+  </Assets><LogSources>
+    <LogSource>FortiGate traffic - logs-fortinet_fortigate.traffic-*</LogSource>
+  </LogSources></Scope>
+  <Prerequisites><TelemetryRequirements>
+    <Requirement>FortiGate logs shipped via Elastic Agent to logs-fortinet_fortigate.* (verified live).</Requirement>
+    <Requirement>Fields: fortinet.firewall.subtype (ips/dns/...), fortinet.firewall.action, fortinet.firewall.severity, fortinet.firewall.attack, fortinet.firewall.srccountry/dstcountry ('Reserved' = RFC1918 internal), fortinet.firewall.cfgpath, dns.question.name, source.ip, destination.ip, destination.port.</Requirement>
+  </TelemetryRequirements><DetectionSignals>
+    <Signal><Name>Horizontal sweep</Name><Details>internal source, action deny, cardinality(destination.ip) &gt;= 300; known scanners excluded.</Details></Signal>
+  </DetectionSignals></Prerequisites>
+  <Inputs>
+    <Input name="$source_ip" description="Internal sweeping source."/>
+  </Inputs>
+  <Triage><ImmediateCapture>
+    <Item>Source: $source_ip</Item>
+  </ImmediateCapture><InitialAssessment>
+    <Rule>Approved scanners (Nessus 192.168.166.1) are excluded; any OTHER internal host sweeping hundreds of destinations is treated as recon until identified.</Rule>
+  </InitialAssessment></Triage>
+  <Investigation>
+    <Goal>Determine whether the sweeping host is an approved scanner or an unexpected/compromised internal host, and whether it also succeeded in reaching hosts.</Goal>
+    <Workflow>
+      <Step order="1" name="Sweep breadth, ports and denied/accepted split">
+        <Purpose>Characterise the sweep: how many destinations, which ports, and crucially whether any connections were ACCEPTED (not just denied).</Purpose>
+        <Query platform="Elastic" language="ES|QL" id="INV-01-FGSWEEP-SHAPE">
+          <![CDATA[
+FROM logs-fortinet_fortigate.traffic-*
+| WHERE source.ip == "$source_ip" AND @timestamp >= NOW() - 4 hours
+| STATS total = COUNT(*), dsts = COUNT_DISTINCT(destination.ip), denied = COUNT(CASE(fortinet.firewall.action == "deny", 1, null)), accepted = COUNT(CASE(fortinet.firewall.action == "accept", 1, null)), dports = VALUES(destination.port)
+| LIMIT 1
+          ]]>
+        </Query>
+        <ExpectedOutput>
+          <Field name="dsts"/>
+          <Field name="denied"/>
+          <Field name="accepted"/>
+          <Field name="dports"/>
+        </ExpectedOutput>
+        <AnalystNotes>Many distinct destinations on a few ports = sweep. accepted &gt; 0 means the host reached some targets - pivot to what it did there. A single scanned port (e.g. 445) across the estate = SMB discovery for lateral movement.</AnalystNotes>
+      </Step>
+      <Step order="2" name="What is this source and does it normally scan">
+        <Purpose>Profile the source's overall behavior to separate a scanner/monitoring host from a workstation that should never sweep.</Purpose>
+        <Query platform="Elastic" language="ES|QL" id="INV-02-FGSWEEP-SRC">
+          <![CDATA[
+FROM logs-fortinet_fortigate.traffic-*
+| WHERE source.ip == "$source_ip" AND @timestamp >= NOW() - 4 hours
+| STATS conns = COUNT(*), dstcountries = VALUES(fortinet.firewall.dstcountry), top_ports = VALUES(destination.port) BY fortinet.firewall.action
+| SORT conns DESC
+| LIMIT 10
+          ]]>
+        </Query>
+        <ExpectedOutput>
+          <Field name="fortinet.firewall.action"/>
+          <Field name="conns"/>
+          <Field name="top_ports"/>
+        </ExpectedOutput>
+        <AnalystNotes>A workstation IP (user segment) sweeping is high concern; a monitoring/management host may do this legitimately. Correlate the IP with its segment/role.</AnalystNotes>
+      </Step>
+      <Step order="3" name="Finalize classification">
+        <DecisionTree>
+          <Node><Condition>INV-01 shows the sweep included ACCEPTED connections (the host reached targets), especially on 445/135/3389.</Condition><Result>True Positive (Internal Recon with Reach - escalate, treat source as possibly compromised)</Result></Node>
+          <Node><Condition>INV-01/02 show a broad sweep from a user-segment host that is not an approved scanner.</Condition><Result>True Positive (Unauthorised Internal Scanning - investigate the host)</Result></Node>
+          <Node><Condition>Source is an approved scanner/monitoring host that was not in the exclusion list.</Condition><Result>False Positive</Result></Node>
+          <Node><Condition>Sweep from a server whose role is unclear.</Condition><Result>Needs Escalation</Result></Node>
+        </DecisionTree>
+        <DocumentationChecklist>
+          <Item>Attach outputs of INV-01-FGSWEEP-SHAPE, INV-02-FGSWEEP-SRC to the case.</Item>
+        </DocumentationChecklist>
+      </Step>
+    </Workflow>
+  </Investigation>
+  <ClassificationGuidance>
+    <FalsePositive>
+      <Definition>An approved vulnerability scanner or network-monitoring host.</Definition>
+      <Indicators>
+        <Item>Known scanner/monitoring IP.</Item>
+        <Item>Scheduled, uniform sweep.</Item>
+        <Item>Deny-only (no unexpected reach).</Item>
+      </Indicators>
+      <SOCAction>
+        <Item>Confirm the scanner; add to the rule exclusion; close as false_positive.</Item>
+      </SOCAction>
+    </FalsePositive>
+    <TruePositive>
+      <Definition>An internal host performing host-discovery recon (possible compromise or rogue tool).</Definition>
+      <Indicators>
+        <Item>Broad sweep from a non-scanner host.</Item>
+        <Item>Accepted connections on lateral-movement ports.</Item>
+        <Item>User-segment origin.</Item>
+      </Indicators>
+      <SOCAction>
+        <Item>Isolate/triage the source host; hunt for the scanning process.</Item>
+        <Item>Check what accepted connections reached; open IR if compromise indicators.</Item>
+      </SOCAction>
+    </TruePositive>
+    <Misconfiguration>
+      <Definition>A misconfigured application/monitoring job scanning broadly by accident.</Definition>
+      <Indicators>
+        <Item>A known app/monitoring host due to a broken config.</Item>
+        <Item>Deny-only, benign intent confirmed.</Item>
+      </Indicators>
+      <SOCAction>
+        <Item>Fix the job; document and exclude if appropriate.</Item>
+      </SOCAction>
+    </Misconfiguration>
+  </ClassificationGuidance>
+  <Response><IRForHumans>
+    <Phase name="Immediate Actions (0-30 minutes)">
+      <Action priority="1">Identify the source host and its role.</Action>
+      <Action priority="2">If accepted connections on lateral ports: isolate and triage.</Action>
+    </Phase>
+    <Phase name="Containment and Eradication (hours)">
+      <Action>Forensic triage of the host; scope what it reached; hunt lateral movement.</Action>
+    </Phase>
+    <Phase name="Recovery and Hardening (days)">
+      <Action>Segment user/workstation networks; restrict east-west; alert on non-scanner sweeps.</Action>
+    </Phase>
+  </IRForHumans></Response>
+  <QualityChecks>
+    <Check>Rule excludes known scanners; threshold 300 destinations/hr. 'Reserved' srccountry = internal.</Check>
+    <Check>The accepted-connection split (INV-01) is the key escalation discriminator.</Check>
+  </QualityChecks>
+  <ClosureCriteria><FalsePositiveClosure>
+    <Item>Approved scanner confirmed; deny-only; documented and excluded.</Item>
+  </FalsePositiveClosure><TruePositiveClosure>
+    <Item>Source host triaged; reach scoped; no compromise or fully eradicated.</Item>
+  </TruePositiveClosure></ClosureCriteria>
+</Playbook>

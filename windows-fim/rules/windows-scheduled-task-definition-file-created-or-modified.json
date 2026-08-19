@@ -1,0 +1,80 @@
+{
+  "rule_id": "jcb-fim-win-scheduled-task-file",
+  "name": "Windows — Scheduled Task Definition File Created or Modified",
+  "version": 1,
+  "enabled": true,
+  "interval": "1h",
+  "from": "now-90m",
+  "to": "now",
+  "description": "Attacker objective\nPersist or execute code on a schedule by creating or modifying a Windows scheduled task, whose definition is stored as a file under the system Tasks directory.\n\nAttack logic\nWindows stores each scheduled task as an XML definition file under the system Tasks folder. Creating or altering one of these files corresponds to creating or changing a scheduled task — a common persistence and execution technique.\n\nWhy this detection works\nFile-integrity monitoring records writes to the Tasks directory, surfacing scheduled-task changes at the filesystem level even where task-scheduler event logging is unavailable.\n\nFalse positives\nLegitimate software installation/update, Group Policy, or administration that creates scheduled tasks.\n\nTuning\nAllowlist known software-deployment and management tooling; correlate with Windows scheduled-task events (4698) and the task's action/command where available; prioritise servers.\n\nRequired telemetry\nFile Integrity Monitoring (fim.event): file.path (system Tasks directory), event.action, host.name.",
+  "tags": [
+    "JCB",
+    "FIM",
+    "Phase3",
+    "Tactic: Persistence",
+    "Use Case: Threat Detection"
+  ],
+  "author": [
+    "raadabujaish"
+  ],
+  "license": "",
+  "threat": [
+    {
+      "framework": "MITRE ATT&CK",
+      "tactic": {
+        "id": "TA0003",
+        "name": "Persistence",
+        "reference": "https://attack.mitre.org/tactics/TA0003/"
+      },
+      "technique": [
+        {
+          "id": "T1053",
+          "name": "Scheduled Task/Job",
+          "reference": "https://attack.mitre.org/techniques/T1053/",
+          "subtechnique": [
+            {
+              "id": "T1053.005",
+              "name": "Scheduled Task",
+              "reference": "https://attack.mitre.org/techniques/T1053/005/"
+            }
+          ]
+        }
+      ]
+    }
+  ],
+  "investigation_fields": {
+    "field_names": [
+      "host.name",
+      "file.path",
+      "file.extension",
+      "event.action",
+      "user.name",
+      "process.name",
+      "event.dataset"
+    ]
+  },
+  "related_integrations": [],
+  "required_fields": [],
+  "setup": "",
+  "note": "## Investigation guide\n1. file.path names the task definition and host.name the system.\n2. Correlate with Windows event 4698 (scheduled task created) to identify the task action and the creating account (not captured by FIM).\n3. Review the task's command/trigger; an unexpected task is persistence — remove and investigate.",
+  "false_positives": [
+    "Legitimate software installation/update, Group Policy, or administration that creates scheduled tasks."
+  ],
+  "references": [
+    "https://attack.mitre.org/techniques/T1053/"
+  ],
+  "risk_score": 68,
+  "risk_score_mapping": [],
+  "severity": "high",
+  "severity_mapping": [],
+  "output_index": "",
+  "max_signals": 100,
+  "exceptions_list": [],
+  "actions": [],
+  "type": "query",
+  "language": "kuery",
+  "index": [
+    "logs-fim.event-*"
+  ],
+  "query": "event.dataset:\"fim.event\" and event.action:(\"created\" or \"updated\") and file.path:*\\\\System32\\\\Tasks\\\\*"
+}

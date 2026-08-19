@@ -1,0 +1,86 @@
+{
+  "rule_id": "jcb-f5-attack-campaign",
+  "name": "F5 WAF — Targeted Web-Attack Campaign Against Internet Banking",
+  "version": 1,
+  "enabled": true,
+  "interval": "1h",
+  "from": "now-3h",
+  "to": "now",
+  "description": "Attacker objective\nCompromise internet-banking applications by probing them with a broad exploitation toolkit (SQLi, XSS, command execution, code injection, traversal, RFI, request smuggling, WAF evasion).\n\nAttack logic\nA legitimate client triggers at most one or two WAF attack categories incidentally. A single source that triggers several distinct dangerous categories within a short window is running an automated or targeted web-attack toolkit against the bank.\n\nWhy this detection works\nCounting distinct dangerous attack types per source separates toolkit/campaign behaviour from incidental single-category hits.\n\nFalse positives\nAuthorised vulnerability scanners / pentests; aggressive DAST from a partner.\n\nTuning\nRaise the distinct-type threshold or shorten the window if noisy; allowlist sanctioned scanner IPs.\n\nRequired telemetry\nF5 ASM / Advanced WAF events (CEF): attack_type, source.ip, policy/app, deviceAction.",
+  "tags": [
+    "JCB",
+    "F5-WAF",
+    "Phase3",
+    "Use Case: Threat Detection",
+    "Tactic: Initial Access"
+  ],
+  "author": [
+    "raadabujaish"
+  ],
+  "threat": [
+    {
+      "framework": "MITRE ATT&CK",
+      "tactic": {
+        "id": "TA0001",
+        "name": "Initial Access",
+        "reference": "https://attack.mitre.org/tactics/TA0001/"
+      },
+      "technique": [
+        {
+          "id": "T1190",
+          "name": "Exploit Public-Facing Application",
+          "reference": "https://attack.mitre.org/techniques/T1190/"
+        }
+      ]
+    }
+  ],
+  "investigation_fields": {
+    "field_names": [
+      "source.ip",
+      "cef.extensions.deviceCustomString4",
+      "cef.name",
+      "cef.extensions.deviceCustomString1",
+      "cef.extensions.deviceAction",
+      "cef.extensions.deviceCustomNumber2",
+      "url.original",
+      "http.request.method",
+      "source.geo.country_name"
+    ]
+  },
+  "related_integrations": [],
+  "required_fields": [],
+  "setup": "",
+  "note": "## Investigation guide\n1. source.ip = the attacker; review the distinct attack types and whether any were not blocked (reached the app).\n2. Correlate with the targeted policy/app and block the source if hostile.",
+  "false_positives": [
+    "Authorised vulnerability scanners / pentests; aggressive DAST from a partner."
+  ],
+  "references": [
+    "https://attack.mitre.org/techniques/T1190/"
+  ],
+  "risk_score": 73,
+  "risk_score_mapping": [],
+  "severity": "high",
+  "severity_mapping": [],
+  "output_index": "",
+  "max_signals": 100,
+  "exceptions_list": [],
+  "actions": [],
+  "type": "threshold",
+  "language": "kuery",
+  "index": [
+    "logs-cef.log-*"
+  ],
+  "query": "observer.vendor:\"F5\" and cef.extensions.deviceCustomString4:(\"SQL-Injection\" or \"Cross Site Scripting (XSS)\" or \"Command Execution\" or \"Server Side Code Injection\" or \"Path Traversal\" or \"Remote File Include\" or \"HTTP Request Smuggling Attack\" or \"Session Hijacking\" or \"Detection Evasion\" or \"Trojan/Backdoor/Spyware\" or \"JSON Parser Attack\" or \"Injection Attempt\")",
+  "threshold": {
+    "field": [
+      "source.ip"
+    ],
+    "value": 1,
+    "cardinality": [
+      {
+        "field": "cef.extensions.deviceCustomString4",
+        "value": 4
+      }
+    ]
+  }
+}

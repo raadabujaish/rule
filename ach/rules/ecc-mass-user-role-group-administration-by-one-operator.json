@@ -1,0 +1,73 @@
+{
+  "rule_id": "jcb-ecc-mass-user-role-change",
+  "name": "ECC — Mass User/Role/Group Administration by One Operator",
+  "version": 1,
+  "enabled": true,
+  "interval": "1h",
+  "from": "now-90m",
+  "to": "now",
+  "description": "Attacker objective\nManipulate access at scale in the ECC banking application — mass-modifying users, deleting roles, or removing groups — as a compromised or rogue operator, to escalate privilege or disrupt access.\n\nAttack logic\nECC records every user/role/group administration action with the operator identity. A single operator performing an unusually high volume of these changes in a short window indicates mass privilege manipulation rather than routine day-to-day administration.\n\nWhy this detection works\nAggregating ECC administration actions per operator over a short window separates a mass-change burst from the steady, low per-operator rate of normal administration.\n\nFalse positives\nA legitimate bulk role/reorganisation or onboarding/offboarding batch performed by an authorized operator.\n\nTuning\nSet the per-operator burst threshold above the routine administration rate; allowlist sanctioned bulk-change windows; review the operations and affected users.\n\nRequired telemetry\nECC application audit (apps-*, type=ECC_USR_AUDIT): USRADT_LOGIN_NAME (operator), USRADT_OPERATION/USRADT_ACTION, USR_LOGIN_NAME (target), USRADT_WS.",
+  "tags": [
+    "JCB",
+    "BankingSystem",
+    "Change-Control",
+    "Phase3",
+    "Tactic: Privilege Escalation",
+    "Use Case: Threat Detection"
+  ],
+  "author": [
+    "raadabujaish"
+  ],
+  "license": "",
+  "threat": [
+    {
+      "framework": "MITRE ATT&CK",
+      "tactic": {
+        "id": "TA0004",
+        "name": "Privilege Escalation",
+        "reference": "https://attack.mitre.org/tactics/TA0004/"
+      },
+      "technique": [
+        {
+          "id": "T1098",
+          "name": "Account Manipulation",
+          "reference": "https://attack.mitre.org/techniques/T1098/"
+        }
+      ]
+    }
+  ],
+  "investigation_fields": {
+    "field_names": [
+      "operator",
+      "host.name",
+      "user.name",
+      "source.ip",
+      "destination.ip",
+      "event.action",
+      "event.code",
+      "event.outcome",
+      "message"
+    ]
+  },
+  "related_integrations": [],
+  "required_fields": [],
+  "setup": "",
+  "note": "## Investigation guide\n1. operator = the ECC admin identity; review the operations (user/role/group changes) and the affected users.\n2. Confirm whether a sanctioned bulk change was scheduled; if not, treat as a compromised/rogue operator and disable the account pending review.\n3. Correlate the operator's workstation (USRADT_WS) and login with endpoint/AD activity.",
+  "false_positives": [
+    "A legitimate bulk role/reorganisation or onboarding/offboarding batch performed by an authorized operator."
+  ],
+  "references": [
+    "https://attack.mitre.org/techniques/T1098/"
+  ],
+  "risk_score": 73,
+  "risk_score_mapping": [],
+  "severity": "high",
+  "severity_mapping": [],
+  "output_index": "",
+  "max_signals": 100,
+  "exceptions_list": [],
+  "actions": [],
+  "type": "esql",
+  "language": "esql",
+  "query": "FROM apps-*, -apps-*-2025 METADATA _id, _index, _version\n| WHERE type == \"ECC_USR_AUDIT\" AND USRADT_LOGIN_NAME IS NOT NULL\n| EVAL operator = MV_FIRST(SPLIT(USRADT_LOGIN_NAME, \"@\"))\n| STATS changes = COUNT(), operations = VALUES(USRADT_OPERATION), targets = VALUES(USR_LOGIN_NAME) BY operator\n| WHERE changes >= 30"
+}

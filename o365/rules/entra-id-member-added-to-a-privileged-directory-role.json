@@ -1,0 +1,111 @@
+{
+  "rule_id": "jcb-m365-priv-role-add",
+  "name": "Entra ID — Member Added to a Privileged Directory Role",
+  "version": 1,
+  "enabled": true,
+  "interval": "1h",
+  "from": "now-90m",
+  "to": "now",
+  "description": "Attacker objective\nEscalate to tenant-wide control by adding an account to a highly-privileged Entra ID (Azure AD) directory role such as Global Administrator, Privileged Role Administrator or Application Administrator.\n\nAttack logic\nDirectory-role membership changes to privileged roles are rare and grant far-reaching control over identities, applications and data. An addition to these roles is among the most consequential cloud identity changes.\n\nWhy this detection works\nThe unified audit log records role additions with the target role display name and the acting principal; scoping to the privileged role set makes any such grant a high-signal event.\n\nFalse positives\nAuthorised administration or a planned role assignment.\n\nTuning\nCorrelate with change tickets; allowlist verified break-glass/administration workflows; treat Global Administrator additions as highest priority.\n\nRequired telemetry\no365.audit RecordType 8 / AzureActiveDirectory, Operation 'Add member to role.' (ModifiedProperties.Role_DisplayName, ObjectId=target, user.name=actor).",
+  "tags": [
+    "JCB",
+    "M365",
+    "Phase3",
+    "Tactic: Persistence",
+    "Tactic: Privilege Escalation",
+    "Use Case: Threat Detection"
+  ],
+  "author": [
+    "raadabujaish"
+  ],
+  "license": "",
+  "threat": [
+    {
+      "framework": "MITRE ATT&CK",
+      "tactic": {
+        "id": "TA0003",
+        "name": "Persistence",
+        "reference": "https://attack.mitre.org/tactics/TA0003/"
+      },
+      "technique": [
+        {
+          "id": "T1098",
+          "name": "Account Manipulation",
+          "reference": "https://attack.mitre.org/techniques/T1098/",
+          "subtechnique": [
+            {
+              "id": "T1098.003",
+              "name": "Additional Cloud Roles",
+              "reference": "https://attack.mitre.org/techniques/T1098/003/"
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "framework": "MITRE ATT&CK",
+      "tactic": {
+        "id": "TA0004",
+        "name": "Privilege Escalation",
+        "reference": "https://attack.mitre.org/tactics/TA0004/"
+      },
+      "technique": [
+        {
+          "id": "T1098",
+          "name": "Account Manipulation",
+          "reference": "https://attack.mitre.org/techniques/T1098/",
+          "subtechnique": [
+            {
+              "id": "T1098.003",
+              "name": "Additional Cloud Roles",
+              "reference": "https://attack.mitre.org/techniques/T1098/003/"
+            }
+          ]
+        }
+      ]
+    }
+  ],
+  "investigation_fields": {
+    "field_names": [
+      "user.name",
+      "user.id",
+      "source.ip",
+      "event.action",
+      "event.code",
+      "event.outcome",
+      "o365.audit.Operation",
+      "o365.audit.ResultStatus",
+      "o365.audit.ObjectId",
+      "o365.audit.Severity",
+      "message",
+      "event.dataset",
+      "o365.audit",
+      "o365.audit.ModifiedProperties.Role_DisplayName.NewValue"
+    ]
+  },
+  "related_integrations": [],
+  "required_fields": [],
+  "setup": "",
+  "note": "## Investigation guide\n1. ObjectId is the account added; Role_DisplayName is the role granted; user.name is the actor.\n2. Verify authorisation; if unauthorised, remove the role, disable the account and investigate the actor and their recent sign-ins.\n3. Review what the newly-privileged account did next.",
+  "false_positives": [
+    "Authorised administration or a planned role assignment."
+  ],
+  "references": [
+    "https://attack.mitre.org/techniques/T1098/",
+    "https://attack.mitre.org/techniques/T1098/"
+  ],
+  "risk_score": 88,
+  "risk_score_mapping": [],
+  "severity": "critical",
+  "severity_mapping": [],
+  "output_index": "",
+  "max_signals": 100,
+  "exceptions_list": [],
+  "actions": [],
+  "type": "query",
+  "language": "kuery",
+  "index": [
+    "logs-o365*"
+  ],
+  "query": "event.dataset:\"o365.audit\" and event.action:\"Add member to role.\" and o365.audit.ModifiedProperties.Role_DisplayName.NewValue:(\"Global Administrator\" or \"Privileged Role Administrator\" or \"Privileged Authentication Administrator\" or \"Application Administrator\" or \"Cloud Application Administrator\" or \"Exchange Administrator\" or \"SharePoint Administrator\" or \"Security Administrator\" or \"User Administrator\" or \"Conditional Access Administrator\" or \"Hybrid Identity Administrator\" or \"Intune Administrator\" or \"Authentication Administrator\" or \"Domain Name Administrator\" or \"Helpdesk Administrator\")"
+}

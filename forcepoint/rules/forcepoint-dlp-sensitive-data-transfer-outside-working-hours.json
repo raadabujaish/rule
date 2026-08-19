@@ -1,0 +1,79 @@
+{
+  "rule_id": "jcb-fp-afterhours-sensitive",
+  "name": "Forcepoint DLP — Sensitive Data Transfer Outside Working Hours",
+  "version": 1,
+  "enabled": true,
+  "interval": "1h",
+  "from": "now-90m",
+  "to": "now",
+  "description": "Attacker objective\nMove sensitive data at an unusual time — outside the user's normal working hours — to reduce the chance of being observed, a common insider-exfiltration and compromised-account pattern.\n\nAttack logic\nThe DLP engine flags transfers occurring outside expected working hours. Combined with a sensitive-content classifier, an out-of-hours sensitive transfer is a higher-risk event than the same transfer during business hours.\n\nWhy this detection works\nUsing the DLP engine's own out-of-hours classifier together with a sensitive-content classifier avoids fragile local time-window logic and isolates sensitive data moving at anomalous times.\n\nFalse positives\nShift workers, on-call staff, or automated jobs that legitimately run outside business hours.\n\nTuning\nAllowlist verified out-of-hours business processes and service accounts; prioritise interactive users and external destinations.\n\nRequired telemetry\nForcepoint DLP CEF: deviceEventCategory (Data Sent During Unusual Hours + sensitive classifier), loginName, sourceHost, destinationHosts/destinationUserName.",
+  "tags": [
+    "JCB",
+    "Forcepoint-DLP",
+    "Phase3",
+    "Tactic: Exfiltration",
+    "Use Case: Insider Threat",
+    "Use Case: Threat Detection"
+  ],
+  "author": [
+    "raadabujaish"
+  ],
+  "license": "",
+  "threat": [
+    {
+      "framework": "MITRE ATT&CK",
+      "tactic": {
+        "id": "TA0010",
+        "name": "Exfiltration",
+        "reference": "https://attack.mitre.org/tactics/TA0010/"
+      },
+      "technique": [
+        {
+          "id": "T1567",
+          "name": "Exfiltration Over Web Service",
+          "reference": "https://attack.mitre.org/techniques/T1567/"
+        }
+      ]
+    }
+  ],
+  "investigation_fields": {
+    "field_names": [
+      "@timestamp",
+      "host.name",
+      "source.ip",
+      "user.name",
+      "cef.extensions.loginName",
+      "cef.extensions.deviceEventCategory",
+      "cef.extensions.sourceServiceName",
+      "cef.extensions.destinationHosts",
+      "cef.extensions.destinationUserName",
+      "cef.extensions.filename",
+      "cef.extensions.eventId",
+      "destination.ip",
+      "destination.port",
+      "event.action",
+      "message"
+    ]
+  },
+  "related_integrations": [],
+  "required_fields": [],
+  "setup": "",
+  "note": "## Investigation guide\n1. Confirm the user's normal working pattern and whether an out-of-hours sensitive transfer is expected.\n2. Review the destination and file; an out-of-hours sensitive transfer to an external destination is high-risk.\n3. Correlate with the user's authentication activity for signs of account compromise.",
+  "false_positives": [
+    "Shift workers, on-call staff, or automated jobs that legitimately run outside business hours."
+  ],
+  "references": [
+    "https://attack.mitre.org/techniques/T1567/"
+  ],
+  "risk_score": 56,
+  "risk_score_mapping": [],
+  "severity": "medium",
+  "severity_mapping": [],
+  "output_index": "",
+  "max_signals": 100,
+  "exceptions_list": [],
+  "actions": [],
+  "type": "esql",
+  "language": "esql",
+  "query": "FROM logs-cef.log-* METADATA _id, _index, _version\n| WHERE observer.vendor == \"Forcepoint\" AND cef.extensions.deviceEventCategory LIKE \"*Unusual Hours*\" AND (cef.extensions.deviceEventCategory LIKE \"*Sensitive words*\" OR cef.extensions.deviceEventCategory LIKE \"*PCI*\" OR cef.extensions.deviceEventCategory LIKE \"*Files Outbound*\")\n| EVAL host.name = CASE(cef.extensions.sourceHost != \"N/A\" AND cef.extensions.sourceHost IS NOT NULL, TO_LOWER(MV_FIRST(SPLIT(cef.extensions.sourceHost, \".\"))), null), source.ip = CASE(cef.extensions.sourceIp != \"N/A\" AND cef.extensions.sourceIp IS NOT NULL, TO_IP(cef.extensions.sourceIp), null), user.name = CASE(cef.extensions.loginName LIKE \"INTDOM*\", TO_LOWER(MV_LAST(SPLIT(cef.extensions.loginName, \"\\\\\"))), null)\n| KEEP @timestamp, host.name, source.ip, user.name, cef.extensions.loginName, cef.extensions.deviceEventCategory, cef.extensions.sourceServiceName, cef.extensions.destinationHosts, cef.extensions.destinationUserName, cef.extensions.filename, cef.extensions.eventId"
+}

@@ -1,0 +1,105 @@
+{
+  "rule_id": "jcb-rec-potential-ransomware-behavior-high-count-of",
+  "name": "Windows — Potential Ransomware Behavior - High count of Readme files by System",
+  "version": 1,
+  "enabled": true,
+  "interval": "5m",
+  "from": "now-9m",
+  "to": "now",
+  "description": "This rule identifies a high number (20) of file creation event by the System virtual process from the same host and with same file name containing keywords similar to ransomware note files and all within a short time period.",
+  "tags": [
+    "JCB",
+    "Windows"
+  ],
+  "author": [
+    "raadabujaish"
+  ],
+  "threat": [
+    {
+      "framework": "MITRE ATT&CK",
+      "tactic": {
+        "id": "TA0040",
+        "name": "Impact",
+        "reference": "https://attack.mitre.org/tactics/TA0040/"
+      },
+      "technique": [
+        {
+          "id": "T1485",
+          "name": "Data Destruction",
+          "reference": "https://attack.mitre.org/techniques/T1485/"
+        }
+      ]
+    },
+    {
+      "framework": "MITRE ATT&CK",
+      "tactic": {
+        "id": "TA0008",
+        "name": "Lateral Movement",
+        "reference": "https://attack.mitre.org/tactics/TA0008/"
+      },
+      "technique": [
+        {
+          "id": "T1021",
+          "name": "Remote Services",
+          "reference": "https://attack.mitre.org/techniques/T1021/",
+          "subtechnique": [
+            {
+              "id": "T1021.002",
+              "name": "SMB/Windows Admin Shares",
+              "reference": "https://attack.mitre.org/techniques/T1021/002/"
+            }
+          ]
+        }
+      ]
+    }
+  ],
+  "investigation_fields": {
+    "field_names": [
+      "host.name",
+      "user.name",
+      "user.domain",
+      "process.name",
+      "process.executable",
+      "process.command_line",
+      "process.args",
+      "process.parent.name",
+      "process.parent.executable",
+      "event.code",
+      "event.action",
+      "event.category",
+      "host.os.type",
+      "process.pid",
+      "file.name"
+    ]
+  },
+  "related_integrations": [],
+  "required_fields": [],
+  "setup": "",
+  "false_positives": [],
+  "references": [
+    "https://news.sophos.com/en-us/2023/12/21/akira-again-the-ransomware-that-keeps-on-taking/"
+  ],
+  "risk_score": 73,
+  "risk_score_mapping": [],
+  "severity": "high",
+  "severity_mapping": [],
+  "output_index": "",
+  "max_signals": 100,
+  "exceptions_list": [],
+  "actions": [],
+  "type": "threshold",
+  "language": "kuery",
+  "index": [
+    "logs-windows.sysmon_operational-*",
+    "logs-system.security-*",
+    "logs-windows.powershell_operational-*"
+  ],
+  "query": "event.category:file and host.os.type:windows and process.pid:4 and event.action:creation and\n file.name:(*read*me* or *README* or *lock* or *LOCK* or *how*to* or *HOW*TO* or *@* or *recover* or *RECOVER* or *decrypt* or *DECRYPT* or *restore* or *RESTORE* or *FILES_BACK* or *files_back*)\n",
+  "threshold": {
+    "field": [
+      "host.id",
+      "file.name"
+    ],
+    "value": 20
+  }
+}

@@ -1,0 +1,80 @@
+{
+  "rule_id": "jcb-ad-security-log-cleared",
+  "name": "AD/Windows — Security Event Log Cleared",
+  "version": 1,
+  "enabled": true,
+  "interval": "30m",
+  "from": "now-1h",
+  "to": "now",
+  "description": "Attacker objective\nErase forensic evidence by clearing the Windows Security event log.\n\nAttack logic\nClearing the Security log is not part of normal operations. Any occurrence is a classic anti-forensics step, frequently seen after hands-on-keyboard activity.\n\nWhy this detection works\nEvent 1102 is emitted whenever the Security log is cleared, and records the acting subject.\n\nFalse positives\nAuthorised administrative maintenance (rare).\n\nTuning\nCorrelate with maintenance windows and change control.\n\nRequired telemetry\nWindows Security 1102 (SubjectUserName, computer).",
+  "tags": [
+    "JCB",
+    "ActiveDirectory",
+    "Phase3",
+    "Use Case: Threat Detection",
+    "Tactic: Defense Evasion"
+  ],
+  "author": [
+    "raadabujaish"
+  ],
+  "threat": [
+    {
+      "framework": "MITRE ATT&CK",
+      "tactic": {
+        "id": "TA0005",
+        "name": "Defense Evasion",
+        "reference": "https://attack.mitre.org/tactics/TA0005/"
+      },
+      "technique": [
+        {
+          "id": "T1070",
+          "name": "Indicator Removal",
+          "reference": "https://attack.mitre.org/techniques/T1070/",
+          "subtechnique": [
+            {
+              "id": "T1070.001",
+              "name": "Clear Windows Event Logs",
+              "reference": "https://attack.mitre.org/techniques/T1070/001/"
+            }
+          ]
+        }
+      ]
+    }
+  ],
+  "investigation_fields": {
+    "field_names": [
+      "winlog.event_data.SubjectUserName",
+      "winlog.event_data.TargetUserName",
+      "winlog.event_data.ServiceName",
+      "winlog.event_data.AttributeLDAPDisplayName",
+      "winlog.event_data.ObjectDN",
+      "winlog.computer_name",
+      "winlog.event_data.IpAddress"
+    ]
+  },
+  "related_integrations": [],
+  "required_fields": [],
+  "setup": "",
+  "note": "## Investigation guide\n1. SubjectUserName cleared the log on the named host.\n2. Verify authorisation; log clearing is a strong compromise indicator — pivot to other telemetry for the same host/time window.",
+  "false_positives": [
+    "Authorised administrative maintenance (rare)."
+  ],
+  "references": [
+    "https://attack.mitre.org/techniques/T1070/",
+    "https://attack.mitre.org/techniques/T1070/001/"
+  ],
+  "risk_score": 78,
+  "risk_score_mapping": [],
+  "severity": "high",
+  "severity_mapping": [],
+  "output_index": "",
+  "max_signals": 100,
+  "exceptions_list": [],
+  "actions": [],
+  "type": "query",
+  "language": "kuery",
+  "index": [
+    "logs-system.security-*"
+  ],
+  "query": "event.code:\"1102\""
+}

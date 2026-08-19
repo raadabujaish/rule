@@ -1,0 +1,145 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<Playbook xmlns="https://soc.example/playbooks" id="PB-NS-001" name="NETSCOUT AED — Volumetric DDoS Surge Against a Bank Internet Service - SOC Playbook" version="1.0" status="Production" classification="TLP:AMBER">
+  <Metadata>
+    <Owner>JCB Detection Engineering (WatchWave)</Owner>
+    <LastUpdated>2026-08-14</LastUpdated>
+    <Severity default="High">High</Severity>
+    <Confidence default="Medium">Medium</Confidence>
+    <Category>Impact / Network Denial of Service</Category>
+    <MitreAttack>
+      <Technique id="T1498.001" name="Direct Network Flood"/>
+      <Tactic id="TA0040" name="Impact"/>
+    </MitreAttack>
+    <References>
+      <Reference title="MITRE ATT and CK" url="https://attack.mitre.org/techniques/T1498/"/>
+    </References>
+  </Metadata>
+  <ExecutiveSummary>
+    <Overview>NETSCOUT AED reported a surge of volumetric-flood events (SYN/ICMP/rate-based/malformed) against a protected bank service (threshold now 10/protection-group/hour). Triage: an active DDoS attack on an internet-facing banking service, or a benign traffic spike/misconfiguration?</Overview>
+    <BusinessImpact>A volumetric DDoS can take internet banking offline - an availability and reputational impact.</BusinessImpact>
+  </ExecutiveSummary>
+  <Scope><Assets>
+    <AssetType>Bank internet-facing services behind NETSCOUT AED (DDoS protection)</AssetType>
+  </Assets><LogSources>
+    <LogSource>NETSCOUT AED CEF - logs-cef.log-*</LogSource>
+  </LogSources></Scope>
+  <Prerequisites><TelemetryRequirements>
+    <Requirement>NETSCOUT Arbor Edge Defense CEF (verified live). Fields: source.ip, source.geo, source.as.organization.name, destination.ip, cef.extensions.deviceCustomString2 (protection group / bank service), cef.device.event_class_id (attack type), cef.extensions.deviceCustomString6 (threat category), cef.severity.</Requirement>
+  </TelemetryRequirements><DetectionSignals>
+    <Signal><Name>Volumetric DDoS Surge Against a Bank Int</Name><Details>flood events against a protection group.</Details></Signal>
+  </DetectionSignals></Prerequisites>
+  <Inputs>
+    <Input name="$protgroup" description="Protection group / bank service (deviceCustomString2)."/>
+  </Inputs>
+  <Triage><ImmediateCapture>
+    <Item>$protgroup: $protgroup</Item>
+  </ImmediateCapture><InitialAssessment>
+    <Rule>Weigh the full evidence story per the ClassificationGuidance, not any single fact.</Rule>
+  </InitialAssessment></Triage>
+  <Investigation>
+    <Goal>Determine whether the flood surge is an active DDoS on a bank service and its scale/source.</Goal>
+    <Workflow>
+      <Step order="1" name="Flood events, types and scale for the protection group">
+        <Purpose>The event types, count and whether AED is blocking show the attack's nature and whether mitigation is holding.</Purpose>
+        <Query platform="Elastic" language="ES|QL" id="INV-01-NS-FLOOD">
+          <![CDATA[
+FROM logs-cef.log-*
+| WHERE observer.vendor == "NETSCOUT" AND cef.extensions.deviceCustomString2 == "$protgroup" AND @timestamp >= NOW() - 4 hours
+| STATS events = COUNT(*), attack_types = VALUES(cef.device.event_class_id), sources = COUNT_DISTINCT(source.ip), src_countries = VALUES(source.geo.country_name)
+| LIMIT 1
+          ]]>
+        </Query>
+        <ExpectedOutput>
+          <Field name="events"/>
+          <Field name="attack_types"/>
+          <Field name="sources"/>
+          <Field name="src_countries"/>
+        </ExpectedOutput>
+        <AnalystNotes>Many flood events (SYN/ICMP flood, rate-based blocking) from many sources = a real volumetric DDoS. AED blocking them = mitigation active. A single source or a small spike may be a scanner or a traffic anomaly.</AnalystNotes>
+      </Step>
+      <Step order="2" name="Top attacking sources">
+        <Purpose>The source distribution (many IPs/countries vs one) distinguishes a distributed attack from a single noisy source.</Purpose>
+        <Query platform="Elastic" language="ES|QL" id="INV-02-NS-SOURCES" optional="true">
+          <![CDATA[
+FROM logs-cef.log-*
+| WHERE observer.vendor == "NETSCOUT" AND cef.extensions.deviceCustomString2 == "$protgroup" AND @timestamp >= NOW() - 4 hours
+| STATS events = COUNT(*), countries = VALUES(source.geo.country_name), asns = VALUES(source.as.organization.name) BY source.ip
+| SORT events DESC
+| LIMIT 15
+          ]]>
+        </Query>
+        <ExpectedOutput>
+          <Field name="source.ip"/>
+          <Field name="events"/>
+          <Field name="countries"/>
+        </ExpectedOutput>
+        <AnalystNotes>Many distinct sources across countries = distributed (real DDoS). Concentrated from one ASN may be a single attacker or a misrouted flow.</AnalystNotes>
+      </Step>
+      <Step order="3" name="Finalize classification">
+        <DecisionTree>
+          <Node><Condition>Distributed flood events from many sources against a bank internet service.</Condition><Result>True Positive (DDoS Attack - engage DDoS response, confirm mitigation)</Result></Node>
+          <Node><Condition>A small, single-source spike or a benign traffic anomaly.</Condition><Result>False Positive / Benign Activity</Result></Node>
+          <Node><Condition>A load-test or maintenance traffic surge mislabeled.</Condition><Result>Misconfiguration</Result></Node>
+          <Node><Condition>Flood surge with unclear scale/source.</Condition><Result>Needs Escalation</Result></Node>
+        </DecisionTree>
+        <DocumentationChecklist>
+          <Item>Attach outputs of INV-01-NS-FLOOD, INV-02-NS-SOURCES to the case.</Item>
+        </DocumentationChecklist>
+      </Step>
+    </Workflow>
+  </Investigation>
+  <ClassificationGuidance>
+    <FalsePositive>
+      <Definition>A benign traffic spike or single-source anomaly.</Definition>
+      <Indicators>
+        <Item>Single/few sources.</Item>
+        <Item>Small volume.</Item>
+        <Item>No service impact.</Item>
+      </Indicators>
+      <SOCAction>
+        <Item>Confirm no impact; close as benign_activity.</Item>
+      </SOCAction>
+    </FalsePositive>
+    <TruePositive>
+      <Definition>An active volumetric DDoS.</Definition>
+      <Indicators>
+        <Item>Distributed flood from many sources.</Item>
+        <Item>Real bank service targeted.</Item>
+        <Item>Volume/impact.</Item>
+      </Indicators>
+      <SOCAction>
+        <Item>Engage DDoS response; confirm AED mitigation is holding; coordinate with the ISP/upstream; monitor service availability.</Item>
+      </SOCAction>
+    </TruePositive>
+    <Misconfiguration>
+      <Definition>Load-test / maintenance traffic mislabeled.</Definition>
+      <Indicators>
+        <Item>Scheduled load test.</Item>
+        <Item>Known maintenance.</Item>
+      </Indicators>
+      <SOCAction>
+        <Item>Confirm the test; document; whitelist if needed.</Item>
+      </SOCAction>
+    </Misconfiguration>
+  </ClassificationGuidance>
+  <Response><IRForHumans>
+    <Phase name="Immediate Actions (0-30 minutes)">
+      <Action priority="1">Confirm the target service and whether it is impacted.</Action>
+      <Action priority="2">Engage DDoS response; verify AED mitigation.</Action>
+    </Phase>
+    <Phase name="Containment and Eradication (hours)">
+      <Action>Engage DDoS response; confirm mitigation; coordinate upstream/ISP; monitor availability.</Action>
+    </Phase>
+    <Phase name="Recovery and Hardening (days)">
+      <Action>Tune AED protection thresholds; ensure upstream scrubbing; document the attack for capacity planning.</Action>
+    </Phase>
+  </IRForHumans></Response>
+  <QualityChecks>
+    <Check>Threshold reduced 30-&gt;10 flood events/group/hour (baseline ~0-5/hr). deviceCustomString2 is the protected service.</Check>
+  </QualityChecks>
+  <ClosureCriteria><FalsePositiveClosure>
+    <Item>Benign spike confirmed; documented.</Item>
+  </FalsePositiveClosure><TruePositiveClosure>
+    <Item>DDoS mitigated; service availability restored; attack documented.</Item>
+  </TruePositiveClosure></ClosureCriteria>
+</Playbook>

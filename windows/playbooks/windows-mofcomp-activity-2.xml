@@ -1,0 +1,149 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<Playbook xmlns="https://soc.example/playbooks" id="PB-WIN-027" name="Windows — Mofcomp Activity - SOC Playbook" version="1.0" status="Production" classification="TLP:AMBER">
+  <Metadata>
+    <Owner>JCB Detection Engineering (WatchWave)</Owner>
+    <LastUpdated>2026-08-14</LastUpdated>
+    <Severity default="Medium">Medium</Severity>
+    <Confidence default="Medium">Medium</Confidence>
+    <Category>Persistence / WMI Event Subscription</Category>
+    <MitreAttack>
+      <Technique id="T1546.003" name="WMI Event Subscription"/>
+      <Tactic id="TA0003" name="Persistence"/>
+    </MitreAttack>
+    <References>
+      <Reference title="MITRE ATT and CK" url="https://attack.mitre.org/techniques/T1546/"/>
+    </References>
+  </Metadata>
+  <ExecutiveSummary>
+    <Overview>mofcomp.exe compiled a .mof file (excluding known SQL/SCCM contexts) - MOF compilation can install WMI event subscriptions used for persistence. Triage question: is this WMI-persistence installation, or legitimate software/management MOF compilation?</Overview>
+    <BusinessImpact>Malicious MOF compilation registers WMI event consumers that survive reboots and run attacker code on triggers.</BusinessImpact>
+  </ExecutiveSummary>
+  <Scope><Assets>
+    <AssetType>Windows servers and workstations (INTDOM domain)</AssetType>
+    <AssetType>Domain controllers</AssetType>
+  </Assets><LogSources>
+    <LogSource>Sysmon process + Windows Security 4688 - logs-windows.sysmon_operational-*,logs-system.security-*</LogSource>
+  </LogSources></Scope>
+  <Prerequisites><TelemetryRequirements>
+    <Requirement>Windows Security + Sysmon + PowerShell logs via Elastic Agent (verified live). Sysmon event.code 1=process(command_line/parent populated), 11=file, 13/12=registry(registry.path populated); process.code_signature NOT collected.</Requirement>
+  </TelemetryRequirements><DetectionSignals>
+    <Signal><Name>Mofcomp</Name><Details>mofcomp.exe compiling a .mof, not the known SQL context.</Details></Signal>
+  </DetectionSignals></Prerequisites>
+  <Inputs>
+    <Input name="$hostname" description="Host where mofcomp ran."/>
+    <Input name="$username" description="Account (user.name)."/>
+  </Inputs>
+  <Triage><ImmediateCapture>
+    <Item>Host: $hostname</Item>
+  </ImmediateCapture><InitialAssessment>
+    <Rule>Weigh the evidence story, not any single fact - see ClassificationGuidance.</Rule>
+  </InitialAssessment></Triage>
+  <Investigation>
+    <Goal>Determine whether the MOF compilation installs WMI persistence or is legitimate.</Goal>
+    <Workflow>
+      <Step order="1" name="Mofcomp command, MOF path and parent">
+        <Purpose>The MOF file path and parent process reveal software installation vs attacker persistence.</Purpose>
+        <Query platform="Elastic" language="ES|QL" id="INV-01-MOF-DETAIL">
+          <![CDATA[
+FROM logs-windows.sysmon_operational-*,logs-system.security-*
+| WHERE event.code IN ("1","4688") AND host.name == "$hostname" AND process.name RLIKE "(?i)mofcomp(.exe)?" AND @timestamp >= NOW() - 4 hours
+| KEEP @timestamp, process.parent.name, process.command_line, user.name
+| SORT @timestamp DESC
+| LIMIT 15
+          ]]>
+        </Query>
+        <ExpectedOutput>
+          <Field name="process.parent.name"/>
+          <Field name="process.command_line"/>
+          <Field name="user.name"/>
+        </ExpectedOutput>
+        <AnalystNotes>A .mof in temp/appdata or a user-writable path compiled by a script/unknown parent = persistence. A vendor installer compiling its own MOF in Program Files is benign.</AnalystNotes>
+      </Step>
+      <Step order="2" name="Process origin and account on the host">
+        <Purpose>The parent process and account reveal whether this was interactive attacker activity or an automated/service context.</Purpose>
+        <Query platform="Elastic" language="ES|QL" id="INV-02-PROC-TREE" optional="true">
+          <![CDATA[
+FROM logs-windows.sysmon_operational-*,logs-system.security-*
+| WHERE event.code IN ("1","4688") AND host.name == "$hostname" AND @timestamp >= NOW() - 2 hours
+| STATS runs = COUNT(*), parents = VALUES(process.parent.name), users = VALUES(user.name) BY process.name
+| SORT runs DESC
+| LIMIT 15
+          ]]>
+        </Query>
+        <ExpectedOutput>
+          <Field name="process.name"/>
+          <Field name="parents"/>
+          <Field name="users"/>
+        </ExpectedOutput>
+        <AnalystNotes>A suspicious process spawned by an office app/browser/script interpreter, run by a normal user, is more concerning than one under a known admin/automation parent.</AnalystNotes>
+      </Step>
+      <Step order="3" name="Finalize classification">
+        <DecisionTree>
+          <Node><Condition>A .mof from a temp/user-writable path compiled by a suspicious parent (script/dropper).</Condition><Result>True Positive (WMI Persistence - IR, remove the subscription)</Result></Node>
+          <Node><Condition>A vendor installer/management tool compiling its own MOF under a known context.</Condition><Result>False Positive</Result></Node>
+          <Node><Condition>Mofcomp with an unclear MOF path/parent.</Condition><Result>Needs Escalation</Result></Node>
+        </DecisionTree>
+        <DocumentationChecklist>
+          <Item>Attach outputs of INV-01-MOF-DETAIL, INV-02-PROC-TREE to the case.</Item>
+        </DocumentationChecklist>
+      </Step>
+    </Workflow>
+  </Investigation>
+  <ClassificationGuidance>
+    <FalsePositive>
+      <Definition>Legitimate software/management MOF compilation.</Definition>
+      <Indicators>
+        <Item>Vendor installer parent.</Item>
+        <Item>MOF in Program Files.</Item>
+        <Item>Known context.</Item>
+      </Indicators>
+      <SOCAction>
+        <Item>Confirm the software; close as false_positive.</Item>
+      </SOCAction>
+    </FalsePositive>
+    <TruePositive>
+      <Definition>WMI event-subscription persistence.</Definition>
+      <Indicators>
+        <Item>MOF from temp/user path.</Item>
+        <Item>Suspicious parent.</Item>
+        <Item>Attacker context.</Item>
+      </Indicators>
+      <SOCAction>
+        <Item>Enumerate and remove the WMI event consumer/filter/binding; isolate the host; open IR.</Item>
+        <Item>Hunt the same MOF elsewhere.</Item>
+      </SOCAction>
+    </TruePositive>
+    <Misconfiguration>
+      <Definition>A management product using MOF by design.</Definition>
+      <Indicators>
+        <Item>A known product.</Item>
+        <Item>Consistent expected MOF.</Item>
+      </Indicators>
+      <SOCAction>
+        <Item>Baseline; document.</Item>
+      </SOCAction>
+    </Misconfiguration>
+  </ClassificationGuidance>
+  <Response><IRForHumans>
+    <Phase name="Immediate Actions (0-30 minutes)">
+      <Action priority="1">Confirm the activity on the host; if malicious indicators, isolate the host.</Action>
+      <Action priority="2">Identify the responsible account/process and its origin.</Action>
+    </Phase>
+    <Phase name="Containment and Eradication (hours)">
+      <Action>Isolate the host; capture volatile evidence; hunt the same pattern across the estate.</Action>
+      <Action>Reset credentials used on the host if compromise is confirmed.</Action>
+    </Phase>
+    <Phase name="Recovery and Hardening (days)">
+      <Action>Remediate the root cause; add/verify EDR coverage; apply relevant hardening.</Action>
+    </Phase>
+  </IRForHumans></Response>
+  <QualityChecks>
+    <Check>Confirm the required telemetry (Sysmon/Security auditing) is present on the host.</Check>
+    <Check>Tune known-benign administrative sources via exceptions, not by disabling the rule.</Check>
+  </QualityChecks>
+  <ClosureCriteria><FalsePositiveClosure>
+    <Item>Activity confirmed benign/authorised and documented.</Item>
+  </FalsePositiveClosure><TruePositiveClosure>
+    <Item>Host contained and triaged; root cause eradicated; estate swept; findings recorded.</Item>
+  </TruePositiveClosure></ClosureCriteria>
+</Playbook>

@@ -1,0 +1,84 @@
+{
+  "rule_id": "jcb-rec-execution-via-microsoft-dotnet-clickonce-hos",
+  "name": "Windows — Execution via Microsoft DotNet ClickOnce Host",
+  "version": 1,
+  "enabled": true,
+  "interval": "5m",
+  "from": "now-9m",
+  "to": "now",
+  "description": "Identifies the execution of DotNet ClickOnce installer via Dfsvc.exe trampoline. Adversaries may take advantage of ClickOnce to proxy execution of malicious payloads via trusted Microsoft processes.",
+  "tags": [
+    "JCB",
+    "Windows"
+  ],
+  "author": [
+    "raadabujaish"
+  ],
+  "threat": [
+    {
+      "framework": "MITRE ATT&CK",
+      "tactic": {
+        "id": "TA0005",
+        "name": "Defense Evasion",
+        "reference": "https://attack.mitre.org/tactics/TA0005/"
+      },
+      "technique": [
+        {
+          "id": "T1127",
+          "name": "Trusted Developer Utilities Proxy Execution",
+          "reference": "https://attack.mitre.org/techniques/T1127/"
+        },
+        {
+          "id": "T1218",
+          "name": "System Binary Proxy Execution",
+          "reference": "https://attack.mitre.org/techniques/T1218/",
+          "subtechnique": [
+            {
+              "id": "T1218.011",
+              "name": "Rundll32",
+              "reference": "https://attack.mitre.org/techniques/T1218/011/"
+            }
+          ]
+        }
+      ]
+    }
+  ],
+  "investigation_fields": {
+    "field_names": [
+      "host.name",
+      "user.name",
+      "user.domain",
+      "process.name",
+      "process.executable",
+      "process.command_line",
+      "process.args",
+      "process.parent.name",
+      "process.parent.executable",
+      "event.code",
+      "event.action",
+      "user.id",
+      "host.os.type"
+    ]
+  },
+  "related_integrations": [],
+  "required_fields": [],
+  "setup": "",
+  "false_positives": [],
+  "references": [],
+  "risk_score": 21,
+  "risk_score_mapping": [],
+  "severity": "low",
+  "severity_mapping": [],
+  "output_index": "",
+  "max_signals": 100,
+  "exceptions_list": [],
+  "actions": [],
+  "type": "eql",
+  "language": "eql",
+  "index": [
+    "logs-windows.sysmon_operational-*",
+    "logs-system.security-*",
+    "logs-windows.powershell_operational-*"
+  ],
+  "query": "sequence by user.id with maxspan=5s\n [process where host.os.type == \"windows\" and event.action == \"start\" and\n  process.name : \"rundll32.exe\" and process.command_line : (\"*dfshim*ShOpenVerbApplication*\", \"*dfshim*#*\")]\n [network where host.os.type == \"windows\" and process.name : \"dfsvc.exe\"]\n"
+}

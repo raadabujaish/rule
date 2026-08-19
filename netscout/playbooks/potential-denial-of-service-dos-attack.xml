@@ -1,0 +1,151 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<Playbook xmlns="https://soc.example/playbooks" id="PB-JCB-NEW-3" name="Potential Denial of Service (DoS) Attack - SOC Playbook" version="2.1" status="Production" classification="TLP:AMBER">
+  <Metadata>
+    <Owner>JCB Detection Engineering (WatchWave)</Owner>
+    <LastUpdated>2026-08-19</LastUpdated>
+    <Severity default="Critical">Critical</Severity>
+    <Confidence default="Medium">Medium</Confidence>
+    <Category>Impact / Network Denial of Service</Category>
+    <MitreAttack>
+      <Technique id="T1498" name="Network Denial of Service"/>
+      <Tactic id="TA0040" name="Impact"/>
+    </MitreAttack>
+    <References>
+      <Reference title="MITRE ATT and CK - T1498 Network Denial of Service" url="https://attack.mitre.org/techniques/T1498/"/>
+    </References>
+  </Metadata>
+  <ExecutiveSummary>
+    <Overview>NETSCOUT Arbor Edge Defense reported volumetric / flood events (SYN, ICMP, rate-based, malformed/invalid packets) that could deny a JCB internet-facing banking service. Triage question: is a source actively flooding a bank service and threatening its availability (a DoS), or is this a small blocked spike / background noise / an authorised load test?</Overview>
+    <BusinessImpact>A denial-of-service against Internet Banking, mobile or web services is a direct availability and reputational impact - customers cannot transact and the outage is publicly visible. Confirming impact and whether AED mitigation is holding is the priority.</BusinessImpact>
+  </ExecutiveSummary>
+  <Scope>
+    <Assets>
+      <AssetType>JCB internet-facing banking services behind NETSCOUT AED (bank range 91.223.202.0/24 - Internet Banking, mobile, OWA and web properties, organised into AED protection groups such as "Corporate Online", "JCB Mobile ICS", "TEJARI WEBSITE")</AssetType>
+    </Assets>
+    <LogSources>
+      <LogSource>NETSCOUT Arbor Edge Defense CEF - logs-cef.log-*</LogSource>
+    </LogSources>
+  </Scope>
+  <Prerequisites>
+    <TelemetryRequirements>
+      <Requirement>NETSCOUT AED CEF (verified live on JCB). Populated fields: source.ip, source.geo.country_name, source.as.organization.name, destination.ip, destination.port, network.transport, observer.product ("Arbor Edge Defense"), cef.device.event_class_id (flood/detection class), cef.extensions.deviceCustomString2 (protection group / bank service), cef.extensions.deviceCustomString6 (threat category, incl. "DDoS Botnets" / "DNS Flood"), cef.severity.</Requirement>
+      <Requirement>Relevant flood/volumetric detection classes observed live on JCB: "TCP SYN Flood Detection", "ICMP Flood Detection", "Rate-based Blocking", "TCP Connection Limiting", "TCP Connection Reset", "Invalid Packets", "Block Malformed DNS Traffic", "Malformed HTTP Filtering".</Requirement>
+    </TelemetryRequirements>
+    <DetectionSignals>
+      <Signal><Name>Volumetric / Flood Events Against a Bank Service</Name><Details>A surge of flood-class events against a protected bank service above the rule threshold.</Details></Signal>
+    </DetectionSignals>
+  </Prerequisites>
+  <Inputs>
+    <Input name="$srcip" description="Source IP generating the flood the alert attributes the DoS to (source.ip - primary entity)."/>
+    <Input name="$target" description="Targeted bank asset under attack (destination.ip). Used to measure whether the flood is single-source (DoS) or distributed (DDoS)."/>
+  </Inputs>
+  <Triage>
+    <ImmediateCapture>
+      <Item>$srcip: $srcip</Item>
+      <Item>$target: $target</Item>
+    </ImmediateCapture>
+    <InitialAssessment>
+      <Rule>Weigh the full evidence story per the ClassificationGuidance - flood volume, class, whether AED blocked it, and how concentrated the sources are - not any single fact. If the load against the target comes from many distributed sources, treat it as a DDoS and use the DDoS playbook/response.</Rule>
+    </InitialAssessment>
+  </Triage>
+  <Investigation>
+    <Goal>Determine whether a source is actively flooding a JCB service (scale, flood type, targeted asset), whether AED is mitigating it, and whether the attack is single-source (DoS) or distributed (DDoS).</Goal>
+    <Workflow>
+      <Step order="1" name="Flood volume and targets for the source">
+        <Purpose>Characterise the alerting source: how much flood traffic, which flood classes and threat categories, against which bank services and ports.</Purpose>
+        <Query platform="Elastic" language="ES|QL" id="INV-01">
+          <![CDATA[
+FROM logs-cef.log-*
+| WHERE observer.vendor == "NETSCOUT" AND source.ip == "$srcip" AND @timestamp >= NOW() - 4 hours
+| STATS events = COUNT(*), dst_ips = COUNT_DISTINCT(destination.ip), flood_classes = VALUES(cef.device.event_class_id), threat_cats = VALUES(cef.extensions.deviceCustomString6), services = VALUES(cef.extensions.deviceCustomString2), transports = VALUES(network.transport), ports = VALUES(destination.port), product = VALUES(observer.product)
+| LIMIT 1
+          ]]>
+        </Query>
+        <AnalystNotes>High event volume from one source against a bank service via a flood class (SYN/ICMP flood, rate-based blocking) = a single-source DoS. A handful of "Invalid Packets"/malformed events is often background noise. Note the flood_classes and whether they are volumetric (flood/rate) vs protocol hygiene (invalid/malformed).</AnalystNotes>
+      </Step>
+      <Step order="2" name="Source concentration on the targeted asset (DoS vs DDoS)">
+        <Purpose>The decisive discriminator: whether the targeted asset is being hit by one/few sources (DoS) or many distributed sources (DDoS).</Purpose>
+        <Query platform="Elastic" language="ES|QL" id="INV-02">
+          <![CDATA[
+FROM logs-cef.log-*
+| WHERE observer.vendor == "NETSCOUT" AND destination.ip == "$target" AND @timestamp >= NOW() - 4 hours
+| STATS events = COUNT(*), src_countries = COUNT_DISTINCT(source.geo.country_name), asn = VALUES(source.as.organization.name) BY source.ip
+| SORT events DESC
+| LIMIT 15
+          ]]>
+        </Query>
+        <AnalystNotes>One (or very few) source IPs dominating the events against the target = a DoS (this playbook). Many comparable sources across many countries = a distributed attack (DDoS) - switch to the DDoS playbook/response. Grounding: live JCB "DDoS Botnets" activity against a single bank IP has been seen from ~180 distinct sources across ~20 countries - that pattern is DDoS, not DoS.</AnalystNotes>
+      </Step>
+      <Step order="3" name="Flood classes and scale on the targeted service">
+        <Purpose>The flood-class and volume breakdown on the targeted service shows the attack's nature and whether AED mitigation classes are engaging.</Purpose>
+        <Query platform="Elastic" language="ES|QL" id="INV-03">
+          <![CDATA[
+FROM logs-cef.log-*
+| WHERE observer.vendor == "NETSCOUT" AND destination.ip == "$target" AND @timestamp >= NOW() - 4 hours
+| STATS events = COUNT(*), sources = COUNT_DISTINCT(source.ip), ports = VALUES(destination.port) BY cef.device.event_class_id, cef.extensions.deviceCustomString2
+| SORT events DESC
+| LIMIT 20
+          ]]>
+        </Query>
+        <AnalystNotes>Rate-based / SYN-flood / ICMP-flood / connection-limiting classes with high event counts indicate active volumetric mitigation by AED (mitigation engaging = good). Confirm the protected service (deviceCustomString2) is a real, in-use bank service and check its availability directly.</AnalystNotes>
+      </Step>
+    </Workflow>
+  </Investigation>
+  <DecisionTree>
+    <Node><Condition>Sustained volumetric flood (SYN/ICMP/rate-based) from one or a few sources against a real bank service, with AED mitigating and availability at risk.</Condition><Result>True Positive (DoS Attack - engage DoS response, confirm mitigation and service availability)</Result></Node>
+    <Node><Condition>The targeted asset is being hit by many distributed sources across many countries (INV-02).</Condition><Result>Needs Escalation / Reclassify as DDoS (use the DDoS playbook and response)</Result></Node>
+    <Node><Condition>A small or single-packet spike, background "Invalid Packets"/malformed noise fully blocked by AED, with no service impact - or an authorised load test.</Condition><Result>False Positive (proven-blocked spike, or authorised load test)</Result></Node>
+    <Node><Condition>A real flood, but scale, source concentration or service impact cannot be established from available telemetry.</Condition><Result>Needs Escalation</Result></Node>
+  </DecisionTree>
+  <ClassificationGuidance>
+    <FalsePositive>
+      <Definition>An authorised or proven-blocked event - a scheduled load/performance test, or low-volume background flood/invalid-packet noise that AED blocked with no impact. Never classify simply as "benign".</Definition>
+      <Indicators>
+        <Item>Single or very few sources, low event volume, non-volumetric classes (e.g. isolated "Invalid Packets").</Item>
+        <Item>AED blocked every event; the targeted service stayed available.</Item>
+        <Item>The traffic maps to a known/scheduled load test or maintenance window.</Item>
+      </Indicators>
+      <SOCAction>
+        <Item>Confirm no availability impact and/or the authorised test; document; close as proven-blocked or authorised. Tune AED thresholds only with owner sign-off.</Item>
+      </SOCAction>
+    </FalsePositive>
+    <TruePositive>
+      <Definition>An active denial-of-service: a source (or few sources) generating volumetric flood traffic that threatens a bank service's availability.</Definition>
+      <Indicators>
+        <Item>High-volume flood-class events (SYN/ICMP/rate-based) concentrated from one/few sources against a real bank service.</Item>
+        <Item>Signs of AED mitigation engaging (rate-based blocking, connection limiting) and/or measurable service degradation.</Item>
+        <Item>Targeting of a live, customer-facing service (Internet Banking, mobile, OWA).</Item>
+      </Indicators>
+      <SOCAction>
+        <Item>Engage DoS response; confirm AED mitigation is holding and monitor service availability; block/rate-limit the source upstream; coordinate with the ISP/upstream scrubbing if impact persists.</Item>
+      </SOCAction>
+    </TruePositive>
+  </ClassificationGuidance>
+  <Response>
+    <IRForHumans>
+      <Phase name="Immediate Actions (0-30 minutes)">
+        <Action priority="1">Confirm the targeted service and whether it is degraded or down; check availability directly.</Action>
+        <Action priority="2">Establish single-source (DoS) vs distributed (DDoS) from INV-02 and route to the correct response.</Action>
+        <Action priority="3">Verify AED mitigation is engaging for the flood classes on the target (INV-03).</Action>
+      </Phase>
+      <Phase name="Containment and Eradication (hours)">
+        <Action>Block/rate-limit the offending source(s) upstream; confirm AED mitigation is holding; coordinate with the ISP/upstream scrubbing provider if service impact continues; keep monitoring availability.</Action>
+      </Phase>
+      <Phase name="Recovery and Hardening (days)">
+        <Action>Tune AED protection thresholds for the affected service; validate upstream scrubbing capacity; document the attack (source, flood type, scale) for capacity planning and blocklisting.</Action>
+      </Phase>
+    </IRForHumans>
+  </Response>
+  <Escalation>
+    <Trigger>Confirmed service degradation/outage, a distributed source pattern (reclassify as DDoS), or a real flood whose scale/impact cannot be established.</Trigger>
+    <To>SOC L2 / IR</To>
+  </Escalation>
+  <Closure>
+    <FalsePositiveClosure>
+      <Item>Proven-blocked spike or authorised load test confirmed; no availability impact; documented.</Item>
+    </FalsePositiveClosure>
+    <TruePositiveClosure>
+      <Item>DoS source blocked/rate-limited; AED mitigation confirmed; service availability restored and verified; attack documented for capacity planning.</Item>
+    </TruePositiveClosure>
+  </Closure>
+</Playbook>

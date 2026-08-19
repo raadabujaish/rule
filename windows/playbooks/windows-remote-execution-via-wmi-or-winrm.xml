@@ -1,0 +1,151 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<Playbook xmlns="https://soc.example/playbooks" id="PB-WIN-024" name="Windows — Remote Execution via WMI or WinRM - SOC Playbook" version="1.0" status="Production" classification="TLP:AMBER">
+  <Metadata>
+    <Owner>JCB Detection Engineering (WatchWave)</Owner>
+    <LastUpdated>2026-08-14</LastUpdated>
+    <Severity default="High">High</Severity>
+    <Confidence default="Medium">Medium</Confidence>
+    <Category>Execution / Lateral Movement</Category>
+    <MitreAttack>
+      <Technique id="T1047" name="Windows Management Instrumentation"/>
+      <Tactic id="TA0002" name="Execution"/>
+    </MitreAttack>
+    <References>
+      <Reference title="MITRE ATT and CK" url="https://attack.mitre.org/techniques/T1047/"/>
+    </References>
+  </Metadata>
+  <ExecutiveSummary>
+    <Overview>A process was spawned by a WMI/WinRM host process (wmiprvse.exe, wsmprovhost.exe, winrshost.exe) running a shell/script/LOLBin (cmd, powershell, mshta, rundll32, etc.). Triage question: is this remote code execution / lateral movement via WMI/WinRM, or legitimate remote management?</Overview>
+    <BusinessImpact>WMI/WinRM remote execution is a common lateral-movement channel; a shell spawned by these providers usually means someone is running commands remotely.</BusinessImpact>
+  </ExecutiveSummary>
+  <Scope><Assets>
+    <AssetType>Windows servers and workstations (INTDOM domain)</AssetType>
+    <AssetType>Domain controllers</AssetType>
+  </Assets><LogSources>
+    <LogSource>Sysmon process + Windows Security 4688 - logs-windows.sysmon_operational-*,logs-system.security-*</LogSource>
+  </LogSources></Scope>
+  <Prerequisites><TelemetryRequirements>
+    <Requirement>Windows Security + Sysmon + PowerShell logs via Elastic Agent (verified live). Sysmon event.code 1=process(command_line/parent populated), 11=file, 13/12=registry(registry.path populated); process.code_signature NOT collected.</Requirement>
+  </TelemetryRequirements><DetectionSignals>
+    <Signal><Name>WMI/WinRM child</Name><Details>process.parent in wmiprvse/wsmprovhost/winrshost spawning a shell/LOLBin.</Details></Signal>
+  </DetectionSignals></Prerequisites>
+  <Inputs>
+    <Input name="$hostname" description="Target host."/>
+    <Input name="$username" description="Account (user.name)."/>
+  </Inputs>
+  <Triage><ImmediateCapture>
+    <Item>Host: $hostname</Item>
+  </ImmediateCapture><InitialAssessment>
+    <Rule>Weigh the evidence story, not any single fact - see ClassificationGuidance.</Rule>
+  </InitialAssessment></Triage>
+  <Investigation>
+    <Goal>Determine whether the WMI/WinRM execution is legitimate remote management or lateral movement.</Goal>
+    <Workflow>
+      <Step order="1" name="What did the WMI/WinRM provider spawn">
+        <Purpose>The child process and its command line reveal whether this is admin management or attacker execution.</Purpose>
+        <Query platform="Elastic" language="ES|QL" id="INV-01-WMIEXEC-CHILD">
+          <![CDATA[
+FROM logs-windows.sysmon_operational-*,logs-system.security-*
+| WHERE event.code IN ("1","4688") AND host.name == "$hostname" AND process.parent.name RLIKE "(?i)(wmiprvse|wsmprovhost|winrshost).*" AND @timestamp >= NOW() - 4 hours
+| KEEP @timestamp, process.name, process.parent.name, process.command_line, user.name
+| SORT @timestamp DESC
+| LIMIT 20
+          ]]>
+        </Query>
+        <ExpectedOutput>
+          <Field name="process.name"/>
+          <Field name="process.parent.name"/>
+          <Field name="process.command_line"/>
+          <Field name="user.name"/>
+        </ExpectedOutput>
+        <AnalystNotes>An encoded PowerShell or a download cradle spawned by wmiprvse/wsmprovhost = attacker remote exec. A known management script by an admin account is benign. The command_line content is decisive.</AnalystNotes>
+      </Step>
+      <Step order="2" name="Where did the remote execution originate">
+        <Purpose>A network logon from another host just before the WMI/WinRM execution identifies the source of lateral movement.</Purpose>
+        <Query platform="Elastic" language="ES|QL" id="INV-02-WMIEXEC-SOURCE" optional="true">
+          <![CDATA[
+FROM logs-system.security-*
+| WHERE host.name == "$hostname" AND event.code == "4624" AND winlog.event_data.LogonType IN ("3","10") AND @timestamp >= NOW() - 1 hours
+| EVAL src = COALESCE(TO_STRING(source.ip), "local")
+| STATS logons = COUNT(*), users = VALUES(winlog.event_data.TargetUserName), types = VALUES(winlog.event_data.LogonType) BY src
+| SORT logons DESC
+| LIMIT 10
+          ]]>
+        </Query>
+        <ExpectedOutput>
+          <Field name="src"/>
+          <Field name="users"/>
+          <Field name="types"/>
+        </ExpectedOutput>
+        <AnalystNotes>The network-logon source just before the execution is the pivoting host - contain it too.</AnalystNotes>
+      </Step>
+      <Step order="3" name="Finalize classification">
+        <DecisionTree>
+          <Node><Condition>An encoded/download-cradle or LOLBin spawned by WMI/WinRM providers, especially from a network-logon source.</Condition><Result>True Positive (Remote Execution / Lateral Movement - IR)</Result></Node>
+          <Node><Condition>A documented management script executed by an admin via WinRM.</Condition><Result>False Positive</Result></Node>
+          <Node><Condition>WMI/WinRM child with unclear command/provenance.</Condition><Result>Needs Escalation</Result></Node>
+        </DecisionTree>
+        <DocumentationChecklist>
+          <Item>Attach outputs of INV-01-WMIEXEC-CHILD, INV-02-WMIEXEC-SOURCE to the case.</Item>
+        </DocumentationChecklist>
+      </Step>
+    </Workflow>
+  </Investigation>
+  <ClassificationGuidance>
+    <FalsePositive>
+      <Definition>Legitimate remote management via WMI/WinRM.</Definition>
+      <Indicators>
+        <Item>Known management host/account.</Item>
+        <Item>Expected script.</Item>
+        <Item>Benign command.</Item>
+      </Indicators>
+      <SOCAction>
+        <Item>Confirm the management task; close as false_positive.</Item>
+      </SOCAction>
+    </FalsePositive>
+    <TruePositive>
+      <Definition>Lateral movement / remote code execution.</Definition>
+      <Indicators>
+        <Item>Encoded/download-cradle child.</Item>
+        <Item>Network-logon source.</Item>
+        <Item>Non-admin account.</Item>
+      </Indicators>
+      <SOCAction>
+        <Item>Isolate target and source; open IR; scope the spread.</Item>
+        <Item>Reset credentials used; hunt the source's other targets.</Item>
+      </SOCAction>
+    </TruePositive>
+    <Misconfiguration>
+      <Definition>A monitoring/orchestration tool using WMI/WinRM by design.</Definition>
+      <Indicators>
+        <Item>A known orchestration product.</Item>
+        <Item>Consistent expected commands.</Item>
+      </Indicators>
+      <SOCAction>
+        <Item>Baseline; document/exception.</Item>
+      </SOCAction>
+    </Misconfiguration>
+  </ClassificationGuidance>
+  <Response><IRForHumans>
+    <Phase name="Immediate Actions (0-30 minutes)">
+      <Action priority="1">Confirm the activity on the host; if malicious indicators, isolate the host.</Action>
+      <Action priority="2">Identify the responsible account/process and its origin.</Action>
+    </Phase>
+    <Phase name="Containment and Eradication (hours)">
+      <Action>Isolate the host; capture volatile evidence; hunt the same pattern across the estate.</Action>
+      <Action>Reset credentials used on the host if compromise is confirmed.</Action>
+    </Phase>
+    <Phase name="Recovery and Hardening (days)">
+      <Action>Remediate the root cause; add/verify EDR coverage; apply relevant hardening.</Action>
+    </Phase>
+  </IRForHumans></Response>
+  <QualityChecks>
+    <Check>Confirm the required telemetry (Sysmon/Security auditing) is present on the host.</Check>
+    <Check>Tune known-benign administrative sources via exceptions, not by disabling the rule.</Check>
+  </QualityChecks>
+  <ClosureCriteria><FalsePositiveClosure>
+    <Item>Activity confirmed benign/authorised and documented.</Item>
+  </FalsePositiveClosure><TruePositiveClosure>
+    <Item>Host contained and triaged; root cause eradicated; estate swept; findings recorded.</Item>
+  </TruePositiveClosure></ClosureCriteria>
+</Playbook>

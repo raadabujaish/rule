@@ -1,0 +1,150 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<Playbook xmlns="https://soc.example/playbooks" id="PB-WIN-045" name="Windows — Windows Account or Group Discovery - SOC Playbook" version="1.0" status="Production" classification="TLP:AMBER">
+  <Metadata>
+    <Owner>JCB Detection Engineering (WatchWave)</Owner>
+    <LastUpdated>2026-08-14</LastUpdated>
+    <Severity default="Low">Low</Severity>
+    <Confidence default="Low">Low</Confidence>
+    <Category>Discovery / Account Discovery</Category>
+    <MitreAttack>
+      <Technique id="T1087.001" name="Local Account"/>
+      <Tactic id="TA0007" name="Discovery"/>
+    </MitreAttack>
+    <References>
+      <Reference title="MITRE ATT and CK" url="https://attack.mitre.org/techniques/T1087/"/>
+    </References>
+  </Metadata>
+  <ExecutiveSummary>
+    <Overview>Built-in tools enumerated accounts/groups - net user/group/localgroup (or net1) with discovery arguments. Triage question: is this attacker account/group reconnaissance, or normal admin/script activity?</Overview>
+    <BusinessImpact>Account/group enumeration maps identities and privileges for targeting - a common early discovery step.</BusinessImpact>
+  </ExecutiveSummary>
+  <Scope><Assets>
+    <AssetType>Windows servers and workstations (INTDOM domain)</AssetType>
+    <AssetType>Domain controllers</AssetType>
+  </Assets><LogSources>
+    <LogSource>Sysmon process + Windows Security - logs-windows.sysmon_operational-*,logs-system.security-*</LogSource>
+  </LogSources></Scope>
+  <Prerequisites><TelemetryRequirements>
+    <Requirement>Windows Security + Sysmon + PowerShell logs via Elastic Agent (verified live). Sysmon event.code 1=process(command_line/parent populated), 11=file, 13/12=registry(registry.path populated); process.code_signature NOT collected.</Requirement>
+  </TelemetryRequirements><DetectionSignals>
+    <Signal><Name>Account/group discovery</Name><Details>net user/group/localgroup discovery commands.</Details></Signal>
+  </DetectionSignals></Prerequisites>
+  <Inputs>
+    <Input name="$hostname" description="Host running the discovery."/>
+    <Input name="$username" description="Account (user.name)."/>
+  </Inputs>
+  <Triage><ImmediateCapture>
+    <Item>Host: $hostname</Item>
+  </ImmediateCapture><InitialAssessment>
+    <Rule>Weigh the evidence story, not any single fact - see ClassificationGuidance.</Rule>
+  </InitialAssessment></Triage>
+  <Investigation>
+    <Goal>Determine whether the account/group enumeration is attacker reconnaissance or benign admin activity.</Goal>
+    <Workflow>
+      <Step order="1" name="Enumeration commands and parent process">
+        <Purpose>The commands and parent separate a recon burst (multiple enumerations) from a single admin check.</Purpose>
+        <Query platform="Elastic" language="ES|QL" id="INV-01-ACCTDISC-CMD">
+          <![CDATA[
+FROM logs-windows.sysmon_operational-*,logs-system.security-*
+| WHERE event.code IN ("1","4688") AND host.name == "$hostname" AND process.command_line IS NOT NULL AND @timestamp >= NOW() - 4 hours
+| EVAL cl = TO_LOWER(process.command_line)
+| WHERE (process.name RLIKE "(?i)net1?(.exe)?" AND (cl LIKE "*user*" OR cl LIKE "*group*" OR cl LIKE "*localgroup*"))
+| KEEP @timestamp, process.parent.name, process.command_line, user.name
+| SORT @timestamp DESC
+| LIMIT 20
+          ]]>
+        </Query>
+        <ExpectedOutput>
+          <Field name="process.parent.name"/>
+          <Field name="process.command_line"/>
+          <Field name="user.name"/>
+        </ExpectedOutput>
+        <AnalystNotes>Several enumerations (net user /domain, net group 'Domain Admins') in minutes by a script/unusual parent = recon. A single net user by an admin is routine. Parent process is key.</AnalystNotes>
+      </Step>
+      <Step order="2" name="Broader discovery from the same host/account">
+        <Purpose>Account discovery alongside other discovery (network, registry) is an active recon phase.</Purpose>
+        <Query platform="Elastic" language="ES|QL" id="INV-02-ACCTDISC-BURST" optional="true">
+          <![CDATA[
+FROM logs-windows.sysmon_operational-*,logs-system.security-*
+| WHERE event.code IN ("1","4688") AND host.name == "$hostname" AND @timestamp >= NOW() - 2 hours
+| WHERE process.name RLIKE "(?i)(whoami|nltest|dsquery|net1?|ipconfig|netstat|systeminfo|tasklist|quser|arp)(.exe)?"
+| STATS tools = COUNT_DISTINCT(process.name), tool_list = VALUES(process.name), runs = COUNT(*)
+| LIMIT 1
+          ]]>
+        </Query>
+        <ExpectedOutput>
+          <Field name="tools"/>
+          <Field name="tool_list"/>
+          <Field name="runs"/>
+        </ExpectedOutput>
+        <AnalystNotes>Many distinct discovery tools in a short window = hands-on-keyboard recon phase - escalate.</AnalystNotes>
+      </Step>
+      <Step order="3" name="Finalize classification">
+        <DecisionTree>
+          <Node><Condition>A burst of account/group enumeration by a script/unusual parent, or alongside broader discovery tooling.</Condition><Result>True Positive (Account Reconnaissance - investigate the host/account)</Result></Node>
+          <Node><Condition>A single/expected admin enumeration.</Condition><Result>False Positive / Benign Activity</Result></Node>
+          <Node><Condition>Enumeration with unclear parent/intent.</Condition><Result>Needs Escalation</Result></Node>
+        </DecisionTree>
+        <DocumentationChecklist>
+          <Item>Attach outputs of INV-01-ACCTDISC-CMD, INV-02-ACCTDISC-BURST to the case.</Item>
+        </DocumentationChecklist>
+      </Step>
+    </Workflow>
+  </Investigation>
+  <ClassificationGuidance>
+    <FalsePositive>
+      <Definition>Normal admin/script activity.</Definition>
+      <Indicators>
+        <Item>Admin/known-tool parent.</Item>
+        <Item>Single/expected command.</Item>
+        <Item>Interactive admin context.</Item>
+      </Indicators>
+      <SOCAction>
+        <Item>Confirm; close as benign_activity.</Item>
+      </SOCAction>
+    </FalsePositive>
+    <TruePositive>
+      <Definition>Attacker account/group reconnaissance.</Definition>
+      <Indicators>
+        <Item>Enumeration burst.</Item>
+        <Item>Script/unusual parent.</Item>
+        <Item>Alongside other discovery.</Item>
+      </Indicators>
+      <SOCAction>
+        <Item>Investigate the parent/account/host; correlate with other discovery; open IR if warranted.</Item>
+      </SOCAction>
+    </TruePositive>
+    <Misconfiguration>
+      <Definition>An inventory tool enumerating accounts.</Definition>
+      <Indicators>
+        <Item>A known inventory agent.</Item>
+        <Item>Consistent expected commands.</Item>
+      </Indicators>
+      <SOCAction>
+        <Item>Baseline; document.</Item>
+      </SOCAction>
+    </Misconfiguration>
+  </ClassificationGuidance>
+  <Response><IRForHumans>
+    <Phase name="Immediate Actions (0-30 minutes)">
+      <Action priority="1">Confirm the activity on the host; if malicious indicators, isolate the host.</Action>
+      <Action priority="2">Identify the responsible account/process and its origin.</Action>
+    </Phase>
+    <Phase name="Containment and Eradication (hours)">
+      <Action>Isolate the host; capture volatile evidence; hunt the same pattern across the estate.</Action>
+      <Action>Reset credentials used on the host if compromise is confirmed.</Action>
+    </Phase>
+    <Phase name="Recovery and Hardening (days)">
+      <Action>Remediate the root cause; add/verify EDR coverage; apply relevant hardening.</Action>
+    </Phase>
+  </IRForHumans></Response>
+  <QualityChecks>
+    <Check>Confirm the required telemetry (Sysmon/Security auditing) is present on the host.</Check>
+    <Check>Tune known-benign administrative sources via exceptions, not by disabling the rule.</Check>
+  </QualityChecks>
+  <ClosureCriteria><FalsePositiveClosure>
+    <Item>Activity confirmed benign/authorised and documented.</Item>
+  </FalsePositiveClosure><TruePositiveClosure>
+    <Item>Host contained and triaged; root cause eradicated; estate swept; findings recorded.</Item>
+  </TruePositiveClosure></ClosureCriteria>
+</Playbook>

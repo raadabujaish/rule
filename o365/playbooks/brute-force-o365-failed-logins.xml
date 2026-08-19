@@ -1,0 +1,149 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<Playbook xmlns="https://soc.example/playbooks" id="PB-O365-001" name="Brute Force - O365 Failed Logins - SOC Playbook" version="1.0" status="Production" classification="TLP:AMBER">
+  <Metadata>
+    <Owner>JCB Detection Engineering (WatchWave)</Owner>
+    <LastUpdated>2026-08-14</LastUpdated>
+    <Severity default="High">High</Severity>
+    <Confidence default="Medium">Medium</Confidence>
+    <Category>Credential Access / Brute Force</Category>
+    <MitreAttack>
+      <Technique id="T1110" name="Brute Force"/>
+      <Tactic id="TA0006" name="Credential Access"/>
+    </MitreAttack>
+    <References>
+      <Reference title="MITRE ATT and CK" url="https://attack.mitre.org/techniques/T1110/"/>
+    </References>
+  </Metadata>
+  <ExecutiveSummary>
+    <Overview>One source IP produced many O365 UserLoginFailed events (&gt;=10 in the window) - password guessing/spray against cloud identities. This is the patched, lag-aware version. Triage: brute force from a real attacker source, or the egress NAT / a broken client?</Overview>
+    <BusinessImpact>A successful cloud-credential guess yields access to mail, files and potentially federated on-prem resources.</BusinessImpact>
+  </ExecutiveSummary>
+  <Scope><Assets>
+    <AssetType>Microsoft 365 / Entra ID tenant (JCB)</AssetType>
+    <AssetType>Exchange Online, SharePoint/OneDrive, Teams, Entra directory</AssetType>
+  </Assets><LogSources>
+    <LogSource>Microsoft 365 unified audit log - logs-o365.audit-*</LogSource>
+  </LogSources></Scope>
+  <Prerequisites><TelemetryRequirements>
+    <Requirement>O365 unified audit via Elastic Agent (verified live). Fields: event.action, user.name, source.ip, o365.audit.Operation, o365.audit.ResultStatus, o365.audit.ObjectId, o365.audit.ModifiedProperties, o365.audit.Parameters, o365.audit.UserId. INGEST LAG 20-60 min - all queries use a 4h window and timestamp_override event.ingested at rule level.</Requirement>
+    <Requirement>JCB egress NAT is 94.249.88.0/24 - internal users appear from it.</Requirement>
+  </TelemetryRequirements><DetectionSignals>
+    <Signal><Name>Brute Force - O365 Failed Logins</Name><Details>source.ip with &gt;=10 UserLoginFailed (event.ingested override).</Details></Signal>
+  </DetectionSignals></Prerequisites>
+  <Inputs>
+    <Input name="$source_ip" description="Source IP of the failed logins."/>
+    <Input name="$username" description="An affected account if the alert scopes one."/>
+  </Inputs>
+  <Triage><ImmediateCapture>
+    <Item>$source_ip: $source_ip</Item>
+  </ImmediateCapture><InitialAssessment>
+    <Rule>Weigh the full evidence story per the ClassificationGuidance, not any single fact.</Rule>
+  </InitialAssessment></Triage>
+  <Investigation>
+    <Goal>Determine whether the failed-login burst is a real credential attack and whether any login then succeeded.</Goal>
+    <Workflow>
+      <Step order="1" name="Failed-login profile for this source">
+        <Purpose>Breadth of accounts and error types distinguish spray (many users) from a single-account brute or a broken client.</Purpose>
+        <Query platform="Elastic" language="ES|QL" id="INV-01-O365BF-FAILS">
+          <![CDATA[
+FROM logs-o365.audit-*
+| WHERE event.dataset == "o365.audit" AND event.action == "UserLoginFailed" AND source.ip == "$source_ip" AND @timestamp >= NOW() - 4 hours
+| STATS fails = COUNT(*), users = COUNT_DISTINCT(user.name), errors = VALUES(o365.audit.LogonError), user_list = VALUES(user.name)
+| LIMIT 1
+          ]]>
+        </Query>
+        <ExpectedOutput>
+          <Field name="fails"/>
+          <Field name="users"/>
+          <Field name="errors"/>
+        </ExpectedOutput>
+        <AnalystNotes>Many users + few fails each = spray; one user + many fails = brute; one user + one error repeated = a broken client/expired credential. Error InvalidUserNameOrPassword = guessing; DeviceAuthenticationFailed = client/service noise (excluded at rule level).</AnalystNotes>
+      </Step>
+      <Step order="2" name="Did any login SUCCEED from this source">
+        <Purpose>A UserLoggedIn from the brute-forcing source after failures is the difference between attempt and compromise.</Purpose>
+        <Query platform="Elastic" language="ES|QL" id="INV-02-O365BF-SUCCESS" optional="true">
+          <![CDATA[
+FROM logs-o365.audit-*
+| WHERE event.dataset == "o365.audit" AND event.action == "UserLoggedIn" AND source.ip == "$source_ip" AND @timestamp >= NOW() - 4 hours
+| STATS logins = COUNT(*), users = VALUES(user.name), first_success = MIN(@timestamp)
+| LIMIT 1
+          ]]>
+        </Query>
+        <ExpectedOutput>
+          <Field name="logins"/>
+          <Field name="users"/>
+          <Field name="first_success"/>
+        </ExpectedOutput>
+        <AnalystNotes>A success from the same source for a targeted account is strong compromise evidence - escalate and reset. No success = attempt only.</AnalystNotes>
+      </Step>
+      <Step order="3" name="Finalize classification">
+        <DecisionTree>
+          <Node><Condition>A success (UserLoggedIn) from the brute-forcing source for a targeted account.</Condition><Result>True Positive (Cloud Account Compromised - IR, reset + revoke tokens)</Result></Node>
+          <Node><Condition>Many accounts with InvalidUserNameOrPassword from an external (non-94.249.88.x) source, no success.</Condition><Result>True Positive (Brute/Spray Attempted)</Result></Node>
+          <Node><Condition>Source is the egress NAT 94.249.88.0/24 aggregating internal users, or one account with DeviceAuthenticationFailed (broken client).</Condition><Result>False Positive / Misconfiguration</Result></Node>
+          <Node><Condition>External source, failures, but breadth/ownership unclear.</Condition><Result>Needs Escalation</Result></Node>
+        </DecisionTree>
+        <DocumentationChecklist>
+          <Item>Attach outputs of INV-01-O365BF-FAILS, INV-02-O365BF-SUCCESS to the case.</Item>
+        </DocumentationChecklist>
+      </Step>
+    </Workflow>
+  </Investigation>
+  <ClassificationGuidance>
+    <FalsePositive>
+      <Definition>Internal users behind the egress NAT, or a single broken client/service.</Definition>
+      <Indicators>
+        <Item>Source 94.249.88.0/24.</Item>
+        <Item>One account, repeated device-auth error.</Item>
+        <Item>No success.</Item>
+      </Indicators>
+      <SOCAction>
+        <Item>Confirm the NAT/client; exclude/fix; close.</Item>
+      </SOCAction>
+    </FalsePositive>
+    <TruePositive>
+      <Definition>A real credential-guessing attack against cloud identities.</Definition>
+      <Indicators>
+        <Item>Many accounts / external source.</Item>
+        <Item>InvalidUserNameOrPassword pattern.</Item>
+        <Item>Any success from the source.</Item>
+      </Indicators>
+      <SOCAction>
+        <Item>Reset compromised accounts + revoke tokens; block the source; enforce CA/MFA.</Item>
+      </SOCAction>
+    </TruePositive>
+    <Misconfiguration>
+      <Definition>A broken client/service repeatedly failing O365 auth.</Definition>
+      <Indicators>
+        <Item>One service account, one repeated error.</Item>
+        <Item>Consistent source device.</Item>
+        <Item>No human accounts.</Item>
+      </Indicators>
+      <SOCAction>
+        <Item>Fix the stored credential/client config; track under credential-hygiene.</Item>
+      </SOCAction>
+    </Misconfiguration>
+  </ClassificationGuidance>
+  <Response><IRForHumans>
+    <Phase name="Immediate Actions (0-30 minutes)">
+      <Action priority="1">Confirm the change/actor in the audit log.</Action>
+      <Action priority="2">If unexpected/unauthorised, disable the actor session and reverse the change.</Action>
+    </Phase>
+    <Phase name="Containment and Eradication (hours)">
+      <Action>Reverse the change; revoke sessions/tokens for the actor and affected principals.</Action>
+      <Action>Review the actor's other recent audit activity.</Action>
+    </Phase>
+    <Phase name="Recovery and Hardening (days)">
+      <Action>Enforce MFA/conditional access; tighten admin consent and privileged-role governance (PIM); alert on these operations.</Action>
+    </Phase>
+  </IRForHumans></Response>
+  <QualityChecks>
+    <Check>Account for O365 ingest lag (20-60 min) - short windows miss events; this rule uses event.ingested override.</Check>
+    <Check>Exclude the egress NAT 94.249.88.0/24 where source is used; tune known admin/automation via exceptions.</Check>
+  </QualityChecks>
+  <ClosureCriteria><FalsePositiveClosure>
+    <Item>Confirmed NAT/client; documented.</Item>
+  </FalsePositiveClosure><TruePositiveClosure>
+    <Item>Compromised accounts reset + tokens revoked; source blocked.</Item>
+  </TruePositiveClosure></ClosureCriteria>
+</Playbook>

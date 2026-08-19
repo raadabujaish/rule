@@ -1,0 +1,61 @@
+{
+  "rule_id": "jcb-ad-disabled-account-probing",
+  "name": "AD — Repeated Authentication Against Disabled or Locked Accounts",
+  "version": 1,
+  "enabled": true,
+  "interval": "15m",
+  "from": "now-35m",
+  "to": "now",
+  "description": "≥10 authentication attempts in 30 minutes from one source against DISABLED/LOCKED/EXPIRED accounts (4771 0x12; 4625 substatus 0xC0000072/0xC0000234/0xC0000193). Valid credentials are dead — repeated use indicates orphaned services or an attacker replaying stolen credentials.",
+  "tags": [
+    "JCB",
+    "Detection-QA-2026-08",
+    "Active Directory"
+  ],
+  "author": [
+    "JCB Detection Engineering"
+  ],
+  "license": "internal",
+  "threat": [],
+  "investigation_fields": {
+    "field_names": [
+      "source.ip",
+      "winlog.event_data.TargetUserName",
+      "winlog.event_data.Status",
+      "winlog.event_data.SubStatus",
+      "host.name",
+      "event.code"
+    ]
+  },
+  "related_integrations": [],
+  "required_fields": [],
+  "setup": "",
+  "false_positives": [],
+  "references": [],
+  "risk_score": 47,
+  "risk_score_mapping": [],
+  "severity": "medium",
+  "severity_mapping": [],
+  "output_index": "",
+  "max_signals": 100,
+  "exceptions_list": [],
+  "actions": [],
+  "type": "threshold",
+  "language": "kuery",
+  "index": [
+    "logs-system.security-*"
+  ],
+  "query": "(event.code:\"4771\" and winlog.event_data.Status:\"0x12\") or (event.code:\"4625\" and winlog.event_data.SubStatus:(\"0xc0000072\" or \"0xc0000234\" or \"0xc0000193\"))",
+  "threshold": {
+    "field": [
+      "source.ip"
+    ],
+    "value": 10
+  },
+  "alert_suppression": {
+    "duration": {
+      "value": 6,
+      "unit": "h"
+    }
+  }
+}

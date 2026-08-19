@@ -1,0 +1,150 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<Playbook xmlns="https://soc.example/playbooks" id="PB-WIN-012" name="Windows — Service Installed with Suspicious Image Path - SOC Playbook" version="1.0" status="Production" classification="TLP:AMBER">
+  <Metadata>
+    <Owner>JCB Detection Engineering (WatchWave)</Owner>
+    <LastUpdated>2026-08-14</LastUpdated>
+    <Severity default="High">High</Severity>
+    <Confidence default="Medium">Medium</Confidence>
+    <Category>Persistence / Privilege Escalation - Create Service</Category>
+    <MitreAttack>
+      <Technique id="T1543.003" name="Windows Service"/>
+      <Tactic id="TA0003" name="Persistence"/>
+    </MitreAttack>
+    <References>
+      <Reference title="MITRE ATT and CK" url="https://attack.mitre.org/techniques/T1543/"/>
+    </References>
+  </Metadata>
+  <ExecutiveSummary>
+    <Overview>A service was installed (4697) with a suspicious image path - cmd.exe, powershell, or an interpreter/encoded command as the service binary. Triage question: is this a persistence/privilege-escalation service, or a legitimate (if unusual) service install?</Overview>
+    <BusinessImpact>A service running cmd/powershell/encoded commands is a persistence and SYSTEM-level execution mechanism.</BusinessImpact>
+  </ExecutiveSummary>
+  <Scope><Assets>
+    <AssetType>Windows servers and workstations (INTDOM domain)</AssetType>
+    <AssetType>Domain controllers</AssetType>
+  </Assets><LogSources>
+    <LogSource>Windows Security event log - logs-system.security-*</LogSource>
+  </LogSources></Scope>
+  <Prerequisites><TelemetryRequirements>
+    <Requirement>Windows Security + Sysmon + PowerShell logs via Elastic Agent (verified live). Sysmon event.code 1=process(command_line/parent populated), 11=file, 13/12=registry(registry.path populated); process.code_signature NOT collected.</Requirement>
+  </TelemetryRequirements><DetectionSignals>
+    <Signal><Name>Suspicious service image</Name><Details>4697 ServiceFileName containing cmd/powershell/interpreter/encoded content.</Details></Signal>
+  </DetectionSignals></Prerequisites>
+  <Inputs>
+    <Input name="$hostname" description="Host where the service was installed."/>
+    <Input name="$username" description="Installing principal (SubjectUserName)."/>
+  </Inputs>
+  <Triage><ImmediateCapture>
+    <Item>Host: $hostname</Item>
+  </ImmediateCapture><InitialAssessment>
+    <Rule>Weigh the evidence story, not any single fact - see ClassificationGuidance.</Rule>
+  </InitialAssessment></Triage>
+  <Investigation>
+    <Goal>Determine whether the suspicious-image-path service is malicious persistence or an unusual-but-legitimate install.</Goal>
+    <Workflow>
+      <Step order="1" name="Service detail: name, image path, installer">
+        <Purpose>The image path content (encoded PowerShell, cmd, temp path) reveals malicious intent.</Purpose>
+        <Query platform="Elastic" language="ES|QL" id="INV-01-SVCIMG-DETAIL">
+          <![CDATA[
+FROM logs-system.security-*
+| WHERE event.code == "4697" AND host.name == "$hostname" AND @timestamp >= NOW() - 4 hours
+| KEEP @timestamp, winlog.event_data.SubjectUserName, winlog.event_data.ServiceName, winlog.event_data.ServiceFileName, winlog.event_data.ServiceType
+| SORT @timestamp DESC
+| LIMIT 15
+          ]]>
+        </Query>
+        <ExpectedOutput>
+          <Field name="winlog.event_data.ServiceName"/>
+          <Field name="winlog.event_data.ServiceFileName"/>
+          <Field name="winlog.event_data.SubjectUserName"/>
+        </ExpectedOutput>
+        <AnalystNotes>ServiceFileName with -enc/-e base64, cmd /c, a temp/appdata path, or an interpreter = malicious. A legitimate app service points at its own signed binary in Program Files.</AnalystNotes>
+      </Step>
+      <Step order="2" name="Did the installing account arrive via remote execution">
+        <Purpose>A suspicious service installed right after a remote logon/pipe access is attacker persistence via lateral movement.</Purpose>
+        <Query platform="Elastic" language="ES|QL" id="INV-02-SVCIMG-ORIGIN" optional="true">
+          <![CDATA[
+FROM logs-system.security-*
+| WHERE host.name == "$hostname" AND event.code IN ("4624","5145") AND @timestamp >= NOW() - 1 hours
+| EVAL src = COALESCE(TO_STRING(source.ip), "local")
+| STATS c = COUNT(*), codes = VALUES(event.code), types = VALUES(winlog.event_data.LogonType) BY src
+| SORT c DESC
+| LIMIT 10
+          ]]>
+        </Query>
+        <ExpectedOutput>
+          <Field name="src"/>
+          <Field name="codes"/>
+          <Field name="types"/>
+        </ExpectedOutput>
+        <AnalystNotes>A network logon/pipe access from another host just before the install links the persistence to lateral movement - escalate.</AnalystNotes>
+      </Step>
+      <Step order="3" name="Finalize classification">
+        <DecisionTree>
+          <Node><Condition>Service image path contains encoded PowerShell/cmd/interpreter or a temp path, especially after remote logon.</Condition><Result>True Positive (Malicious Service Persistence - IR)</Result></Node>
+          <Node><Condition>An unusual but verifiable legitimate service (vendor app with an interpreter wrapper) under a change record.</Condition><Result>False Positive</Result></Node>
+          <Node><Condition>Suspicious image path with unclear provenance.</Condition><Result>Needs Escalation</Result></Node>
+        </DecisionTree>
+        <DocumentationChecklist>
+          <Item>Attach outputs of INV-01-SVCIMG-DETAIL, INV-02-SVCIMG-ORIGIN to the case.</Item>
+        </DocumentationChecklist>
+      </Step>
+    </Workflow>
+  </Investigation>
+  <ClassificationGuidance>
+    <FalsePositive>
+      <Definition>An unusual but legitimate service install.</Definition>
+      <Indicators>
+        <Item>Verifiable vendor/app service.</Item>
+        <Item>Change record.</Item>
+        <Item>Signed target binary.</Item>
+      </Indicators>
+      <SOCAction>
+        <Item>Confirm the app; close as false_positive.</Item>
+      </SOCAction>
+    </FalsePositive>
+    <TruePositive>
+      <Definition>Malicious service persistence / SYSTEM execution.</Definition>
+      <Indicators>
+        <Item>Encoded/interpreter image path.</Item>
+        <Item>Temp/appdata path.</Item>
+        <Item>Follows remote logon.</Item>
+      </Indicators>
+      <SOCAction>
+        <Item>Stop and remove the service; isolate the host; open IR.</Item>
+        <Item>Hunt the installer's origin and other persistence.</Item>
+      </SOCAction>
+    </TruePositive>
+    <Misconfiguration>
+      <Definition>A deployment tool creating wrapper services.</Definition>
+      <Indicators>
+        <Item>A known deployment account.</Item>
+        <Item>Consistent expected wrapper.</Item>
+      </Indicators>
+      <SOCAction>
+        <Item>Baseline; document/exception.</Item>
+      </SOCAction>
+    </Misconfiguration>
+  </ClassificationGuidance>
+  <Response><IRForHumans>
+    <Phase name="Immediate Actions (0-30 minutes)">
+      <Action priority="1">Confirm the activity on the host; if malicious indicators, isolate the host.</Action>
+      <Action priority="2">Identify the responsible account/process and its origin.</Action>
+    </Phase>
+    <Phase name="Containment and Eradication (hours)">
+      <Action>Isolate the host; capture volatile evidence; hunt the same pattern across the estate.</Action>
+      <Action>Reset credentials used on the host if compromise is confirmed.</Action>
+    </Phase>
+    <Phase name="Recovery and Hardening (days)">
+      <Action>Remediate the root cause; add/verify EDR coverage; apply relevant hardening.</Action>
+    </Phase>
+  </IRForHumans></Response>
+  <QualityChecks>
+    <Check>Confirm the required telemetry (Sysmon/Security auditing) is present on the host.</Check>
+    <Check>Tune known-benign administrative sources via exceptions, not by disabling the rule.</Check>
+  </QualityChecks>
+  <ClosureCriteria><FalsePositiveClosure>
+    <Item>Activity confirmed benign/authorised and documented.</Item>
+  </FalsePositiveClosure><TruePositiveClosure>
+    <Item>Host contained and triaged; root cause eradicated; estate swept; findings recorded.</Item>
+  </TruePositiveClosure></ClosureCriteria>
+</Playbook>

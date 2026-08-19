@@ -1,0 +1,108 @@
+{
+  "rule_id": "jcb-rec-network-activity-detected-via-kworker",
+  "name": "Linux — Network Activity Detected via Kworker",
+  "version": 1,
+  "enabled": true,
+  "interval": "5m",
+  "from": "now-9m",
+  "to": "now",
+  "description": "This rule monitors for network connections from a kworker process. kworker, or kernel worker, processes are part of the kernel's workqueue mechanism. They are responsible for executing work that has been scheduled to be done in kernel space, which might include tasks like handling interrupts, background activities, and other kernel-related tasks. Attackers may attempt to evade detection by masquerading as a kernel worker process.",
+  "tags": [
+    "JCB",
+    "Linux"
+  ],
+  "author": [
+    "raadabujaish"
+  ],
+  "threat": [
+    {
+      "framework": "MITRE ATT&CK",
+      "tactic": {
+        "id": "TA0011",
+        "name": "Command and Control",
+        "reference": "https://attack.mitre.org/tactics/TA0011/"
+      },
+      "technique": []
+    },
+    {
+      "framework": "MITRE ATT&CK",
+      "tactic": {
+        "id": "TA0005",
+        "name": "Defense Evasion",
+        "reference": "https://attack.mitre.org/tactics/TA0005/"
+      },
+      "technique": [
+        {
+          "id": "T1014",
+          "name": "Rootkit",
+          "reference": "https://attack.mitre.org/techniques/T1014/"
+        },
+        {
+          "id": "T1036",
+          "name": "Masquerading",
+          "reference": "https://attack.mitre.org/techniques/T1036/"
+        }
+      ]
+    },
+    {
+      "framework": "MITRE ATT&CK",
+      "tactic": {
+        "id": "TA0010",
+        "name": "Exfiltration",
+        "reference": "https://attack.mitre.org/tactics/TA0010/"
+      },
+      "technique": [
+        {
+          "id": "T1041",
+          "name": "Exfiltration Over C2 Channel",
+          "reference": "https://attack.mitre.org/techniques/T1041/"
+        }
+      ]
+    }
+  ],
+  "investigation_fields": {
+    "field_names": [
+      "host.name",
+      "user.name",
+      "user.id",
+      "process.name",
+      "process.executable",
+      "process.args",
+      "process.parent.name",
+      "file.path",
+      "event.action",
+      "event.outcome",
+      "message",
+      "host.os.type",
+      "event.category",
+      "destination.ip",
+      "destination.port"
+    ]
+  },
+  "related_integrations": [],
+  "required_fields": [],
+  "setup": "",
+  "false_positives": [],
+  "references": [],
+  "risk_score": 21,
+  "risk_score_mapping": [],
+  "severity": "low",
+  "severity_mapping": [],
+  "output_index": "",
+  "max_signals": 100,
+  "exceptions_list": [],
+  "actions": [],
+  "type": "new_terms",
+  "query": "host.os.type:linux and event.category:network and event.action:(connection_attempted or connection_accepted) and \nprocess.name:kworker* and not destination.ip:(\n  10.0.0.0/8 or\n  127.0.0.0/8 or\n  169.254.0.0/16 or\n  172.16.0.0/12 or\n  192.168.0.0/16 or\n  224.0.0.0/4 or\n  \"::1\" or\n  \"FE80::/10\" or\n  \"FF00::/8\"\n) and not destination.port:2049\n",
+  "new_terms_fields": [
+    "process.name",
+    "destination.ip",
+    "destination.port"
+  ],
+  "history_window_start": "now-14d",
+  "index": [
+    "logs-auditd.log-*",
+    "logs-auditd_manager.auditd-*"
+  ],
+  "language": "kuery"
+}

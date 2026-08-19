@@ -1,0 +1,150 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<Playbook xmlns="https://soc.example/playbooks" id="PB-WIN-014" name="Windows — Offensive / Dual-Use Tooling Executed (Process Name — Covers Hosts Without Command-Line Auditing) - SOC Playbook" version="1.0" status="Production" classification="TLP:AMBER">
+  <Metadata>
+    <Owner>JCB Detection Engineering (WatchWave)</Owner>
+    <LastUpdated>2026-08-14</LastUpdated>
+    <Severity default="High">High</Severity>
+    <Confidence default="Medium">Medium</Confidence>
+    <Category>Execution / Multiple</Category>
+    <MitreAttack>
+      <Technique id="T1588.002" name="Tool"/>
+      <Tactic id="TA0042" name="Resource Development"/>
+    </MitreAttack>
+    <References>
+      <Reference title="MITRE ATT and CK" url="https://attack.mitre.org/techniques/T1588/"/>
+    </References>
+  </Metadata>
+  <ExecutiveSummary>
+    <Overview>A known offensive/dual-use tool executed by process name (4688/Sysmon 1) - mimikatz, procdump, rubeus, sharphound/bloodhound, psexec, and similar. This name-based rule covers hosts lacking command-line auditing. Triage question: is this an attacker using a hacktool, or an authorised pentest/admin use of a dual-use tool?</Overview>
+    <BusinessImpact>These tools perform credential theft, AD reconnaissance and lateral movement; execution outside an authorised engagement is a strong compromise signal.</BusinessImpact>
+  </ExecutiveSummary>
+  <Scope><Assets>
+    <AssetType>Windows servers and workstations (INTDOM domain)</AssetType>
+    <AssetType>Domain controllers</AssetType>
+  </Assets><LogSources>
+    <LogSource>Windows Security 4688 + Sysmon process - logs-windows.sysmon_operational-*,logs-system.security-*</LogSource>
+  </LogSources></Scope>
+  <Prerequisites><TelemetryRequirements>
+    <Requirement>Windows Security + Sysmon + PowerShell logs via Elastic Agent (verified live). Sysmon event.code 1=process(command_line/parent populated), 11=file, 13/12=registry(registry.path populated); process.code_signature NOT collected.</Requirement>
+  </TelemetryRequirements><DetectionSignals>
+    <Signal><Name>Offensive tool executed</Name><Details>4688/Sysmon-1 process.name in the offensive-tool list.</Details></Signal>
+  </DetectionSignals></Prerequisites>
+  <Inputs>
+    <Input name="$hostname" description="Host where the tool ran."/>
+    <Input name="$username" description="Executing account (user.name)."/>
+    <Input name="$process" description="Tool process name."/>
+  </Inputs>
+  <Triage><ImmediateCapture>
+    <Item>Host: $hostname</Item>
+  </ImmediateCapture><InitialAssessment>
+    <Rule>Weigh the evidence story, not any single fact - see ClassificationGuidance.</Rule>
+  </InitialAssessment></Triage>
+  <Investigation>
+    <Goal>Determine whether the offensive-tool execution is an authorised engagement/admin use or malicious tradecraft.</Goal>
+    <Workflow>
+      <Step order="1" name="Tool, account, host and parent process">
+        <Purpose>The tool, the running account, and the parent process establish intent and origin.</Purpose>
+        <Query platform="Elastic" language="ES|QL" id="INV-01-OFFTOOL-DETAIL">
+          <![CDATA[
+FROM logs-windows.sysmon_operational-*,logs-system.security-*
+| WHERE event.code IN ("1","4688") AND host.name == "$hostname" AND process.name RLIKE "(?i)(mimikatz|mimilib|procdump|procdump64|rubeus|sharphound|bloodhound|psexec|psexec64|psexesvc|paexec|remcom|csexec|winexesvc|secretsdump|wce|gsecdump).*" AND @timestamp >= NOW() - 4 hours
+| KEEP @timestamp, process.name, process.parent.name, user.name, process.command_line
+| SORT @timestamp DESC
+| LIMIT 20
+          ]]>
+        </Query>
+        <ExpectedOutput>
+          <Field name="process.name"/>
+          <Field name="process.parent.name"/>
+          <Field name="user.name"/>
+          <Field name="process.command_line"/>
+        </ExpectedOutput>
+        <AnalystNotes>A credential tool (mimikatz/procdump/rubeus/secretsdump) is almost always malicious outside a pentest. Parent process (cmd/powershell/a dropper) and command_line (if present) show intent. Note the account - a service/normal user running mimikatz is compromise.</AnalystNotes>
+      </Step>
+      <Step order="2" name="Same tooling on other hosts / by the same account">
+        <Purpose>The same offensive tool across hosts is an active campaign, not an isolated test.</Purpose>
+        <Query platform="Elastic" language="ES|QL" id="INV-02-OFFTOOL-SPREAD" optional="true">
+          <![CDATA[
+FROM logs-windows.sysmon_operational-*,logs-system.security-*
+| WHERE event.code IN ("1","4688") AND user.name == "$username" AND process.name RLIKE "(?i)(mimikatz|procdump|rubeus|sharphound|bloodhound|psexec|secretsdump|wce|gsecdump).*" AND @timestamp >= NOW() - 4 hours
+| STATS runs = COUNT(*), hosts = COUNT_DISTINCT(host.name), tools = VALUES(process.name)
+| LIMIT 1
+          ]]>
+        </Query>
+        <ExpectedOutput>
+          <Field name="runs"/>
+          <Field name="hosts"/>
+          <Field name="tools"/>
+        </ExpectedOutput>
+        <AnalystNotes>Multiple hosts/tools by one account = campaign - escalate. A single run on one host by a pentester may be authorised.</AnalystNotes>
+      </Step>
+      <Step order="3" name="Finalize classification">
+        <DecisionTree>
+          <Node><Condition>A credential-theft/AD-recon tool (mimikatz/procdump/rubeus/sharphound/secretsdump) run outside an authorised engagement, or the same tooling across hosts.</Condition><Result>True Positive (Hacktool / Active Intrusion - IR)</Result></Node>
+          <Node><Condition>Execution during a documented, in-scope penetration test from the tester's host.</Condition><Result>False Positive</Result></Node>
+          <Node><Condition>Dual-use tool (psexec) by an admin for a plausible task with no other indicators.</Condition><Result>Benign Activity / Needs Escalation per role</Result></Node>
+        </DecisionTree>
+        <DocumentationChecklist>
+          <Item>Attach outputs of INV-01-OFFTOOL-DETAIL, INV-02-OFFTOOL-SPREAD to the case.</Item>
+        </DocumentationChecklist>
+      </Step>
+    </Workflow>
+  </Investigation>
+  <ClassificationGuidance>
+    <FalsePositive>
+      <Definition>Authorised penetration testing or a legitimate admin dual-use tool.</Definition>
+      <Indicators>
+        <Item>In-scope engagement + tester host.</Item>
+        <Item>PsExec by a known admin for a known task.</Item>
+        <Item>No credential-theft tooling.</Item>
+      </Indicators>
+      <SOCAction>
+        <Item>Confirm the engagement/admin task; close as false_positive/benign_activity.</Item>
+      </SOCAction>
+    </FalsePositive>
+    <TruePositive>
+      <Definition>Malicious use of offensive tooling.</Definition>
+      <Indicators>
+        <Item>Credential/recon tool outside an engagement.</Item>
+        <Item>Service/normal account running it.</Item>
+        <Item>Spread across hosts.</Item>
+      </Indicators>
+      <SOCAction>
+        <Item>Isolate affected hosts; open IR; treat host credentials as exposed.</Item>
+        <Item>Hunt the tool's origin and other hosts; reset exposed credentials.</Item>
+      </SOCAction>
+    </TruePositive>
+    <Misconfiguration>
+      <Definition>A security team's sanctioned tool run without prior notice.</Definition>
+      <Indicators>
+        <Item>Internal security team source.</Item>
+        <Item>No engagement record but confirmed benign.</Item>
+      </Indicators>
+      <SOCAction>
+        <Item>Confirm with the security team; document; require change records going forward.</Item>
+      </SOCAction>
+    </Misconfiguration>
+  </ClassificationGuidance>
+  <Response><IRForHumans>
+    <Phase name="Immediate Actions (0-30 minutes)">
+      <Action priority="1">Confirm the activity on the host; if malicious indicators, isolate the host.</Action>
+      <Action priority="2">Identify the responsible account/process and its origin.</Action>
+    </Phase>
+    <Phase name="Containment and Eradication (hours)">
+      <Action>Isolate the host; capture volatile evidence; hunt the same pattern across the estate.</Action>
+      <Action>Reset credentials used on the host if compromise is confirmed.</Action>
+    </Phase>
+    <Phase name="Recovery and Hardening (days)">
+      <Action>Remediate the root cause; add/verify EDR coverage; apply relevant hardening.</Action>
+    </Phase>
+  </IRForHumans></Response>
+  <QualityChecks>
+    <Check>Confirm the required telemetry (Sysmon/Security auditing) is present on the host.</Check>
+    <Check>Tune known-benign administrative sources via exceptions, not by disabling the rule.</Check>
+  </QualityChecks>
+  <ClosureCriteria><FalsePositiveClosure>
+    <Item>Activity confirmed benign/authorised and documented.</Item>
+  </FalsePositiveClosure><TruePositiveClosure>
+    <Item>Host contained and triaged; root cause eradicated; estate swept; findings recorded.</Item>
+  </TruePositiveClosure></ClosureCriteria>
+</Playbook>

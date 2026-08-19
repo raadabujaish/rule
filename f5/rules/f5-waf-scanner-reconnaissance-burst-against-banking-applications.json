@@ -1,0 +1,63 @@
+{
+  "rule_id": "jcb-f5-scanner-recon-burst",
+  "name": "F5 WAF — Scanner / Reconnaissance Burst Against Banking Applications",
+  "version": 1,
+  "enabled": true,
+  "interval": "15m",
+  "from": "now-35m",
+  "to": "now",
+  "description": "≥30 recon-type violations (Vulnerability Scan, Forceful Browsing, Predictable Resource Location, Non-browser Client, Information Leakage) from one source in 30 minutes, any action. Catches the scanning phase the QA - F5WAF rule saw only piecemeal.",
+  "tags": [
+    "JCB",
+    "Detection-QA-2026-08",
+    "F5 WAF"
+  ],
+  "author": [
+    "JCB Detection Engineering"
+  ],
+  "license": "internal",
+  "threat": [],
+  "investigation_fields": {
+    "field_names": [
+      "source.ip",
+      "cef.extensions.deviceCustomString6",
+      "cef.extensions.deviceCustomString4",
+      "cef.extensions.deviceCustomString1",
+      "cef.extensions.requestUrl",
+      "event.action",
+      "cef.severity"
+    ]
+  },
+  "related_integrations": [],
+  "required_fields": [],
+  "setup": "",
+  "false_positives": [],
+  "references": [],
+  "risk_score": 47,
+  "risk_score_mapping": [],
+  "severity": "medium",
+  "severity_mapping": [],
+  "output_index": "",
+  "max_signals": 100,
+  "exceptions_list": [],
+  "actions": [],
+  "type": "threshold",
+  "language": "kuery",
+  "index": [
+    "logs-cef.log-*"
+  ],
+  "query": "observer.vendor:\"F5\" and cef.extensions.deviceCustomString4:(\"Vulnerability Scan\" or \"Forceful Browsing\" or \"Predictable Resource Location\" or \"Non-browser Client\" or \"Information Leakage\")",
+  "threshold": {
+    "field": [
+      "source.ip"
+    ],
+    "value": 100,
+    "cardinality": []
+  },
+  "alert_suppression": {
+    "duration": {
+      "value": 6,
+      "unit": "h"
+    }
+  }
+}

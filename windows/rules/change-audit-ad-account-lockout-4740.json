@@ -1,0 +1,98 @@
+{
+  "rule_id": "4eadfce8-a38d-4d42-a315-6380fafbdb2f",
+  "name": "Change Audit — AD Account Lockout (4740)",
+  "version": 1,
+  "enabled": true,
+  "interval": "1h",
+  "from": "now-7200s",
+  "to": "now",
+  "description": "AD - Account Locked",
+  "tags": [
+    "IRM"
+  ],
+  "author": [],
+  "license": "",
+  "threat": [],
+  "investigation_fields": {
+    "field_names": [
+      "host.name",
+      "winlog.computer_name",
+      "user.name",
+      "user.domain",
+      "winlog.event_data.TargetUserName",
+      "winlog.event_data.TargetDomainName",
+      "source.ip",
+      "winlog.event_data.LogonType",
+      "winlog.event_data.Status",
+      "winlog.event_data.SubStatus",
+      "winlog.event_data.ServiceName",
+      "winlog.event_data.TicketOptions",
+      "event.code",
+      "event.action"
+    ]
+  },
+  "related_integrations": [],
+  "required_fields": [],
+  "setup": "",
+  "false_positives": [],
+  "references": [],
+  "risk_score": 21,
+  "risk_score_mapping": [],
+  "severity": "low",
+  "severity_mapping": [],
+  "output_index": "",
+  "max_signals": 100,
+  "exceptions_list": [],
+  "actions": [],
+  "meta": {
+    "from": "1h",
+    "kibana_siem_app_url": "https://jcb.scanwave.local:8008/app/security"
+  },
+  "type": "query",
+  "language": "kuery",
+  "index": [
+    "apm-*-transaction*",
+    "auditbeat-*",
+    "endgame-*",
+    "filebeat-*",
+    "logs-*",
+    "packetbeat-*",
+    "traces-apm*",
+    "winlogbeat-*",
+    "-*elastic-cloud-logs-*"
+  ],
+  "query": "NOT \"192.168.166.1\"",
+  "filters": [
+    {
+      "meta": {
+        "index": "3bf8f070-92b8-465a-8270-a307118f5541",
+        "type": "phrase",
+        "disabled": false,
+        "negate": false,
+        "alias": null,
+        "key": "event.code",
+        "params": {
+          "query": "4740"
+        }
+      },
+      "$state": {
+        "store": "appState"
+      },
+      "query": {
+        "match_phrase": {
+          "event.code": "4740"
+        }
+      }
+    }
+  ],
+  "alert_suppression": {
+    "group_by": [
+      "winlog.event_data.TargetUserName"
+    ],
+    "duration": {
+      "value": 1,
+      "unit": "h"
+    },
+    "missing_fields_strategy": "doNotSuppress"
+  }
+}

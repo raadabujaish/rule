@@ -1,0 +1,208 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<Playbook xmlns="https://soc.example/playbooks" id="PB-JCB-NEW-4" name=" Sysmon Detection Alerts - SOC Playbook" version="2.1" status="Production" classification="TLP:AMBER">
+  <Metadata>
+    <Owner>JCB Detection Engineering (WatchWave)</Owner>
+    <LastUpdated>2026-08-19</LastUpdated>
+    <Severity default="High">High</Severity>
+    <Confidence default="Medium">Medium</Confidence>
+    <Category>Endpoint Detection (Sysmon) — Multiple Techniques</Category>
+    <MitreAttack>
+      <Technique id="T1059" name="Command and Scripting Interpreter"/>
+      <Tactic id="TA0002" name="Execution"/>
+    </MitreAttack>
+    <References>
+      <Reference title="MITRE ATT&amp;CK T1059 Command and Scripting Interpreter" url="https://attack.mitre.org/techniques/T1059/"/>
+      <Reference title="Sysmon (System Monitor) documentation" url="https://learn.microsoft.com/sysinternals/downloads/sysmon"/>
+    </References>
+  </Metadata>
+  <ExecutiveSummary>
+    <Overview>An endpoint detection derived from Sysmon telemetry fired for a host/user. This is a roll-up signal: the operative ATT&amp;CK technique is whatever the constituent detection was (process creation, injection, registry persistence, suspicious network, etc.) — read kibana.alert.rule.name on the alert to pin it. The triage job is to pull the specific alert(s) for the entity and corroborate them against the raw Sysmon process and network activity on the host, then decide whether this is genuine adversary behaviour or benign admin/software activity. The MITRE mapping below (Execution / T1059) is the most common Sysmon case and a placeholder — always re-map from the constituent alert.</Overview>
+    <BusinessImpact>Sysmon detections are the primary endpoint tripwire on the Windows estate (verified live: ~25k Sysmon events/hour, event.code 1 process, 3 network, 11 file, 12/13 registry). A true positive on a banking endpoint can represent execution, persistence, credential access or command-and-control that, unaddressed, leads to lateral movement and data loss.</BusinessImpact>
+  </ExecutiveSummary>
+  <Scope>
+    <Assets>
+      <AssetType>Windows servers and workstations (INTDOM) running Sysmon via Elastic Agent</AssetType>
+    </Assets>
+    <LogSources>
+      <LogSource>Windows Sysmon operational — logs-windows.sysmon_operational-* (verified live: host.name always populated; user.name, process.command_line on code 1; source.ip/destination.ip on code 3)</LogSource>
+      <LogSource>Elastic Detection alerts — .alerts-security.alerts-* (verified live, ES|QL-queryable: kibana.alert.rule.name, kibana.alert.severity, kibana.alert.risk_score)</LogSource>
+    </LogSources>
+  </Scope>
+  <Prerequisites>
+    <TelemetryRequirements>
+      <Requirement>Sysmon shipping to logs-windows.sysmon_operational-* (verified live).</Requirement>
+      <Requirement>Elastic security alerts readable in .alerts-security.alerts-* (verified live) so the constituent Sysmon detection(s) for the entity can be enumerated.</Requirement>
+      <Requirement>process.code_signature is NOT collected on JCB Sysmon — do not rely on signature status; use process lineage (parent), path and command line instead.</Requirement>
+    </TelemetryRequirements>
+    <DetectionSignals>
+      <Signal><Name>Sysmon-derived alert</Name><Details>An alert in .alerts-security.alerts-* whose kibana.alert.rule.name corresponds to a Sysmon-based detection, tied to host.name and often user.name.</Details></Signal>
+      <Signal><Name>Corroborating endpoint activity</Name><Details>Raw Sysmon process (code 1) and network (code 3) records on the same host around the alert time that confirm or explain the flagged behaviour.</Details></Signal>
+    </DetectionSignals>
+  </Prerequisites>
+  <Inputs>
+    <Input name="$hostname" description="Endpoint the Sysmon alert fired on (host.name from the alert)."/>
+    <Input name="$username" description="User associated with the alert (user.name), where present."/>
+  </Inputs>
+  <Triage>
+    <ImmediateCapture>
+      <Item>Host: $hostname</Item>
+      <Item>User: $username (if present on the alert)</Item>
+      <Item>The constituent kibana.alert.rule.name and its severity/risk — this defines the actual technique to investigate</Item>
+    </ImmediateCapture>
+    <InitialAssessment>
+      <Rule>Read the specific constituent alert first (INV-01) and re-map the technique from kibana.alert.rule.name — do not treat "Sysmon Detection Alerts" as a single behaviour.</Rule>
+      <Rule>Corroborate with raw Sysmon (INV-02/INV-03): an alert that matches a benign, expected process/parent/command line on that host is a candidate false positive; one with no benign explanation is escalated.</Rule>
+    </InitialAssessment>
+  </Triage>
+  <Investigation>
+    <Goal>Identify the specific Sysmon detection(s) for the entity, corroborate them against raw Sysmon process/network activity on $hostname, and decide adversary behaviour vs benign endpoint activity.</Goal>
+    <Workflow>
+      <Step order="1" name="Enumerate the Sysmon detection(s) for the host">
+        <Purpose>Pull the actual alert(s) for $hostname — names, severities, risk, timing — so the technique and blast radius are known before touching raw telemetry.</Purpose>
+        <Query platform="Elastic" language="ES|QL" id="INV-01-ALERT-CLUSTER">
+          <![CDATA[
+FROM .alerts-security.alerts-* METADATA _id
+| WHERE host.name == "$hostname" AND @timestamp >= NOW() - 4 hours
+| STATS hits = COUNT(*), max_risk = MAX(kibana.alert.risk_score), severities = VALUES(kibana.alert.severity), first_seen = MIN(@timestamp), last_seen = MAX(@timestamp) BY kibana.alert.rule.name
+| SORT max_risk DESC
+| LIMIT 25
+          ]]>
+        </Query>
+        <ExpectedOutput>
+          <Field name="kibana.alert.rule.name"/>
+          <Field name="max_risk"/>
+          <Field name="severities"/>
+        </ExpectedOutput>
+        <AnalystNotes>A single low-risk Sysmon alert on an otherwise-quiet host is routine triage. Several distinct high-risk detections clustered on one host in a short window (e.g. execution + injection + network) is a strong incident signal. Use the rule names to decide which raw Sysmon codes to focus on in INV-02/INV-03.</AnalystNotes>
+      </Step>
+      <Step order="2" name="Corroborate with raw Sysmon process activity">
+        <Purpose>Inspect the process creations (code 1) on the host around the alert — parent/child lineage and command lines either explain the alert benignly or confirm malicious execution.</Purpose>
+        <Query platform="Elastic" language="ES|QL" id="INV-02-SYSMON-PROCESS">
+          <![CDATA[
+FROM logs-windows.sysmon_operational-*
+| WHERE host.name == "$hostname" AND event.code == "1" AND @timestamp >= NOW() - 4 hours
+| KEEP @timestamp, user.name, process.parent.name, process.name, process.command_line
+| SORT @timestamp DESC
+| LIMIT 30
+          ]]>
+        </Query>
+        <ExpectedOutput>
+          <Field name="process.parent.name"/>
+          <Field name="process.name"/>
+          <Field name="process.command_line"/>
+        </ExpectedOutput>
+        <AnalystNotes>Look for suspicious lineage (office/browser spawning script hosts or cmd/powershell), LOLBins with download/exec arguments, encoded PowerShell, or execution from user-writable/temp paths. A process that matches a known scheduled job/software updater with an expected parent is benign. Code signature is not available on JCB Sysmon — judge on lineage, path and command line.</AnalystNotes>
+      </Step>
+      <Step order="3" name="Corroborate with raw Sysmon network activity">
+        <Purpose>Check outbound connections (code 3) from the host — a process beaconing to an external/unfamiliar destination turns an endpoint alert into a command-and-control case.</Purpose>
+        <Query platform="Elastic" language="ES|QL" id="INV-03-SYSMON-NETWORK">
+          <![CDATA[
+FROM logs-windows.sysmon_operational-*
+| WHERE host.name == "$hostname" AND event.code == "3" AND @timestamp >= NOW() - 4 hours
+| STATS conns = COUNT(*), ports = VALUES(destination.port), last_seen = MAX(@timestamp) BY destination.ip, process.name
+| SORT conns DESC
+| LIMIT 25
+          ]]>
+        </Query>
+        <ExpectedOutput>
+          <Field name="destination.ip"/>
+          <Field name="process.name"/>
+          <Field name="conns"/>
+        </ExpectedOutput>
+        <AnalystNotes>An unexpected process (script host, LOLBin, unknown binary) making outbound connections — especially repetitive connections to a single external IP or a non-standard port — supports command-and-control. Connections by known browsers/agents to expected infrastructure are benign. Correlate the process.name here with the flagged process in INV-02.</AnalystNotes>
+      </Step>
+      <Step order="4" name="Check whether the same detection hit the user elsewhere">
+        <Purpose>Establish spread: if the same alert fired for $username across multiple hosts, this is a campaign/lateral pattern rather than a one-host event.</Purpose>
+        <Query platform="Elastic" language="ES|QL" id="INV-04-USER-SPREAD">
+          <![CDATA[
+FROM .alerts-security.alerts-* METADATA _id
+| WHERE user.name == "$username" AND @timestamp >= NOW() - 4 hours
+| STATS alerts = COUNT(*), rules = VALUES(kibana.alert.rule.name), hosts = COUNT_DISTINCT(host.name) BY user.name
+| SORT alerts DESC
+| LIMIT 15
+          ]]>
+        </Query>
+        <ExpectedOutput>
+          <Field name="alerts"/>
+          <Field name="rules"/>
+          <Field name="hosts"/>
+        </ExpectedOutput>
+        <AnalystNotes>The same Sysmon detection for one user across several hosts (hosts &gt; 1) indicates lateral movement or a mass-deployed script/tool; widen the investigation to those hosts and treat the user identity as potentially compromised.</AnalystNotes>
+      </Step>
+    </Workflow>
+  </Investigation>
+  <DecisionTree>
+    <Node><Condition>INV-02/INV-03 corroborate the constituent alert with malicious endpoint activity (suspicious lineage, encoded/download-exec command lines, or beaconing to an unfamiliar external destination) with no benign explanation.</Condition><Result>True Positive (Adversary activity on the endpoint — escalate to IR, map technique from the constituent rule)</Result></Node>
+    <Node><Condition>INV-01 shows multiple distinct high-risk Sysmon detections clustered on the host, or INV-04 shows the same detection across multiple hosts for the user.</Condition><Result>True Positive (Multi-signal / spreading endpoint compromise — escalate to IR)</Result></Node>
+    <Node><Condition>INV-02/INV-03 tie the alert to a known-benign process (expected parent, signed/known software updater, scheduled job) whose command line and destinations match normal operations on that host.</Condition><Result>False Positive (Benign admin/software activity matching the detection pattern)</Result></Node>
+    <Node><Condition>An internal tool (management agent, vulnerability scanner, packaging/deployment job) produces the flagged pattern by design across many hosts.</Condition><Result>Misconfiguration (Noisy internal tooling — tune the detection/exception to the tool, not off)</Result></Node>
+    <Node><Condition>The constituent alert and raw Sysmon are ambiguous — plausible but unverified benign explanation, or missing corroborating context.</Condition><Result>Needs Escalation</Result></Node>
+  </DecisionTree>
+  <ClassificationGuidance>
+    <FalsePositive>
+      <Definition>The Sysmon detection matched legitimate administrative or software activity — the benign process/parent/command-line context must be shown, not assumed because the host is "normal".</Definition>
+      <Indicators>
+        <Item>INV-02 shows the flagged process has an expected parent and a benign command line (known updater, admin script, scheduled job).</Item>
+        <Item>INV-03 destinations are expected corporate/vendor infrastructure.</Item>
+        <Item>Single low-risk alert, no clustering (INV-01) and no cross-host spread (INV-04).</Item>
+      </Indicators>
+      <SOCAction>
+        <Item>Document the benign process/tool; close as false_positive.</Item>
+        <Item>If a specific tool recurs, tune the constituent rule or add a scoped exception for that process/path — never disable the Sysmon pipeline.</Item>
+      </SOCAction>
+    </FalsePositive>
+    <TruePositive>
+      <Definition>The Sysmon detection reflects real adversary behaviour on the endpoint — execution, injection, persistence, credential access or command-and-control.</Definition>
+      <Indicators>
+        <Item>Suspicious process lineage / encoded or download-exec command lines (INV-02).</Item>
+        <Item>Beaconing or unusual outbound connections from the flagged process (INV-03).</Item>
+        <Item>Alert clustering on the host (INV-01) or the same detection across hosts for the user (INV-04).</Item>
+      </Indicators>
+      <SOCAction>
+        <Item>Isolate the host; preserve Sysmon and alert evidence; identify the initial access / parent process.</Item>
+        <Item>Treat $username as potentially compromised where user-tied; hunt the pattern across the estate; contain identified C2.</Item>
+      </SOCAction>
+    </TruePositive>
+    <Misconfiguration>
+      <Definition>An internal tool legitimately produces the flagged Sysmon pattern by design, generating recurring alerts — operational noise, not an attack.</Definition>
+      <Indicators>
+        <Item>A management agent / scanner / deployment job produces the identical pattern across many hosts on a schedule.</Item>
+        <Item>Owner confirms the tool and behaviour.</Item>
+      </Indicators>
+      <SOCAction>
+        <Item>Tune the constituent detection or scope an exception to the tool's process/path; document.</Item>
+        <Item>Track under detection-tuning; keep the analytic enabled.</Item>
+      </SOCAction>
+    </Misconfiguration>
+  </ClassificationGuidance>
+  <Response>
+    <IRForHumans>
+      <Phase name="Immediate Actions (0-30 minutes)">
+        <Action priority="1">Read the constituent alert (INV-01) and re-map the technique; corroborate against raw Sysmon process/network (INV-02/INV-03).</Action>
+        <Action priority="2">If corroborated malicious and no benign explanation exists, isolate $hostname and preserve endpoint evidence.</Action>
+      </Phase>
+      <Phase name="Containment and Eradication (hours)">
+        <Action>Reconstruct the process tree and network activity; identify initial access, persistence and any C2; remove malicious artefacts.</Action>
+        <Action>Contain identified C2 destinations; reset credentials used on the host; sweep peers via INV-04 for the same pattern.</Action>
+      </Phase>
+      <Phase name="Recovery and Hardening (days)">
+        <Action>Feed confirmed benign tools back into detection tuning/exceptions; feed confirmed malicious indicators into blocklists and hunts.</Action>
+        <Action>Where signature-based judgement was needed, prioritise enabling process.code_signature collection on Sysmon to strengthen future triage.</Action>
+      </Phase>
+    </IRForHumans>
+  </Response>
+  <Escalation>
+    <Trigger>Corroborated malicious endpoint activity, multiple clustered high-risk detections on a host, or the same detection spreading across hosts for a user.</Trigger>
+    <To>SOC L2 / IR</To>
+  </Escalation>
+  <Closure>
+    <FalsePositiveClosure>
+      <Item>Constituent alert tied to a documented benign process/tool with matching raw Sysmon context.</Item>
+      <Item>No clustering and no cross-host spread; tuning/exception scoped if recurring.</Item>
+    </FalsePositiveClosure>
+    <TruePositiveClosure>
+      <Item>Host contained and triaged; process tree, persistence and C2 reconstructed and removed.</Item>
+      <Item>Credentials reset; estate swept; indicators recorded; incident documented.</Item>
+    </TruePositiveClosure>
+  </Closure>
+</Playbook>

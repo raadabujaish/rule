@@ -1,0 +1,82 @@
+{
+  "rule_id": "jcb-panos-config-new-admin",
+  "name": "PAN-OS — Firewall Configuration Change by an Unexpected Administrator",
+  "version": 1,
+  "enabled": true,
+  "interval": "1h",
+  "from": "now-24h",
+  "to": "now",
+  "description": "Attacker objective\nA compromised or rogue administrator modifies the perimeter firewall — adding an allow rule, weakening a policy, or manipulating admin accounts — to enable access or evade defenses.\n\nAttack logic\nFirewall configuration is performed by a small, stable set of administrators. A configuration change by an administrator not seen in the historical window is anomalous on an internet-edge firewall.\n\nWhy this detection works\nPAN-OS CONFIG logs fully attribute each change to an admin; a new-terms model auto-baselines the known admin set and fires on a genuinely new one.\n\nFalse positives\nOnboarding of a new legitimate firewall admin.\n\nTuning\nAllowlist verified new admins; the history window auto-baselines over time.\n\nRequired telemetry\nPAN-OS CONFIG logs (admin, cmd, path, result).",
+  "tags": [
+    "JCB",
+    "Perimeter",
+    "Phase3",
+    "Use Case: Threat Detection",
+    "Tactic: Defense Evasion"
+  ],
+  "author": [
+    "raadabujaish"
+  ],
+  "threat": [
+    {
+      "framework": "MITRE ATT&CK",
+      "tactic": {
+        "id": "TA0005",
+        "name": "Defense Evasion",
+        "reference": "https://attack.mitre.org/tactics/TA0005/"
+      },
+      "technique": [
+        {
+          "id": "T1562",
+          "name": "Impair Defenses",
+          "reference": "https://attack.mitre.org/techniques/T1562/",
+          "subtechnique": [
+            {
+              "id": "T1562.004",
+              "name": "Disable or Modify System Firewall",
+              "reference": "https://attack.mitre.org/techniques/T1562/004/"
+            }
+          ]
+        }
+      ]
+    }
+  ],
+  "investigation_fields": {
+    "field_names": [
+      "panw.panos.admin",
+      "panw.panos.cmd",
+      "panw.panos.path",
+      "panw.panos.client_type",
+      "host.ip"
+    ]
+  },
+  "related_integrations": [],
+  "required_fields": [],
+  "setup": "",
+  "note": "## Investigation guide\n1. admin = the account; path/cmd = what changed (watch for security rulebase and management-user changes).\n2. Confirm the admin was authorised and review the specific change against change control.",
+  "false_positives": [
+    "Onboarding of a new legitimate firewall admin."
+  ],
+  "references": [
+    "https://attack.mitre.org/techniques/T1562/",
+    "https://attack.mitre.org/techniques/T1562/004/"
+  ],
+  "risk_score": 73,
+  "risk_score_mapping": [],
+  "severity": "high",
+  "severity_mapping": [],
+  "output_index": "",
+  "max_signals": 100,
+  "exceptions_list": [],
+  "actions": [],
+  "type": "new_terms",
+  "query": "panw.panos.type:\"CONFIG\"",
+  "new_terms_fields": [
+    "panw.panos.admin"
+  ],
+  "history_window_start": "now-30d",
+  "index": [
+    "logs-panw.panos-*"
+  ],
+  "language": "kuery"
+}

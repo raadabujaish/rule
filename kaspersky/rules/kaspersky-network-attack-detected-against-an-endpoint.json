@@ -1,0 +1,75 @@
+{
+  "rule_id": "jcb-kav-network-attack",
+  "name": "Kaspersky — Network Attack Detected Against an Endpoint",
+  "version": 1,
+  "enabled": true,
+  "interval": "1h",
+  "from": "now-90m",
+  "to": "now",
+  "description": "Attacker objective\nExploit a network-facing service on an endpoint or server (remote code execution, scanning, brute-force) for initial access or lateral movement.\n\nAttack logic\nKaspersky Network Threat Protection (host network IPS) detects and blocks known network exploits and attacks directed at the protected host.\n\nWhy this detection works\nThe attack signature name, the victim host and the attacker IP together are a high-fidelity indicator that an exploitation attempt reached the host.\n\nFalse positives\nAn authorised vulnerability scanner triggering network-attack signatures.\n\nTuning\nAllowlist sanctioned scanner sources; prioritise attacks targeting servers over workstations.\n\nRequired telemetry\nKaspersky Security Center CEF (GNRL_EV_ATTACK_DETECTED): AttackName, destination.domain (victim), AttackerIPv4, AttackedPort/Protocol.",
+  "tags": [
+    "JCB",
+    "Kaspersky",
+    "Phase3",
+    "Tactic: Initial Access",
+    "Use Case: Threat Detection"
+  ],
+  "author": [
+    "raadabujaish"
+  ],
+  "license": "",
+  "threat": [
+    {
+      "framework": "MITRE ATT&CK",
+      "tactic": {
+        "id": "TA0001",
+        "name": "Initial Access",
+        "reference": "https://attack.mitre.org/tactics/TA0001/"
+      },
+      "technique": [
+        {
+          "id": "T1190",
+          "name": "Exploit Public-Facing Application",
+          "reference": "https://attack.mitre.org/techniques/T1190/"
+        }
+      ]
+    }
+  ],
+  "investigation_fields": {
+    "field_names": [
+      "destination.domain",
+      "destination.user.name",
+      "destination.ip",
+      "cef.name",
+      "cef.device.event_class_id",
+      "cef.severity",
+      "message",
+      "observer.product",
+      "observer.vendor"
+    ]
+  },
+  "related_integrations": [],
+  "required_fields": [],
+  "setup": "",
+  "note": "## Investigation guide\n1. The attack name, victim host (destination.domain) and attacker IP are in the event.\n2. Confirm whether the targeted service is exposed; even if blocked, profile the attacker and hunt for follow-on activity on the victim.\n3. Prioritise attacks against internet-facing or high-value servers.",
+  "false_positives": [
+    "An authorised vulnerability scanner triggering network-attack signatures."
+  ],
+  "references": [
+    "https://attack.mitre.org/techniques/T1190/"
+  ],
+  "risk_score": 75,
+  "risk_score_mapping": [],
+  "severity": "high",
+  "severity_mapping": [],
+  "output_index": "",
+  "max_signals": 100,
+  "exceptions_list": [],
+  "actions": [],
+  "type": "query",
+  "language": "kuery",
+  "index": [
+    "logs-cef.log-*"
+  ],
+  "query": "observer.vendor:\"KasperskyLab\" and cef.device.event_class_id:\"GNRL_EV_ATTACK_DETECTED\""
+}

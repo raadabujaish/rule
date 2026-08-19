@@ -1,0 +1,173 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<Playbook xmlns="https://soc.example/playbooks" id="PB-AD-003" name="AD — Repeated Authentication Against Disabled or Locked Accounts - SOC Playbook" version="1.0" status="Production" classification="TLP:AMBER">
+  <Metadata>
+    <Owner>JCB Detection Engineering (WatchWave)</Owner>
+    <LastUpdated>2026-08-14</LastUpdated>
+    <Severity default="Medium">Medium</Severity>
+    <Confidence default="Medium">Medium</Confidence>
+    <Category>Credential Access / Valid Accounts abuse attempt</Category>
+    <MitreAttack>
+      <Technique id="T1078.002" name="Domain Accounts"/>
+      <Tactic id="TA0001" name="Initial Access"/>
+    </MitreAttack>
+    <References>
+      <Reference title="MITRE ATT and CK" url="https://attack.mitre.org/techniques/T1078/"/>
+    </References>
+  </Metadata>
+  <ExecutiveSummary>
+    <Overview>One source produced 10+ authentication attempts against DISABLED, LOCKED or EXPIRED accounts (4771 0x12; 4625 substatus 0xC0000072/0xC0000234/0xC0000193) in 30 minutes. Triage question: is someone replaying stolen-but-dead credentials or enumerating former staff, or is an orphaned system still trying its old account?</Overview>
+    <BusinessImpact>Attackers replaying breached credential dumps hit disabled ex-employee accounts first; the same shape is produced by decommissioned-but-running services. The wrong verdict either misses recon or wastes IR time.</BusinessImpact>
+  </ExecutiveSummary>
+  <Scope><Assets>
+    <AssetType>Active Directory domain controllers (INTDOM)</AssetType>
+    <AssetType>Windows member servers and workstations</AssetType>
+  </Assets><LogSources>
+    <LogSource>Windows Security event log - logs-system.security-*</LogSource>
+  </LogSources></Scope>
+  <Prerequisites><TelemetryRequirements>
+    <Requirement>Windows Security auditing shipped via Elastic Agent to logs-system.security-* (verified live).</Requirement>
+  </TelemetryRequirements><DetectionSignals>
+    <Signal><Name>Dead-account auth burst</Name><Details>&gt;= 10 failures with disabled/locked/expired statuses from one source in the window.</Details></Signal>
+  </DetectionSignals></Prerequisites>
+  <Inputs>
+    <Input name="$source_ip" description="Source IP producing the dead-account authentication attempts."/>
+  </Inputs>
+  <Triage><ImmediateCapture>
+    <Item>Source: $source_ip</Item>
+  </ImmediateCapture><InitialAssessment>
+    <Rule>Orphaned service: ONE dead service account, steady cadence - lean Misconfiguration.</Rule>
+    <Rule>Multiple different disabled HUMAN accounts (ex-staff) from one source - treat as credential-replay recon, escalate.</Rule>
+  </InitialAssessment></Triage>
+  <Investigation>
+    <Goal>Determine whether $source_ip is replaying dead credentials across accounts (attack) or is an orphaned system using its own expired identity (ops).</Goal>
+    <Workflow>
+      <Step order="1" name="Which dead accounts, which statuses, what cadence">
+        <Purpose>Account mix is the core discriminator: one service account = orphan; several human accounts = replay/enumeration.</Purpose>
+        <Query platform="Elastic" language="ES|QL" id="INV-01-DEAD-ACCTS">
+          <![CDATA[
+FROM logs-system.security-*
+| WHERE source.ip == "$source_ip" AND @timestamp >= NOW() - 4 hours
+  AND ((event.code == "4771" AND winlog.event_data.Status == "0x12") OR (event.code == "4625" AND winlog.event_data.SubStatus IN ("0xc0000072","0xc0000234","0xc0000193")))
+| EVAL reason = CASE(winlog.event_data.SubStatus == "0xc0000072", "disabled", winlog.event_data.SubStatus == "0xc0000234", "locked", winlog.event_data.SubStatus == "0xc0000193", "expired", "krb-0x12")
+| STATS attempts = COUNT(*), first_seen = MIN(@timestamp), last_seen = MAX(@timestamp), reasons = VALUES(reason) BY winlog.event_data.TargetUserName
+| SORT attempts DESC
+| LIMIT 50
+          ]]>
+        </Query>
+        <ExpectedOutput>
+          <Field name="winlog.event_data.TargetUserName"/>
+          <Field name="attempts"/>
+          <Field name="reasons"/>
+        </ExpectedOutput>
+        <AnalystNotes>Human naming pattern (first/last names) across multiple accounts = replaying a stale credential list. A single svc_*/app account = orphaned automation.</AnalystNotes>
+      </Step>
+      <Step order="2" name="Does the same source also authenticate successfully (live credentials too)">
+        <Purpose>A source mixing valid logons with dead-account attempts is a real workstation (possibly compromised, or a shared kiosk); a source with ONLY dead attempts is automation or attack infrastructure.</Purpose>
+        <Query platform="Elastic" language="ES|QL" id="INV-02-DEAD-MIX">
+          <![CDATA[
+FROM logs-system.security-*
+| WHERE source.ip == "$source_ip" AND event.code IN ("4624","4625","4771") AND @timestamp >= NOW() - 4 hours
+| STATS c = COUNT(*), users = COUNT_DISTINCT(winlog.event_data.TargetUserName) BY event.code
+| SORT event.code
+| LIMIT 10
+          ]]>
+        </Query>
+        <ExpectedOutput>
+          <Field name="event.code"/>
+          <Field name="c"/>
+          <Field name="users"/>
+        </ExpectedOutput>
+        <AnalystNotes>Only failures, several users = replay list. 4624 successes present = live system; check whether the successful account should be associated with the dead ones (same person pre/post rename?).</AnalystNotes>
+      </Step>
+      <Step order="3" name="When were these accounts disabled and by whom (recent lifecycle)">
+        <Purpose>An account disabled TODAY still being used by its owner's devices is expected residue; accounts disabled long ago being probed is not.</Purpose>
+        <Query platform="Elastic" language="ES|QL" id="INV-03-DEAD-LIFECYCLE" optional="true">
+          <![CDATA[
+FROM logs-system.security-*
+| WHERE event.code IN ("4725","4740","4722") AND @timestamp >= NOW() - 4 hours
+| KEEP @timestamp, event.code, winlog.event_data.TargetUserName, winlog.event_data.SubjectUserName
+| SORT @timestamp DESC
+| LIMIT 25
+          ]]>
+        </Query>
+        <ExpectedOutput>
+          <Field name="event.code"/>
+          <Field name="winlog.event_data.TargetUserName"/>
+        </ExpectedOutput>
+        <AnalystNotes>If a probed account appears here as freshly disabled (4725), the residue window explains the alert. No recent lifecycle events = the accounts were disabled earlier; probing them now is more suspicious.</AnalystNotes>
+      </Step>
+      <Step order="4" name="Finalize classification">
+        <DecisionTree>
+          <Node><Condition>INV-01 shows multiple distinct disabled HUMAN accounts probed from one source, and INV-03 shows none of them was disabled today.</Condition><Result>True Positive (Credential Replay / Ex-staff Enumeration - escalate)</Result></Node>
+          <Node><Condition>INV-02 shows the source is otherwise a normally-authenticating workstation AND INV-01 shows exactly one account disabled TODAY (fresh-disable residue from that user's own device).</Condition><Result>Benign Activity</Result></Node>
+          <Node><Condition>INV-01 shows one service/application account attempted continuously and the source is an application server.</Condition><Result>Misconfiguration</Result></Node>
+          <Node><Condition>Source has no valid authentications, targets 2+ dead accounts, but source ownership cannot be established from context.</Condition><Result>Needs Escalation</Result></Node>
+        </DecisionTree>
+        <DocumentationChecklist>
+          <Item>Attach outputs of INV-01-DEAD-ACCTS, INV-02-DEAD-MIX, INV-03-DEAD-LIFECYCLE to the case.</Item>
+        </DocumentationChecklist>
+      </Step>
+    </Workflow>
+  </Investigation>
+  <ClassificationGuidance>
+    <FalsePositive>
+      <Definition>Expected residue: a just-disabled user's own devices keep retrying briefly.</Definition>
+      <Indicators>
+        <Item>Single account, disabled within the last hours (INV-03).</Item>
+        <Item>Source is that user's known workstation.</Item>
+        <Item>Attempts fade out.</Item>
+      </Indicators>
+      <SOCAction>
+        <Item>Confirm with IAM the disable action.</Item>
+        <Item>Close as benign_activity; helpdesk optionally clears saved sessions.</Item>
+      </SOCAction>
+    </FalsePositive>
+    <TruePositive>
+      <Definition>Deliberate use of dead credentials - replaying a breach list or targeting former-staff access.</Definition>
+      <Indicators>
+        <Item>Several distinct disabled human accounts from one source.</Item>
+        <Item>Accounts not recently disabled.</Item>
+        <Item>Source has no legitimate auth footprint (INV-02 failures only).</Item>
+      </Indicators>
+      <SOCAction>
+        <Item>Contain/block the source.</Item>
+        <Item>Cross-check the probed names against breach-dump monitoring.</Item>
+        <Item>Escalate to IR - this is recon of your identity attack surface.</Item>
+      </SOCAction>
+    </TruePositive>
+    <Misconfiguration>
+      <Definition>An orphaned system/service still authenticating with its dead account.</Definition>
+      <Indicators>
+        <Item>One svc/app account, steady machine cadence, application-server source.</Item>
+        <Item>Continues across days; recurring same-account alerts (suppression 6h).</Item>
+      </Indicators>
+      <SOCAction>
+        <Item>Identify the process on the source and decommission or re-credential it.</Item>
+        <Item>Track under credential-hygiene P0; do not exception.</Item>
+      </SOCAction>
+    </Misconfiguration>
+  </ClassificationGuidance>
+  <Response><IRForHumans>
+    <Phase name="Immediate Actions (0-30 minutes)">
+      <Action priority="1">Identify source system ownership.</Action>
+      <Action priority="2">If replay pattern: block source, notify IR.</Action>
+    </Phase>
+    <Phase name="Containment and Eradication (hours)">
+      <Action>Hunt other sources probing the same dead accounts.</Action>
+      <Action>Validate the disabled accounts cannot be re-enabled without approval.</Action>
+    </Phase>
+    <Phase name="Recovery and Hardening (days)">
+      <Action>Purge stale credentials from decommissioned systems.</Action>
+      <Action>Feed confirmed-orphan sources to the ops cleanup list.</Action>
+    </Phase>
+  </IRForHumans></Response>
+  <QualityChecks>
+    <Check>Statuses used: 0x12/0xC0000072/0xC0000234/0xC0000193 - verified live in JCB.</Check>
+    <Check>Suppression 6h per source.</Check>
+  </QualityChecks>
+  <ClosureCriteria><FalsePositiveClosure>
+    <Item>Fresh-disable residue confirmed with IAM and faded out.</Item>
+  </FalsePositiveClosure><TruePositiveClosure>
+    <Item>Source contained; replay list scope documented; no dead account re-enabled.</Item>
+  </TruePositiveClosure></ClosureCriteria>
+</Playbook>

@@ -1,0 +1,148 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<Playbook xmlns="https://soc.example/playbooks" id="PB-FG-008" name="FortiGate — Unauthorized Internal Port Scan / Network Reconnaissance - SOC Playbook" version="1.0" status="Production" classification="TLP:AMBER">
+  <Metadata>
+    <Owner>JCB Detection Engineering (WatchWave)</Owner>
+    <LastUpdated>2026-08-14</LastUpdated>
+    <Severity default="Medium">Medium</Severity>
+    <Confidence default="Medium">Medium</Confidence>
+    <Category>Discovery / Network Service Scanning</Category>
+    <MitreAttack>
+      <Technique id="T1046" name="Network Service Scanning"/>
+      <Tactic id="TA0007" name="Discovery"/>
+    </MitreAttack>
+    <References>
+      <Reference title="MITRE ATT and CK" url="https://attack.mitre.org/techniques/T1046/"/>
+    </References>
+  </Metadata>
+  <ExecutiveSummary>
+    <Overview>An internal source generated port-scan-shaped traffic (many ports/destinations) not attributable to an approved scanner. Triage question: is an internal host performing port reconnaissance (recon/compromise), or an unlisted legitimate scanner/monitoring tool?</Overview>
+    <BusinessImpact>Port scanning maps services for the next attack step; from a non-scanner host it signals recon by a possibly-compromised machine.</BusinessImpact>
+  </ExecutiveSummary>
+  <Scope><Assets>
+    <AssetType>FortiGate perimeter and internal firewalls (HQ + DR)</AssetType>
+    <AssetType>Internal server and user segments behind the FortiGate</AssetType>
+  </Assets><LogSources>
+    <LogSource>FortiGate traffic - logs-fortinet_fortigate.traffic-*</LogSource>
+  </LogSources></Scope>
+  <Prerequisites><TelemetryRequirements>
+    <Requirement>FortiGate logs shipped via Elastic Agent to logs-fortinet_fortigate.* (verified live).</Requirement>
+    <Requirement>Fields: fortinet.firewall.subtype (ips/dns/...), fortinet.firewall.action, fortinet.firewall.severity, fortinet.firewall.attack, fortinet.firewall.srccountry/dstcountry ('Reserved' = RFC1918 internal), fortinet.firewall.cfgpath, dns.question.name, source.ip, destination.ip, destination.port.</Requirement>
+  </TelemetryRequirements><DetectionSignals>
+    <Signal><Name>Internal port scan</Name><Details>internal source, scan-shaped traffic; Nessus 192.168.166.1 excluded.</Details></Signal>
+  </DetectionSignals></Prerequisites>
+  <Inputs>
+    <Input name="$source_ip" description="Internal scanning source."/>
+  </Inputs>
+  <Triage><ImmediateCapture>
+    <Item>Source: $source_ip</Item>
+  </ImmediateCapture><InitialAssessment>
+    <Rule>Approved scanners are excluded; the discriminator is whether the source has a legitimate scanning role and whether it reached (accepted) services vs was denied.</Rule>
+  </InitialAssessment></Triage>
+  <Investigation>
+    <Goal>Determine whether the port-scanning host is an unlisted legitimate scanner or an unexpected/compromised host, and what it reached.</Goal>
+    <Workflow>
+      <Step order="1" name="Port-scan shape: ports, destinations, accept/deny">
+        <Purpose>Distinguish a port scan (many ports per destination) from a host sweep (many destinations one port), and see what was reached.</Purpose>
+        <Query platform="Elastic" language="ES|QL" id="INV-01-FGSCAN-SHAPE">
+          <![CDATA[
+FROM logs-fortinet_fortigate.traffic-*
+| WHERE source.ip == "$source_ip" AND @timestamp >= NOW() - 4 hours
+| STATS conns = COUNT(*), dsts = COUNT_DISTINCT(destination.ip), ports = COUNT_DISTINCT(destination.port), accepted = COUNT(CASE(fortinet.firewall.action == "accept", 1, null)), denied = COUNT(CASE(fortinet.firewall.action == "deny", 1, null))
+| LIMIT 1
+          ]]>
+        </Query>
+        <ExpectedOutput>
+          <Field name="dsts"/>
+          <Field name="ports"/>
+          <Field name="accepted"/>
+          <Field name="denied"/>
+        </ExpectedOutput>
+        <AnalystNotes>High distinct-port count against few destinations = vertical port scan. accepted &gt; 0 means the scan found open services - note which. Mostly denied = blocked recon.</AnalystNotes>
+      </Step>
+      <Step order="2" name="Which services did the scan find open">
+        <Purpose>Open services the scan reached are the attacker's next targets - identify them.</Purpose>
+        <Query platform="Elastic" language="ES|QL" id="INV-02-FGSCAN-OPEN" optional="true">
+          <![CDATA[
+FROM logs-fortinet_fortigate.traffic-*
+| WHERE source.ip == "$source_ip" AND fortinet.firewall.action == "accept" AND @timestamp >= NOW() - 4 hours
+| STATS hits = COUNT(*), open_ports = VALUES(destination.port) BY destination.ip
+| SORT hits DESC
+| LIMIT 20
+          ]]>
+        </Query>
+        <ExpectedOutput>
+          <Field name="destination.ip"/>
+          <Field name="open_ports"/>
+        </ExpectedOutput>
+        <AnalystNotes>The (destination, open port) pairs the scan reached are what to watch for follow-on exploitation. Empty = the scan was fully denied.</AnalystNotes>
+      </Step>
+      <Step order="3" name="Finalize classification">
+        <DecisionTree>
+          <Node><Condition>INV-01 shows vertical port scanning from a non-scanner host, especially with accepted connections to sensitive services.</Condition><Result>True Positive (Unauthorised Recon - investigate the source host)</Result></Node>
+          <Node><Condition>INV-02 shows the scan reached sensitive open services (DB/admin ports) on internal hosts.</Condition><Result>True Positive (Recon with Service Discovery - escalate)</Result></Node>
+          <Node><Condition>Source is an unlisted but legitimate scanner/monitoring tool.</Condition><Result>False Positive</Result></Node>
+          <Node><Condition>Scan-shaped traffic from a server with unclear role.</Condition><Result>Needs Escalation</Result></Node>
+        </DecisionTree>
+        <DocumentationChecklist>
+          <Item>Attach outputs of INV-01-FGSCAN-SHAPE, INV-02-FGSCAN-OPEN to the case.</Item>
+        </DocumentationChecklist>
+      </Step>
+    </Workflow>
+  </Investigation>
+  <ClassificationGuidance>
+    <FalsePositive>
+      <Definition>An unlisted legitimate scanner or monitoring/health-check tool.</Definition>
+      <Indicators>
+        <Item>Known monitoring/scanner host.</Item>
+        <Item>Scheduled, uniform behavior.</Item>
+        <Item>Expected target/port set.</Item>
+      </Indicators>
+      <SOCAction>
+        <Item>Confirm the tool; add to exclusion; close as false_positive.</Item>
+      </SOCAction>
+    </FalsePositive>
+    <TruePositive>
+      <Definition>Internal port reconnaissance by an unexpected/compromised host.</Definition>
+      <Indicators>
+        <Item>Vertical scan from a non-scanner host.</Item>
+        <Item>Accepted connections to sensitive services.</Item>
+        <Item>User-segment or app-server origin.</Item>
+      </Indicators>
+      <SOCAction>
+        <Item>Triage the source host for the scanning tool/compromise.</Item>
+        <Item>Watch reached services for exploitation; open IR if indicators.</Item>
+      </SOCAction>
+    </TruePositive>
+    <Misconfiguration>
+      <Definition>A misconfigured app/monitoring job scanning unintentionally.</Definition>
+      <Indicators>
+        <Item>A known host due to broken config.</Item>
+        <Item>Benign intent confirmed.</Item>
+      </Indicators>
+      <SOCAction>
+        <Item>Fix the job; document/exclude.</Item>
+      </SOCAction>
+    </Misconfiguration>
+  </ClassificationGuidance>
+  <Response><IRForHumans>
+    <Phase name="Immediate Actions (0-30 minutes)">
+      <Action priority="1">Identify the source and role.</Action>
+      <Action priority="2">If accepted to sensitive services: escalate and watch those services.</Action>
+    </Phase>
+    <Phase name="Containment and Eradication (hours)">
+      <Action>Triage the host; scope reached services; hunt follow-on exploitation.</Action>
+    </Phase>
+    <Phase name="Recovery and Hardening (days)">
+      <Action>Segment networks; restrict east-west; alert on non-scanner scanning.</Action>
+    </Phase>
+  </IRForHumans></Response>
+  <QualityChecks>
+    <Check>Overlaps with the sweep rule (PB-FG-003) - this one is vertical (ports), that one horizontal (hosts). Both exclude Nessus.</Check>
+    <Check>Consider consolidating if both fire on the same sources repeatedly.</Check>
+  </QualityChecks>
+  <ClosureCriteria><FalsePositiveClosure>
+    <Item>Legitimate scanner confirmed; documented and excluded.</Item>
+  </FalsePositiveClosure><TruePositiveClosure>
+    <Item>Source triaged; reached services scoped; no compromise or eradicated.</Item>
+  </TruePositiveClosure></ClosureCriteria>
+</Playbook>

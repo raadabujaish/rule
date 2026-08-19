@@ -1,0 +1,151 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<Playbook xmlns="https://soc.example/playbooks" id="PB-WIN-048" name="Windows — PowerShell Engine Downgraded to v2 (AMSI and Script-Block-Logging Bypass) - SOC Playbook" version="1.0" status="Production" classification="TLP:AMBER">
+  <Metadata>
+    <Owner>JCB Detection Engineering (WatchWave)</Owner>
+    <LastUpdated>2026-08-14</LastUpdated>
+    <Severity default="High">High</Severity>
+    <Confidence default="Medium">Medium</Confidence>
+    <Category>Execution / Defense Evasion</Category>
+    <MitreAttack>
+      <Technique id="T1059.001" name="PowerShell"/>
+      <Tactic id="TA0002" name="Execution"/>
+    </MitreAttack>
+    <References>
+      <Reference title="MITRE ATT and CK" url="https://attack.mitre.org/techniques/T1059/"/>
+    </References>
+  </Metadata>
+  <ExecutiveSummary>
+    <Overview>PowerShell ran with engine version 2.x (events 400/403/4103) - PowerShell v2 predates AMSI and script-block logging, so attackers force a downgrade to evade both. Triage question: is this an evasion downgrade to run unmonitored code, or a legacy app genuinely needing v2?</Overview>
+    <BusinessImpact>A v2 downgrade blinds AMSI and script-block logging, letting malicious PowerShell run undetected.</BusinessImpact>
+  </ExecutiveSummary>
+  <Scope><Assets>
+    <AssetType>Windows servers and workstations (INTDOM domain)</AssetType>
+    <AssetType>Domain controllers</AssetType>
+  </Assets><LogSources>
+    <LogSource>PowerShell operational log - logs-windows.powershell_operational-*</LogSource>
+  </LogSources></Scope>
+  <Prerequisites><TelemetryRequirements>
+    <Requirement>Windows Security + Sysmon + PowerShell logs via Elastic Agent (verified live). Sysmon event.code 1=process(command_line/parent populated), 11=file, 13/12=registry(registry.path populated); process.code_signature NOT collected.</Requirement>
+  </TelemetryRequirements><DetectionSignals>
+    <Signal><Name>PowerShell v2 downgrade</Name><Details>400/403/4103 with engine.version 2.x.</Details></Signal>
+  </DetectionSignals></Prerequisites>
+  <Inputs>
+    <Input name="$hostname" description="Host where v2 PowerShell ran."/>
+    <Input name="$username" description="Account (user.name) if present."/>
+  </Inputs>
+  <Triage><ImmediateCapture>
+    <Item>Host: $hostname</Item>
+  </ImmediateCapture><InitialAssessment>
+    <Rule>Weigh the evidence story, not any single fact - see ClassificationGuidance.</Rule>
+  </InitialAssessment></Triage>
+  <Investigation>
+    <Goal>Determine whether the PowerShell v2 downgrade is an evasion attempt or a legacy-application requirement.</Goal>
+    <Workflow>
+      <Step order="1" name="Confirm the v2 engine start and its host/user">
+        <Purpose>Establish where and by whom v2 was invoked - a forced downgrade on a modern host is suspicious.</Purpose>
+        <Query platform="Elastic" language="ES|QL" id="INV-01-PSV2-START">
+          <![CDATA[
+FROM logs-windows.powershell_operational-*,logs-windows.powershell-*
+| WHERE event.code IN ("400","403","4103") AND host.name == "$hostname" AND powershell.engine.version LIKE "2.*" AND @timestamp >= NOW() - 4 hours
+| KEEP @timestamp, event.code, powershell.engine.version, user.name, host.name
+| SORT @timestamp DESC
+| LIMIT 15
+          ]]>
+        </Query>
+        <ExpectedOutput>
+          <Field name="event.code"/>
+          <Field name="powershell.engine.version"/>
+          <Field name="user.name"/>
+        </ExpectedOutput>
+        <AnalystNotes>A v2 start on a host that has no legacy-app reason is a deliberate downgrade (powershell -version 2). Note the user - a normal/service account forcing v2 is evasion.</AnalystNotes>
+      </Step>
+      <Step order="2" name="What ran under the v2 session">
+        <Purpose>v2 is chosen to run something unmonitored - look for the process/network activity around it.</Purpose>
+        <Query platform="Elastic" language="ES|QL" id="INV-02-PSV2-ACTIVITY" optional="true">
+          <![CDATA[
+FROM logs-windows.sysmon_operational-*,logs-system.security-*
+| WHERE event.code IN ("1","4688") AND host.name == "$hostname" AND process.name RLIKE "(?i)(powershell|pwsh).*" AND process.command_line IS NOT NULL AND @timestamp >= NOW() - 2 hours
+| EVAL cl = TO_LOWER(process.command_line)
+| WHERE cl LIKE "*-version 2*" OR cl LIKE "*-v 2*"
+| KEEP @timestamp, process.parent.name, process.command_line, user.name
+| SORT @timestamp DESC
+| LIMIT 15
+          ]]>
+        </Query>
+        <ExpectedOutput>
+          <Field name="process.parent.name"/>
+          <Field name="process.command_line"/>
+          <Field name="user.name"/>
+        </ExpectedOutput>
+        <AnalystNotes>A -version 2 flag confirms a forced downgrade. The parent and any additional arguments show intent. Because v2 bypasses script-block logging, correlate with process/network telemetry rather than PowerShell logs.</AnalystNotes>
+      </Step>
+      <Step order="3" name="Finalize classification">
+        <DecisionTree>
+          <Node><Condition>A deliberate v2 downgrade (-version 2) on a modern host by an unexpected account, especially with suspicious activity.</Condition><Result>True Positive (Logging-Bypass Evasion - IR)</Result></Node>
+          <Node><Condition>A documented legacy application that requires PowerShell v2.</Condition><Result>False Positive</Result></Node>
+          <Node><Condition>v2 usage with unclear justification.</Condition><Result>Needs Escalation</Result></Node>
+        </DecisionTree>
+        <DocumentationChecklist>
+          <Item>Attach outputs of INV-01-PSV2-START, INV-02-PSV2-ACTIVITY to the case.</Item>
+        </DocumentationChecklist>
+      </Step>
+    </Workflow>
+  </Investigation>
+  <ClassificationGuidance>
+    <FalsePositive>
+      <Definition>A legacy application legitimately requiring PowerShell v2.</Definition>
+      <Indicators>
+        <Item>Documented legacy app.</Item>
+        <Item>Consistent v2 use by that app.</Item>
+        <Item>Known context.</Item>
+      </Indicators>
+      <SOCAction>
+        <Item>Confirm the legacy requirement; document; plan migration off v2.</Item>
+      </SOCAction>
+    </FalsePositive>
+    <TruePositive>
+      <Definition>A deliberate downgrade to bypass AMSI/script-block logging.</Definition>
+      <Indicators>
+        <Item>-version 2 flag on a modern host.</Item>
+        <Item>Unexpected account.</Item>
+        <Item>Suspicious activity under the session.</Item>
+      </Indicators>
+      <SOCAction>
+        <Item>Isolate the host; open IR; rely on process/network telemetry for what ran.</Item>
+        <Item>Consider removing the PSv2 feature estate-wide.</Item>
+      </SOCAction>
+    </TruePositive>
+    <Misconfiguration>
+      <Definition>A misconfigured script pinning v2 unnecessarily.</Definition>
+      <Indicators>
+        <Item>A known script forcing v2 by habit.</Item>
+        <Item>Benign activity.</Item>
+      </Indicators>
+      <SOCAction>
+        <Item>Update the script to a supported version; document.</Item>
+      </SOCAction>
+    </Misconfiguration>
+  </ClassificationGuidance>
+  <Response><IRForHumans>
+    <Phase name="Immediate Actions (0-30 minutes)">
+      <Action priority="1">Confirm the activity on the host; if malicious indicators, isolate the host.</Action>
+      <Action priority="2">Identify the responsible account/process and its origin.</Action>
+    </Phase>
+    <Phase name="Containment and Eradication (hours)">
+      <Action>Isolate the host; capture volatile evidence; hunt the same pattern across the estate.</Action>
+      <Action>Reset credentials used on the host if compromise is confirmed.</Action>
+    </Phase>
+    <Phase name="Recovery and Hardening (days)">
+      <Action>Remediate the root cause; add/verify EDR coverage; apply relevant hardening.</Action>
+    </Phase>
+  </IRForHumans></Response>
+  <QualityChecks>
+    <Check>Confirm the required telemetry (Sysmon/Security auditing) is present on the host.</Check>
+    <Check>Tune known-benign administrative sources via exceptions, not by disabling the rule.</Check>
+  </QualityChecks>
+  <ClosureCriteria><FalsePositiveClosure>
+    <Item>Activity confirmed benign/authorised and documented.</Item>
+  </FalsePositiveClosure><TruePositiveClosure>
+    <Item>Host contained and triaged; root cause eradicated; estate swept; findings recorded.</Item>
+  </TruePositiveClosure></ClosureCriteria>
+</Playbook>

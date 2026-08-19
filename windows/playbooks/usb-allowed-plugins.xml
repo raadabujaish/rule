@@ -1,0 +1,169 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<Playbook xmlns="https://soc.example/playbooks" id="PB-JCB-NEW-04" name=" USB Allowed Plugins - SOC Playbook" version="2.1" status="Production" classification="TLP:AMBER">
+  <Metadata>
+    <Owner>JCB Detection Engineering (WatchWave)</Owner>
+    <LastUpdated>2026-08-19</LastUpdated>
+    <Severity default="High">High</Severity>
+    <Confidence default="Medium">Medium</Confidence>
+    <Category>Collection / Removable Media</Category>
+    <MitreAttack>
+      <Technique id="T1091" name="Replication Through Removable Media"/>
+      <Tactic id="TA0001" name="Initial Access"/>
+      <Technique id="T1052.001" name="Exfiltration over USB"/>
+      <Tactic id="TA0010" name="Exfiltration"/>
+    </MitreAttack>
+    <References>
+      <Reference title="MITRE ATT and CK T1091 Replication Through Removable Media" url="https://attack.mitre.org/techniques/T1091/"/>
+      <Reference title="MITRE ATT and CK T1052.001 Exfiltration over USB" url="https://attack.mitre.org/techniques/T1052/001/"/>
+    </References>
+  </Metadata>
+  <ExecutiveSummary>
+    <Overview>Windows logged event 6416 ("A new external device was recognized by the system", event.action new-external-device-recognized-by-system) - a device was allowed to enumerate on an endpoint. This event fires for EVERY external device (audio endpoints, HID, printers, docks dominate the volume), so the triage job is to separate benign peripherals from removable STORAGE / portable devices (USB mass storage, external disks, phones via WPD, CD/DVD), which are the data-exfiltration and malware-introduction vectors on a bank endpoint. Note: 6416 is written by SYSTEM, so winlog.event_data.user.name is the machine account (e.g. PC406CSM$) - the real user must be attributed from interactive logons.</Overview>
+    <BusinessImpact>Unmonitored removable storage on bank endpoints is a primary channel for exfiltrating customer / PCI data and for introducing malware that bypasses network controls. The rule is High severity because an allowed mass-storage device on a sensitive host warrants confirmation that it is sanctioned.</BusinessImpact>
+  </ExecutiveSummary>
+  <Scope><Assets>
+    <AssetType>Windows endpoints (intdom.local) with USB / device auditing (Event ID 6416)</AssetType>
+  </Assets><LogSources>
+    <LogSource>Windows Security auditing - logs-system.security-*</LogSource>
+  </LogSources></Scope>
+  <Prerequisites><TelemetryRequirements>
+    <Requirement>Windows Security 6416 (verified live on logs-system.security-*, event.provider Microsoft-Windows-Security-Auditing). Fields: host.name (endpoint, lowercased), winlog.event_data.DeviceDescription (e.g. "Kingston XS1000 SCSI Disk Device", "Apple iPhone", "Generic USB Hub"), winlog.event_data.ClassName (device class: USB, HIDClass, AudioEndpoint, DiskDrive, WPD, Volume, CDROM, USBDevice, ...), winlog.event_data.DeviceId (bus id, e.g. "USB\VID_...", "USBSTOR\..."), event.code "6416", event.action, event.provider. winlog.event_data.user.name / SubjectUserName is the machine account for 6416; attribute the interactive user via 4624 (INV-03). Removable-storage classes of interest: DiskDrive, CDROM, WPD, Volume, FloppyDisk, or DeviceId starting USBSTOR.</Requirement>
+  </TelemetryRequirements><DetectionSignals>
+    <Signal><Name>USB Allowed Plugins</Name><Details>Event 6416 - a new external device recognized (allowed to enumerate) on an endpoint.</Details></Signal>
+  </DetectionSignals></Prerequisites>
+  <Inputs>
+    <Input name="$host" description="Endpoint host.name (lowercased), e.g. hq-ibrahimhmlap. Matches the alert entity host.name."/>
+  </Inputs>
+  <Triage><ImmediateCapture>
+    <Item>$host: $host</Item>
+    <Item>Identify the device class and description before judging - a mass-storage device is a very different event from an audio endpoint or HID.</Item>
+  </ImmediateCapture><InitialAssessment>
+    <Rule>Weigh the full evidence story per the ClassificationGuidance. Device class (storage vs peripheral), host sensitivity, and the attributed user drive the verdict - not the raw 6416 count.</Rule>
+  </InitialAssessment></Triage>
+  <Investigation>
+    <Goal>Determine whether the allowed device is benign peripheral enumeration or an unsanctioned removable-storage / portable device on the host (exfiltration / malware vector).</Goal>
+    <Workflow>
+      <Step order="1" name="Classify the recognized devices (storage vs peripheral)">
+        <Purpose>6416 is dominated by benign peripherals; split the host's devices by class so a storage / portable device stands out immediately.</Purpose>
+        <Query platform="Elastic" language="ES|QL" id="INV-01">
+          <![CDATA[
+FROM logs-system.security-*
+| WHERE event.code == "6416" AND host.name == "$host" AND @timestamp >= NOW() - 4 hours
+| EVAL storage = CASE(winlog.event_data.ClassName IN ("DiskDrive","CDROM","WPD","Volume","FloppyDisk") OR winlog.event_data.DeviceId LIKE "USBSTOR*", "STORAGE", "peripheral")
+| STATS events = COUNT(*), devices = VALUES(winlog.event_data.DeviceDescription) BY storage, winlog.event_data.ClassName
+| SORT storage ASC, events DESC
+| LIMIT 30
+          ]]>
+        </Query>
+        <ExpectedOutput>
+          <Field name="storage"/>
+          <Field name="winlog.event_data.ClassName"/>
+          <Field name="devices"/>
+        </ExpectedOutput>
+        <AnalystNotes>Rows tagged STORAGE (DiskDrive / WPD / Volume / CDROM, or a USBSTOR device id) are the ones that matter. peripheral rows (AudioEndpoint, HIDClass, PrintQueue, Monitor, USBDevice-printers/docks) are routine and usually closable.</AnalystNotes>
+      </Step>
+      <Step order="2" name="Detail the removable-storage / portable devices">
+        <Purpose>List the storage / portable devices with their DeviceId (VID/PID / serial) and timeline - the concrete evidence for a data-exfil / malware-vector review.</Purpose>
+        <Query platform="Elastic" language="ES|QL" id="INV-02">
+          <![CDATA[
+FROM logs-system.security-*
+| WHERE event.code == "6416" AND host.name == "$host" AND @timestamp >= NOW() - 4 hours
+    AND (winlog.event_data.ClassName IN ("DiskDrive","CDROM","WPD","Volume","FloppyDisk") OR winlog.event_data.DeviceId LIKE "USBSTOR*")
+| KEEP @timestamp, host.name, winlog.event_data.DeviceDescription, winlog.event_data.ClassName, winlog.event_data.DeviceId, event.action
+| SORT @timestamp DESC
+| LIMIT 30
+          ]]>
+        </Query>
+        <ExpectedOutput>
+          <Field name="winlog.event_data.DeviceDescription"/>
+          <Field name="winlog.event_data.ClassName"/>
+          <Field name="winlog.event_data.DeviceId"/>
+        </ExpectedOutput>
+        <AnalystNotes>Zero rows = only benign peripherals were recognised (lean towards benign / policy note). A DiskDrive / WPD / Volume / USBSTOR device = confirm it is a sanctioned, encrypted, asset-registered device. Record the DeviceId (VID/PID and serial) for asset / whitelist checks and for tracking reuse across hosts.</AnalystNotes>
+      </Step>
+      <Step order="3" name="Attribute the device to an interactive user">
+        <Purpose>6416 carries the machine account, so identify who was actually logged on to the host in the window (console / unlock / RDP / cached).</Purpose>
+        <Query platform="Elastic" language="ES|QL" id="INV-03">
+          <![CDATA[
+FROM logs-system.security-*
+| WHERE event.code == "4624" AND host.name == "$host" AND @timestamp >= NOW() - 4 hours
+    AND winlog.event_data.LogonType IN ("2","7","10","11")
+| STATS logons = COUNT(*), first_seen = MIN(@timestamp), last_seen = MAX(@timestamp) BY winlog.event_data.TargetUserName, winlog.event_data.LogonType
+| SORT logons DESC
+| LIMIT 20
+          ]]>
+        </Query>
+        <ExpectedOutput>
+          <Field name="winlog.event_data.TargetUserName"/>
+          <Field name="winlog.event_data.LogonType"/>
+          <Field name="logons"/>
+        </ExpectedOutput>
+        <AnalystNotes>LogonType 2 = console, 7 = unlock, 10 = RemoteInteractive (RDP), 11 = cached. The interactive user present at the device-plug time is the person to attribute the device to and, if needed, to interview. Machine ($) and service accounts are not the plugger.</AnalystNotes>
+      </Step>
+    </Workflow>
+  </Investigation>
+  <DecisionTree>
+    <Node><Condition>An unsanctioned removable-storage / portable device (external disk, USB stick, phone via WPD, CD/DVD) recognised on a sensitive host, especially with an unfamiliar DeviceId / serial or an unexpected user, and no asset / whitelist record.</Condition><Result>True Positive (Unsanctioned removable-storage device - data-handling / exfiltration or malware-vector review)</Result></Node>
+    <Node><Condition>Only benign peripherals (audio, HID, printers, docks, monitors) were recognised, OR the storage device is a sanctioned, asset-registered, encrypted device used by the assigned user.</Condition><Result>False Positive (Benign peripheral or sanctioned device)</Result></Node>
+    <Node><Condition>Device auditing is enumerating routine peripherals so broadly that the rule is noisy without a storage filter.</Condition><Result>Misconfiguration (rule / audit-policy scoping to storage classes)</Result></Node>
+    <Node><Condition>A storage / portable device whose sanction status, owner or contents cannot be determined from the logs alone.</Condition><Result>Needs Escalation (endpoint / user review)</Result></Node>
+  </DecisionTree>
+  <ClassificationGuidance>
+    <FalsePositive>
+      <Definition>Benign peripheral enumeration, or a sanctioned removable device used by its assigned user.</Definition>
+      <Indicators>
+        <Item>Device class is AudioEndpoint / HIDClass / PrintQueue / Monitor / dock, etc.</Item>
+        <Item>Storage device is asset-registered, encrypted and used by the assigned user.</Item>
+        <Item>No sensitivity to the host's role.</Item>
+      </Indicators>
+      <SOCAction>
+        <Item>Confirm peripheral class or the device's sanctioned status; close as benign_or_sanctioned.</Item>
+      </SOCAction>
+    </FalsePositive>
+    <TruePositive>
+      <Definition>An unsanctioned removable-storage / portable device on an endpoint.</Definition>
+      <Indicators>
+        <Item>DiskDrive / WPD / Volume / CDROM or USBSTOR device id.</Item>
+        <Item>Unfamiliar DeviceId / serial, or a device seen across multiple hosts.</Item>
+        <Item>Sensitive host and/or unexpected user.</Item>
+      </Indicators>
+      <SOCAction>
+        <Item>Confirm whether the device is sanctioned / encrypted; identify and interview the attributed user; review what data was accessible; if unsanctioned on a sensitive host, escalate for data-handling / malware review.</Item>
+      </SOCAction>
+    </TruePositive>
+    <Misconfiguration>
+      <Definition>Rule / audit-policy scope too broad - all 6416 recognitions alert rather than storage classes only.</Definition>
+      <Indicators>
+        <Item>Alerts dominated by audio / HID / printer recognitions.</Item>
+        <Item>No storage device in the evidence.</Item>
+      </Indicators>
+      <SOCAction>
+        <Item>Recommend scoping the detection to storage / portable classes (DiskDrive / WPD / Volume / CDROM / USBSTOR); document.</Item>
+      </SOCAction>
+    </Misconfiguration>
+  </ClassificationGuidance>
+  <Response><IRForHumans>
+    <Phase name="Immediate Actions (0-30 minutes)">
+      <Action priority="1">Classify the recognised device(s); if a removable-storage / portable device, capture the DeviceId / serial and attribute the interactive user (INV-03).</Action>
+      <Action priority="2">Check whether the device and user are sanctioned for removable media on this host, and whether the host handles sensitive / PCI data.</Action>
+    </Phase>
+    <Phase name="Containment and Eradication (hours)">
+      <Action>For an unsanctioned device on a sensitive host: interview the user, review what data was accessible / copied, scan the host for malware introduced from the media, and apply device-control restrictions.</Action>
+    </Phase>
+    <Phase name="Recovery and Hardening (days)">
+      <Action>Enforce removable-media policy (encryption + whitelisting via device control); scope the detection to storage classes; maintain an approved-device register; educate users.</Action>
+    </Phase>
+  </IRForHumans></Response>
+  <Escalation>
+    <Trigger>An unsanctioned removable-storage / portable device on a sensitive host, an unfamiliar device reused across multiple hosts, or evidence of data copied to the device.</Trigger>
+    <To>SOC L2 / IR</To>
+  </Escalation>
+  <Closure>
+    <FalsePositiveClosure>
+      <Item>Benign peripheral or sanctioned encrypted device confirmed and documented; scoping recommendation raised if the rule is noisy.</Item>
+    </FalsePositiveClosure>
+    <TruePositiveClosure>
+      <Item>Unsanctioned device and user identified; data exposure assessed; host scanned; device-control restrictions applied; case recorded (IR opened if exfiltration / malware confirmed).</Item>
+    </TruePositiveClosure>
+  </Closure>
+</Playbook>

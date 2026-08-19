@@ -1,0 +1,149 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<Playbook xmlns="https://soc.example/playbooks" id="PB-F5-007" name="F5 WAF — Telemetry Stopped (Log Absence) - SOC Playbook" version="1.0" status="Production" classification="TLP:AMBER">
+  <Metadata>
+    <Owner>JCB Detection Engineering (WatchWave)</Owner>
+    <LastUpdated>2026-08-14</LastUpdated>
+    <Severity default="High">High</Severity>
+    <Confidence default="Medium">Medium</Confidence>
+    <Category>Impact / Loss of Visibility</Category>
+    <MitreAttack>
+      <Technique id="T1562.008" name="Disable or Modify Cloud Logs"/>
+      <Tactic id="TA0005" name="Defense Evasion"/>
+    </MitreAttack>
+    <References>
+      <Reference title="MITRE ATT and CK" url="https://attack.mitre.org/techniques/T1562/"/>
+    </References>
+  </Metadata>
+  <ExecutiveSummary>
+    <Overview>No F5 WAF events arrived for 15 minutes. This replaces the old inverted heartbeat (which alerted every minute logs existed). Triage question: is this a benign quiet period / maintenance, or has WAF logging (and possibly WAF protection) failed or been disabled - leaving internet banking unprotected and blind?</Overview>
+    <BusinessImpact>Loss of WAF telemetry blinds detection for the bank's internet-facing apps; if protection also dropped, exploitation could proceed unseen.</BusinessImpact>
+  </ExecutiveSummary>
+  <Scope><Assets>
+    <AssetType>F5 BIG-IP ASM / Advanced WAF fronting JCB internet banking and public web apps</AssetType>
+    <AssetType>Published banking applications and their backend servers</AssetType>
+  </Assets><LogSources>
+    <LogSource>F5 ASM CEF events via syslog -&gt; logs-cef.log-* (observer.vendor F5)</LogSource>
+  </LogSources></Scope>
+  <Prerequisites><TelemetryRequirements>
+    <Requirement>F5 ASM logging to CEF over syslog, parsed into logs-cef.log-* (verified live).</Requirement>
+    <Requirement>CEF fields: deviceCustomString4=attack_type, deviceCustomNumber2=violation_rating (&gt;=4 = real attack), deviceCustomString1=security policy, requestUrl, requestMethod, deviceCustomNumber1=HTTP response code, deviceCustomString6=source geo, cef.name=violation name, event.action=passed|alerted|blocked.</Requirement>
+  </TelemetryRequirements><DetectionSignals>
+    <Signal><Name>F5 log absence</Name><Details>Zero F5 events in the last 15 minutes (ES|QL COUNT == 0).</Details></Signal>
+  </DetectionSignals></Prerequisites>
+  <Inputs>
+  </Inputs>
+  <Triage><ImmediateCapture>
+    <Item>Confirm current F5 event flow</Item>
+    <Item>Note last-seen F5 event time</Item>
+  </ImmediateCapture><InitialAssessment>
+    <Rule>A short quiet window overnight can be benign; a sustained gap during business hours is an outage or tampering and must be escalated to the WAF/network team fast.</Rule>
+  </InitialAssessment></Triage>
+  <Investigation>
+    <Goal>Confirm whether F5 telemetry has genuinely stopped and for how long, to distinguish a brief lull from an outage/tampering.</Goal>
+    <Workflow>
+      <Step order="1" name="Confirm F5 event flow over the last 2 hours">
+        <Purpose>See whether events truly stopped and when the last one arrived - a real gap vs a momentary lull.</Purpose>
+        <Query platform="Elastic" language="ES|QL" id="INV-01-F5ABS-FLOW">
+          <![CDATA[
+FROM logs-cef.log-*
+| WHERE observer.vendor == "F5" AND @timestamp >= NOW() - 2 hours
+| STATS events = COUNT(*), last_seen = MAX(@timestamp), first_seen = MIN(@timestamp), devices = VALUES(cef.extensions.deviceHostName)
+| LIMIT 1
+          ]]>
+        </Query>
+        <ExpectedOutput>
+          <Field name="events"/>
+          <Field name="last_seen"/>
+          <Field name="devices"/>
+        </ExpectedOutput>
+        <AnalystNotes>events == 0 over 2h confirms a sustained outage. A recent last_seen (minutes ago) with a small count suggests a brief lull already recovering. deviceHostName lists which F5 units were last reporting.</AnalystNotes>
+      </Step>
+      <Step order="2" name="Is any CEF telemetry still flowing (pipeline vs device)">
+        <Purpose>Distinguish an F5-specific outage from a whole-pipeline failure: if OTHER CEF vendors still flow, the problem is the F5 device/feed.</Purpose>
+        <Query platform="Elastic" language="ES|QL" id="INV-02-F5ABS-PIPELINE">
+          <![CDATA[
+FROM logs-cef.log-*
+| WHERE @timestamp >= NOW() - 30 minutes
+| STATS events = COUNT(*), vendors = VALUES(observer.vendor) BY observer.vendor
+| SORT events DESC
+| LIMIT 15
+          ]]>
+        </Query>
+        <ExpectedOutput>
+          <Field name="observer.vendor"/>
+          <Field name="events"/>
+        </ExpectedOutput>
+        <AnalystNotes>If Kaspersky/NETSCOUT/Forcepoint CEF still arrive but F5 does not, the F5 syslog feed or device is the fault (not the whole pipeline). If NOTHING arrives, it is a collector/pipeline outage.</AnalystNotes>
+      </Step>
+      <Step order="3" name="Finalize classification">
+        <DecisionTree>
+          <Node><Condition>INV-01 confirms zero F5 events for a sustained period while INV-02 shows other CEF vendors still flowing.</Condition><Result>True Positive (F5 Telemetry/Feed Outage - escalate to WAF/network ops; verify WAF still enforcing)</Result></Node>
+          <Node><Condition>INV-02 shows all CEF telemetry stopped.</Condition><Result>Misconfiguration (Collector/Pipeline Outage - escalate to logging ops)</Result></Node>
+          <Node><Condition>INV-01 shows events resumed within minutes (a brief lull, e.g. low overnight traffic).</Condition><Result>Benign Activity</Result></Node>
+          <Node><Condition>Sustained F5 gap coinciding with a change window but no confirmation it is planned.</Condition><Result>Needs Escalation</Result></Node>
+        </DecisionTree>
+        <DocumentationChecklist>
+          <Item>Attach outputs of INV-01-F5ABS-FLOW, INV-02-F5ABS-PIPELINE to the case.</Item>
+        </DocumentationChecklist>
+      </Step>
+    </Workflow>
+  </Investigation>
+  <ClassificationGuidance>
+    <FalsePositive>
+      <Definition>A brief, benign lull in F5 events (genuine low traffic), already recovering.</Definition>
+      <Indicators>
+        <Item>Last-seen only minutes ago.</Item>
+        <Item>Overnight/low-traffic period.</Item>
+        <Item>Flow resumes on its own.</Item>
+      </Indicators>
+      <SOCAction>
+        <Item>Confirm recovery; close as benign_activity; consider widening the absence window if overnight lulls recur.</Item>
+      </SOCAction>
+    </FalsePositive>
+    <TruePositive>
+      <Definition>F5 protection/logging genuinely stopped - device down, syslog feed broken, or tampering.</Definition>
+      <Indicators>
+        <Item>Sustained zero F5 events.</Item>
+        <Item>Other CEF vendors still flowing (F5-specific).</Item>
+        <Item>During business hours.</Item>
+      </Indicators>
+      <SOCAction>
+        <Item>Escalate to WAF/network ops immediately.</Item>
+        <Item>Verify the F5 units are up and ENFORCING (not just logging).</Item>
+        <Item>Treat internet-banking apps as temporarily unmonitored - heighten other perimeter monitoring until restored.</Item>
+      </SOCAction>
+    </TruePositive>
+    <Misconfiguration>
+      <Definition>A logging pipeline/collector outage affecting CEF ingestion broadly.</Definition>
+      <Indicators>
+        <Item>All CEF vendors stopped, not just F5.</Item>
+        <Item>Collector/agent fault.</Item>
+      </Indicators>
+      <SOCAction>
+        <Item>Escalate to logging/SIEM ops; restore the CEF collector.</Item>
+        <Item>Document the visibility gap window.</Item>
+      </SOCAction>
+    </Misconfiguration>
+  </ClassificationGuidance>
+  <Response><IRForHumans>
+    <Phase name="Immediate Actions (0-30 minutes)">
+      <Action priority="1">Confirm whether the F5 units are up and enforcing.</Action>
+      <Action priority="2">Escalate to WAF/network or logging ops per INV-02.</Action>
+    </Phase>
+    <Phase name="Containment and Eradication (hours)">
+      <Action>Restore the F5 syslog feed or collector; verify enforcement remained active during the gap.</Action>
+    </Phase>
+    <Phase name="Recovery and Hardening (days)">
+      <Action>Add device-health monitoring on the F5 units; consider redundant log paths for the WAF feed.</Action>
+    </Phase>
+  </IRForHumans></Response>
+  <QualityChecks>
+    <Check>This is an absence detection - the alert means no data, so the queries look slightly wider (2h/30m) to confirm the gap and its scope.</Check>
+    <Check>Suppression 2h so one outage pages once.</Check>
+  </QualityChecks>
+  <ClosureCriteria><FalsePositiveClosure>
+    <Item>Brief lull confirmed recovered; documented.</Item>
+  </FalsePositiveClosure><TruePositiveClosure>
+    <Item>F5 feed restored; enforcement confirmed active throughout; visibility gap documented.</Item>
+  </TruePositiveClosure></ClosureCriteria>
+</Playbook>

@@ -1,0 +1,84 @@
+{
+  "rule_id": "jcb-ns-ddos-surge",
+  "name": "NETSCOUT AED — Volumetric DDoS Surge Against a Bank Internet Service",
+  "version": 1,
+  "enabled": true,
+  "interval": "1h",
+  "from": "now-70m",
+  "to": "now",
+  "description": "Attacker objective\nDeny availability of an internet-facing banking service (internet/mobile banking, webmail, corporate portal) by flooding it — TCP SYN/ICMP flood, fragmentation, rate abuse, or malformed-protocol attacks.\n\nAttack logic\nThe edge DDoS-defense appliance mitigates volumetric and protocol attacks against the bank's protected internet services. A short-window surge of these mitigation events against one protected service, well above the steady background the appliance handles, indicates an active DDoS attack rather than routine background floods.\n\nWhy this detection works\nAggregating DDoS-mitigation events per protected service over a short window separates a genuine volumetric attack from the low, steady rate of background floods the appliance blocks continuously.\n\nFalse positives\nA legitimate traffic spike (marketing campaign, product launch) misread as a flood; a scheduled load test against a protected service.\n\nTuning\nSet the per-service surge threshold above the observed background rate; allowlist scheduled load tests; correlate with the F5/FortiGate view of the same service and with any upstream cloud-signaling.\n\nRequired telemetry\nNETSCOUT Arbor Edge Defense (CEF): cef.device.event_class_id (DDoS mitigation classes), Protection Group (deviceCustomString2), source.ip (attacker), destination.ip (bank service), destination.port.",
+  "tags": [
+    "JCB",
+    "NETSCOUT",
+    "Perimeter",
+    "Phase3",
+    "Tactic: Impact",
+    "Use Case: Threat Detection"
+  ],
+  "author": [
+    "raadabujaish"
+  ],
+  "license": "",
+  "threat": [
+    {
+      "framework": "MITRE ATT&CK",
+      "tactic": {
+        "id": "TA0040",
+        "name": "Impact",
+        "reference": "https://attack.mitre.org/tactics/TA0040/"
+      },
+      "technique": [
+        {
+          "id": "T1498",
+          "name": "Network Denial of Service",
+          "reference": "https://attack.mitre.org/techniques/T1498/"
+        }
+      ]
+    }
+  ],
+  "investigation_fields": {
+    "field_names": [
+      "source.ip",
+      "source.geo.country_name",
+      "source.as.organization.name",
+      "destination.ip",
+      "destination.port",
+      "network.transport",
+      "cef.device.event_class_id",
+      "cef.name",
+      "cef.extensions.deviceCustomString2",
+      "cef.severity",
+      "observer.vendor"
+    ]
+  },
+  "related_integrations": [],
+  "required_fields": [],
+  "setup": "",
+  "note": "## Investigation guide\n1. deviceCustomString2 = the targeted bank service; review the attack type (event_class_id), source geography/ASN and destination port.\n2. Confirm whether the service is degraded; if so, engage DDoS response and upstream cloud-signaling.\n3. Correlate with F5/FortiGate for the same public service and with any customer-impact reports.",
+  "false_positives": [
+    "A legitimate traffic spike (marketing campaign, product launch) misread as a flood; a scheduled load test against a protected service."
+  ],
+  "references": [
+    "https://attack.mitre.org/techniques/T1498/"
+  ],
+  "risk_score": 73,
+  "risk_score_mapping": [],
+  "severity": "high",
+  "severity_mapping": [],
+  "output_index": "",
+  "max_signals": 100,
+  "exceptions_list": [],
+  "actions": [],
+  "type": "threshold",
+  "language": "kuery",
+  "index": [
+    "logs-cef.log-*"
+  ],
+  "query": "observer.vendor:\"NETSCOUT\" and cef.device.event_class_id:(\"TCP SYN Flood Detection\" or \"ICMP Flood Detection\" or \"Rate-based Blocking\" or \"TCP Connection Limiting\" or \"Fragment Detection\" or \"Block Malformed DNS Traffic\" or \"Malformed HTTP Filtering\")",
+  "threshold": {
+    "field": [
+      "cef.extensions.deviceCustomString2"
+    ],
+    "value": 30
+  }
+}

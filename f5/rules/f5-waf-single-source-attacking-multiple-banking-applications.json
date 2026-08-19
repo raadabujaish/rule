@@ -1,0 +1,85 @@
+{
+  "rule_id": "jcb-f5-multi-app-targeting",
+  "name": "F5 WAF — Single Source Attacking Multiple Banking Applications",
+  "version": 1,
+  "enabled": true,
+  "interval": "1h",
+  "from": "now-24h",
+  "to": "now",
+  "description": "Attacker objective\nDeliberately target the institution across its estate by attacking multiple distinct banking applications rather than a single opportunistic endpoint.\n\nAttack logic\nA single source attacking two or more distinct WAF-protected banking applications with high-confidence attacks indicates focused targeting of the bank rather than opportunistic scanning of one app.\n\nWhy this detection works\nCounting distinct targeted applications (WAF policies) per source surfaces focused, multi-application targeting.\n\nFalse positives\nShared NAT/proxy egress; authorised scanners.\n\nTuning\nRaise the distinct-application threshold for higher confidence; allowlist known scanners.\n\nRequired telemetry\nF5 ASM / Advanced WAF events (CEF): source.ip, WAF policy / application name.",
+  "tags": [
+    "JCB",
+    "F5-WAF",
+    "Phase3",
+    "Use Case: Threat Detection",
+    "Tactic: Initial Access"
+  ],
+  "author": [
+    "raadabujaish"
+  ],
+  "threat": [
+    {
+      "framework": "MITRE ATT&CK",
+      "tactic": {
+        "id": "TA0001",
+        "name": "Initial Access",
+        "reference": "https://attack.mitre.org/tactics/TA0001/"
+      },
+      "technique": [
+        {
+          "id": "T1190",
+          "name": "Exploit Public-Facing Application",
+          "reference": "https://attack.mitre.org/techniques/T1190/"
+        }
+      ]
+    }
+  ],
+  "investigation_fields": {
+    "field_names": [
+      "source.ip",
+      "cef.extensions.deviceCustomString4",
+      "cef.extensions.deviceCustomString1",
+      "url.original",
+      "cef.extensions.deviceAction",
+      "cef.extensions.deviceCustomNumber2",
+      "source.geo.country_name",
+      "source.as.organization.name"
+    ]
+  },
+  "related_integrations": [],
+  "required_fields": [],
+  "setup": "",
+  "note": "## Investigation guide\n1. Identify which banking applications were targeted and whether attacks were blocked or alerted.\n2. Multi-application targeting is deliberate; prioritise and consider blocking the source.",
+  "false_positives": [
+    "Shared NAT/proxy egress; authorised scanners."
+  ],
+  "references": [
+    "https://attack.mitre.org/techniques/T1190/"
+  ],
+  "risk_score": 73,
+  "risk_score_mapping": [],
+  "severity": "high",
+  "severity_mapping": [],
+  "output_index": "",
+  "max_signals": 100,
+  "exceptions_list": [],
+  "actions": [],
+  "type": "threshold",
+  "language": "kuery",
+  "index": [
+    "logs-cef.log-*"
+  ],
+  "query": "observer.vendor:\"F5\" and cef.extensions.deviceCustomString4:(\"SQL-Injection\" or \"Cross Site Scripting (XSS)\" or \"Command Execution\" or \"Server Side Code Injection\" or \"Path Traversal\" or \"Remote File Include\" or \"HTTP Request Smuggling Attack\" or \"Detection Evasion\" or \"Injection Attempt\" or \"Authentication/Authorization Attacks\" or \"Trojan/Backdoor/Spyware\") and cef.extensions.deviceCustomNumber2 >= 4",
+  "threshold": {
+    "field": [
+      "source.ip"
+    ],
+    "value": 1,
+    "cardinality": [
+      {
+        "field": "cef.extensions.deviceCustomString1",
+        "value": 2
+      }
+    ]
+  }
+}

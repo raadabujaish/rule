@@ -1,0 +1,89 @@
+{
+  "rule_id": "f815aef6-131c-4037-93da-c4dd9305f7f5",
+  "name": "Windows — Event Log Cleared (All Channels)",
+  "version": 1,
+  "enabled": true,
+  "interval": "15m",
+  "from": "now-25m",
+  "to": "now",
+  "description": "Detects clearing of a Windows event log — event 1102 for the Security log and event 104 for any other channel. Log clearing is a defence-evasion and anti-forensics action that almost always follows hands-on-keyboard activity.\n\n**This rule exists to correct a coverage gap.** The existing custom rule 'AD/Windows — Security Event Log Cleared' searches for event 1102 in `logs-system.security-*`, but at JCB the Elastic Windows integration routes 1102 and 104 into the `system.application` and `system.system` datasets, not `system.security`. That rule therefore cannot fire. This rule searches all three system datasets, which is where the events actually land (validated: 16 x 1102 and 971 x 104 over 90 days).",
+  "tags": [
+    "JCB",
+    "ScanWave",
+    "Windows",
+    "Defense Evasion",
+    "Anti-Forensics",
+    "MITRE T1070.001"
+  ],
+  "author": [
+    "ScanWave"
+  ],
+  "license": "ScanWave — JCB Managed Detection",
+  "threat": [
+    {
+      "framework": "MITRE ATT&CK",
+      "tactic": {
+        "id": "TA0005",
+        "name": "Defense Evasion",
+        "reference": "https://attack.mitre.org/tactics/TA0005/"
+      },
+      "technique": [
+        {
+          "id": "T1070",
+          "name": "Indicator Removal",
+          "reference": "https://attack.mitre.org/techniques/T1070/",
+          "subtechnique": [
+            {
+              "id": "T1070.001",
+              "name": "Clear Windows Event Logs",
+              "reference": "https://attack.mitre.org/techniques/T1070/001/"
+            }
+          ]
+        }
+      ]
+    }
+  ],
+  "investigation_fields": {
+    "field_names": [
+      "host.name",
+      "winlog.event_data.SubjectUserName",
+      "winlog.event_data.SubjectDomainName",
+      "winlog.event_data.TargetUserName",
+      "winlog.event_data.TargetDomainName",
+      "winlog.event_data.MemberName",
+      "winlog.event_data.MemberSid",
+      "event.code",
+      "event.action",
+      "message",
+      "winlog.channel"
+    ]
+  },
+  "related_integrations": [],
+  "required_fields": [],
+  "setup": "",
+  "note": "### Triage\n1. `winlog.channel` identifies which log was cleared; `winlog.event_data.SubjectUserName` (1102) identifies who cleared it.\n2. Reconstruct what the account did **before** the clear using every other telemetry source — the local log is by definition gone. Use FortiGate traffic, share access on other hosts, and the account's activity on the domain controllers.\n3. Log clearing on the Exchange servers at JCB has a small routine baseline; log clearing anywhere else, or by an interactive user account, should be escalated.\n4. Correlate with `Windows — Defender / EDR / Firewall Tampering` and `Windows — Elastic Agent Service Terminated` on the same host.\n\n### Follow-up\nRetire or fix the older 'AD/Windows — Security Event Log Cleared' rule so the SOC is not relying on a query that cannot match.",
+  "false_positives": [
+    "Scheduled log maintenance or log rotation. The Entra/AD Connect server hq-adsync-app-p clears its Application log routinely (68 events in 7 days) and is excluded in the query; Exchange has a small 1102 baseline that is deliberately NOT excluded.",
+    "Server rebuilds and imaging.",
+    "Diagnostic work by administrators who clear a noisy log before reproducing a fault."
+  ],
+  "references": [
+    "https://attack.mitre.org/techniques/T1070/001/"
+  ],
+  "risk_score": 73,
+  "risk_score_mapping": [],
+  "severity": "high",
+  "severity_mapping": [],
+  "output_index": "",
+  "max_signals": 100,
+  "exceptions_list": [],
+  "actions": [],
+  "type": "query",
+  "language": "kuery",
+  "index": [
+    "logs-system.security-*",
+    "logs-system.system-*",
+    "logs-system.application-*"
+  ],
+  "query": "event.code:(\"1102\" or \"104\") and not (event.code:\"104\" and host.name:\"hq-adsync-app-p\" and winlog.channel:\"Application\")"
+}

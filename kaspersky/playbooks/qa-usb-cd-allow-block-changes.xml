@@ -1,0 +1,168 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<Playbook xmlns="https://soc.example/playbooks" id="PB-JCB-NEW-05" name="QA - USB/CD Allow/Block Changes - SOC Playbook" version="2.1" status="Production" classification="TLP:AMBER">
+  <Metadata>
+    <Owner>JCB Detection Engineering (WatchWave)</Owner>
+    <LastUpdated>2026-08-19</LastUpdated>
+    <Severity default="Medium">Medium</Severity>
+    <Confidence default="Medium">Medium</Confidence>
+    <Category>Collection / Removable Media (Device Control)</Category>
+    <MitreAttack>
+      <Technique id="T1091" name="Replication Through Removable Media"/>
+      <Tactic id="TA0001" name="Initial Access"/>
+      <Technique id="T1052.001" name="Exfiltration over USB"/>
+      <Tactic id="TA0010" name="Exfiltration"/>
+    </MitreAttack>
+    <References>
+      <Reference title="MITRE ATT and CK T1091 Replication Through Removable Media" url="https://attack.mitre.org/techniques/T1091/"/>
+      <Reference title="MITRE ATT and CK T1052.001 Exfiltration over USB" url="https://attack.mitre.org/techniques/T1052/001/"/>
+    </References>
+  </Metadata>
+  <ExecutiveSummary>
+    <Overview>Kaspersky Device Control recorded USB / CD-DVD connect decisions on an endpoint - a device was Allowed (GNRL_EV_DEVCTRL_DEV_PLUGGED) or Blocked (GNRL_EV_DEVCTRL_DEV_PLUG_DENIED). The event message carries the device category, the bus type ("USB (except mice and keyboards)", CD/DVD, etc.), the user and the Result Decision (Allow / Block). Two signals matter: an Allowed removable / optical device on a sensitive host (a data-exfiltration or malware-introduction vector), and repeated Blocked attempts by one user (a device-control circumvention attempt). Although this rule is named with the QA prefix, it is treated here as a production device-control audit.</Overview>
+    <BusinessImpact>Removable and optical media are primary vectors for exfiltrating customer / PCI data and for introducing malware onto bank endpoints. Device-control decisions are the enforcement record; an allowed device on a sensitive host, or persistent bypass attempts, require confirmation.</BusinessImpact>
+  </ExecutiveSummary>
+  <Scope><Assets>
+    <AssetType>Windows / endpoints managed by Kaspersky Device Control</AssetType>
+    <AssetType>Kaspersky Security Center</AssetType>
+  </Assets><LogSources>
+    <LogSource>Kaspersky CEF via syslog - logs-cef.log-*</LogSource>
+  </LogSources></Scope>
+  <Prerequisites><TelemetryRequirements>
+    <Requirement>Kaspersky Security Center CEF (verified live on logs-cef.log-*, cef.device.vendor == "KasperskyLab", observer.product "SecurityCenter"). Fields: destination.domain (the affected ENDPOINT, not the collector), destination.user.name (initiator, e.g. INTDOM\user or NT AUTHORITY\SYSTEM), cef.device.event_class_id (GNRL_EV_DEVCTRL_DEV_PLUGGED = Allow, GNRL_EV_DEVCTRL_DEV_PLUG_DENIED = Block, GNRL_EV_DEVCTRL_DEV_UNPLUGGED = removed), cef.name ("Device is connected" / block), cef.severity, message and cef.extensions.message (multi-line: Device category, Device type/Bus type, User, Result Decision, Result Operation). Pivot on destination.domain as the host of interest.</Requirement>
+  </TelemetryRequirements><DetectionSignals>
+    <Signal><Name>USB/CD Allow/Block Changes</Name><Details>Kaspersky Device Control USB / optical connect Allow or Block decisions on an endpoint.</Details></Signal>
+  </DetectionSignals></Prerequisites>
+  <Inputs>
+    <Input name="$endpoint" description="Endpoint hostname (destination.domain), e.g. SME-TV4. Matches the alert entity."/>
+  </Inputs>
+  <Triage><ImmediateCapture>
+    <Item>$endpoint: $endpoint</Item>
+    <Item>Note the Allow vs Block split and the device type (USB storage vs CD/DVD vs other) from the message.</Item>
+  </ImmediateCapture><InitialAssessment>
+    <Rule>Weigh the full evidence story per the ClassificationGuidance. An Allowed storage device on a sensitive host, or a burst of Blocks by one user, matters more than the raw event count.</Rule>
+  </InitialAssessment></Triage>
+  <Investigation>
+    <Goal>Determine whether the device-control activity is routine enforcement, an allowed removable device that needs a data-handling review, or repeated bypass attempts.</Goal>
+    <Workflow>
+      <Step order="1" name="Allow vs Block posture on the endpoint">
+        <Purpose>Break the endpoint's device-control decisions into Allowed / Blocked / Removed with the users involved.</Purpose>
+        <Query platform="Elastic" language="ES|QL" id="INV-01">
+          <![CDATA[
+FROM logs-cef.log-*
+| WHERE cef.device.vendor == "KasperskyLab" AND cef.device.event_class_id IN ("GNRL_EV_DEVCTRL_DEV_PLUGGED","GNRL_EV_DEVCTRL_DEV_PLUG_DENIED","GNRL_EV_DEVCTRL_DEV_UNPLUGGED")
+    AND destination.domain == "$endpoint" AND @timestamp >= NOW() - 4 hours
+| STATS events = COUNT(*), users = VALUES(destination.user.name), signals = VALUES(cef.name) BY cef.device.event_class_id
+| SORT events DESC
+| LIMIT 20
+          ]]>
+        </Query>
+        <ExpectedOutput>
+          <Field name="cef.device.event_class_id"/>
+          <Field name="events"/>
+          <Field name="users"/>
+        </ExpectedOutput>
+        <AnalystNotes>DEV_PLUG_DENIED dominating = device control enforcing policy (usually benign). DEV_PLUGGED (Allow) on a restricted host, or a mix driven by one user rapidly retrying, points to the review cases below.</AnalystNotes>
+      </Step>
+      <Step order="2" name="Allowed device connections (potential exfil / malware vector)">
+        <Purpose>Detail the devices that were permitted - the message reveals the device category, bus type (USB / CD-DVD) and the user.</Purpose>
+        <Query platform="Elastic" language="ES|QL" id="INV-02">
+          <![CDATA[
+FROM logs-cef.log-*
+| WHERE cef.device.vendor == "KasperskyLab" AND cef.device.event_class_id == "GNRL_EV_DEVCTRL_DEV_PLUGGED"
+    AND destination.domain == "$endpoint" AND @timestamp >= NOW() - 4 hours
+| KEEP @timestamp, destination.user.name, cef.name, cef.severity, observer.product, message
+| SORT @timestamp DESC
+| LIMIT 25
+          ]]>
+        </Query>
+        <ExpectedOutput>
+          <Field name="destination.user.name"/>
+          <Field name="message"/>
+        </ExpectedOutput>
+        <AnalystNotes>Read the message: "Device type/Bus type" tells USB mass storage vs CD/DVD vs other; "User" is the active user; "Result Decision: Allow" confirms the device was permitted. An allowed mass-storage / optical device by an unexpected user on a sensitive host is the data-handling review case. System-user allows for internal buses are routine.</AnalystNotes>
+      </Step>
+      <Step order="3" name="Blocked attempts (device-control circumvention)">
+        <Purpose>Detail the denied connect attempts - repeated blocks by one user can indicate attempts to bypass device control.</Purpose>
+        <Query platform="Elastic" language="ES|QL" id="INV-03">
+          <![CDATA[
+FROM logs-cef.log-*
+| WHERE cef.device.vendor == "KasperskyLab" AND cef.device.event_class_id == "GNRL_EV_DEVCTRL_DEV_PLUG_DENIED"
+    AND destination.domain == "$endpoint" AND @timestamp >= NOW() - 4 hours
+| KEEP @timestamp, destination.user.name, cef.name, cef.severity, message
+| SORT @timestamp DESC
+| LIMIT 25
+          ]]>
+        </Query>
+        <ExpectedOutput>
+          <Field name="destination.user.name"/>
+          <Field name="message"/>
+        </ExpectedOutput>
+        <AnalystNotes>A few blocks = policy working (benign). Many blocks by the same user across different devices, or persistent retries, indicate a deliberate attempt to attach unauthorised media - review the user. Read the message device type to see what they tried to connect.</AnalystNotes>
+      </Step>
+    </Workflow>
+  </Investigation>
+  <DecisionTree>
+    <Node><Condition>An Allowed removable / optical device by an unexpected user on a restricted / sensitive host, or a burst of Blocked attempts indicating deliberate device-control circumvention.</Condition><Result>True Positive (Unsanctioned media use or circumvention attempt - data-handling / user review)</Result></Node>
+    <Node><Condition>Blocked attempts only (device control enforced the policy), or expected Allowed device use by an authorised user per policy.</Condition><Result>False Positive (Policy enforced, or authorised device use)</Result></Node>
+    <Node><Condition>Device-control policy is over-permissive (allowing storage it should block) or over-restrictive (blocking a legitimately needed device).</Condition><Result>Misconfiguration (device-control policy tuning)</Result></Node>
+    <Node><Condition>An allowed device or repeated-block pattern whose legitimacy cannot be determined from the logs alone.</Condition><Result>Needs Escalation (endpoint / user review)</Result></Node>
+  </DecisionTree>
+  <ClassificationGuidance>
+    <FalsePositive>
+      <Definition>Device control working as designed, or authorised device use.</Definition>
+      <Indicators>
+        <Item>Blocked (DEV_PLUG_DENIED) attempts - policy enforced.</Item>
+        <Item>Allowed device is a sanctioned, asset-registered device used by its assigned user.</Item>
+        <Item>System-user allow of an internal bus.</Item>
+      </Indicators>
+      <SOCAction>
+        <Item>Confirm the block outcome or the device's sanctioned status; close as policy_enforced_or_authorised (not "benign").</Item>
+      </SOCAction>
+    </FalsePositive>
+    <TruePositive>
+      <Definition>Unsanctioned removable / optical media use, or a circumvention attempt.</Definition>
+      <Indicators>
+        <Item>Allowed storage / optical device by an unexpected user on a restricted host.</Item>
+        <Item>Many blocked attempts by one user across devices (bypass attempts).</Item>
+        <Item>Exfiltration / malware context on the host.</Item>
+      </Indicators>
+      <SOCAction>
+        <Item>Review what data was accessible; interview the user; scan the host for malware from the media; tighten the device-control policy; escalate if exfiltration is suspected.</Item>
+      </SOCAction>
+    </TruePositive>
+    <Misconfiguration>
+      <Definition>An over-permissive or over-restrictive device-control policy.</Definition>
+      <Indicators>
+        <Item>Storage repeatedly allowed where policy intends a block.</Item>
+        <Item>A legitimately needed device repeatedly blocked for a valid user.</Item>
+      </Indicators>
+      <SOCAction>
+        <Item>Raise a device-control policy-tuning request with the device details; document.</Item>
+      </SOCAction>
+    </Misconfiguration>
+  </ClassificationGuidance>
+  <Response><IRForHumans>
+    <Phase name="Immediate Actions (0-30 minutes)">
+      <Action priority="1">Establish the Allow / Block split and the device types; identify the user(s) and whether the host is sensitive.</Action>
+      <Action priority="2">For an Allowed removable / optical device by an unexpected user, or a burst of blocks by one user, capture the message details and begin a data-handling / user review.</Action>
+    </Phase>
+    <Phase name="Containment and Eradication (hours)">
+      <Action>Review data accessible on the allowed device; interview the user; scan the host for malware introduced from the media; tighten device-control policy for the endpoint / group.</Action>
+    </Phase>
+    <Phase name="Recovery and Hardening (days)">
+      <Action>Enforce removable-media encryption and whitelisting; maintain an approved-device register; review device-control policy scope; educate users; document lessons learned.</Action>
+    </Phase>
+  </IRForHumans></Response>
+  <Escalation>
+    <Trigger>An Allowed removable / optical device by an unexpected user on a sensitive host, persistent bypass attempts, or evidence of data copied to media.</Trigger>
+    <To>SOC L2 / IR</To>
+  </Escalation>
+  <Closure>
+    <FalsePositiveClosure>
+      <Item>Block outcome or sanctioned-device use confirmed and documented; policy-tuning request raised if the policy was mis-scoped.</Item>
+    </FalsePositiveClosure>
+    <TruePositiveClosure>
+      <Item>Unsanctioned media / circumvention scoped; data exposure assessed; host scanned; user addressed; device-control policy tightened; case recorded (IR opened if exfiltration / malware confirmed).</Item>
+    </TruePositiveClosure>
+  </Closure>
+</Playbook>

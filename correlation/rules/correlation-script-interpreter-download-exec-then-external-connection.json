@@ -1,0 +1,97 @@
+{
+  "rule_id": "jcb-corr-interpreter-to-c2",
+  "name": "Correlation — Script Interpreter Download/Exec then External Connection",
+  "version": 1,
+  "enabled": true,
+  "interval": "1h",
+  "from": "now-130m",
+  "to": "now",
+  "description": "Attacker objective\nDownload a second-stage payload or beacon to external command-and-control using a script interpreter or LOLBin.\n\nAttack logic\nAn attacker's initial foothold typically runs a script interpreter (PowerShell, mshta, wscript) or LOLBin that downloads tooling or beacons out. The tell is such a process, invoked with download/encoded/web arguments, immediately opening an outbound connection to a public address.\n\nWhy this detection works\nProcess-to-network correlation on the same process (by process GUID) links the suspicious interpreter invocation to its own external connection, isolating download/C2 behaviour from benign interpreter use.\n\nFalse positives\nAn administrative script or software tool that legitimately downloads from an external service.\n\nTuning\nAllowlist sanctioned automation hosts and destination services; tighten the interpreter/argument set if noisy.\n\nRequired telemetry\nSysmon Event ID 1 (process, command line) and Event ID 3 (network) correlated by process.entity_id. Requires Sysmon network logging.",
+  "tags": [
+    "JCB",
+    "Correlation",
+    "Phase3",
+    "Use Case: Threat Detection",
+    "Tactic: Command and Control",
+    "Tactic: Execution"
+  ],
+  "author": [
+    "raadabujaish"
+  ],
+  "license": "",
+  "threat": [
+    {
+      "framework": "MITRE ATT&CK",
+      "tactic": {
+        "id": "TA0011",
+        "name": "Command and Control",
+        "reference": "https://attack.mitre.org/tactics/TA0011/"
+      },
+      "technique": [
+        {
+          "id": "T1071",
+          "name": "Application Layer Protocol",
+          "reference": "https://attack.mitre.org/techniques/T1071/"
+        }
+      ]
+    },
+    {
+      "framework": "MITRE ATT&CK",
+      "tactic": {
+        "id": "TA0002",
+        "name": "Execution",
+        "reference": "https://attack.mitre.org/tactics/TA0002/"
+      },
+      "technique": [
+        {
+          "id": "T1059",
+          "name": "Command and Scripting Interpreter",
+          "reference": "https://attack.mitre.org/techniques/T1059/"
+        }
+      ]
+    }
+  ],
+  "investigation_fields": {
+    "field_names": [
+      "host.name",
+      "user.name",
+      "user.domain",
+      "process.name",
+      "process.executable",
+      "process.command_line",
+      "process.args",
+      "process.parent.name",
+      "process.parent.executable",
+      "event.code",
+      "event.action",
+      "process.entity_id",
+      "powershell.exe",
+      "destination.ip"
+    ]
+  },
+  "related_integrations": [],
+  "required_fields": [],
+  "setup": "",
+  "note": "## Investigation guide\n1. The same interpreter process that ran a download/encoded command opened an external connection.\n2. Review the command line, the destination IP/domain and its reputation; if malicious, isolate the host and block the destination.\n3. Hunt for the downloaded payload and any persistence it established.",
+  "false_positives": [
+    "An administrative script or software tool that legitimately downloads from an external service."
+  ],
+  "references": [
+    "https://attack.mitre.org/techniques/T1071/",
+    "https://attack.mitre.org/techniques/T1059/"
+  ],
+  "risk_score": 78,
+  "risk_score_mapping": [],
+  "severity": "high",
+  "severity_mapping": [],
+  "output_index": "",
+  "max_signals": 100,
+  "exceptions_list": [],
+  "actions": [],
+  "type": "eql",
+  "language": "eql",
+  "index": [
+    "logs-windows.sysmon_operational-*"
+  ],
+  "query": "sequence by process.entity_id with maxspan=15m\n  [process where event.code == \"1\" and process.name in~ (\"powershell.exe\",\"pwsh.exe\",\"mshta.exe\",\"wscript.exe\",\"cscript.exe\",\"rundll32.exe\",\"regsvr32.exe\",\"certutil.exe\") and process.command_line like~ (\"*http*\",\"*-enc*\",\"*download*\",\"*iex*\",\"*frombase64*\",\"*webclient*\",\"*invoke-webrequest*\",\"*bitstransfer*\")]\n  [network where event.code == \"3\" and not cidrmatch(destination.ip, \"10.0.0.0/8\",\"172.16.0.0/12\",\"192.168.0.0/16\",\"127.0.0.0/8\",\"169.254.0.0/16\",\"224.0.0.0/4\",\"100.64.0.0/10\")]"
+}

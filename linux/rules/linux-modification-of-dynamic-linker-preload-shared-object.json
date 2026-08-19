@@ -1,0 +1,87 @@
+{
+  "rule_id": "jcb-rec-modification-of-dynamic-linker-preload-share",
+  "name": "Linux — Modification of Dynamic Linker Preload Shared Object",
+  "version": 1,
+  "enabled": true,
+  "interval": "5m",
+  "from": "now-9m",
+  "to": "now",
+  "description": "Identifies modification of the dynamic linker preload shared object (ld.so.preload). Adversaries may execute malicious payloads by hijacking the dynamic linker used to load libraries.",
+  "tags": [
+    "JCB",
+    "Linux"
+  ],
+  "author": [
+    "raadabujaish"
+  ],
+  "threat": [
+    {
+      "framework": "MITRE ATT&CK",
+      "tactic": {
+        "id": "TA0004",
+        "name": "Privilege Escalation",
+        "reference": "https://attack.mitre.org/tactics/TA0004/"
+      },
+      "technique": [
+        {
+          "id": "T1574",
+          "name": "Hijack Execution Flow",
+          "reference": "https://attack.mitre.org/techniques/T1574/",
+          "subtechnique": [
+            {
+              "id": "T1574.006",
+              "name": "Dynamic Linker Hijacking",
+              "reference": "https://attack.mitre.org/techniques/T1574/006/"
+            }
+          ]
+        }
+      ]
+    }
+  ],
+  "investigation_fields": {
+    "field_names": [
+      "host.name",
+      "user.name",
+      "user.id",
+      "process.name",
+      "process.executable",
+      "process.args",
+      "process.parent.name",
+      "file.path",
+      "event.action",
+      "event.outcome",
+      "message",
+      "host.os.type",
+      "event.category",
+      "event.type"
+    ]
+  },
+  "related_integrations": [],
+  "required_fields": [],
+  "setup": "",
+  "false_positives": [],
+  "references": [
+    "https://www.anomali.com/blog/rocke-evolves-its-arsenal-with-a-new-malware-family-written-in-golang"
+  ],
+  "risk_score": 47,
+  "risk_score_mapping": [],
+  "severity": "medium",
+  "severity_mapping": [],
+  "output_index": "",
+  "max_signals": 100,
+  "exceptions_list": [],
+  "actions": [],
+  "type": "new_terms",
+  "query": "host.os.type:linux and event.category:file and event.action:(updated or renamed or rename or file_rename_event) and \nnot event.type:deletion and file.path:/etc/ld.so.preload and not process.name:(wine or oneagentinstallaction)\n",
+  "new_terms_fields": [
+    "host.id",
+    "user.id",
+    "process.executable"
+  ],
+  "history_window_start": "now-10d",
+  "index": [
+    "logs-auditd.log-*",
+    "logs-auditd_manager.auditd-*"
+  ],
+  "language": "kuery"
+}

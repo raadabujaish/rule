@@ -1,0 +1,146 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<Playbook xmlns="https://soc.example/playbooks" id="PB-O365-015" name="O365 DLP — High Endpoint DLP Volume by One User (Daily Aggregate) - SOC Playbook" version="1.0" status="Production" classification="TLP:AMBER">
+  <Metadata>
+    <Owner>JCB Detection Engineering (WatchWave)</Owner>
+    <LastUpdated>2026-08-14</LastUpdated>
+    <Severity default="Medium">Medium</Severity>
+    <Confidence default="Medium">Medium</Confidence>
+    <Category>Exfiltration / Data from Local System</Category>
+    <MitreAttack>
+      <Technique id="T1052" name="Exfiltration Over Physical Medium"/>
+      <Tactic id="TA0010" name="Exfiltration"/>
+    </MitreAttack>
+    <References>
+      <Reference title="MITRE ATT and CK" url="https://attack.mitre.org/techniques/T1052/"/>
+    </References>
+  </Metadata>
+  <ExecutiveSummary>
+    <Overview>One user generated a high volume (&gt;=200/day) of endpoint/Exchange DLP events - the daily-aggregate replacement for per-event Purview promotion. Triage: heavy-but-legitimate document handling, or data exfiltration by (or via) this user?</Overview>
+    <BusinessImpact>A user moving large volumes of DLP-classified data may be exfiltrating sensitive/regulated information.</BusinessImpact>
+  </ExecutiveSummary>
+  <Scope><Assets>
+    <AssetType>Microsoft 365 / Entra ID tenant (JCB)</AssetType>
+    <AssetType>Exchange Online, SharePoint/OneDrive, Teams, Entra directory</AssetType>
+  </Assets><LogSources>
+    <LogSource>Microsoft 365 unified audit log - logs-o365.audit-*</LogSource>
+  </LogSources></Scope>
+  <Prerequisites><TelemetryRequirements>
+    <Requirement>O365 unified audit via Elastic Agent (verified live). Fields: event.action, user.name, source.ip, o365.audit.Operation, o365.audit.ResultStatus, o365.audit.ObjectId, o365.audit.ModifiedProperties, o365.audit.Parameters, o365.audit.UserId. INGEST LAG 20-60 min - all queries use a 4h window and timestamp_override event.ingested at rule level.</Requirement>
+    <Requirement>JCB egress NAT is 94.249.88.0/24 - internal users appear from it.</Requirement>
+  </TelemetryRequirements><DetectionSignals>
+    <Signal><Name>High Endpoint DLP Volume by One User (Da</Name><Details>user with &gt;=200 DLP events/day.</Details></Signal>
+  </DetectionSignals></Prerequisites>
+  <Inputs>
+    <Input name="$username" description="User with the high DLP volume."/>
+  </Inputs>
+  <Triage><ImmediateCapture>
+    <Item>$username: $username</Item>
+  </ImmediateCapture><InitialAssessment>
+    <Rule>Weigh the full evidence story per the ClassificationGuidance, not any single fact.</Rule>
+  </InitialAssessment></Triage>
+  <Investigation>
+    <Goal>Determine whether the high DLP volume is legitimate business document handling or data exfiltration.</Goal>
+    <Workflow>
+      <Step order="1" name="DLP volume, channels and actions for the user">
+        <Purpose>The action mix (downloads, network-share copies, uploads) and channels separate normal work from exfil.</Purpose>
+        <Query platform="Elastic" language="ES|QL" id="INV-01-O365DLP-VOLUME">
+          <![CDATA[
+FROM logs-o365.audit-*
+| WHERE event.code IN ("DLPEndpoint","ComplianceDLPExchange") AND user.name == "$username" AND @timestamp >= NOW() - 4 hours
+| STATS dlp_events = COUNT(*), actions = VALUES(event.action), channels = VALUES(event.code)
+| LIMIT 1
+          ]]>
+        </Query>
+        <ExpectedOutput>
+          <Field name="dlp_events"/>
+          <Field name="actions"/>
+          <Field name="channels"/>
+        </ExpectedOutput>
+        <AnalystNotes>FileDownloadedFromBrowser/FileCopiedToNetworkShare/FileUploadedToCloud at high volume, especially outside the user's role, suggests exfil. FileModified/normal-app actions suggest routine work. Note the action mix.</AnalystNotes>
+      </Step>
+      <Step order="2" name="Is this outside the user's normal pattern">
+        <Purpose>A sudden spike vs a consistently high-volume role user distinguishes exfil from a data-heavy job.</Purpose>
+        <Query platform="Elastic" language="ES|QL" id="INV-02-O365DLP-CONTEXT" optional="true">
+          <![CDATA[
+FROM logs-o365.audit-*
+| WHERE event.code == "DLPEndpoint" AND user.name == "$username" AND @timestamp >= NOW() - 4 hours
+| STATS events = COUNT(*), distinct_actions = COUNT_DISTINCT(event.action)
+| LIMIT 1
+          ]]>
+        </Query>
+        <ExpectedOutput>
+          <Field name="events"/>
+          <Field name="distinct_actions"/>
+        </ExpectedOutput>
+        <AnalystNotes>Correlate with the user's role - a finance/data analyst may legitimately hit this; a teller/branch user should not. A spike after an account-compromise indicator is exfil.</AnalystNotes>
+      </Step>
+      <Step order="3" name="Finalize classification">
+        <DecisionTree>
+          <Node><Condition>High-volume downloads/uploads/network-copies of DLP data outside the user's role, or after a compromise indicator.</Condition><Result>True Positive (Data Exfiltration - escalate, involve DLP/compliance)</Result></Node>
+          <Node><Condition>A data-heavy role user (analyst/finance) with routine high-volume document handling.</Condition><Result>False Positive / Benign Activity</Result></Node>
+          <Node><Condition>A DLP policy over-classifying benign files, inflating volume.</Condition><Result>Misconfiguration</Result></Node>
+          <Node><Condition>High volume with unclear role/intent.</Condition><Result>Needs Escalation</Result></Node>
+        </DecisionTree>
+        <DocumentationChecklist>
+          <Item>Attach outputs of INV-01-O365DLP-VOLUME, INV-02-O365DLP-CONTEXT to the case.</Item>
+        </DocumentationChecklist>
+      </Step>
+    </Workflow>
+  </Investigation>
+  <ClassificationGuidance>
+    <FalsePositive>
+      <Definition>Routine high-volume document handling by a data-heavy role.</Definition>
+      <Indicators>
+        <Item>Analyst/finance role.</Item>
+        <Item>Routine actions.</Item>
+        <Item>Consistent with history.</Item>
+      </Indicators>
+      <SOCAction>
+        <Item>Confirm the role/work; close as benign_activity.</Item>
+      </SOCAction>
+    </FalsePositive>
+    <TruePositive>
+      <Definition>Data exfiltration by or via the user.</Definition>
+      <Indicators>
+        <Item>Bulk downloads/uploads/network-copies.</Item>
+        <Item>Outside the user's role.</Item>
+        <Item>Post-compromise timing.</Item>
+      </Indicators>
+      <SOCAction>
+        <Item>Engage DLP/compliance; review the moved data; reset the account if compromised; open IR.</Item>
+      </SOCAction>
+    </TruePositive>
+    <Misconfiguration>
+      <Definition>A DLP policy over-classifying benign files.</Definition>
+      <Indicators>
+        <Item>Benign files flagged as sensitive.</Item>
+        <Item>Volume inflated by false classification.</Item>
+      </Indicators>
+      <SOCAction>
+        <Item>Tune the DLP policy; document.</Item>
+      </SOCAction>
+    </Misconfiguration>
+  </ClassificationGuidance>
+  <Response><IRForHumans>
+    <Phase name="Immediate Actions (0-30 minutes)">
+      <Action priority="1">Confirm the change/actor in the audit log.</Action>
+      <Action priority="2">If unexpected/unauthorised, disable the actor session and reverse the change.</Action>
+    </Phase>
+    <Phase name="Containment and Eradication (hours)">
+      <Action>Reverse the change; revoke sessions/tokens for the actor and affected principals.</Action>
+      <Action>Review the actor's other recent audit activity.</Action>
+    </Phase>
+    <Phase name="Recovery and Hardening (days)">
+      <Action>Enforce MFA/conditional access; tighten admin consent and privileged-role governance (PIM); alert on these operations.</Action>
+    </Phase>
+  </IRForHumans></Response>
+  <QualityChecks>
+    <Check>Account for O365 ingest lag (20-60 min) - short windows miss events; this rule uses event.ingested override.</Check>
+    <Check>Exclude the egress NAT 94.249.88.0/24 where source is used; tune known admin/automation via exceptions.</Check>
+  </QualityChecks>
+  <ClosureCriteria><FalsePositiveClosure>
+    <Item>Legitimate role/work confirmed; documented.</Item>
+  </FalsePositiveClosure><TruePositiveClosure>
+    <Item>Exfil scoped with DLP/compliance; account secured; data reviewed.</Item>
+  </TruePositiveClosure></ClosureCriteria>
+</Playbook>

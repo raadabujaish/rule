@@ -1,0 +1,153 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<Playbook xmlns="https://soc.example/playbooks" id="PB-LNX-028" name="Linux — Suspicious Memory grep Activity - SOC Playbook" version="1.0" status="Production" classification="TLP:AMBER">
+  <Metadata>
+    <Owner>JCB Detection Engineering (WatchWave)</Owner>
+    <LastUpdated>2026-08-14</LastUpdated>
+    <Severity default="Medium">Medium</Severity>
+    <Confidence default="Medium">Medium</Confidence>
+    <Category>Credential Access / Proc Filesystem</Category>
+    <MitreAttack>
+      <Technique id="T1003.007" name="Proc Filesystem"/>
+      <Tactic id="TA0006" name="Credential Access"/>
+    </MitreAttack>
+    <References>
+      <Reference title="MITRE ATT and CK" url="https://attack.mitre.org/techniques/T1003/"/>
+    </References>
+  </Metadata>
+  <ExecutiveSummary>
+    <Overview>grep was run via sudo against process memory / /proc to search for secrets. RECOVERED: USER_CMD captures sudo grep with args (proven: 'sudo grep -i /var/log/secure' seen).</Overview>
+    <BusinessImpact>Grepping process memory extracts credentials from running processes.</BusinessImpact>
+  </ExecutiveSummary>
+  <Scope><Assets>
+    <AssetType>Linux servers (core banking, app, DB - INTDOM)</AssetType>
+  </Assets><LogSources>
+    <LogSource>Linux auditd USER_CMD/SERVICE/NETFILTER records - logs-auditd.log-*</LogSource>
+  </LogSources></Scope>
+  <Prerequisites><TelemetryRequirements>
+    <Requirement>JCB Linux auditd does NOT audit execve (no EXECVE records, event.action:exec never occurs) or file paths. It DOES capture: USER_CMD (commands run via sudo, WITH process.args + auditd.log.AUID/UID user), SERVICE_STOP/START (auditd.log.unit), NETFILTER_CFG (firewall config), package events. These queries use those real records.</Requirement>
+    <Requirement>COVERAGE IS PARTIAL: USER_CMD captures only sudo-invoked commands - it misses actions taken when already root and non-sudo execution. Full coverage requires enabling auditd execve+file auditing (or Elastic Defend / ingesting the already-installed MDE-for-Linux device telemetry).</Requirement>
+  </TelemetryRequirements><DetectionSignals>
+    <Signal><Name>Suspicious Memory grep Activity</Name><Details>sudo command matching the behavior (auditd USER_CMD).</Details></Signal>
+  </DetectionSignals></Prerequisites>
+  <Inputs>
+    <Input name="$hostname" description="Linux host where the command ran."/>
+    <Input name="$username" description="Invoking user (auditd.log.AUID)."/>
+  </Inputs>
+  <Triage><ImmediateCapture>
+    <Item>$hostname: $hostname</Item>
+  </ImmediateCapture><InitialAssessment>
+    <Rule>Weigh the full evidence story per the ClassificationGuidance, not any single fact.</Rule>
+  </InitialAssessment></Triage>
+  <Investigation>
+    <Goal>Determine whether the suspicious memory grep activity is malicious or a legitimate admin action, using the available sudo-command telemetry.</Goal>
+    <Workflow>
+      <Step order="1" name="Confirm the command via sudo (USER_CMD)">
+        <Purpose>auditd USER_CMD records commands run via sudo with their arguments and the invoking user - the only command-with-args telemetry JCB Linux collects.</Purpose>
+        <Query platform="Elastic" language="ES|QL" id="INV-01-UC-CMD">
+          <![CDATA[
+FROM logs-auditd.log-*
+| WHERE auditd.log.record_type == "USER_CMD" AND host.name == "$hostname" AND @timestamp >= NOW() - 4 hours
+| EVAL cmd = MV_CONCAT(process.args, " ")
+| WHERE cmd RLIKE ".*grep.*(/proc/|/dev/mem|mem).*|.*(/proc/|mem).*grep.*"
+| KEEP @timestamp, auditd.log.AUID, auditd.log.UID, process.executable, cmd, host.name
+| SORT @timestamp DESC
+| LIMIT 20
+          ]]>
+        </Query>
+        <ExpectedOutput>
+          <Field name="auditd.log.AUID"/>
+          <Field name="process.executable"/>
+          <Field name="cmd"/>
+          <Field name="host.name"/>
+        </ExpectedOutput>
+        <AnalystNotes>sudo grep targeting /proc/*/mem or process memory by an unexpected AUID is credential access. grep of a normal file is benign - inspect the target in the args.</AnalystNotes>
+      </Step>
+      <Step order="2" name="The user's other sudo commands (context)">
+        <Purpose>The invoking user's other sudo activity separates an admin task from an attacker escalating.</Purpose>
+        <Query platform="Elastic" language="ES|QL" id="INV-02-UC-CONTEXT" optional="true">
+          <![CDATA[
+FROM logs-auditd.log-*
+| WHERE auditd.log.record_type == "USER_CMD" AND host.name == "$hostname" AND @timestamp >= NOW() - 4 hours
+| EVAL cmd = MV_CONCAT(process.args, " ")
+| STATS commands = COUNT(*), samples = VALUES(cmd) BY auditd.log.AUID
+| SORT commands DESC
+| LIMIT 15
+          ]]>
+        </Query>
+        <ExpectedOutput>
+          <Field name="auditd.log.AUID"/>
+          <Field name="commands"/>
+          <Field name="samples"/>
+        </ExpectedOutput>
+        <AnalystNotes>A known admin running maintenance via sudo differs from an unexpected user running credential/privilege commands. AUID is the real invoking user (login uid).</AnalystNotes>
+      </Step>
+      <Step order="3" name="Finalize classification">
+        <DecisionTree>
+          <Node><Condition>sudo grep of process memory (/proc/*/mem) by an unexpected user.</Condition><Result>True Positive (Memory Credential Access - investigate host)</Result></Node>
+          <Node><Condition>The command was run by a known admin as part of documented maintenance.</Condition><Result>False Positive</Result></Node>
+          <Node><Condition>A known monitoring tool.</Condition><Result>Misconfiguration</Result></Node>
+          <Node><Condition>Command observed but coverage-limited (may have run as root/non-sudo) and intent unclear - inspect the host.</Condition><Result>Needs Escalation</Result></Node>
+        </DecisionTree>
+        <DocumentationChecklist>
+          <Item>Attach outputs of INV-01-UC-CMD, INV-02-UC-CONTEXT to the case.</Item>
+        </DocumentationChecklist>
+      </Step>
+    </Workflow>
+  </Investigation>
+  <ClassificationGuidance>
+    <FalsePositive>
+      <Definition>A legitimate diagnostic grep by an admin.</Definition>
+      <Indicators>
+        <Item>Known admin AUID.</Item>
+        <Item>Diagnostic context.</Item>
+        <Item>Benign target.</Item>
+      </Indicators>
+      <SOCAction>
+        <Item>Confirm the admin/maintenance context; close as false_positive.</Item>
+      </SOCAction>
+    </FalsePositive>
+    <TruePositive>
+      <Definition>Credential theft by grepping process memory.</Definition>
+      <Indicators>
+        <Item>sudo grep of /proc/*/mem.</Item>
+        <Item>Unexpected AUID.</Item>
+        <Item>Sensitive target process.</Item>
+      </Indicators>
+      <SOCAction>
+        <Item>Inspect the host (full session, files touched); isolate if confirmed malicious; open IR.</Item>
+        <Item>Reset credentials used; hunt peers.</Item>
+      </SOCAction>
+    </TruePositive>
+    <Misconfiguration>
+      <Definition>A monitoring tool grepping /proc via sudo.</Definition>
+      <Indicators>
+        <Item>A known monitoring tool.</Item>
+      </Indicators>
+      <SOCAction>
+        <Item>Correct the automation/config; document.</Item>
+      </SOCAction>
+    </Misconfiguration>
+  </ClassificationGuidance>
+  <Response><IRForHumans>
+    <Phase name="Immediate Actions (0-30 minutes)">
+      <Action priority="1">Inspect the host for the full command/session context (USER_CMD is sudo-only).</Action>
+      <Action priority="2">If malicious, isolate the host.</Action>
+    </Phase>
+    <Phase name="Containment and Eradication (hours)">
+      <Action>Isolate the host; capture the session/files on-host; open IR.</Action>
+      <Action>Reset credentials; hunt peers.</Action>
+    </Phase>
+    <Phase name="Recovery and Hardening (days)">
+      <Action>ENABLE auditd execve+file auditing OR ingest MDE-for-Linux device telemetry for full command/file coverage; redesign the detection to use USER_CMD/SERVICE_STOP/NETFILTER.</Action>
+    </Phase>
+  </IRForHumans></Response>
+  <QualityChecks>
+    <Check>DETECTION DEFECT: the paired detection rule (EQL 'process where event.action:exec') CANNOT FIRE in JCB - auditd emits no execve events. REDESIGN the detection to key on auditd.log.record_type:USER_CMD with a process.args match (proven to capture this behavior when run via sudo). This playbook already uses that telemetry.</Check>
+    <Check>PARTIAL COVERAGE: USER_CMD captures sudo-invoked commands only; misses already-root and non-sudo execution. For full coverage enable auditd execve auditing or ingest MDE-for-Linux device telemetry (MDE/wdavdaemon is already installed on the Linux hosts).</Check>
+  </QualityChecks>
+  <ClosureCriteria><FalsePositiveClosure>
+    <Item>Admin/maintenance context confirmed; documented.</Item>
+  </FalsePositiveClosure><TruePositiveClosure>
+    <Item>Host inspected + contained; technique eradicated; peers swept.</Item>
+  </TruePositiveClosure></ClosureCriteria>
+</Playbook>

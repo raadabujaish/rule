@@ -1,0 +1,93 @@
+{
+  "rule_id": "jcb-rec-office-test-registry-persistence",
+  "name": "Windows — Office Test Registry Persistence",
+  "version": 1,
+  "enabled": true,
+  "interval": "5m",
+  "from": "now-9m",
+  "to": "now",
+  "description": "Identifies the modification of the Microsoft Office \"Office Test\" Registry key, a registry location that can be used to specify a DLL which will be executed every time an MS Office application is started. Attackers can abuse this to gain persistence on a compromised host.",
+  "tags": [
+    "JCB",
+    "Windows"
+  ],
+  "author": [
+    "raadabujaish"
+  ],
+  "threat": [
+    {
+      "framework": "MITRE ATT&CK",
+      "tactic": {
+        "id": "TA0003",
+        "name": "Persistence",
+        "reference": "https://attack.mitre.org/tactics/TA0003/"
+      },
+      "technique": [
+        {
+          "id": "T1137",
+          "name": "Office Application Startup",
+          "reference": "https://attack.mitre.org/techniques/T1137/",
+          "subtechnique": [
+            {
+              "id": "T1137.002",
+              "name": "Office Test",
+              "reference": "https://attack.mitre.org/techniques/T1137/002/"
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "framework": "MITRE ATT&CK",
+      "tactic": {
+        "id": "TA0005",
+        "name": "Defense Evasion",
+        "reference": "https://attack.mitre.org/tactics/TA0005/"
+      },
+      "technique": [
+        {
+          "id": "T1112",
+          "name": "Modify Registry",
+          "reference": "https://attack.mitre.org/techniques/T1112/"
+        }
+      ]
+    }
+  ],
+  "investigation_fields": {
+    "field_names": [
+      "host.name",
+      "user.name",
+      "process.name",
+      "process.executable",
+      "registry.path",
+      "registry.value",
+      "registry.data.strings",
+      "event.code",
+      "host.os.type",
+      "event.action"
+    ]
+  },
+  "related_integrations": [],
+  "required_fields": [],
+  "setup": "",
+  "false_positives": [],
+  "references": [
+    "https://unit42.paloaltonetworks.com/unit42-technical-walkthrough-office-test-persistence-method-used-in-recent-sofacy-attacks/"
+  ],
+  "risk_score": 21,
+  "risk_score_mapping": [],
+  "severity": "low",
+  "severity_mapping": [],
+  "output_index": "",
+  "max_signals": 100,
+  "exceptions_list": [],
+  "actions": [],
+  "type": "eql",
+  "language": "eql",
+  "index": [
+    "logs-windows.sysmon_operational-*",
+    "logs-system.security-*",
+    "logs-windows.powershell_operational-*"
+  ],
+  "query": "registry where host.os.type == \"windows\" and event.action != \"deletion\" and\n    registry.path : \"*\\\\Software\\\\Microsoft\\\\Office Test\\\\Special\\\\Perf\\\\*\"\n"
+}

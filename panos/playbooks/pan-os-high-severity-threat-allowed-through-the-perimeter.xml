@@ -1,0 +1,156 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<Playbook xmlns="https://soc.example/playbooks" id="PB-PAN-001" name="PAN-OS — High-Severity Threat Allowed Through the Perimeter - SOC Playbook" version="1.0" status="Production" classification="TLP:AMBER">
+  <Metadata>
+    <Owner>JCB Detection Engineering (WatchWave)</Owner>
+    <LastUpdated>2026-08-14</LastUpdated>
+    <Severity default="High">High</Severity>
+    <Confidence default="Medium">Medium</Confidence>
+    <Category>Initial Access / Exploit Public-Facing Application</Category>
+    <MitreAttack>
+      <Technique id="T1190" name="Exploit Public-Facing Application"/>
+      <Tactic id="TA0001" name="Initial Access"/>
+    </MitreAttack>
+    <References>
+      <Reference title="MITRE ATT and CK" url="https://attack.mitre.org/techniques/T1190/"/>
+    </References>
+  </Metadata>
+  <ExecutiveSummary>
+    <Overview>PAN-OS flagged a high/critical-severity vulnerability or spyware threat whose session action was ALLOWED or only ALERTED (not reset/dropped) - the scoped replacement for the deleted catch-all External Alerts rule. Triage question: did a real high-severity threat pass the firewall, and did the affected host show follow-on compromise?</Overview>
+    <BusinessImpact>A high-severity threat the firewall let through can mean successful exploitation or active spyware/C2 - the events that most warrant a look, without the 550k/day noise of the old rule.</BusinessImpact>
+  </ExecutiveSummary>
+  <Scope><Assets>
+    <AssetType>Palo Alto Networks perimeter firewalls</AssetType>
+    <AssetType>Internal and DMZ hosts behind PAN-OS</AssetType>
+  </Assets><LogSources>
+    <LogSource>PAN-OS threat log - logs-panw.panos-*</LogSource>
+    <LogSource>FortiGate traffic - logs-fortinet_fortigate.traffic-*</LogSource>
+  </LogSources></Scope>
+  <Prerequisites><TelemetryRequirements>
+    <Requirement>PAN-OS logs via Elastic Agent to logs-panw.panos-* (verified live).</Requirement>
+    <Requirement>Fields: panw.panos.sub_type (vulnerability/spyware/CONFIG/...), panw.panos.action (alert/allow/reset-both/drop), event.severity (numeric; lower = more severe, 5 = informational), panw.panos.threat_category, panw.panos.threat.name, panw.panos.admin, panw.panos.cmd, panw.panos.path, panw.panos.result, source.ip, destination.ip, destination.port, network.application.</Requirement>
+  </TelemetryRequirements><DetectionSignals>
+    <Signal><Name>High-sev threat allowed</Name><Details>sub_type vulnerability/spyware, event.severity &lt;= 2 (high/critical), action alert or allow.</Details></Signal>
+  </DetectionSignals></Prerequisites>
+  <Inputs>
+    <Input name="$source_ip" description="Threat source IP."/>
+    <Input name="$dest_ip" description="Threatened destination host."/>
+  </Inputs>
+  <Triage><ImmediateCapture>
+    <Item>Source: $source_ip</Item>
+    <Item>Destination: $dest_ip</Item>
+  </ImmediateCapture><InitialAssessment>
+    <Rule>'alert' means PAN-OS detected but forwarded; 'allow' means the policy permitted it. Direction matters: an external source hitting a DMZ host is inbound exploitation; an internal source to external may be spyware/C2 egress.</Rule>
+  </InitialAssessment></Triage>
+  <Investigation>
+    <Goal>Determine the threat's direction and severity, whether it was truly allowed vs reset, and whether the affected host shows compromise.</Goal>
+    <Workflow>
+      <Step order="1" name="Threat detail, direction and enforcement">
+        <Purpose>Identify the threat, its category, action, and whether the flow is inbound exploitation or outbound spyware/C2.</Purpose>
+        <Query platform="Elastic" language="ES|QL" id="INV-01-PAN-THREAT">
+          <![CDATA[
+FROM logs-panw.panos-*
+| WHERE panw.panos.sub_type IN ("vulnerability","spyware") AND source.ip == "$source_ip" AND @timestamp >= NOW() - 4 hours
+| STATS hits = COUNT(*), threats = VALUES(panw.panos.threat.name), categories = VALUES(panw.panos.threat_category), actions = VALUES(panw.panos.action), min_sev = MIN(event.severity), apps = VALUES(network.application) BY destination.ip
+| SORT hits DESC
+| LIMIT 20
+          ]]>
+        </Query>
+        <ExpectedOutput>
+          <Field name="destination.ip"/>
+          <Field name="threats"/>
+          <Field name="categories"/>
+          <Field name="actions"/>
+          <Field name="min_sev"/>
+        </ExpectedOutput>
+        <AnalystNotes>min_sev &lt;= 2 confirms high/critical. action 'allow'/'alert' = forwarded. spyware category on an INTERNAL source.ip = a bank host may be infected and beaconing - high priority. vulnerability from external = inbound exploitation.</AnalystNotes>
+      </Step>
+      <Step order="2" name="Did the threatened host then behave anomalously">
+        <Purpose>Post-threat outbound activity from the destination host suggests the threat succeeded.</Purpose>
+        <Query platform="Elastic" language="ES|QL" id="INV-02-PAN-FOLLOWON" optional="true">
+          <![CDATA[
+FROM logs-fortinet_fortigate.traffic-*
+| WHERE source.ip == "$dest_ip" AND fortinet.firewall.action == "accept" AND @timestamp >= NOW() - 2 hours
+| STATS conns = COUNT(*), ext_dsts = COUNT_DISTINCT(destination.ip), dcountries = VALUES(fortinet.firewall.dstcountry), dports = VALUES(destination.port)
+| LIMIT 1
+          ]]>
+        </Query>
+        <ExpectedOutput>
+          <Field name="conns"/>
+          <Field name="ext_dsts"/>
+          <Field name="dcountries"/>
+        </ExpectedOutput>
+        <AnalystNotes>New external connections (esp. foreign/high-risk) from the threatened host after a high-sev allowed threat corroborate compromise. Normal traffic weakens it. Cross-source corroboration only (same host), not mere time proximity.</AnalystNotes>
+      </Step>
+      <Step order="3" name="Finalize classification">
+        <DecisionTree>
+          <Node><Condition>INV-01 shows a high/critical spyware threat from an INTERNAL source (a bank host beaconing), or INV-02 shows the threatened host beaconing externally after an allowed exploit.</Condition><Result>True Positive (Compromise / Active Threat - isolate host, IR)</Result></Node>
+          <Node><Condition>INV-01 shows a high/critical vulnerability exploit from an external source that was allowed/alerted against a real service.</Condition><Result>True Positive (Exploitation Allowed - escalate, inspect target, set action to reset)</Result></Node>
+          <Node><Condition>INV-01 shows the threat was actually reset/dropped in most events (alert is a duplicate log line) against a non-exposed target.</Condition><Result>True Positive (Attack Blocked) or Benign per exposure</Result></Node>
+          <Node><Condition>High-sev threat allowed but direction/target sensitivity is unclear.</Condition><Result>Needs Escalation</Result></Node>
+        </DecisionTree>
+        <DocumentationChecklist>
+          <Item>Attach outputs of INV-01-PAN-THREAT, INV-02-PAN-FOLLOWON to the case.</Item>
+        </DocumentationChecklist>
+      </Step>
+    </Workflow>
+  </Investigation>
+  <ClassificationGuidance>
+    <FalsePositive>
+      <Definition>A high-severity signature on benign traffic (false signature) that did not affect the host.</Definition>
+      <Indicators>
+        <Item>Known-benign app misclassified.</Item>
+        <Item>No follow-on host activity.</Item>
+        <Item>Signature known for false positives.</Item>
+      </Indicators>
+      <SOCAction>
+        <Item>Verify the signature/threat reputation; tune if a confirmed FP.</Item>
+        <Item>Close as false_positive.</Item>
+      </SOCAction>
+    </FalsePositive>
+    <TruePositive>
+      <Definition>A real high-severity threat the firewall allowed - inbound exploitation or internal spyware/C2.</Definition>
+      <Indicators>
+        <Item>High/critical severity, action allow/alert.</Item>
+        <Item>Internal source with spyware category (infected host).</Item>
+        <Item>Threatened host shows follow-on beaconing.</Item>
+      </Indicators>
+      <SOCAction>
+        <Item>Isolate the affected host; open IR.</Item>
+        <Item>Change the PAN-OS action to reset/drop for the signature; block the source.</Item>
+        <Item>Hunt the threat across the estate.</Item>
+      </SOCAction>
+    </TruePositive>
+    <Misconfiguration>
+      <Definition>A security profile set to alert-only (not reset) on high-severity threats (policy gap).</Definition>
+      <Indicators>
+        <Item>High-sev threats consistently 'alert' not reset.</Item>
+        <Item>Security profile in alert-only mode.</Item>
+      </Indicators>
+      <SOCAction>
+        <Item>Engage the firewall team to set reset/drop on high/critical signatures.</Item>
+        <Item>Re-triage as TP if a threat reached a host.</Item>
+      </SOCAction>
+    </Misconfiguration>
+  </ClassificationGuidance>
+  <Response><IRForHumans>
+    <Phase name="Immediate Actions (0-30 minutes)">
+      <Action priority="1">Isolate the affected host if compromise indicators; block the source.</Action>
+      <Action priority="2">Confirm the security profile action for the signature.</Action>
+    </Phase>
+    <Phase name="Containment and Eradication (hours)">
+      <Action>Set reset/drop on the signature; inspect the host; hunt the threat across the estate.</Action>
+    </Phase>
+    <Phase name="Recovery and Hardening (days)">
+      <Action>Enforce reset/drop on high/critical signatures; reduce perimeter exposure; keep threat prevention current.</Action>
+    </Phase>
+  </IRForHumans></Response>
+  <QualityChecks>
+    <Check>Replaces External Alerts (2.66M/90d). event.severity numeric, &lt;=2 = high/critical; verified in JCB.</Check>
+    <Check>Direction (internal vs external source) changes the story - spyware from internal = infected host.</Check>
+  </QualityChecks>
+  <ClosureCriteria><FalsePositiveClosure>
+    <Item>Benign signature confirmed; no host impact; documented.</Item>
+  </FalsePositiveClosure><TruePositiveClosure>
+    <Item>Host isolated/cleaned; signature set to reset; source blocked; estate swept.</Item>
+  </TruePositiveClosure></ClosureCriteria>
+</Playbook>

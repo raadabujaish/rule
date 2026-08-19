@@ -1,0 +1,99 @@
+{
+  "rule_id": "jcb-ad-recon-tooling",
+  "name": "AD — Domain Reconnaissance via LOLBins / BloodHound",
+  "version": 1,
+  "enabled": true,
+  "interval": "1h",
+  "from": "now-90m",
+  "to": "now",
+  "description": "Attacker objective\nEnumerate the domain — privileged groups, trusts, Domain Controllers and users — to plan privilege escalation and lateral movement.\n\nAttack logic\nAfter a foothold, attackers map Active Directory using built-in tools (nltest, net group, dsquery, wmic) or collectors (SharpHound/BloodHound). This enumeration precedes targeting of privileged accounts and trusts.\n\nWhy this detection works\nProcess command-line auditing records the recon tools and arguments; matching domain-enumeration and collector patterns isolates reconnaissance, independent of case.\n\nFalse positives\nAn administrator legitimately querying group membership, trusts or DCs.\n\nTuning\nAllowlist known administrative hosts/accounts; a burst of distinct recon commands from one host is higher-confidence.\n\nRequired telemetry\nProcess creation with command line: Sysmon Event ID 1 and Windows Security 4688.",
+  "tags": [
+    "JCB",
+    "ActiveDirectory",
+    "Phase3",
+    "Use Case: Threat Detection",
+    "Tactic: Discovery"
+  ],
+  "author": [
+    "raadabujaish"
+  ],
+  "license": "",
+  "threat": [
+    {
+      "framework": "MITRE ATT&CK",
+      "tactic": {
+        "id": "TA0007",
+        "name": "Discovery",
+        "reference": "https://attack.mitre.org/tactics/TA0007/"
+      },
+      "technique": [
+        {
+          "id": "T1087",
+          "name": "Account Discovery",
+          "reference": "https://attack.mitre.org/techniques/T1087/",
+          "subtechnique": [
+            {
+              "id": "T1087.002",
+              "name": "Domain Account",
+              "reference": "https://attack.mitre.org/techniques/T1087/002/"
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "framework": "MITRE ATT&CK",
+      "tactic": {
+        "id": "TA0007",
+        "name": "Discovery",
+        "reference": "https://attack.mitre.org/tactics/TA0007/"
+      },
+      "technique": [
+        {
+          "id": "T1482",
+          "name": "Domain Trust Discovery",
+          "reference": "https://attack.mitre.org/techniques/T1482/"
+        }
+      ]
+    }
+  ],
+  "investigation_fields": {
+    "field_names": [
+      "@timestamp",
+      "host.name",
+      "user.name",
+      "process.name",
+      "process.parent.name",
+      "process.command_line",
+      "event.code",
+      "winlog.event_data.SubjectUserName",
+      "user.domain",
+      "process.executable",
+      "process.args",
+      "process.parent.executable",
+      "event.action"
+    ]
+  },
+  "related_integrations": [],
+  "required_fields": [],
+  "setup": "",
+  "note": "## Investigation guide\n1. Review the recon commands and the host/user; a cluster of enumeration from one host suggests hands-on reconnaissance.\n2. Correlate with a preceding foothold (phishing/exploit) and watch the same host for follow-on privilege escalation or lateral movement.",
+  "false_positives": [
+    "An administrator legitimately querying group membership, trusts or DCs."
+  ],
+  "references": [
+    "https://attack.mitre.org/techniques/T1087/",
+    "https://attack.mitre.org/techniques/T1482/"
+  ],
+  "risk_score": 56,
+  "risk_score_mapping": [],
+  "severity": "medium",
+  "severity_mapping": [],
+  "output_index": "",
+  "max_signals": 100,
+  "exceptions_list": [],
+  "actions": [],
+  "type": "esql",
+  "language": "esql",
+  "query": "FROM logs-windows.sysmon_operational-*,logs-system.security-* METADATA _id, _index, _version\n| WHERE (event.code == \"1\" OR event.code == \"4688\") AND process.command_line IS NOT NULL\n| EVAL cl = TO_LOWER(process.command_line)\n| WHERE (cl LIKE \"*nltest*\" AND (cl LIKE \"*dclist*\" OR cl LIKE \"*domain_trusts*\" OR cl LIKE \"*dsgetdc*\" OR cl LIKE \"*trusted_domains*\"))\n   OR (cl LIKE \"*group*\" AND (cl LIKE \"*domain admins*\" OR cl LIKE \"*enterprise admins*\" OR cl LIKE \"*domain controllers*\") AND cl LIKE \"*/domain*\")\n   OR (cl LIKE \"*whoami*\" AND cl LIKE \"*/all*\")\n   OR cl LIKE \"*sharphound*\" OR cl LIKE \"*bloodhound*\" OR cl LIKE \"*invoke-bloodhound*\" OR cl LIKE \"*collectionmethod*\"\n   OR (cl LIKE \"*adfind*\" AND (cl LIKE \"*objectcategory*\" OR cl LIKE \"*trustdmp*\" OR cl LIKE \"*-gcb*\"))\n   OR (cl LIKE \"*dsquery*\" AND (cl LIKE \"*-filter*\" OR cl LIKE \"* group*\" OR cl LIKE \"* user*\"))\n   OR (cl LIKE \"*wmic*\" AND cl LIKE \"*/node:*\")\n| KEEP @timestamp, host.name, user.name, process.name, process.parent.name, process.command_line, event.code, winlog.event_data.SubjectUserName"
+}

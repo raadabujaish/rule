@@ -1,0 +1,102 @@
+{
+  "rule_id": "1bd9497e-9ce9-436b-a401-3cfbe0fd642f",
+  "name": "AD — Kerberos Replay Attack Detected",
+  "version": 1,
+  "enabled": true,
+  "interval": "15m",
+  "from": "now-25m",
+  "to": "now",
+  "description": "Windows event 4649 is logged when the Kerberos subsystem detects a replayed authenticator — the same request submitted twice. It is a direct indicator of ticket replay, pass-the-ticket and relay tooling, and it is one of the few Windows events that is almost never produced by normal operation. Validated baseline at JCB: 5 events across 7 days on a single host. No existing rule covers this event code.",
+  "tags": [
+    "JCB",
+    "ScanWave",
+    "Windows",
+    "Credential Access",
+    "Kerberos",
+    "MITRE T1558",
+    "MITRE T1550.003"
+  ],
+  "author": [
+    "ScanWave"
+  ],
+  "license": "ScanWave — JCB Managed Detection",
+  "threat": [
+    {
+      "framework": "MITRE ATT&CK",
+      "tactic": {
+        "id": "TA0006",
+        "name": "Credential Access",
+        "reference": "https://attack.mitre.org/tactics/TA0006/"
+      },
+      "technique": [
+        {
+          "id": "T1558",
+          "name": "Steal or Forge Kerberos Tickets",
+          "reference": "https://attack.mitre.org/techniques/T1558/"
+        }
+      ]
+    },
+    {
+      "framework": "MITRE ATT&CK",
+      "tactic": {
+        "id": "TA0008",
+        "name": "Lateral Movement",
+        "reference": "https://attack.mitre.org/tactics/TA0008/"
+      },
+      "technique": [
+        {
+          "id": "T1550",
+          "name": "Use Alternate Authentication Material",
+          "reference": "https://attack.mitre.org/techniques/T1550/",
+          "subtechnique": [
+            {
+              "id": "T1550.003",
+              "name": "Pass the Ticket",
+              "reference": "https://attack.mitre.org/techniques/T1550/003/"
+            }
+          ]
+        }
+      ]
+    }
+  ],
+  "investigation_fields": {
+    "field_names": [
+      "host.name",
+      "user.name",
+      "user.domain",
+      "process.name",
+      "process.executable",
+      "process.command_line",
+      "process.args",
+      "process.parent.name",
+      "process.parent.executable",
+      "event.code",
+      "event.action"
+    ]
+  },
+  "related_integrations": [],
+  "required_fields": [],
+  "setup": "",
+  "note": "### Triage\n1. Establish the account and host in the event, then review all Kerberos activity (4768/4769/4771) for that account around the same time.\n2. A cluster of 4649 events, or 4649 on a domain controller or Tier-0 server, should be treated as active credential-material abuse.\n3. Correlate with `Windows — Pass-the-Hash / Overpass-the-Hash Logon Pattern`, `AD — Kerberoasting: RC4 Service Ticket Requested` and `AD — DCSync: Directory Replication by an Unexpected Principal`.\n4. Isolated single events can result from network retransmission — investigate but weigh volume and destination.",
+  "false_positives": [
+    "Network-level packet duplication or an aggressive load balancer replaying authentication traffic.",
+    "Misbehaving application that caches and resubmits a Kerberos authenticator."
+  ],
+  "references": [
+    "https://attack.mitre.org/techniques/T1550/003/"
+  ],
+  "risk_score": 73,
+  "risk_score_mapping": [],
+  "severity": "high",
+  "severity_mapping": [],
+  "output_index": "",
+  "max_signals": 100,
+  "exceptions_list": [],
+  "actions": [],
+  "type": "query",
+  "language": "kuery",
+  "index": [
+    "logs-system.security-*"
+  ],
+  "query": "event.code:\"4649\""
+}

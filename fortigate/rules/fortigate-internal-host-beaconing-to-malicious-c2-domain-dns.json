@@ -1,0 +1,96 @@
+{
+  "rule_id": "jcb-fgt-malicious-dns-c2",
+  "name": "FortiGate — Internal Host Beaconing to Malicious/C2 Domain (DNS)",
+  "version": 1,
+  "enabled": true,
+  "interval": "1h",
+  "from": "now-24h",
+  "to": "now",
+  "description": "Attacker objective\nAn infected internal host beacons to attacker command-and-control or crypto-mining infrastructure via DNS.\n\nAttack logic\nDNS filtering blocks or redirects lookups to known-malicious domains. Internal DNS resolvers forward all client queries and are excluded; a non-resolver endpoint generating repeated blocked malicious-domain lookups is an infected host beaconing.\n\nWhy this detection works\nThreat-feed-backed DNS verdicts, plus a resolver/forwarder allowlist, attribute the malicious lookups to the true endpoint (source IP/MAC) rather than the resolver that forwards them.\n\nFalse positives\nA shared NAT/proxy not in the resolver allowlist; an occasional user typo.\n\nTuning\nMaintain the resolver/forwarder allowlist; adjust the count for chatty hosts.\n\nRequired telemetry\nFortiGate DNS-filter UTM (subtype:dns, blocked/redirect action, dns.question.name, source.ip, source.mac).",
+  "tags": [
+    "JCB",
+    "Perimeter",
+    "Phase3",
+    "Use Case: Threat Detection",
+    "Tactic: Command and Control"
+  ],
+  "author": [
+    "raadabujaish"
+  ],
+  "threat": [
+    {
+      "framework": "MITRE ATT&CK",
+      "tactic": {
+        "id": "TA0011",
+        "name": "Command and Control",
+        "reference": "https://attack.mitre.org/tactics/TA0011/"
+      },
+      "technique": [
+        {
+          "id": "T1071",
+          "name": "Application Layer Protocol",
+          "reference": "https://attack.mitre.org/techniques/T1071/",
+          "subtechnique": [
+            {
+              "id": "T1071.004",
+              "name": "DNS",
+              "reference": "https://attack.mitre.org/techniques/T1071/004/"
+            }
+          ]
+        }
+      ]
+    }
+  ],
+  "investigation_fields": {
+    "field_names": [
+      "source.ip",
+      "source.mac",
+      "dns.question.name",
+      "fortinet.firewall.domainfilterlist",
+      "destination.ip"
+    ]
+  },
+  "related_integrations": [],
+  "required_fields": [],
+  "setup": "",
+  "note": "## Investigation guide\n1. source.ip / source.mac = the infected endpoint; dns.question.name = the C2/malware domain.\n2. Isolate and scan the host; hunt for the malware family (e.g. crypto-miner, botnet).\n3. Correlate with lateral-movement / exploit alerts on the same host.",
+  "false_positives": [
+    "A shared NAT/proxy not in the resolver allowlist; an occasional user typo."
+  ],
+  "references": [
+    "https://attack.mitre.org/techniques/T1071/",
+    "https://attack.mitre.org/techniques/T1071/004/"
+  ],
+  "risk_score": 73,
+  "risk_score_mapping": [],
+  "severity": "high",
+  "severity_mapping": [],
+  "output_index": "",
+  "max_signals": 100,
+  "exceptions_list": [],
+  "actions": [],
+  "type": "threshold",
+  "language": "kuery",
+  "index": [
+    "logs-fortinet_fortigate.log-*"
+  ],
+  "query": "fortinet.firewall.subtype:\"dns\" and fortinet.firewall.action:\"redirect\" and not source.ip:(\"192.168.112.222\" or \"192.168.112.223\" or \"192.168.25.1\" or \"172.17.25.1\" or \"192.168.112.221\")",
+  "threshold": {
+    "field": [
+      "source.ip"
+    ],
+    "value": 10,
+    "cardinality": [
+      {
+        "field": "dns.question.name",
+        "value": 1
+      }
+    ]
+  },
+  "alert_suppression": {
+    "duration": {
+      "value": 24,
+      "unit": "h"
+    }
+  }
+}

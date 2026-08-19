@@ -1,0 +1,150 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<Playbook xmlns="https://soc.example/playbooks" id="PB-WIN-005" name="Change Audit — AD Account Lockout (4740) - SOC Playbook" version="1.0" status="Production" classification="TLP:AMBER">
+  <Metadata>
+    <Owner>JCB Detection Engineering (WatchWave)</Owner>
+    <LastUpdated>2026-08-14</LastUpdated>
+    <Severity default="Low">Low</Severity>
+    <Confidence default="Medium">Medium</Confidence>
+    <Category>Credential Access / Account Lockout</Category>
+    <MitreAttack>
+      <Technique id="T1110" name="Brute Force"/>
+      <Tactic id="TA0006" name="Credential Access"/>
+    </MitreAttack>
+    <References>
+      <Reference title="MITRE ATT and CK" url="https://attack.mitre.org/techniques/T1110/"/>
+    </References>
+  </Metadata>
+  <ExecutiveSummary>
+    <Overview>An account was locked out (4740) - the reshaped, suppressed successor to QA - AD - Account Locked. Triage question: is the lockout the visible symptom of a brute-force/spray, or a benign stale-credential loop (the dominant JCB cause, e.g. achuser locking ~95x/day)?</Overview>
+    <BusinessImpact>Lockouts are both a possible brute-force indicator and, in JCB, a major availability drain from stale service-account credentials.</BusinessImpact>
+  </ExecutiveSummary>
+  <Scope><Assets>
+    <AssetType>Windows servers and workstations (INTDOM domain)</AssetType>
+    <AssetType>Domain controllers</AssetType>
+  </Assets><LogSources>
+    <LogSource>Windows Security event log - logs-system.security-*</LogSource>
+  </LogSources></Scope>
+  <Prerequisites><TelemetryRequirements>
+    <Requirement>Windows Security + Sysmon + PowerShell logs via Elastic Agent (verified live). Sysmon event.code 1=process(command_line/parent populated), 11=file, 13/12=registry(registry.path populated); process.code_signature NOT collected.</Requirement>
+  </TelemetryRequirements><DetectionSignals>
+    <Signal><Name>Account lockout</Name><Details>4740; suppressed 1h per account.</Details></Signal>
+  </DetectionSignals></Prerequisites>
+  <Inputs>
+    <Input name="$target_user" description="Locked-out account (TargetUserName)."/>
+  </Inputs>
+  <Triage><ImmediateCapture>
+    <Item>Host: $hostname</Item>
+  </ImmediateCapture><InitialAssessment>
+    <Rule>Weigh the evidence story, not any single fact - see ClassificationGuidance.</Rule>
+  </InitialAssessment></Triage>
+  <Investigation>
+    <Goal>Determine whether the lockout stems from a credential attack or a benign stale-credential/service loop.</Goal>
+    <Workflow>
+      <Step order="1" name="Lockout source and recent failures for this account">
+        <Purpose>Locate WHERE the bad passwords come from - one device = stale credential; many sources = attack.</Purpose>
+        <Query platform="Elastic" language="ES|QL" id="INV-01-LOCK-SOURCE">
+          <![CDATA[
+FROM logs-system.security-*
+| WHERE winlog.event_data.TargetUserName == "$target_user" AND event.code IN ("4740","4625","4771") AND @timestamp >= NOW() - 4 hours
+| EVAL src = COALESCE(TO_STRING(source.ip), "local/caller")
+| STATS events = COUNT(*), codes = VALUES(event.code) BY src
+| SORT events DESC
+| LIMIT 20
+          ]]>
+        </Query>
+        <ExpectedOutput>
+          <Field name="src"/>
+          <Field name="codes"/>
+          <Field name="events"/>
+        </ExpectedOutput>
+        <AnalystNotes>One consistent source/caller with steady failures = stale credential (helpdesk fix). Multiple sources or a tight external burst = brute-force. JCB known loop accounts: achuser, aml_srv.</AnalystNotes>
+      </Step>
+      <Step order="2" name="Did the account authenticate successfully around the lockout">
+        <Purpose>A success from a NEW source near the lockout suggests compromise; success from the normal device = user recovered.</Purpose>
+        <Query platform="Elastic" language="ES|QL" id="INV-02-LOCK-SUCCESS" optional="true">
+          <![CDATA[
+FROM logs-system.security-*
+| WHERE winlog.event_data.TargetUserName == "$target_user" AND event.code == "4624" AND @timestamp >= NOW() - 2 hours
+| EVAL src = COALESCE(TO_STRING(source.ip), "local")
+| STATS logons = COUNT(*), types = VALUES(winlog.event_data.LogonType), hosts = VALUES(host.name) BY src
+| LIMIT 10
+          ]]>
+        </Query>
+        <ExpectedOutput>
+          <Field name="src"/>
+          <Field name="types"/>
+          <Field name="hosts"/>
+        </ExpectedOutput>
+        <AnalystNotes>Success from an unfamiliar source shortly after a lockout is a compromise signal; success only from the user's normal device supports benign recovery.</AnalystNotes>
+      </Step>
+      <Step order="3" name="Finalize classification">
+        <DecisionTree>
+          <Node><Condition>INV-01 shows failures from multiple/unfamiliar sources, or INV-02 shows success from a new source.</Condition><Result>True Positive (Brute-force related lockout - investigate as credential attack)</Result></Node>
+          <Node><Condition>INV-01 shows one consistent source/caller (stale credential), especially a known loop account (achuser/aml_srv).</Condition><Result>Misconfiguration</Result></Node>
+          <Node><Condition>A user locked out once from their own device after typos, recovered normally.</Condition><Result>Benign Activity</Result></Node>
+          <Node><Condition>Lockout source unclear.</Condition><Result>Needs Escalation</Result></Node>
+        </DecisionTree>
+        <DocumentationChecklist>
+          <Item>Attach outputs of INV-01-LOCK-SOURCE, INV-02-LOCK-SUCCESS to the case.</Item>
+        </DocumentationChecklist>
+      </Step>
+    </Workflow>
+  </Investigation>
+  <ClassificationGuidance>
+    <FalsePositive>
+      <Definition>A user briefly locked out from their own device (typos) and recovered.</Definition>
+      <Indicators>
+        <Item>Single normal source.</Item>
+        <Item>One-off.</Item>
+        <Item>Normal recovery.</Item>
+      </Indicators>
+      <SOCAction>
+        <Item>Confirm with the user; close as benign_activity.</Item>
+      </SOCAction>
+    </FalsePositive>
+    <TruePositive>
+      <Definition>A lockout that is the symptom of a credential attack.</Definition>
+      <Indicators>
+        <Item>Failures from multiple/unfamiliar sources.</Item>
+        <Item>Success from a new source.</Item>
+        <Item>Targeted account.</Item>
+      </Indicators>
+      <SOCAction>
+        <Item>Investigate as brute-force (pivot to PB-AD-002/001); reset if compromise indicators.</Item>
+      </SOCAction>
+    </TruePositive>
+    <Misconfiguration>
+      <Definition>A stale stored credential repeatedly locking a service/app account.</Definition>
+      <Indicators>
+        <Item>One consistent source/caller.</Item>
+        <Item>Recurring same-account lockouts.</Item>
+        <Item>Known loop account.</Item>
+      </Indicators>
+      <SOCAction>
+        <Item>Helpdesk: fix the stored credential on the source; track under credential-hygiene P0.</Item>
+      </SOCAction>
+    </Misconfiguration>
+  </ClassificationGuidance>
+  <Response><IRForHumans>
+    <Phase name="Immediate Actions (0-30 minutes)">
+      <Action priority="1">Confirm the activity on the host; if malicious indicators, isolate the host.</Action>
+      <Action priority="2">Identify the responsible account/process and its origin.</Action>
+    </Phase>
+    <Phase name="Containment and Eradication (hours)">
+      <Action>Isolate the host; capture volatile evidence; hunt the same pattern across the estate.</Action>
+      <Action>Reset credentials used on the host if compromise is confirmed.</Action>
+    </Phase>
+    <Phase name="Recovery and Hardening (days)">
+      <Action>Remediate the root cause; add/verify EDR coverage; apply relevant hardening.</Action>
+    </Phase>
+  </IRForHumans></Response>
+  <QualityChecks>
+    <Check>Confirm the required telemetry (Sysmon/Security auditing) is present on the host.</Check>
+    <Check>Tune known-benign administrative sources via exceptions, not by disabling the rule.</Check>
+  </QualityChecks>
+  <ClosureCriteria><FalsePositiveClosure>
+    <Item>Activity confirmed benign/authorised and documented.</Item>
+  </FalsePositiveClosure><TruePositiveClosure>
+    <Item>Host contained and triaged; root cause eradicated; estate swept; findings recorded.</Item>
+  </TruePositiveClosure></ClosureCriteria>
+</Playbook>

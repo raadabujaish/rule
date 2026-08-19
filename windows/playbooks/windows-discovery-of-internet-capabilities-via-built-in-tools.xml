@@ -1,0 +1,150 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<Playbook xmlns="https://soc.example/playbooks" id="PB-WIN-022" name="Windows — Discovery of Internet Capabilities via Built-in Tools - SOC Playbook" version="1.0" status="Production" classification="TLP:AMBER">
+  <Metadata>
+    <Owner>JCB Detection Engineering (WatchWave)</Owner>
+    <LastUpdated>2026-08-14</LastUpdated>
+    <Severity default="Low">Low</Severity>
+    <Confidence default="Low">Low</Confidence>
+    <Category>Discovery / System Network Configuration Discovery</Category>
+    <MitreAttack>
+      <Technique id="T1016.001" name="Internet Connection Discovery"/>
+      <Tactic id="TA0007" name="Discovery"/>
+    </MitreAttack>
+    <References>
+      <Reference title="MITRE ATT and CK" url="https://attack.mitre.org/techniques/T1016/"/>
+    </References>
+  </Metadata>
+  <ExecutiveSummary>
+    <Overview>A host ran ping/tracert/pathping to a non-local target for the first time in the baseline window (new_terms) - checking internet reachability, an early step malware uses to confirm C2 connectivity. Triage question: is this malware/attacker connectivity-checking, or normal admin/troubleshooting?</Overview>
+    <BusinessImpact>Malware often verifies internet access before beaconing; a new connectivity check from an unusual host/process can be an early infection sign.</BusinessImpact>
+  </ExecutiveSummary>
+  <Scope><Assets>
+    <AssetType>Windows servers and workstations (INTDOM domain)</AssetType>
+    <AssetType>Domain controllers</AssetType>
+  </Assets><LogSources>
+    <LogSource>Sysmon process + Windows Security 4688 - logs-windows.sysmon_operational-*,logs-system.security-*</LogSource>
+  </LogSources></Scope>
+  <Prerequisites><TelemetryRequirements>
+    <Requirement>Windows Security + Sysmon + PowerShell logs via Elastic Agent (verified live). Sysmon event.code 1=process(command_line/parent populated), 11=file, 13/12=registry(registry.path populated); process.code_signature NOT collected.</Requirement>
+  </TelemetryRequirements><DetectionSignals>
+    <Signal><Name>Internet capability check</Name><Details>ping/tracert/pathping to a non-local target, first-seen entity.</Details></Signal>
+  </DetectionSignals></Prerequisites>
+  <Inputs>
+    <Input name="$hostname" description="Host running the check."/>
+    <Input name="$username" description="Account (user.name)."/>
+  </Inputs>
+  <Triage><ImmediateCapture>
+    <Item>Host: $hostname</Item>
+  </ImmediateCapture><InitialAssessment>
+    <Rule>Weigh the evidence story, not any single fact - see ClassificationGuidance.</Rule>
+  </InitialAssessment></Triage>
+  <Investigation>
+    <Goal>Determine whether the connectivity check is malware/attacker reconnaissance or benign troubleshooting.</Goal>
+    <Workflow>
+      <Step order="1" name="What was pinged and by which parent process">
+        <Purpose>The target and the parent process separate human troubleshooting from malware connectivity checks.</Purpose>
+        <Query platform="Elastic" language="ES|QL" id="INV-01-NETCHK-DETAIL">
+          <![CDATA[
+FROM logs-windows.sysmon_operational-*,logs-system.security-*
+| WHERE event.code IN ("1","4688") AND host.name == "$hostname" AND process.name RLIKE "(?i)(ping|tracert|pathping).*" AND @timestamp >= NOW() - 4 hours
+| KEEP @timestamp, process.name, process.parent.name, process.command_line, user.name
+| SORT @timestamp DESC
+| LIMIT 20
+          ]]>
+        </Query>
+        <ExpectedOutput>
+          <Field name="process.name"/>
+          <Field name="process.parent.name"/>
+          <Field name="process.command_line"/>
+          <Field name="user.name"/>
+        </ExpectedOutput>
+        <AnalystNotes>ping 8.8.8.8 spawned by an office app / script interpreter / unknown binary = malware connectivity check. ping by cmd.exe run by an admin = troubleshooting. The target (public DNS, C2-like domain) and parent are the discriminators.</AnalystNotes>
+      </Step>
+      <Step order="2" name="Process origin and account on the host">
+        <Purpose>The parent process and account reveal whether this was interactive attacker activity or an automated/service context.</Purpose>
+        <Query platform="Elastic" language="ES|QL" id="INV-02-PROC-TREE" optional="true">
+          <![CDATA[
+FROM logs-windows.sysmon_operational-*,logs-system.security-*
+| WHERE event.code IN ("1","4688") AND host.name == "$hostname" AND @timestamp >= NOW() - 2 hours
+| STATS runs = COUNT(*), parents = VALUES(process.parent.name), users = VALUES(user.name) BY process.name
+| SORT runs DESC
+| LIMIT 15
+          ]]>
+        </Query>
+        <ExpectedOutput>
+          <Field name="process.name"/>
+          <Field name="parents"/>
+          <Field name="users"/>
+        </ExpectedOutput>
+        <AnalystNotes>A suspicious process spawned by an office app/browser/script interpreter, run by a normal user, is more concerning than one under a known admin/automation parent.</AnalystNotes>
+      </Step>
+      <Step order="3" name="Finalize classification">
+        <DecisionTree>
+          <Node><Condition>Connectivity check spawned by a suspicious parent (office app, script, dropper) or preceding C2-like connections.</Condition><Result>True Positive (Malware Connectivity Check - investigate the host)</Result></Node>
+          <Node><Condition>Ping/tracert run by an admin or IT tool for troubleshooting.</Condition><Result>False Positive / Benign Activity</Result></Node>
+          <Node><Condition>New connectivity check with unclear parent/intent.</Condition><Result>Needs Escalation</Result></Node>
+        </DecisionTree>
+        <DocumentationChecklist>
+          <Item>Attach outputs of INV-01-NETCHK-DETAIL, INV-02-PROC-TREE to the case.</Item>
+        </DocumentationChecklist>
+      </Step>
+    </Workflow>
+  </Investigation>
+  <ClassificationGuidance>
+    <FalsePositive>
+      <Definition>Normal admin/IT troubleshooting.</Definition>
+      <Indicators>
+        <Item>Admin/IT context.</Item>
+        <Item>Interactive cmd/powershell parent.</Item>
+        <Item>Benign target.</Item>
+      </Indicators>
+      <SOCAction>
+        <Item>Confirm; close as benign_activity; new_terms learns the entity.</Item>
+      </SOCAction>
+    </FalsePositive>
+    <TruePositive>
+      <Definition>Malware/attacker verifying internet reachability.</Definition>
+      <Indicators>
+        <Item>Suspicious parent process.</Item>
+        <Item>C2-like target.</Item>
+        <Item>Followed by external connections.</Item>
+      </Indicators>
+      <SOCAction>
+        <Item>Investigate the parent process/host; open IR if malware indicators.</Item>
+        <Item>Check for follow-on beaconing.</Item>
+      </SOCAction>
+    </TruePositive>
+    <Misconfiguration>
+      <Definition>A monitoring tool running connectivity checks.</Definition>
+      <Indicators>
+        <Item>A known monitoring agent.</Item>
+        <Item>Consistent expected targets.</Item>
+      </Indicators>
+      <SOCAction>
+        <Item>Baseline; document.</Item>
+      </SOCAction>
+    </Misconfiguration>
+  </ClassificationGuidance>
+  <Response><IRForHumans>
+    <Phase name="Immediate Actions (0-30 minutes)">
+      <Action priority="1">Confirm the activity on the host; if malicious indicators, isolate the host.</Action>
+      <Action priority="2">Identify the responsible account/process and its origin.</Action>
+    </Phase>
+    <Phase name="Containment and Eradication (hours)">
+      <Action>Isolate the host; capture volatile evidence; hunt the same pattern across the estate.</Action>
+      <Action>Reset credentials used on the host if compromise is confirmed.</Action>
+    </Phase>
+    <Phase name="Recovery and Hardening (days)">
+      <Action>Remediate the root cause; add/verify EDR coverage; apply relevant hardening.</Action>
+    </Phase>
+  </IRForHumans></Response>
+  <QualityChecks>
+    <Check>Confirm the required telemetry (Sysmon/Security auditing) is present on the host.</Check>
+    <Check>Tune known-benign administrative sources via exceptions, not by disabling the rule.</Check>
+  </QualityChecks>
+  <ClosureCriteria><FalsePositiveClosure>
+    <Item>Activity confirmed benign/authorised and documented.</Item>
+  </FalsePositiveClosure><TruePositiveClosure>
+    <Item>Host contained and triaged; root cause eradicated; estate swept; findings recorded.</Item>
+  </TruePositiveClosure></ClosureCriteria>
+</Playbook>

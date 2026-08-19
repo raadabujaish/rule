@@ -1,0 +1,75 @@
+{
+  "rule_id": "jcb-ora-new-privileged-actor",
+  "name": "Oracle — New Principal Performing a Privileged Operation",
+  "version": 1,
+  "enabled": true,
+  "interval": "1h",
+  "from": "now-3h",
+  "to": "now",
+  "description": "Attacker objective\nA compromised or newly-created account begins performing privileged database operations (valid-account misuse / insider abuse).\n\nAttack logic\nPrivileged database actions are performed by a small, stable set of service and admin accounts. The first time a principal not seen in the historical window performs a privileged action is a behavioural anomaly that complements the per-action rules.\n\nWhy this detection works\nA new-terms model over the acting principal auto-baselines the known set from history and fires only on a genuinely new privileged actor.\n\nFalse positives\nOnboarding of a new legitimate service/admin account.\n\nTuning\nVerify and allowlist new accounts; the history window auto-baselines over time.\n\nRequired telemetry\nOracle Unified Audit shipped as apps-* (ACTION_NAME, USERNAME).",
+  "tags": [
+    "JCB",
+    "Oracle",
+    "Phase3",
+    "Use Case: Threat Detection",
+    "Tactic: Privilege Escalation"
+  ],
+  "author": [
+    "raadabujaish"
+  ],
+  "threat": [
+    {
+      "framework": "MITRE ATT&CK",
+      "tactic": {
+        "id": "TA0004",
+        "name": "Privilege Escalation",
+        "reference": "https://attack.mitre.org/tactics/TA0004/"
+      },
+      "technique": [
+        {
+          "id": "T1078",
+          "name": "Valid Accounts",
+          "reference": "https://attack.mitre.org/techniques/T1078/"
+        }
+      ]
+    }
+  ],
+  "investigation_fields": {
+    "field_names": [
+      "USERNAME",
+      "ACTION_NAME",
+      "SQL_TEXT",
+      "type",
+      "TIMESTAMP"
+    ]
+  },
+  "related_integrations": [],
+  "required_fields": [],
+  "setup": "",
+  "note": "## Investigation guide\n1. Identify the new principal and the privileged action performed.\n2. Confirm whether the account was legitimately onboarded; if not, contain and investigate.",
+  "false_positives": [
+    "Onboarding of a new legitimate service/admin account."
+  ],
+  "references": [
+    "https://attack.mitre.org/techniques/T1078/"
+  ],
+  "risk_score": 56,
+  "risk_score_mapping": [],
+  "severity": "medium",
+  "severity_mapping": [],
+  "output_index": "",
+  "max_signals": 100,
+  "exceptions_list": [],
+  "actions": [],
+  "type": "new_terms",
+  "query": "ACTION_NAME.keyword:(\"DELETE\" or \"TRUNCATE TABLE\" or \"ALTER SYSTEM\" or \"CREATE PUBLIC DATABASE LINK\" or \"CREATE TABLE\" or \"PL/SQL EXECUTE\" or \"CREATE USER\" or \"DROP TABLE\")",
+  "new_terms_fields": [
+    "USERNAME.keyword"
+  ],
+  "history_window_start": "now-90d",
+  "index": [
+    "apps-*",
+    "-apps-*-2025"
+  ],
+  "language": "kuery"
+}

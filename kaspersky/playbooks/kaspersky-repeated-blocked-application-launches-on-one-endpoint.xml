@@ -1,0 +1,167 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<Playbook xmlns="https://soc.example/playbooks" id="PB-JCB-NEW-03" name="Kaspersky — Repeated Blocked Application Launches on One Endpoint - SOC Playbook" version="2.1" status="Production" classification="TLP:AMBER">
+  <Metadata>
+    <Owner>JCB Detection Engineering (WatchWave)</Owner>
+    <LastUpdated>2026-08-19</LastUpdated>
+    <Severity default="Medium">Medium</Severity>
+    <Confidence default="Medium">Medium</Confidence>
+    <Category>Execution / Application Control</Category>
+    <MitreAttack>
+      <Technique id="T1204" name="User Execution"/>
+      <Tactic id="TA0002" name="Execution"/>
+      <Technique id="T1219" name="Remote Access Software"/>
+      <Tactic id="TA0011" name="Command and Control"/>
+    </MitreAttack>
+    <References>
+      <Reference title="MITRE ATT and CK T1204 User Execution" url="https://attack.mitre.org/techniques/T1204/"/>
+      <Reference title="MITRE ATT and CK T1219 Remote Access Software" url="https://attack.mitre.org/techniques/T1219/"/>
+    </References>
+  </Metadata>
+  <ExecutiveSummary>
+    <Overview>Kaspersky Application Control blocked application launches repeatedly on one endpoint (GNRL_EV_APPLICATION_LAUNCH_DENIED, "Application startup prohibited"). The event message carries the object name, path, SHA256, KL category and the App-Control rule category (e.g. "ANY DESK"). Most bursts are benign policy enforcement (users repeatedly trying GameBar, Skype, games, or blocked remote-access tools); the concern is an actor persistently trying to run unsanctioned tooling - especially remote-access software - or a burst that coincides with a malware detection. The rule ships without an explicit ATT and CK mapping; the techniques above are best-fit for triage.</Overview>
+    <BusinessImpact>Repeated attempts to run controlled software may be a user working around policy (unlicensed / remote-access apps) or an attacker attempting to stage tooling. Only a small fraction are malicious, but a persistent attempt to run remote-access software on a bank endpoint warrants review.</BusinessImpact>
+  </ExecutiveSummary>
+  <Scope><Assets>
+    <AssetType>Windows endpoints managed by Kaspersky (App Control)</AssetType>
+    <AssetType>Kaspersky Security Center</AssetType>
+  </Assets><LogSources>
+    <LogSource>Kaspersky CEF via syslog - logs-cef.log-*</LogSource>
+  </LogSources></Scope>
+  <Prerequisites><TelemetryRequirements>
+    <Requirement>Kaspersky Security Center CEF (verified live on logs-cef.log-*, cef.device.vendor == "KasperskyLab", observer.product "SecurityCenter"). Fields: destination.domain (the affected ENDPOINT, not the collector), destination.user.name (initiator, e.g. INTDOM\user), cef.device.event_class_id == "GNRL_EV_APPLICATION_LAUNCH_DENIED", cef.name ("Application startup prohibited"), message (multi-line: Object name, Path to object, SHA256, KL category, User, Result: Blocked, Rule category, Rule type). Pivot on destination.domain as the host of interest.</Requirement>
+  </TelemetryRequirements><DetectionSignals>
+    <Signal><Name>Repeated Blocked Application Launches on One Endpoint</Name><Details>A threshold of GNRL_EV_APPLICATION_LAUNCH_DENIED events for a single endpoint (destination.domain).</Details></Signal>
+  </DetectionSignals></Prerequisites>
+  <Inputs>
+    <Input name="$endpoint" description="Endpoint hostname (destination.domain), e.g. Player-403-1."/>
+  </Inputs>
+  <Triage><ImmediateCapture>
+    <Item>$endpoint: $endpoint</Item>
+    <Item>Read the message Object name / Path / Rule category to see WHICH application was blocked.</Item>
+  </ImmediateCapture><InitialAssessment>
+    <Rule>Weigh the full evidence story per the ClassificationGuidance. The blocked application's identity (remote-access tool vs game vs signed Microsoft app) drives the verdict more than the raw count.</Rule>
+  </InitialAssessment></Triage>
+  <Investigation>
+    <Goal>Determine whether the repeated launch denials are benign policy enforcement or a persistent attempt to run unsanctioned / remote-access / malicious software.</Goal>
+    <Workflow>
+      <Step order="1" name="Quantify the blocked launches on the endpoint">
+        <Purpose>Count attempts and identify how many distinct users are driving them on this host in the window.</Purpose>
+        <Query platform="Elastic" language="ES|QL" id="INV-01">
+          <![CDATA[
+FROM logs-cef.log-*
+| WHERE cef.device.vendor == "KasperskyLab" AND cef.device.event_class_id == "GNRL_EV_APPLICATION_LAUNCH_DENIED"
+    AND destination.domain == "$endpoint" AND @timestamp >= NOW() - 4 hours
+| STATS attempts = COUNT(*), distinct_users = COUNT_DISTINCT(destination.user.name), users = VALUES(destination.user.name), signals = VALUES(cef.name)
+| LIMIT 1
+          ]]>
+        </Query>
+        <ExpectedOutput>
+          <Field name="attempts"/>
+          <Field name="distinct_users"/>
+          <Field name="users"/>
+        </ExpectedOutput>
+        <AnalystNotes>A high count from one user repeatedly launching the same app = benign nuisance. Spread across users or paired with malware alerts (see INV-03) raises concern.</AnalystNotes>
+      </Step>
+      <Step order="2" name="Read the blocked applications (object name, path, SHA256, rule category)">
+        <Purpose>The message reveals exactly what was blocked - the decisive evidence for benign-vs-malicious.</Purpose>
+        <Query platform="Elastic" language="ES|QL" id="INV-02">
+          <![CDATA[
+FROM logs-cef.log-*
+| WHERE cef.device.vendor == "KasperskyLab" AND cef.device.event_class_id == "GNRL_EV_APPLICATION_LAUNCH_DENIED"
+    AND destination.domain == "$endpoint" AND @timestamp >= NOW() - 4 hours
+| KEEP @timestamp, destination.user.name, cef.name, message
+| SORT @timestamp DESC
+| LIMIT 25
+          ]]>
+        </Query>
+        <ExpectedOutput>
+          <Field name="destination.user.name"/>
+          <Field name="message"/>
+        </ExpectedOutput>
+        <AnalystNotes>Signed Microsoft apps (GameBar, Skype), games, or a known "ANY DESK"-category block = policy working. An unknown binary from a user-writable path (Temp / Downloads / AppData), an unfamiliar SHA256, or a remote-access tool (AnyDesk / TeamViewer / RustDesk) = investigate. Note the SHA256 for enrichment.</AnalystNotes>
+      </Step>
+      <Step order="3" name="Correlate with other Kaspersky activity on the endpoint">
+        <Purpose>A launch-denial burst that coincides with malware / attack detections on the same host is a real incident, not nuisance.</Purpose>
+        <Query platform="Elastic" language="ES|QL" id="INV-03">
+          <![CDATA[
+FROM logs-cef.log-*
+| WHERE cef.device.vendor == "KasperskyLab" AND destination.domain == "$endpoint" AND @timestamp >= NOW() - 4 hours
+| STATS events = COUNT(*) BY cef.device.event_class_id, cef.name
+| SORT events DESC
+| LIMIT 25
+          ]]>
+        </Query>
+        <ExpectedOutput>
+          <Field name="cef.device.event_class_id"/>
+          <Field name="cef.name"/>
+          <Field name="events"/>
+        </ExpectedOutput>
+        <AnalystNotes>GNRL_EV_VIRUS_FOUND*, GNRL_EV_ATTACK_DETECTED, GNRL_EV_ADSEC_DETECT or GNRL_EV_OBJECT_BLOCKED alongside the launch denials escalates to a host-compromise investigation. Device-control plug events alone are unrelated context.</AnalystNotes>
+      </Step>
+    </Workflow>
+  </Investigation>
+  <DecisionTree>
+    <Node><Condition>A persistent attempt to launch a remote-access tool (AnyDesk / TeamViewer / RustDesk) or an unknown binary from a user-writable path, and/or launch denials coinciding with a malware / attack detection on the host.</Condition><Result>True Positive (Attempted execution of unsanctioned / malicious software - investigate host)</Result></Node>
+    <Node><Condition>The blocked applications are signed, known software (GameBar, Skype, games) that Kaspersky App Control is correctly denying per policy, with no threat context.</Condition><Result>False Positive (Application Control enforcing policy as designed)</Result></Node>
+    <Node><Condition>App Control policy is over-blocking a legitimately needed business application, generating repeated denials for a valid user.</Condition><Result>Misconfiguration (App-Control allowlist tuning)</Result></Node>
+    <Node><Condition>The blocked binary or its path / SHA256 is unfamiliar and cannot be classified from the logs alone.</Condition><Result>Needs Escalation (endpoint review / SHA256 enrichment)</Result></Node>
+  </DecisionTree>
+  <ClassificationGuidance>
+    <FalsePositive>
+      <Definition>Application Control correctly blocking known / policy-controlled software.</Definition>
+      <Indicators>
+        <Item>Signed Microsoft or well-known vendor binary.</Item>
+        <Item>Known App-Control rule category (e.g. games, ANY DESK) firing as designed.</Item>
+        <Item>No malware / attack events on the host.</Item>
+      </Indicators>
+      <SOCAction>
+        <Item>Confirm the app and policy intent; close as policy_enforced (control working as designed).</Item>
+      </SOCAction>
+    </FalsePositive>
+    <TruePositive>
+      <Definition>An actor persistently trying to run unsanctioned / remote-access / malicious software, or a burst tied to a detection.</Definition>
+      <Indicators>
+        <Item>Remote-access tool repeatedly blocked.</Item>
+        <Item>Unknown binary from Temp / Downloads / AppData with an unfamiliar SHA256.</Item>
+        <Item>Concurrent GNRL_EV_VIRUS_FOUND* / ATTACK_DETECTED on the host.</Item>
+      </Indicators>
+      <SOCAction>
+        <Item>Enrich the SHA256; isolate / review the endpoint; identify how the binary arrived; interview the user; open IR if malicious.</Item>
+      </SOCAction>
+    </TruePositive>
+    <Misconfiguration>
+      <Definition>App-Control policy over-blocking a legitimately required application.</Definition>
+      <Indicators>
+        <Item>A valid business app repeatedly denied for a legitimate user.</Item>
+        <Item>Denials stop once an allowlist entry is added.</Item>
+      </Indicators>
+      <SOCAction>
+        <Item>Raise an App-Control allowlist request with the object name / path / SHA256; document.</Item>
+      </SOCAction>
+    </Misconfiguration>
+  </ClassificationGuidance>
+  <Response><IRForHumans>
+    <Phase name="Immediate Actions (0-30 minutes)">
+      <Action priority="1">Read the message to identify the blocked application(s), path and SHA256; determine benign policy block vs unsanctioned / unknown software.</Action>
+      <Action priority="2">Check for concurrent malware / attack detections on the same endpoint (INV-03); if present, treat as a host-compromise investigation.</Action>
+    </Phase>
+    <Phase name="Containment and Eradication (hours)">
+      <Action>For unknown / malicious binaries: enrich the SHA256, isolate or review the endpoint, determine the delivery vector, remove the binary, and interview the user.</Action>
+    </Phase>
+    <Phase name="Recovery and Hardening (days)">
+      <Action>Tune the App-Control policy (tighten for remote-access tooling, allowlist legitimate business apps); reinforce software-request process; document lessons learned.</Action>
+    </Phase>
+  </IRForHumans></Response>
+  <Escalation>
+    <Trigger>A blocked remote-access tool or unknown binary, or launch denials coinciding with a malware / attack detection on the endpoint.</Trigger>
+    <To>SOC L2 / IR</To>
+  </Escalation>
+  <Closure>
+    <FalsePositiveClosure>
+      <Item>Blocked applications confirmed as known / policy-controlled software with no threat context; closed as policy_enforced; allowlist request raised if a valid app was over-blocked.</Item>
+    </FalsePositiveClosure>
+    <TruePositiveClosure>
+      <Item>Unsanctioned / malicious software identified and removed; delivery vector and user addressed; endpoint cleared; IR recorded.</Item>
+    </TruePositiveClosure>
+  </Closure>
+</Playbook>

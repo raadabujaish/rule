@@ -1,0 +1,83 @@
+{
+  "rule_id": "bab1d684-1f83-440a-965d-6b99bd8021cb",
+  "name": "Change Audit — Removable Media Plugged or Denied (Kaspersky Device Control)",
+  "version": 1,
+  "enabled": true,
+  "interval": "1h",
+  "from": "now-3900s",
+  "to": "now",
+  "description": "USB Allowed Plugins",
+  "tags": [
+    "IRM",
+    "QA"
+  ],
+  "author": [],
+  "license": "",
+  "threat": [],
+  "investigation_fields": {
+    "field_names": [
+      "destination.domain",
+      "destination.user.name",
+      "destination.ip",
+      "cef.name",
+      "cef.device.event_class_id",
+      "cef.severity",
+      "message",
+      "observer.product",
+      "cef.device.vendor",
+      "event.code"
+    ]
+  },
+  "related_integrations": [],
+  "required_fields": [],
+  "setup": "",
+  "false_positives": [],
+  "references": [],
+  "risk_score": 47,
+  "risk_score_mapping": [],
+  "severity": "medium",
+  "severity_mapping": [],
+  "output_index": "",
+  "max_signals": 100,
+  "exceptions_list": [],
+  "actions": [],
+  "meta": {
+    "from": "5m",
+    "kibana_siem_app_url": "https://jcb.scanwave.local:8008/app/security"
+  },
+  "type": "query",
+  "language": "kuery",
+  "index": [
+    "logs-cef.log-*"
+  ],
+  "query": "(event.code:\"GNRL_EV_DEVCTRL_DEV_PLUG_DENIED\") or (event.code:\"GNRL_EV_DEVCTRL_DEV_PLUGGED\" and message:\"Removable drives\")",
+  "filters": [
+    {
+      "meta": {
+        "negate": false,
+        "disabled": false,
+        "type": "phrase",
+        "key": "cef.device.vendor",
+        "params": {
+          "query": "KasperskyLab"
+        }
+      },
+      "query": {
+        "match_phrase": {
+          "cef.device.vendor": "KasperskyLab"
+        }
+      }
+    }
+  ],
+  "alert_suppression": {
+    "group_by": [
+      "destination.user.name",
+      "destination.ip"
+    ],
+    "duration": {
+      "value": 12,
+      "unit": "h"
+    },
+    "missing_fields_strategy": "suppress"
+  }
+}

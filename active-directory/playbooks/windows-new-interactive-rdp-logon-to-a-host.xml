@@ -1,0 +1,169 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<Playbook xmlns="https://soc.example/playbooks" id="PB-AD-016" name="Windows — New Interactive RDP Logon to a Host - SOC Playbook" version="1.0" status="Production" classification="TLP:AMBER">
+  <Metadata>
+    <Owner>JCB Detection Engineering (WatchWave)</Owner>
+    <LastUpdated>2026-08-14</LastUpdated>
+    <Severity default="Medium">Medium</Severity>
+    <Confidence default="Low">Low</Confidence>
+    <Category>Lateral Movement / Remote Services</Category>
+    <MitreAttack>
+      <Technique id="T1021.001" name="Remote Desktop Protocol"/>
+      <Tactic id="TA0008" name="Lateral Movement"/>
+    </MitreAttack>
+    <References>
+      <Reference title="MITRE ATT and CK" url="https://attack.mitre.org/techniques/T1021/"/>
+    </References>
+  </Metadata>
+  <ExecutiveSummary>
+    <Overview>A first-seen (account -&gt; host) interactive RDP logon (4624 LogonType 10) fired via new_terms. Triage question: is this a user/admin RDPing somewhere they normally do not, which could be lateral movement, or simply a new-but-legitimate access relationship?</Overview>
+    <BusinessImpact>RDP is a primary lateral-movement and hands-on-keyboard channel; a new RDP relationship to a sensitive host can be an attacker pivoting.</BusinessImpact>
+  </ExecutiveSummary>
+  <Scope><Assets>
+    <AssetType>Active Directory domain controllers (INTDOM)</AssetType>
+    <AssetType>Windows member servers and workstations</AssetType>
+  </Assets><LogSources>
+    <LogSource>Windows Security event log - logs-system.security-*</LogSource>
+  </LogSources></Scope>
+  <Prerequisites><TelemetryRequirements>
+    <Requirement>Windows Security auditing shipped via Elastic Agent to logs-system.security-* (verified live).</Requirement>
+  </TelemetryRequirements><DetectionSignals>
+    <Signal><Name>New RDP relationship</Name><Details>4624 LogonType 10, first observed (user,host) pair in the history window.</Details></Signal>
+  </DetectionSignals></Prerequisites>
+  <Inputs>
+    <Input name="$username" description="Account performing the RDP logon (TargetUserName)."/>
+    <Input name="$hostname" description="Destination host."/>
+    <Input name="$source_ip" description="RDP client source IP."/>
+  </Inputs>
+  <Triage><ImmediateCapture>
+    <Item>Account: $username</Item>
+    <Item>Destination: $hostname</Item>
+    <Item>From: $source_ip</Item>
+  </ImmediateCapture><InitialAssessment>
+    <Rule>Admins RDP to new servers routinely; concern rises when the destination is sensitive (DC, Tier-0, PCI/SWIFT segment) or the source is unusual for the user.</Rule>
+  </InitialAssessment></Triage>
+  <Investigation>
+    <Goal>Determine whether this new RDP relationship is routine admin/user access or an anomalous pivot to a sensitive host.</Goal>
+    <Workflow>
+      <Step order="1" name="Characterise the RDP session and source">
+        <Purpose>Establish the source and whether the same account is opening RDP to several hosts (fan-out = movement).</Purpose>
+        <Query platform="Elastic" language="ES|QL" id="INV-01-RDP-SESSION">
+          <![CDATA[
+FROM logs-system.security-*
+| WHERE event.code == "4624" AND winlog.event_data.LogonType == "10" AND winlog.event_data.TargetUserName == "$username" AND @timestamp >= NOW() - 4 hours
+| EVAL src = COALESCE(TO_STRING(source.ip), "local")
+| STATS sessions = COUNT(*), hosts = COUNT_DISTINCT(host.name), host_list = VALUES(host.name) BY src
+| SORT sessions DESC
+| LIMIT 15
+          ]]>
+        </Query>
+        <ExpectedOutput>
+          <Field name="src"/>
+          <Field name="hosts"/>
+          <Field name="host_list"/>
+        </ExpectedOutput>
+        <AnalystNotes>One user RDPing to many hosts from one source in a short window = fan-out/lateral movement. A single new destination from the user's normal workstation = likely benign new access.</AnalystNotes>
+      </Step>
+      <Step order="2" name="Was the RDP preceded by failed logons (brute) to this host">
+        <Purpose>RDP success preceded by failures to the same host/account suggests guessed access rather than authorised use.</Purpose>
+        <Query platform="Elastic" language="ES|QL" id="INV-02-RDP-PRECEDING" optional="true">
+          <![CDATA[
+FROM logs-system.security-*
+| WHERE host.name == "$hostname" AND event.code == "4625" AND @timestamp >= NOW() - 2 hours
+| STATS fails = COUNT(*), users = VALUES(winlog.event_data.TargetUserName), srcs = VALUES(source.ip)
+| LIMIT 1
+          ]]>
+        </Query>
+        <ExpectedOutput>
+          <Field name="fails"/>
+          <Field name="users"/>
+          <Field name="srcs"/>
+        </ExpectedOutput>
+        <AnalystNotes>A burst of 4625 to this host just before the successful RDP, especially for the same account/source, upgrades suspicion toward brute-forced RDP.</AnalystNotes>
+      </Step>
+      <Step order="3" name="Post-logon privileged actions on the destination">
+        <Purpose>Hands-on-keyboard follow-on (special privileges, new services) indicates active operation, not a benign check-in.</Purpose>
+        <Query platform="Elastic" language="ES|QL" id="INV-03-RDP-ACTIONS" optional="true">
+          <![CDATA[
+FROM logs-system.security-*
+| WHERE host.name == "$hostname" AND winlog.event_data.TargetUserName == "$username" AND event.code IN ("4672","4688","7045","4720","4728") AND @timestamp >= NOW() - 2 hours
+| STATS c = COUNT(*), codes = VALUES(event.code)
+| LIMIT 5
+          ]]>
+        </Query>
+        <ExpectedOutput>
+          <Field name="codes"/>
+          <Field name="c"/>
+        </ExpectedOutput>
+        <AnalystNotes>Account creation, service install or privilege use right after the RDP points to hands-on attacker activity.</AnalystNotes>
+      </Step>
+      <Step order="4" name="Finalize classification">
+        <DecisionTree>
+          <Node><Condition>INV-01 shows fan-out (one account RDPing to many hosts) or INV-02 shows preceding brute-force to the destination.</Condition><Result>True Positive (Lateral Movement via RDP - escalate)</Result></Node>
+          <Node><Condition>INV-03 shows privileged follow-on (new service/account/privileges) on a sensitive destination.</Condition><Result>True Positive (Hands-on-keyboard - IR)</Result></Node>
+          <Node><Condition>Single new destination from the user's normal workstation, destination not sensitive, no follow-on.</Condition><Result>Benign Activity</Result></Node>
+          <Node><Condition>New RDP to a sensitive host (DC/Tier-0/PCI/SWIFT) by an admin without a change record.</Condition><Result>Needs Escalation</Result></Node>
+        </DecisionTree>
+        <DocumentationChecklist>
+          <Item>Attach outputs of INV-01-RDP-SESSION, INV-02-RDP-PRECEDING, INV-03-RDP-ACTIONS to the case.</Item>
+        </DocumentationChecklist>
+      </Step>
+    </Workflow>
+  </Investigation>
+  <ClassificationGuidance>
+    <FalsePositive>
+      <Definition>A legitimate new administrative or user RDP relationship.</Definition>
+      <Indicators>
+        <Item>From the user's normal source.</Item>
+        <Item>Single expected destination.</Item>
+        <Item>No brute-force precursor, no privileged follow-on.</Item>
+      </Indicators>
+      <SOCAction>
+        <Item>Confirm with the user/owner if needed; close as benign_activity; new_terms will learn the pair.</Item>
+      </SOCAction>
+    </FalsePositive>
+    <TruePositive>
+      <Definition>An attacker using RDP to pivot between hosts.</Definition>
+      <Indicators>
+        <Item>Fan-out to multiple hosts.</Item>
+        <Item>Preceded by failed logons.</Item>
+        <Item>Privileged follow-on on the destination.</Item>
+        <Item>Unusual source for the account.</Item>
+      </Indicators>
+      <SOCAction>
+        <Item>Isolate destination and source; reset the account; revoke sessions.</Item>
+        <Item>Hunt the account's other RDP targets; open IR.</Item>
+      </SOCAction>
+    </TruePositive>
+    <Misconfiguration>
+      <Definition>A monitoring/jump product opening RDP in a new pattern after a config change.</Definition>
+      <Indicators>
+        <Item>A known jump-host/PAM system as source.</Item>
+        <Item>New destination due to onboarding, not attack.</Item>
+      </Indicators>
+      <SOCAction>
+        <Item>Confirm the PAM/jump change; document so new_terms learns it.</Item>
+      </SOCAction>
+    </Misconfiguration>
+  </ClassificationGuidance>
+  <Response><IRForHumans>
+    <Phase name="Immediate Actions (0-30 minutes)">
+      <Action priority="1">If fan-out/brute precursor: isolate hosts, reset account.</Action>
+      <Action priority="2">Confirm the source with the user for sensitive destinations.</Action>
+    </Phase>
+    <Phase name="Containment and Eradication (hours)">
+      <Action>Hunt lateral spread from the source; review destination for persistence.</Action>
+    </Phase>
+    <Phase name="Recovery and Hardening (days)">
+      <Action>Restrict RDP to jump hosts/PAM; enforce MFA on RDP; tier admin access.</Action>
+    </Phase>
+  </IRForHumans></Response>
+  <QualityChecks>
+    <Check>new_terms keys on (user,host) - legitimate new admin access fires once then is learned.</Check>
+    <Check>Destination sensitivity should raise severity - maintain a Tier-0/PCI/SWIFT host list for triage.</Check>
+  </QualityChecks>
+  <ClosureCriteria><FalsePositiveClosure>
+    <Item>Benign new access confirmed; destination not sensitive.</Item>
+  </FalsePositiveClosure><TruePositiveClosure>
+    <Item>Lateral movement scoped, hosts isolated, account reset, IR recorded.</Item>
+  </TruePositiveClosure></ClosureCriteria>
+</Playbook>

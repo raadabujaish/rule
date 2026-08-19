@@ -1,0 +1,76 @@
+{
+  "rule_id": "jcb-fgt-sanctioned-country-comms",
+  "name": "FortiGate — Internal Host Communicating with a High-Risk/Sanctioned Country",
+  "version": 1,
+  "enabled": true,
+  "interval": "1h",
+  "from": "now-24h",
+  "to": "now",
+  "description": "Attacker objective\nCommand-and-control or data movement to infrastructure hosted in a high-risk or sanctioned jurisdiction.\n\nAttack logic\nOutbound banking traffic is normally to a stable set of business and cloud regions. The first time an internal host communicates with a high-risk or sanctioned country is a sanctions and threat concern.\n\nWhy this detection works\nA new-terms model over (source host, destination country) auto-baselines normal destinations and fires on a new high-risk pairing.\n\nFalse positives\nA legitimate service hosted in-region.\n\nTuning\nAllowlist verified destinations; review the destination ASN/service.\n\nRequired telemetry\nFortiGate traffic logs (srccountry, dstcountry, source.ip).",
+  "tags": [
+    "JCB",
+    "Perimeter",
+    "Phase3",
+    "Use Case: Threat Detection",
+    "Tactic: Command and Control"
+  ],
+  "author": [
+    "raadabujaish"
+  ],
+  "threat": [
+    {
+      "framework": "MITRE ATT&CK",
+      "tactic": {
+        "id": "TA0011",
+        "name": "Command and Control",
+        "reference": "https://attack.mitre.org/tactics/TA0011/"
+      },
+      "technique": [
+        {
+          "id": "T1071",
+          "name": "Application Layer Protocol",
+          "reference": "https://attack.mitre.org/techniques/T1071/"
+        }
+      ]
+    }
+  ],
+  "investigation_fields": {
+    "field_names": [
+      "source.ip",
+      "destination.ip",
+      "fortinet.firewall.dstcountry",
+      "destination.as.organization.name",
+      "destination.port",
+      "network.bytes"
+    ]
+  },
+  "related_integrations": [],
+  "required_fields": [],
+  "setup": "",
+  "note": "## Investigation guide\n1. source.ip + dstcountry + destination ASN/IP: confirm business justification.\n2. Any C2 or exfiltration to a sanctioned geography is high priority.",
+  "false_positives": [
+    "A legitimate service hosted in-region."
+  ],
+  "references": [
+    "https://attack.mitre.org/techniques/T1071/"
+  ],
+  "risk_score": 56,
+  "risk_score_mapping": [],
+  "severity": "medium",
+  "severity_mapping": [],
+  "output_index": "",
+  "max_signals": 100,
+  "exceptions_list": [],
+  "actions": [],
+  "type": "new_terms",
+  "query": "fortinet.firewall.srccountry:\"Reserved\" and fortinet.firewall.action:\"accept\" and fortinet.firewall.dstcountry:(\"Iran\" or \"Russian Federation\" or \"Russia\" or \"North Korea\" or \"Syria\" or \"Belarus\" or \"Cuba\")",
+  "new_terms_fields": [
+    "source.ip",
+    "fortinet.firewall.dstcountry"
+  ],
+  "history_window_start": "now-30d",
+  "index": [
+    "logs-fortinet_fortigate.traffic-*"
+  ],
+  "language": "kuery"
+}

@@ -1,0 +1,71 @@
+{
+  "rule_id": "jcb-ora-delete-unexpected-principal",
+  "name": "Oracle — DELETE by Unexpected Principal",
+  "version": 1,
+  "enabled": true,
+  "interval": "1h",
+  "from": "now-3h",
+  "to": "now",
+  "description": "Attacker objective\nDestroy banking records, or delete audit rows to cover tracks (anti-forensics), using SQL DELETE.\n\nAttack logic\nIn a healthy core-banking database, DELETE activity is dominated by a small, fixed set of automated maintenance statements run by known service accounts. Interactive users and unknown principals do not routinely issue DELETE against banking or audit tables. The rule allowlists the sanctioned DELETE service accounts and alerts on DELETE by any other principal.\n\nWhy this detection works\nDatabase Unified Audit records the action name and the acting principal for every statement, so an allowlist of sanctioned DELETE accounts turns any out-of-baseline DELETE into a single, high-signal event.\n\nFalse positives\nA newly introduced legitimate batch/service account that performs DELETE before it is added to the allowlist.\n\nTuning\nMaintain the service-account allowlist and add verified batch/ETL accounts after change control. Optionally scope by target schema to also catch a sanctioned account deleting from an unexpected (production) table.\n\nRequired telemetry\nOracle Unified Audit shipped as apps-* (ACTION_NAME, USERNAME/.keyword, SQL_TEXT).",
+  "tags": [
+    "JCB",
+    "Oracle",
+    "Phase3",
+    "Use Case: Threat Detection",
+    "Tactic: Impact"
+  ],
+  "author": [
+    "raadabujaish"
+  ],
+  "threat": [
+    {
+      "framework": "MITRE ATT&CK",
+      "tactic": {
+        "id": "TA0040",
+        "name": "Impact",
+        "reference": "https://attack.mitre.org/tactics/TA0040/"
+      },
+      "technique": [
+        {
+          "id": "T1485",
+          "name": "Data Destruction",
+          "reference": "https://attack.mitre.org/techniques/T1485/"
+        }
+      ]
+    }
+  ],
+  "investigation_fields": {
+    "field_names": [
+      "USERNAME",
+      "ACTION_NAME",
+      "SQL_TEXT",
+      "type",
+      "TIMESTAMP"
+    ]
+  },
+  "related_integrations": [],
+  "required_fields": [],
+  "setup": "",
+  "note": "## Investigation guide\n1. Identify the principal (USERNAME) and the target object (SQL_TEXT).\n2. A DELETE against production banking or audit tables by a human or unknown account is high-risk.\n3. Correlate with the account's session and prior activity; contain the account if unauthorised.",
+  "false_positives": [
+    "A newly introduced legitimate batch/service account that performs DELETE before it is added to the allowlist."
+  ],
+  "references": [
+    "https://attack.mitre.org/techniques/T1485/"
+  ],
+  "risk_score": 73,
+  "risk_score_mapping": [],
+  "severity": "high",
+  "severity_mapping": [],
+  "output_index": "",
+  "max_signals": 100,
+  "exceptions_list": [],
+  "actions": [],
+  "type": "query",
+  "language": "kuery",
+  "index": [
+    "apps-*",
+    "-apps-*-2025"
+  ],
+  "query": "ACTION_NAME.keyword:\"DELETE\" and not USERNAME.keyword:(\"BANKSYS\" or \"JCB_AML\" or \"BANKSBPM\")"
+}

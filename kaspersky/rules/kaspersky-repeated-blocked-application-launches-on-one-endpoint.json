@@ -1,0 +1,61 @@
+{
+  "rule_id": "jcb-kasp-app-launch-denied-burst",
+  "name": "Kaspersky — Repeated Blocked Application Launches on One Endpoint",
+  "version": 1,
+  "enabled": true,
+  "interval": "1h",
+  "from": "now-25h",
+  "to": "now",
+  "description": "≥10 application-control launch denials on one endpoint in 24h — a user or malware repeatedly trying to run blocked software. Baseline: HQ-MOHAMMADADEL 28/7d, Player-403-1 24/7d would alert; the estate tail (2-4/7d) stays quiet. Suppression 24h so a persistent offender pages once daily.",
+  "tags": [
+    "JCB",
+    "Detection-QA-2026-08",
+    "Kaspersky"
+  ],
+  "author": [
+    "JCB Detection Engineering"
+  ],
+  "license": "internal",
+  "threat": [],
+  "investigation_fields": {
+    "field_names": [
+      "destination.domain",
+      "destination.user.name",
+      "cef.name",
+      "message",
+      "cef.device.event_class_id"
+    ]
+  },
+  "related_integrations": [],
+  "required_fields": [],
+  "setup": "",
+  "false_positives": [],
+  "references": [],
+  "risk_score": 47,
+  "risk_score_mapping": [],
+  "severity": "medium",
+  "severity_mapping": [],
+  "output_index": "",
+  "max_signals": 100,
+  "exceptions_list": [],
+  "actions": [],
+  "type": "threshold",
+  "language": "kuery",
+  "index": [
+    "logs-cef.log-*"
+  ],
+  "query": "cef.device.vendor:\"KasperskyLab\" and cef.device.event_class_id:\"GNRL_EV_APPLICATION_LAUNCH_DENIED\"",
+  "threshold": {
+    "field": [
+      "destination.domain"
+    ],
+    "value": 10,
+    "cardinality": []
+  },
+  "alert_suppression": {
+    "duration": {
+      "value": 24,
+      "unit": "h"
+    }
+  }
+}

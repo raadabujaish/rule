@@ -1,0 +1,142 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<Playbook xmlns="https://soc.example/playbooks" id="PB-ACH-001" name="ACH — Maker-Checker Self-Approval (Segregation-of-Duties Violation) - SOC Playbook" version="1.0" status="Production" classification="TLP:AMBER">
+  <Metadata>
+    <Owner>JCB Detection Engineering (WatchWave)</Owner>
+    <LastUpdated>2026-08-14</LastUpdated>
+    <Severity default="High">High</Severity>
+    <Confidence default="Medium">Medium</Confidence>
+    <Category>Impact / Financial Fraud - SoD Violation</Category>
+    <MitreAttack>
+      <Technique id="T1078" name="Valid Accounts"/>
+      <Tactic id="TA0040" name="Impact"/>
+    </MitreAttack>
+    <References>
+      <Reference title="MITRE ATT and CK" url="https://attack.mitre.org/techniques/T1078/"/>
+    </References>
+  </Metadata>
+  <ExecutiveSummary>
+    <Overview>In the ACH payment app, the same user was both maker and checker of a transaction (USERNAME_MAKER == USERNAME_CHECKER) - a segregation-of-duties violation enabling unauthorised/fraudulent payments. Triage: fraud/SoD breach, or a maker-checker config gap?</Overview>
+    <BusinessImpact>Maker-checker self-approval lets one person create AND approve payments - the core control failure behind payment fraud.</BusinessImpact>
+  </ExecutiveSummary>
+  <Scope><Assets>
+    <AssetType>ACH payment application, ECC user-administration</AssetType>
+  </Assets><LogSources>
+    <LogSource>ACH/ECC application audit via apps-* - apps-*</LogSource>
+  </LogSources></Scope>
+  <Prerequisites><TelemetryRequirements>
+    <Requirement>Banking-app audit in apps-* (verified live). ACH maker-checker fields USERNAME_MAKER/USERNAME_CHECKER; ECC user-admin type ECC_USR_AUDIT. type field distinguishes app streams (ACHAPP, ECC_USR_AUDIT).</Requirement>
+  </TelemetryRequirements><DetectionSignals>
+    <Signal><Name>Maker-Checker Self-Approval (Segregation</Name><Details>ACH transaction where maker == checker.</Details></Signal>
+  </DetectionSignals></Prerequisites>
+  <Inputs>
+    <Input name="$user" description="The user acting as both maker and checker (USERNAME_MAKER)."/>
+  </Inputs>
+  <Triage><ImmediateCapture>
+    <Item>$user: $user</Item>
+  </ImmediateCapture><InitialAssessment>
+    <Rule>Weigh the full evidence story per the ClassificationGuidance, not any single fact.</Rule>
+  </InitialAssessment></Triage>
+  <Investigation>
+    <Goal>Determine whether the self-approval is a fraud/SoD breach or a configuration/emergency-process gap.</Goal>
+    <Workflow>
+      <Step order="1" name="Self-approved ACH transactions by this user">
+        <Purpose>The transactions where one user is both maker and checker, and their value, define the SoD breach.</Purpose>
+        <Query platform="Elastic" language="ES|QL" id="INV-01-ACH-SELFAPPROVE">
+          <![CDATA[
+FROM apps-*
+| WHERE type == "ACHAPP" AND USERNAME_MAKER == "$user" AND USERNAME_MAKER == USERNAME_CHECKER AND @timestamp >= NOW() - 4 hours
+| KEEP @timestamp, USERNAME_MAKER, USERNAME_CHECKER, type
+| SORT @timestamp DESC
+| LIMIT 25
+          ]]>
+        </Query>
+        <ExpectedOutput>
+          <Field name="USERNAME_MAKER"/>
+          <Field name="USERNAME_CHECKER"/>
+        </ExpectedOutput>
+        <AnalystNotes>Each row where MAKER == CHECKER is a self-approval. Multiple, or high-value, self-approvals indicate deliberate fraud; a single one may be an emergency-process or config gap. Correlate with the transaction value/beneficiary in the app.</AnalystNotes>
+      </Step>
+      <Step order="2" name="This user's broader ACH maker/checker activity">
+        <Purpose>A pattern of self-approvals vs a one-off separates deliberate fraud from an exception.</Purpose>
+        <Query platform="Elastic" language="ES|QL" id="INV-02-ACH-PATTERN" optional="true">
+          <![CDATA[
+FROM apps-*
+| WHERE type == "ACHAPP" AND (USERNAME_MAKER == "$user" OR USERNAME_CHECKER == "$user") AND @timestamp >= NOW() - 4 hours
+| STATS total = COUNT(*), self_approvals = COUNT(CASE(USERNAME_MAKER == USERNAME_CHECKER, 1, null))
+| LIMIT 1
+          ]]>
+        </Query>
+        <ExpectedOutput>
+          <Field name="total"/>
+          <Field name="self_approvals"/>
+        </ExpectedOutput>
+        <AnalystNotes>A repeated self-approval pattern is deliberate SoD circumvention (fraud risk); a single instance may be an exception - still a control breach.</AnalystNotes>
+      </Step>
+      <Step order="3" name="Finalize classification">
+        <DecisionTree>
+          <Node><Condition>Repeated or high-value maker==checker self-approvals - deliberate SoD circumvention.</Condition><Result>True Positive (Payment Fraud / SoD Breach - escalate to fraud/compliance)</Result></Node>
+          <Node><Condition>A one-off self-approval due to a documented emergency process, low value, benign.</Condition><Result>Benign Activity / Misconfiguration</Result></Node>
+          <Node><Condition>A maker-checker configuration gap allowing self-approval (control weakness, not fraud).</Condition><Result>Misconfiguration</Result></Node>
+          <Node><Condition>Self-approval with unclear intent/value.</Condition><Result>Needs Escalation</Result></Node>
+        </DecisionTree>
+        <DocumentationChecklist>
+          <Item>Attach outputs of INV-01-ACH-SELFAPPROVE, INV-02-ACH-PATTERN to the case.</Item>
+        </DocumentationChecklist>
+      </Step>
+    </Workflow>
+  </Investigation>
+  <ClassificationGuidance>
+    <FalsePositive>
+      <Definition>A documented emergency-process exception, low value.</Definition>
+      <Indicators>
+        <Item>Single instance.</Item>
+        <Item>Emergency process.</Item>
+        <Item>Low value / no beneficiary anomaly.</Item>
+      </Indicators>
+      <SOCAction>
+        <Item>Confirm the exception; document; recommend control fix.</Item>
+      </SOCAction>
+    </FalsePositive>
+    <TruePositive>
+      <Definition>Deliberate SoD circumvention / payment fraud.</Definition>
+      <Indicators>
+        <Item>Repeated/high-value self-approvals.</Item>
+        <Item>Suspicious beneficiary.</Item>
+        <Item>No emergency justification.</Item>
+      </Indicators>
+      <SOCAction>
+        <Item>Escalate to fraud/compliance; hold/reverse the payments; review the user's transactions; open IR.</Item>
+      </SOCAction>
+    </TruePositive>
+    <Misconfiguration>
+      <Definition>A maker-checker control configuration gap.</Definition>
+      <Indicators>
+        <Item>System allows self-approval.</Item>
+        <Item>No enforced separation.</Item>
+      </Indicators>
+      <SOCAction>
+        <Item>Fix the maker-checker enforcement; document the control weakness.</Item>
+      </SOCAction>
+    </Misconfiguration>
+  </ClassificationGuidance>
+  <Response><IRForHumans>
+    <Phase name="Immediate Actions (0-30 minutes)">
+      <Action priority="1">Identify the transactions and value; escalate to fraud/compliance if fraud-shaped.</Action>
+      <Action priority="2">Hold/reverse suspicious payments.</Action>
+    </Phase>
+    <Phase name="Containment and Eradication (hours)">
+      <Action>Escalate to fraud/compliance; hold/reverse payments; review the user; open IR.</Action>
+    </Phase>
+    <Phase name="Recovery and Hardening (days)">
+      <Action>Enforce maker-checker separation in the app; alert on self-approvals; periodic SoD review.</Action>
+    </Phase>
+  </IRForHumans></Response>
+  <QualityChecks>
+    <Check>USERNAME_MAKER/CHECKER are the SoD fields; type ACHAPP. Correlate value/beneficiary in the app.</Check>
+  </QualityChecks>
+  <ClosureCriteria><FalsePositiveClosure>
+    <Item>Documented exception confirmed; control fix recommended.</Item>
+  </FalsePositiveClosure><TruePositiveClosure>
+    <Item>Payments held/reversed; fraud/compliance engaged; control fixed.</Item>
+  </TruePositiveClosure></ClosureCriteria>
+</Playbook>

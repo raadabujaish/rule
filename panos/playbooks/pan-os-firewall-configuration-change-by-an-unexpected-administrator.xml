@@ -1,0 +1,151 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<Playbook xmlns="https://soc.example/playbooks" id="PB-PAN-003" name="PAN-OS — Firewall Configuration Change by an Unexpected Administrator - SOC Playbook" version="1.0" status="Production" classification="TLP:AMBER">
+  <Metadata>
+    <Owner>JCB Detection Engineering (WatchWave)</Owner>
+    <LastUpdated>2026-08-14</LastUpdated>
+    <Severity default="Medium">Medium</Severity>
+    <Confidence default="Medium">Medium</Confidence>
+    <Category>Defense Evasion / Firewall Configuration Change</Category>
+    <MitreAttack>
+      <Technique id="T1562.004" name="Disable or Modify System Firewall"/>
+      <Tactic id="TA0005" name="Defense Evasion"/>
+    </MitreAttack>
+    <References>
+      <Reference title="MITRE ATT and CK" url="https://attack.mitre.org/techniques/T1562/"/>
+    </References>
+  </Metadata>
+  <ExecutiveSummary>
+    <Overview>A PAN-OS configuration change was made by an administrator first-seen via new_terms - an admin who does not normally change this firewall. Triage question: is this a legitimate admin acting under change control, or an unexpected/compromised admin modifying the firewall?</Overview>
+    <BusinessImpact>Firewall config changes by an unexpected admin can open exposure or disable protection; new_terms flags the unfamiliar actor specifically.</BusinessImpact>
+  </ExecutiveSummary>
+  <Scope><Assets>
+    <AssetType>Palo Alto Networks perimeter firewalls</AssetType>
+    <AssetType>Internal and DMZ hosts behind PAN-OS</AssetType>
+  </Assets><LogSources>
+    <LogSource>PAN-OS config log - logs-panw.panos-*</LogSource>
+  </LogSources></Scope>
+  <Prerequisites><TelemetryRequirements>
+    <Requirement>PAN-OS logs via Elastic Agent to logs-panw.panos-* (verified live).</Requirement>
+    <Requirement>Fields: panw.panos.sub_type (vulnerability/spyware/CONFIG/...), panw.panos.action (alert/allow/reset-both/drop), event.severity (numeric; lower = more severe, 5 = informational), panw.panos.threat_category, panw.panos.threat.name, panw.panos.admin, panw.panos.cmd, panw.panos.path, panw.panos.result, source.ip, destination.ip, destination.port, network.application.</Requirement>
+  </TelemetryRequirements><DetectionSignals>
+    <Signal><Name>Unexpected admin config change</Name><Details>panw.panos.type CONFIG by a first-seen admin.</Details></Signal>
+  </DetectionSignals></Prerequisites>
+  <Inputs>
+    <Input name="$admin" description="Administrator who made the change (panw.panos.admin)."/>
+    <Input name="$source_ip" description="Admin source IP if present."/>
+  </Inputs>
+  <Triage><ImmediateCapture>
+    <Item>Admin: $admin</Item>
+    <Item>Source: $source_ip</Item>
+  </ImmediateCapture><InitialAssessment>
+    <Rule>A newly-onboarded but legitimate admin will fire new_terms once; the concern is an unfamiliar admin making sensitive changes with no change record.</Rule>
+  </InitialAssessment></Triage>
+  <Investigation>
+    <Goal>Determine whether the unexpected admin is a legitimate (perhaps new) administrator under change control or an unauthorised/compromised actor.</Goal>
+    <Workflow>
+      <Step order="1" name="What did this admin change">
+        <Purpose>The commands and paths reveal whether sensitive objects (security rules, admins, NAT) were changed vs benign settings.</Purpose>
+        <Query platform="Elastic" language="ES|QL" id="INV-01-PANCFG-CHANGES">
+          <![CDATA[
+FROM logs-panw.panos-*
+| WHERE panw.panos.type == "CONFIG" AND panw.panos.admin == "$admin" AND @timestamp >= NOW() - 4 hours
+| STATS changes = COUNT(*), cmds = VALUES(panw.panos.cmd), paths = VALUES(panw.panos.path), results = VALUES(panw.panos.result), first_seen = MIN(@timestamp), last_seen = MAX(@timestamp)
+| LIMIT 1
+          ]]>
+        </Query>
+        <ExpectedOutput>
+          <Field name="changes"/>
+          <Field name="cmds"/>
+          <Field name="paths"/>
+          <Field name="results"/>
+        </ExpectedOutput>
+        <AnalystNotes>paths containing rulebase/security/rules, address, nat, or mgt-config/admin are sensitive. A burst of set/delete commands in minutes is a significant change session. result 'Succeeded' means it applied.</AnalystNotes>
+      </Step>
+      <Step order="2" name="Did this admin log in from an unusual source">
+        <Purpose>Correlate with the admin's authentication to confirm the session origin is expected.</Purpose>
+        <Query platform="Elastic" language="ES|QL" id="INV-02-PANCFG-LOGIN" optional="true">
+          <![CDATA[
+FROM logs-panw.panos-*
+| WHERE panw.panos.admin == "$admin" AND panw.panos.sub_type IN ("auth","general") AND @timestamp >= NOW() - 4 hours
+| KEEP @timestamp, panw.panos.admin, source.ip, panw.panos.client_type, panw.panos.result
+| SORT @timestamp DESC
+| LIMIT 15
+          ]]>
+        </Query>
+        <ExpectedOutput>
+          <Field name="source.ip"/>
+          <Field name="panw.panos.client_type"/>
+          <Field name="panw.panos.result"/>
+        </ExpectedOutput>
+        <AnalystNotes>An admin authenticating from an unusual source (public IP, unexpected client_type) before the change is a red flag.</AnalystNotes>
+      </Step>
+      <Step order="3" name="Finalize classification">
+        <DecisionTree>
+          <Node><Condition>INV-01 shows sensitive changes (security rules, NAT, admin objects) by an unfamiliar admin with no change record.</Condition><Result>True Positive (Unauthorised Firewall Change - escalate, review and revert)</Result></Node>
+          <Node><Condition>INV-02 shows the admin authenticated from an unusual/public source before the change.</Condition><Result>True Positive (Suspicious Admin Session - IR)</Result></Node>
+          <Node><Condition>INV-01/02 show a recently-onboarded legitimate admin making a scoped change with a ticket.</Condition><Result>False Positive</Result></Node>
+          <Node><Condition>Unfamiliar admin, benign-looking change, no ticket located.</Condition><Result>Needs Escalation</Result></Node>
+        </DecisionTree>
+        <DocumentationChecklist>
+          <Item>Attach outputs of INV-01-PANCFG-CHANGES, INV-02-PANCFG-LOGIN to the case.</Item>
+        </DocumentationChecklist>
+      </Step>
+    </Workflow>
+  </Investigation>
+  <ClassificationGuidance>
+    <FalsePositive>
+      <Definition>A legitimate (possibly new) administrator acting under change control.</Definition>
+      <Indicators>
+        <Item>Recognised/onboarded admin.</Item>
+        <Item>Matches an approved change ticket.</Item>
+        <Item>Scoped, expected changes.</Item>
+      </Indicators>
+      <SOCAction>
+        <Item>Verify the admin and change ticket; close as false_positive; baseline the admin so new_terms learns them.</Item>
+      </SOCAction>
+    </FalsePositive>
+    <TruePositive>
+      <Definition>An unauthorised or compromised admin modifying the firewall.</Definition>
+      <Indicators>
+        <Item>Unfamiliar admin.</Item>
+        <Item>Sensitive object changes with no ticket.</Item>
+        <Item>Unusual login source.</Item>
+      </Indicators>
+      <SOCAction>
+        <Item>Review and revert the changes; disable the admin if compromised; open IR.</Item>
+        <Item>Check for exposure created by the change.</Item>
+      </SOCAction>
+    </TruePositive>
+    <Misconfiguration>
+      <Definition>Automation using an unexpected admin identity due to misconfiguration.</Definition>
+      <Indicators>
+        <Item>An API/automation admin firing new_terms.</Item>
+        <Item>Owner confirms benign.</Item>
+      </Indicators>
+      <SOCAction>
+        <Item>Baseline the automation admin; fix scope if needed; document.</Item>
+      </SOCAction>
+    </Misconfiguration>
+  </ClassificationGuidance>
+  <Response><IRForHumans>
+    <Phase name="Immediate Actions (0-30 minutes)">
+      <Action priority="1">Review the changes; revert if unauthorised.</Action>
+      <Action priority="2">Confirm the admin session legitimacy.</Action>
+    </Phase>
+    <Phase name="Containment and Eradication (hours)">
+      <Action>Audit the config diff; check for exposure; reset the admin if compromised.</Action>
+    </Phase>
+    <Phase name="Recovery and Hardening (days)">
+      <Action>Enforce change control + PAM for firewall admins; alert on sensitive-object changes.</Action>
+    </Phase>
+  </IRForHumans></Response>
+  <QualityChecks>
+    <Check>new_terms keys on the admin - legitimate new admins fire once then learn. panw.panos.admin verified present.</Check>
+    <Check>PB-PAN-004 covers the sensitive-object subset with a content filter.</Check>
+  </QualityChecks>
+  <ClosureCriteria><FalsePositiveClosure>
+    <Item>Legitimate admin + ticket confirmed; documented.</Item>
+  </FalsePositiveClosure><TruePositiveClosure>
+    <Item>Unauthorised change reverted; exposure closed; admin session investigated.</Item>
+  </TruePositiveClosure></ClosureCriteria>
+</Playbook>

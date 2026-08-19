@@ -1,0 +1,95 @@
+{
+  "rule_id": "f6ee80c9-850a-430b-9695-563e1b83e582",
+  "name": "Windows — New Interactive RDP Logon to a Host",
+  "version": 1,
+  "enabled": true,
+  "interval": "30m",
+  "from": "now-40m",
+  "to": "now",
+  "description": "Alerts the first time a given user account logs on interactively over RDP (logon type 10) to a given host, measured against a rolling 14-day history. RDP is tightly restricted at JCB — only 358 type-10 logons across 75 hosts in 7 days — which makes a previously unseen user/host RDP pair a strong lateral-movement signal rather than background noise. No existing rule covers RDP logon type 10.",
+  "tags": [
+    "JCB",
+    "ScanWave",
+    "Windows",
+    "Lateral Movement",
+    "RDP",
+    "MITRE T1021.001"
+  ],
+  "author": [
+    "ScanWave"
+  ],
+  "license": "ScanWave — JCB Managed Detection",
+  "threat": [
+    {
+      "framework": "MITRE ATT&CK",
+      "tactic": {
+        "id": "TA0008",
+        "name": "Lateral Movement",
+        "reference": "https://attack.mitre.org/tactics/TA0008/"
+      },
+      "technique": [
+        {
+          "id": "T1021",
+          "name": "Remote Services",
+          "reference": "https://attack.mitre.org/techniques/T1021/",
+          "subtechnique": [
+            {
+              "id": "T1021.001",
+              "name": "Remote Desktop Protocol",
+              "reference": "https://attack.mitre.org/techniques/T1021/001/"
+            }
+          ]
+        }
+      ]
+    }
+  ],
+  "investigation_fields": {
+    "field_names": [
+      "host.name",
+      "winlog.computer_name",
+      "user.name",
+      "user.domain",
+      "winlog.event_data.TargetUserName",
+      "winlog.event_data.TargetDomainName",
+      "source.ip",
+      "winlog.event_data.LogonType",
+      "winlog.event_data.Status",
+      "winlog.event_data.SubStatus",
+      "winlog.event_data.ServiceName",
+      "winlog.event_data.TicketOptions",
+      "event.code",
+      "event.action"
+    ]
+  },
+  "related_integrations": [],
+  "required_fields": [],
+  "setup": "",
+  "note": "### Triage\n1. Confirm the user/host pair against the expected administrative model: does this person normally administer this server?\n2. Recover `source.ip` from the event to establish where the session originated; an RDP session sourced from a workstation subnet into the server estate, or from a server into another server, is the classic RDP-chaining pattern.\n3. Review what the account did after logon: process creation (4688), service installs, and share access on the destination.\n4. Correlate with `Windows — Potential SharpRDP Behavior` and with FortiGate traffic for RDP crossing network zones.",
+  "false_positives": [
+    "A new administrator or a role change legitimately introducing a new user/host pair.",
+    "Server migrations and commissioning activity.",
+    "Helpdesk staff covering an unfamiliar system for the first time."
+  ],
+  "references": [
+    "https://attack.mitre.org/techniques/T1021/001/"
+  ],
+  "risk_score": 47,
+  "risk_score_mapping": [],
+  "severity": "medium",
+  "severity_mapping": [],
+  "output_index": "",
+  "max_signals": 100,
+  "exceptions_list": [],
+  "actions": [],
+  "type": "new_terms",
+  "query": "event.code:\"4624\" and winlog.event_data.LogonType:\"10\"",
+  "new_terms_fields": [
+    "host.name",
+    "winlog.event_data.TargetUserName"
+  ],
+  "history_window_start": "now-14d",
+  "index": [
+    "logs-system.security-*"
+  ],
+  "language": "kuery"
+}

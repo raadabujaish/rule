@@ -1,0 +1,150 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<Playbook xmlns="https://soc.example/playbooks" id="PB-WIN-049" name="Windows — Potential SharpRDP Behavior - SOC Playbook" version="1.0" status="Production" classification="TLP:AMBER">
+  <Metadata>
+    <Owner>JCB Detection Engineering (WatchWave)</Owner>
+    <LastUpdated>2026-08-14</LastUpdated>
+    <Severity default="High">High</Severity>
+    <Confidence default="Medium">Medium</Confidence>
+    <Category>Lateral Movement / Remote Services</Category>
+    <MitreAttack>
+      <Technique id="T1021.001" name="Remote Desktop Protocol"/>
+      <Tactic id="TA0008" name="Lateral Movement"/>
+    </MitreAttack>
+    <References>
+      <Reference title="MITRE ATT and CK" url="https://attack.mitre.org/techniques/T1021/"/>
+    </References>
+  </Metadata>
+  <ExecutiveSummary>
+    <Overview>An incoming RDP connection was followed within a minute by a RunMRU registry entry set to cmd/powershell/taskmgr/tsclient and then process execution - the SharpRDP authenticated-RDP-command-execution pattern. Triage question: is this SharpRDP lateral movement, or normal interactive RDP admin use?</Overview>
+    <BusinessImpact>SharpRDP executes commands over RDP without a full interactive session, a stealthy lateral-movement technique.</BusinessImpact>
+  </ExecutiveSummary>
+  <Scope><Assets>
+    <AssetType>Windows servers and workstations (INTDOM domain)</AssetType>
+    <AssetType>Domain controllers</AssetType>
+  </Assets><LogSources>
+    <LogSource>Sysmon process + Windows Security - logs-windows.sysmon_operational-*,logs-system.security-*</LogSource>
+  </LogSources></Scope>
+  <Prerequisites><TelemetryRequirements>
+    <Requirement>Windows Security + Sysmon + PowerShell logs via Elastic Agent (verified live). Sysmon event.code 1=process(command_line/parent populated), 11=file, 13/12=registry(registry.path populated); process.code_signature NOT collected.</Requirement>
+  </TelemetryRequirements><DetectionSignals>
+    <Signal><Name>SharpRDP pattern</Name><Details>incoming RDP -&gt; RunMRU set to a shell -&gt; execution within 1m.</Details></Signal>
+  </DetectionSignals></Prerequisites>
+  <Inputs>
+    <Input name="$hostname" description="Target host of the RDP + execution."/>
+    <Input name="$source_ip" description="RDP source IP if present."/>
+  </Inputs>
+  <Triage><ImmediateCapture>
+    <Item>Host: $hostname</Item>
+  </ImmediateCapture><InitialAssessment>
+    <Rule>Weigh the evidence story, not any single fact - see ClassificationGuidance.</Rule>
+  </InitialAssessment></Triage>
+  <Investigation>
+    <Goal>Determine whether the RDP-then-execution pattern is SharpRDP lateral movement or normal RDP admin use.</Goal>
+    <Workflow>
+      <Step order="1" name="RDP source and the RunMRU/execution that followed">
+        <Purpose>Confirm the sequence: an RDP logon then a shell launched via RunMRU is the SharpRDP signature.</Purpose>
+        <Query platform="Elastic" language="ES|QL" id="INV-01-SHARPRDP-SEQ">
+          <![CDATA[
+FROM logs-system.security-*
+| WHERE host.name == "$hostname" AND event.code == "4624" AND winlog.event_data.LogonType == "10" AND @timestamp >= NOW() - 2 hours
+| EVAL src = COALESCE(TO_STRING(source.ip), "local")
+| STATS logons = COUNT(*), users = VALUES(winlog.event_data.TargetUserName), first_seen = MIN(@timestamp) BY src
+| SORT logons DESC
+| LIMIT 10
+          ]]>
+        </Query>
+        <ExpectedOutput>
+          <Field name="src"/>
+          <Field name="users"/>
+          <Field name="first_seen"/>
+        </ExpectedOutput>
+        <AnalystNotes>Identify the RDP source and account. Then check the RunMRU write and process execution below - the tight sequence (RDP then shell within 1m) distinguishes SharpRDP from a human who logs in and works over minutes.</AnalystNotes>
+      </Step>
+      <Step order="2" name="Shell execution via RunMRU on the host">
+        <Purpose>A cmd/powershell launched right after the RDP logon confirms command execution over RDP.</Purpose>
+        <Query platform="Elastic" language="ES|QL" id="INV-02-SHARPRDP-EXEC" optional="true">
+          <![CDATA[
+FROM logs-windows.sysmon_operational-*,logs-system.security-*
+| WHERE event.code IN ("1","4688") AND host.name == "$hostname" AND process.name RLIKE "(?i)(cmd|powershell|pwsh|taskmgr).*" AND @timestamp >= NOW() - 1 hours
+| KEEP @timestamp, process.name, process.parent.name, process.command_line, user.name
+| SORT @timestamp DESC
+| LIMIT 15
+          ]]>
+        </Query>
+        <ExpectedOutput>
+          <Field name="process.name"/>
+          <Field name="process.parent.name"/>
+          <Field name="process.command_line"/>
+        </ExpectedOutput>
+        <AnalystNotes>A shell spawned by explorer/RunMRU immediately after the RDP logon, running commands, supports SharpRDP. A human working interactively spreads activity over time.</AnalystNotes>
+      </Step>
+      <Step order="3" name="Finalize classification">
+        <DecisionTree>
+          <Node><Condition>An RDP logon immediately followed by RunMRU-launched shell command execution, from an unusual source.</Condition><Result>True Positive (SharpRDP Lateral Movement - IR)</Result></Node>
+          <Node><Condition>A normal interactive RDP admin session with organic, time-spread activity.</Condition><Result>False Positive / Benign Activity</Result></Node>
+          <Node><Condition>RDP-then-execution with unclear source/intent.</Condition><Result>Needs Escalation</Result></Node>
+        </DecisionTree>
+        <DocumentationChecklist>
+          <Item>Attach outputs of INV-01-SHARPRDP-SEQ, INV-02-SHARPRDP-EXEC to the case.</Item>
+        </DocumentationChecklist>
+      </Step>
+    </Workflow>
+  </Investigation>
+  <ClassificationGuidance>
+    <FalsePositive>
+      <Definition>A normal interactive RDP administration session.</Definition>
+      <Indicators>
+        <Item>Known admin source/account.</Item>
+        <Item>Organic, time-spread activity.</Item>
+        <Item>Expected host.</Item>
+      </Indicators>
+      <SOCAction>
+        <Item>Confirm the admin session; close as benign_activity.</Item>
+      </SOCAction>
+    </FalsePositive>
+    <TruePositive>
+      <Definition>SharpRDP-style command execution over RDP.</Definition>
+      <Indicators>
+        <Item>RDP then RunMRU shell within 1m.</Item>
+        <Item>Scripted, immediate commands.</Item>
+        <Item>Unusual source.</Item>
+      </Indicators>
+      <SOCAction>
+        <Item>Isolate target and source; open IR; scope lateral movement.</Item>
+        <Item>Reset credentials used; hunt the source's other RDP targets.</Item>
+      </SOCAction>
+    </TruePositive>
+    <Misconfiguration>
+      <Definition>An RDP automation tool driving RunMRU by design.</Definition>
+      <Indicators>
+        <Item>A known RDP automation product.</Item>
+        <Item>Consistent expected commands.</Item>
+      </Indicators>
+      <SOCAction>
+        <Item>Baseline; document.</Item>
+      </SOCAction>
+    </Misconfiguration>
+  </ClassificationGuidance>
+  <Response><IRForHumans>
+    <Phase name="Immediate Actions (0-30 minutes)">
+      <Action priority="1">Confirm the activity on the host; if malicious indicators, isolate the host.</Action>
+      <Action priority="2">Identify the responsible account/process and its origin.</Action>
+    </Phase>
+    <Phase name="Containment and Eradication (hours)">
+      <Action>Isolate the host; capture volatile evidence; hunt the same pattern across the estate.</Action>
+      <Action>Reset credentials used on the host if compromise is confirmed.</Action>
+    </Phase>
+    <Phase name="Recovery and Hardening (days)">
+      <Action>Remediate the root cause; add/verify EDR coverage; apply relevant hardening.</Action>
+    </Phase>
+  </IRForHumans></Response>
+  <QualityChecks>
+    <Check>Confirm the required telemetry (Sysmon/Security auditing) is present on the host.</Check>
+    <Check>Tune known-benign administrative sources via exceptions, not by disabling the rule.</Check>
+  </QualityChecks>
+  <ClosureCriteria><FalsePositiveClosure>
+    <Item>Activity confirmed benign/authorised and documented.</Item>
+  </FalsePositiveClosure><TruePositiveClosure>
+    <Item>Host contained and triaged; root cause eradicated; estate swept; findings recorded.</Item>
+  </TruePositiveClosure></ClosureCriteria>
+</Playbook>

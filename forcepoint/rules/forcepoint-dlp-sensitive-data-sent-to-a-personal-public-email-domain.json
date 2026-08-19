@@ -1,0 +1,79 @@
+{
+  "rule_id": "jcb-fp-sensitive-to-personal-email",
+  "name": "Forcepoint DLP — Sensitive Data Sent to a Personal / Public Email Domain",
+  "version": 1,
+  "enabled": true,
+  "interval": "1h",
+  "from": "now-90m",
+  "to": "now",
+  "description": "Attacker objective\nExfiltrate sensitive corporate data by emailing it to a personal or public webmail account (e.g. a free consumer email domain) the attacker or insider controls.\n\nAttack logic\nThe DLP engine flags recipients on public/personal email domains and, separately, sensitive content. An event carrying both a public-mail-domain classifier and a sensitive-content classifier is sensitive data leaving to a personal mailbox.\n\nWhy this detection works\nCombining the public-mail-domain classifier with a sensitive-content classifier isolates genuine data leakage from routine external business email (which is not sensitive) and internal mail.\n\nFalse positives\nAn employee legitimately sending non-critical work to their own personal address; a business contact on a webmail domain.\n\nTuning\nEscalate users with repeated or bulk occurrences; allowlist sanctioned business partners on public domains; review the file and recipient.\n\nRequired telemetry\nForcepoint DLP CEF: deviceEventCategory (Public Mail Domain + sensitive classifier), destinationUserName (recipient), loginName (sender), filename.",
+  "tags": [
+    "JCB",
+    "Forcepoint-DLP",
+    "Phase3",
+    "Tactic: Exfiltration",
+    "Use Case: Insider Threat",
+    "Use Case: Threat Detection"
+  ],
+  "author": [
+    "raadabujaish"
+  ],
+  "license": "",
+  "threat": [
+    {
+      "framework": "MITRE ATT&CK",
+      "tactic": {
+        "id": "TA0010",
+        "name": "Exfiltration",
+        "reference": "https://attack.mitre.org/tactics/TA0010/"
+      },
+      "technique": [
+        {
+          "id": "T1567",
+          "name": "Exfiltration Over Web Service",
+          "reference": "https://attack.mitre.org/techniques/T1567/"
+        }
+      ]
+    }
+  ],
+  "investigation_fields": {
+    "field_names": [
+      "@timestamp",
+      "host.name",
+      "source.ip",
+      "user.name",
+      "cef.extensions.loginName",
+      "cef.extensions.deviceEventCategory",
+      "cef.extensions.sourceServiceName",
+      "cef.extensions.destinationHosts",
+      "cef.extensions.destinationUserName",
+      "cef.extensions.filename",
+      "cef.extensions.eventId",
+      "destination.ip",
+      "destination.port",
+      "event.action",
+      "message"
+    ]
+  },
+  "related_integrations": [],
+  "required_fields": [],
+  "setup": "",
+  "note": "## Investigation guide\n1. Review the recipient (destinationUserName), the file (filename) and the classifier.\n2. Confirm whether the recipient is a personal account of the sender and whether the content is genuinely sensitive.\n3. Repeated sensitive sends to personal email indicate insider exfiltration — involve HR/compliance.",
+  "false_positives": [
+    "An employee legitimately sending non-critical work to their own personal address; a business contact on a webmail domain."
+  ],
+  "references": [
+    "https://attack.mitre.org/techniques/T1567/"
+  ],
+  "risk_score": 56,
+  "risk_score_mapping": [],
+  "severity": "medium",
+  "severity_mapping": [],
+  "output_index": "",
+  "max_signals": 100,
+  "exceptions_list": [],
+  "actions": [],
+  "type": "esql",
+  "language": "esql",
+  "query": "FROM logs-cef.log-* METADATA _id, _index, _version\n| WHERE observer.vendor == \"Forcepoint\" AND cef.extensions.deviceEventCategory LIKE \"*Public Mail Domain*\" AND (cef.extensions.deviceEventCategory LIKE \"*PCI*\" OR cef.extensions.deviceEventCategory LIKE \"*Sensitive Words-Outbound*\" OR cef.extensions.deviceEventCategory LIKE \"*Files Outbound*\")\n| EVAL host.name = CASE(cef.extensions.sourceHost != \"N/A\" AND cef.extensions.sourceHost IS NOT NULL, TO_LOWER(MV_FIRST(SPLIT(cef.extensions.sourceHost, \".\"))), null), source.ip = CASE(cef.extensions.sourceIp != \"N/A\" AND cef.extensions.sourceIp IS NOT NULL, TO_IP(cef.extensions.sourceIp), null), user.name = CASE(cef.extensions.loginName LIKE \"INTDOM*\", TO_LOWER(MV_LAST(SPLIT(cef.extensions.loginName, \"\\\\\"))), null)\n| KEEP @timestamp, host.name, source.ip, user.name, cef.extensions.loginName, cef.extensions.deviceEventCategory, cef.extensions.sourceServiceName, cef.extensions.destinationHosts, cef.extensions.destinationUserName, cef.extensions.filename, cef.extensions.eventId"
+}

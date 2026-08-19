@@ -1,0 +1,74 @@
+{
+  "rule_id": "jcb-rec-yum-dnf-plugin-status-discovery",
+  "name": "Linux — Yum/DNF Plugin Status Discovery",
+  "version": 1,
+  "enabled": true,
+  "interval": "5m",
+  "from": "now-9m",
+  "to": "now",
+  "description": "This rule detects the execution of the `grep` command with the `plugins` argument on Linux systems. This command is used to search for YUM/DNF configurations and/or plugins with an enabled state. This behavior may indicate an attacker is attempting to establish persistence in a YUM or DNF plugin.",
+  "tags": [
+    "JCB",
+    "Linux"
+  ],
+  "author": [
+    "raadabujaish"
+  ],
+  "threat": [
+    {
+      "framework": "MITRE ATT&CK",
+      "tactic": {
+        "id": "TA0007",
+        "name": "Discovery",
+        "reference": "https://attack.mitre.org/tactics/TA0007/"
+      },
+      "technique": [
+        {
+          "id": "T1082",
+          "name": "System Information Discovery",
+          "reference": "https://attack.mitre.org/techniques/T1082/"
+        }
+      ]
+    }
+  ],
+  "investigation_fields": {
+    "field_names": [
+      "host.name",
+      "user.name",
+      "user.id",
+      "process.name",
+      "process.executable",
+      "process.args",
+      "process.parent.name",
+      "file.path",
+      "event.action",
+      "event.outcome",
+      "message",
+      "host.os.type",
+      "event.type"
+    ]
+  },
+  "related_integrations": [],
+  "required_fields": [],
+  "setup": "",
+  "false_positives": [],
+  "references": [
+    "https://github.com/rapid7/metasploit-framework/blob/master/modules/exploits/linux/local/yum_package_manager_persistence.rb",
+    "https://pwnshift.github.io/2020/10/01/persistence.html"
+  ],
+  "risk_score": 21,
+  "risk_score_mapping": [],
+  "severity": "low",
+  "severity_mapping": [],
+  "output_index": "",
+  "max_signals": 100,
+  "exceptions_list": [],
+  "actions": [],
+  "type": "eql",
+  "language": "eql",
+  "index": [
+    "logs-auditd.log-*",
+    "logs-auditd_manager.auditd-*"
+  ],
+  "query": "process where host.os.type == \"linux\" and event.type == \"start\" and event.action in (\"exec\", \"exec_event\") and\nprocess.name == \"grep\" and process.args : \"plugins*\" and process.args : (\n  \"/etc/yum.conf\", \"/usr/lib/yum-plugins/*\", \"/etc/yum/pluginconf.d/*\",\n  \"/usr/lib/python*/site-packages/dnf-plugins/*\", \"/etc/dnf/plugins/*\", \"/etc/dnf/dnf.conf\"\n)\n"
+}

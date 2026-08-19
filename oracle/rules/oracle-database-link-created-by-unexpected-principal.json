@@ -1,0 +1,71 @@
+{
+  "rule_id": "jcb-ora-dblink-unexpected-principal",
+  "name": "Oracle — Database Link Created by Unexpected Principal",
+  "version": 1,
+  "enabled": true,
+  "interval": "1h",
+  "from": "now-3h",
+  "to": "now",
+  "description": "Attacker objective\nCreate a database link to an attacker-controlled or external database to exfiltrate banking data, or to pivot between systems.\n\nAttack logic\nDatabase links are an integration feature normally created by a known service account and pointed at known internal databases. A link created by any other principal, or one that points at an external/unknown host, is a potential exfiltration or pivot channel.\n\nWhy this detection works\nUnified Audit records CREATE DATABASE LINK with the principal and statement text, so allowlisting the integration account and reviewing the target host turns link creation into a high-signal event.\n\nFalse positives\nA new legitimate integration account.\n\nTuning\nAllowlist verified integration accounts; additionally review the USING clause (target host) for external addresses.\n\nRequired telemetry\nOracle Unified Audit shipped as apps-* (ACTION_NAME, USERNAME, SQL_TEXT).",
+  "tags": [
+    "JCB",
+    "Oracle",
+    "Phase3",
+    "Use Case: Threat Detection",
+    "Tactic: Exfiltration"
+  ],
+  "author": [
+    "raadabujaish"
+  ],
+  "threat": [
+    {
+      "framework": "MITRE ATT&CK",
+      "tactic": {
+        "id": "TA0010",
+        "name": "Exfiltration",
+        "reference": "https://attack.mitre.org/tactics/TA0010/"
+      },
+      "technique": [
+        {
+          "id": "T1048",
+          "name": "Exfiltration Over Alternative Protocol",
+          "reference": "https://attack.mitre.org/techniques/T1048/"
+        }
+      ]
+    }
+  ],
+  "investigation_fields": {
+    "field_names": [
+      "USERNAME",
+      "ACTION_NAME",
+      "SQL_TEXT",
+      "type",
+      "TIMESTAMP"
+    ]
+  },
+  "related_integrations": [],
+  "required_fields": [],
+  "setup": "",
+  "note": "## Investigation guide\n1. SQL_TEXT contains the link name and USING (target host); external or unknown targets indicate a likely exfiltration channel.\n2. Drop the link if unauthorised and investigate the creating principal.",
+  "false_positives": [
+    "A new legitimate integration account."
+  ],
+  "references": [
+    "https://attack.mitre.org/techniques/T1048/"
+  ],
+  "risk_score": 73,
+  "risk_score_mapping": [],
+  "severity": "high",
+  "severity_mapping": [],
+  "output_index": "",
+  "max_signals": 100,
+  "exceptions_list": [],
+  "actions": [],
+  "type": "query",
+  "language": "kuery",
+  "index": [
+    "apps-*",
+    "-apps-*-2025"
+  ],
+  "query": "ACTION_NAME.keyword:\"CREATE PUBLIC DATABASE LINK\" and not USERNAME.keyword:\"INH_LIFE\""
+}

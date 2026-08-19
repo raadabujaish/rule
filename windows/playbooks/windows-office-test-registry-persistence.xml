@@ -1,0 +1,151 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<Playbook xmlns="https://soc.example/playbooks" id="PB-WIN-035" name="Windows — Office Test Registry Persistence - SOC Playbook" version="1.0" status="Production" classification="TLP:AMBER">
+  <Metadata>
+    <Owner>JCB Detection Engineering (WatchWave)</Owner>
+    <LastUpdated>2026-08-14</LastUpdated>
+    <Severity default="High">High</Severity>
+    <Confidence default="Medium">Medium</Confidence>
+    <Category>Persistence / Office Application Startup</Category>
+    <MitreAttack>
+      <Technique id="T1137.002" name="Office Test"/>
+      <Tactic id="TA0003" name="Persistence"/>
+    </MitreAttack>
+    <References>
+      <Reference title="MITRE ATT and CK" url="https://attack.mitre.org/techniques/T1137/"/>
+    </References>
+  </Metadata>
+  <ExecutiveSummary>
+    <Overview>The Office Test\Special\Perf registry key was written - this key loads a DLL into every Office application at startup, a stealthy persistence technique. Triage question: attacker persistence via Office, or (rare) legitimate use?</Overview>
+    <BusinessImpact>The Office Test key runs an attacker DLL inside Office processes on every launch - persistent, user-triggered code execution.</BusinessImpact>
+  </ExecutiveSummary>
+  <Scope><Assets>
+    <AssetType>Windows servers and workstations (INTDOM domain)</AssetType>
+    <AssetType>Domain controllers</AssetType>
+  </Assets><LogSources>
+    <LogSource>Sysmon registry events - logs-windows.sysmon_operational-*</LogSource>
+  </LogSources></Scope>
+  <Prerequisites><TelemetryRequirements>
+    <Requirement>Windows Security + Sysmon + PowerShell logs via Elastic Agent (verified live). Sysmon event.code 1=process(command_line/parent populated), 11=file, 13/12=registry(registry.path populated); process.code_signature NOT collected.</Requirement>
+  </TelemetryRequirements><DetectionSignals>
+    <Signal><Name>Office Test persistence</Name><Details>Sysmon registry write (event 13/12) to the Office Test Perf key.</Details></Signal>
+  </DetectionSignals></Prerequisites>
+  <Inputs>
+    <Input name="$hostname" description="Host where the registry key changed."/>
+    <Input name="$username" description="Account (user.name) if present."/>
+  </Inputs>
+  <Triage><ImmediateCapture>
+    <Item>Host: $hostname</Item>
+  </ImmediateCapture><InitialAssessment>
+    <Rule>Weigh the evidence story, not any single fact - see ClassificationGuidance.</Rule>
+  </InitialAssessment></Triage>
+  <Investigation>
+    <Goal>Determine whether the registry modification is malicious office test persistence or a legitimate change.</Goal>
+    <Workflow>
+      <Step order="1" name="Confirm the registry write, value, data and writing process">
+        <Purpose>The writing process, value and data distinguish attacker persistence from legitimate config.</Purpose>
+        <Query platform="Elastic" language="ES|QL" id="INV-01-REG-WRITE">
+          <![CDATA[
+FROM logs-windows.sysmon_operational-*
+| WHERE event.code IN ("13","12") AND host.name == "$hostname" AND @timestamp >= NOW() - 4 hours
+| WHERE registry.path RLIKE "(?i).*.*software.*microsoft.*office test.*special.*perf.*"
+| KEEP @timestamp, process.name, registry.path, registry.value, registry.data.strings, user.name
+| SORT @timestamp DESC
+| LIMIT 20
+          ]]>
+        </Query>
+        <ExpectedOutput>
+          <Field name="process.name"/>
+          <Field name="registry.path"/>
+          <Field name="registry.value"/>
+          <Field name="registry.data.strings"/>
+        </ExpectedOutput>
+        <AnalystNotes>Any DLL registered under Office Test\Special\Perf is almost always malicious - this key has virtually no legitimate use.</AnalystNotes>
+      </Step>
+      <Step order="2" name="Process context on the host">
+        <Purpose>The writing process's parent/origin reveals whether this was attacker-driven or a legitimate installer.</Purpose>
+        <Query platform="Elastic" language="ES|QL" id="INV-02-REG-CONTEXT" optional="true">
+          <![CDATA[
+FROM logs-windows.sysmon_operational-*,logs-system.security-*
+| WHERE event.code IN ("1","4688") AND host.name == "$hostname" AND @timestamp >= NOW() - 2 hours
+| STATS runs = COUNT(*), parents = VALUES(process.parent.name), users = VALUES(user.name) BY process.name
+| SORT runs DESC
+| LIMIT 15
+          ]]>
+        </Query>
+        <ExpectedOutput>
+          <Field name="process.name"/>
+          <Field name="parents"/>
+          <Field name="users"/>
+        </ExpectedOutput>
+        <AnalystNotes>A registry write by a script/LOLBin/unknown process is attacker persistence; a write by a signed installer/OS process is likely benign.</AnalystNotes>
+      </Step>
+      <Step order="3" name="Finalize classification">
+        <DecisionTree>
+          <Node><Condition>A DLL path written under Office Test\Special\Perf (near-always malicious).</Condition><Result>True Positive (Malicious Persistence/Config - IR)</Result></Node>
+          <Node><Condition>A signed installer/OS process making the change under a known context.</Condition><Result>False Positive</Result></Node>
+          <Node><Condition>A diagnostic tool using the key temporarily.</Condition><Result>Misconfiguration</Result></Node>
+          <Node><Condition>Registry change with unclear writing process/intent.</Condition><Result>Needs Escalation</Result></Node>
+        </DecisionTree>
+        <DocumentationChecklist>
+          <Item>Attach outputs of INV-01-REG-WRITE, INV-02-REG-CONTEXT to the case.</Item>
+        </DocumentationChecklist>
+      </Step>
+    </Workflow>
+  </Investigation>
+  <ClassificationGuidance>
+    <FalsePositive>
+      <Definition>A legitimate installer/OS/admin registry change.</Definition>
+      <Indicators>
+        <Item>Signed installer/OS process.</Item>
+        <Item>Expected value/data.</Item>
+        <Item>Known context.</Item>
+      </Indicators>
+      <SOCAction>
+        <Item>Confirm the software/change; close as false_positive.</Item>
+      </SOCAction>
+    </FalsePositive>
+    <TruePositive>
+      <Definition>Malicious office test persistence.</Definition>
+      <Indicators>
+        <Item>A DLL path written under Office Test\Special\Perf (near-always malicious)..</Item>
+        <Item>Suspicious writing process.</Item>
+        <Item>Attacker context.</Item>
+      </Indicators>
+      <SOCAction>
+        <Item>Remove the malicious registry entry; isolate the host; open IR.</Item>
+        <Item>Hunt the same key change estate-wide.</Item>
+      </SOCAction>
+    </TruePositive>
+    <Misconfiguration>
+      <Definition>A rare developer/diagnostic use of the Office Test key confirmed benign.</Definition>
+      <Indicators>
+        <Item>A diagnostic tool using the key temporarily.</Item>
+      </Indicators>
+      <SOCAction>
+        <Item>Correct the configuration; document.</Item>
+      </SOCAction>
+    </Misconfiguration>
+  </ClassificationGuidance>
+  <Response><IRForHumans>
+    <Phase name="Immediate Actions (0-30 minutes)">
+      <Action priority="1">Confirm the activity on the host; if malicious indicators, isolate the host.</Action>
+      <Action priority="2">Identify the responsible account/process and its origin.</Action>
+    </Phase>
+    <Phase name="Containment and Eradication (hours)">
+      <Action>Isolate the host; capture volatile evidence; hunt the same pattern across the estate.</Action>
+      <Action>Reset credentials used on the host if compromise is confirmed.</Action>
+    </Phase>
+    <Phase name="Recovery and Hardening (days)">
+      <Action>Remediate the root cause; add/verify EDR coverage; apply relevant hardening.</Action>
+    </Phase>
+  </IRForHumans></Response>
+  <QualityChecks>
+    <Check>Confirm the required telemetry (Sysmon/Security auditing) is present on the host.</Check>
+    <Check>Tune known-benign administrative sources via exceptions, not by disabling the rule.</Check>
+  </QualityChecks>
+  <ClosureCriteria><FalsePositiveClosure>
+    <Item>Activity confirmed benign/authorised and documented.</Item>
+  </FalsePositiveClosure><TruePositiveClosure>
+    <Item>Host contained and triaged; root cause eradicated; estate swept; findings recorded.</Item>
+  </TruePositiveClosure></ClosureCriteria>
+</Playbook>

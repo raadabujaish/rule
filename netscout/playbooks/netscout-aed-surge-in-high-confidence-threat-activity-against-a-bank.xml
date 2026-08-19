@@ -1,0 +1,145 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<Playbook xmlns="https://soc.example/playbooks" id="PB-NS-002" name="NETSCOUT AED — Surge in High-Confidence Threat Activity Against a Bank - SOC Playbook" version="1.0" status="Production" classification="TLP:AMBER">
+  <Metadata>
+    <Owner>JCB Detection Engineering (WatchWave)</Owner>
+    <LastUpdated>2026-08-14</LastUpdated>
+    <Severity default="High">High</Severity>
+    <Confidence default="Medium">Medium</Confidence>
+    <Category>Command and Control / Network Threat</Category>
+    <MitreAttack>
+      <Technique id="T1071" name="Application Layer Protocol"/>
+      <Tactic id="TA0011" name="Command and Control"/>
+    </MitreAttack>
+    <References>
+      <Reference title="MITRE ATT and CK" url="https://attack.mitre.org/techniques/T1071/"/>
+    </References>
+  </Metadata>
+  <ExecutiveSummary>
+    <Overview>NETSCOUT AED reported a surge of high-confidence threat activity (Botnet C2, ATLAS threat categories, blocked hosts) against the bank. Triage: real botnet/C2/threat activity involving bank IPs, or benign traffic mis-categorised?</Overview>
+    <BusinessImpact>High-confidence AED threat activity (botnet C2, known-bad hosts) indicates compromised hosts or targeted attack infrastructure.</BusinessImpact>
+  </ExecutiveSummary>
+  <Scope><Assets>
+    <AssetType>Bank internet-facing services behind NETSCOUT AED (DDoS protection)</AssetType>
+  </Assets><LogSources>
+    <LogSource>NETSCOUT AED CEF - logs-cef.log-*</LogSource>
+  </LogSources></Scope>
+  <Prerequisites><TelemetryRequirements>
+    <Requirement>NETSCOUT Arbor Edge Defense CEF (verified live). Fields: source.ip, source.geo, source.as.organization.name, destination.ip, cef.extensions.deviceCustomString2 (protection group / bank service), cef.device.event_class_id (attack type), cef.extensions.deviceCustomString6 (threat category), cef.severity.</Requirement>
+  </TelemetryRequirements><DetectionSignals>
+    <Signal><Name>Surge in High-Confidence Threat Activity</Name><Details>high-confidence threat events (botnet/ATLAS categories).</Details></Signal>
+  </DetectionSignals></Prerequisites>
+  <Inputs>
+    <Input name="$protgroup" description="Protection group / bank service (deviceCustomString2)."/>
+  </Inputs>
+  <Triage><ImmediateCapture>
+    <Item>$protgroup: $protgroup</Item>
+  </ImmediateCapture><InitialAssessment>
+    <Rule>Weigh the full evidence story per the ClassificationGuidance, not any single fact.</Rule>
+  </InitialAssessment></Triage>
+  <Investigation>
+    <Goal>Determine whether the threat surge reflects real botnet/C2 activity involving bank assets or benign mis-categorisation.</Goal>
+    <Workflow>
+      <Step order="1" name="Threat categories and involved bank IPs">
+        <Purpose>The threat categories and whether bank IPs are the source or destination show compromise vs inbound attack.</Purpose>
+        <Query platform="Elastic" language="ES|QL" id="INV-01-NS-THREATS">
+          <![CDATA[
+FROM logs-cef.log-*
+| WHERE observer.vendor == "NETSCOUT" AND (cef.extensions.deviceCustomString6 RLIKE "(?i).*(botnet|command and control|malware|atlas).*" OR cef.device.event_class_id RLIKE "(?i).*(botnet|threat|denied).*") AND @timestamp >= NOW() - 4 hours
+| STATS events = COUNT(*), categories = VALUES(cef.extensions.deviceCustomString6), classes = VALUES(cef.device.event_class_id), int_ips = VALUES(destination.ip)
+| LIMIT 1
+          ]]>
+        </Query>
+        <ExpectedOutput>
+          <Field name="events"/>
+          <Field name="categories"/>
+          <Field name="classes"/>
+          <Field name="int_ips"/>
+        </ExpectedOutput>
+        <AnalystNotes>Botnet C2 with a BANK internal IP as source = a compromised internal host beaconing (high priority - pivot to endpoint IR). Bank IP as destination = inbound threat traffic (perimeter). Read the categories.</AnalystNotes>
+      </Step>
+      <Step order="2" name="Involved sources/destinations">
+        <Purpose>Identify the internal (bank) IPs involved so compromised hosts can be triaged.</Purpose>
+        <Query platform="Elastic" language="ES|QL" id="INV-02-NS-ENTITIES" optional="true">
+          <![CDATA[
+FROM logs-cef.log-*
+| WHERE observer.vendor == "NETSCOUT" AND cef.extensions.deviceCustomString6 RLIKE "(?i).*(botnet|command|malware).*" AND @timestamp >= NOW() - 4 hours
+| STATS events = COUNT(*), threat_cats = VALUES(cef.extensions.deviceCustomString6) BY source.ip, destination.ip
+| SORT events DESC
+| LIMIT 15
+          ]]>
+        </Query>
+        <ExpectedOutput>
+          <Field name="source.ip"/>
+          <Field name="destination.ip"/>
+          <Field name="events"/>
+        </ExpectedOutput>
+        <AnalystNotes>Any bank-range IP (per the AED protection group / AS 'Jordan Commercial Bank') appearing as a botnet C2 source is a compromised host - escalate to endpoint IR.</AnalystNotes>
+      </Step>
+      <Step order="3" name="Finalize classification">
+        <DecisionTree>
+          <Node><Condition>A bank internal IP flagged as a botnet/C2 source (compromised internal host).</Condition><Result>True Positive (Compromised Host / C2 - endpoint IR)</Result></Node>
+          <Node><Condition>Inbound high-confidence threat traffic to bank IPs, blocked by AED.</Condition><Result>True Positive (Inbound Threat - blocked, monitor)</Result></Node>
+          <Node><Condition>A benign service mis-categorised as a threat.</Condition><Result>False Positive</Result></Node>
+          <Node><Condition>Threat surge with unclear entity involvement.</Condition><Result>Needs Escalation</Result></Node>
+        </DecisionTree>
+        <DocumentationChecklist>
+          <Item>Attach outputs of INV-01-NS-THREATS, INV-02-NS-ENTITIES to the case.</Item>
+        </DocumentationChecklist>
+      </Step>
+    </Workflow>
+  </Investigation>
+  <ClassificationGuidance>
+    <FalsePositive>
+      <Definition>A benign service mis-categorised.</Definition>
+      <Indicators>
+        <Item>Known-benign destination flagged.</Item>
+        <Item>No internal compromise.</Item>
+        <Item>Category mismatch.</Item>
+      </Indicators>
+      <SOCAction>
+        <Item>Confirm benign; tune AED category; close.</Item>
+      </SOCAction>
+    </FalsePositive>
+    <TruePositive>
+      <Definition>Real botnet/C2 threat activity involving bank assets.</Definition>
+      <Indicators>
+        <Item>Bank IP as C2 source (compromised).</Item>
+        <Item>Botnet/malware category.</Item>
+        <Item>Sustained activity.</Item>
+      </Indicators>
+      <SOCAction>
+        <Item>If internal-source: endpoint IR on that host. If inbound: confirm AED blocking, monitor. Correlate with endpoint/FortiGate telemetry.</Item>
+      </SOCAction>
+    </TruePositive>
+    <Misconfiguration>
+      <Definition>An AED category-tuning issue.</Definition>
+      <Indicators>
+        <Item>Benign traffic in a threat category.</Item>
+        <Item>Tuning gap.</Item>
+      </Indicators>
+      <SOCAction>
+        <Item>Tune AED categories; document.</Item>
+      </SOCAction>
+    </Misconfiguration>
+  </ClassificationGuidance>
+  <Response><IRForHumans>
+    <Phase name="Immediate Actions (0-30 minutes)">
+      <Action priority="1">Identify involved bank IPs; if an internal IP is a C2 source, escalate to endpoint IR.</Action>
+      <Action priority="2">Confirm AED blocking for inbound threats.</Action>
+    </Phase>
+    <Phase name="Containment and Eradication (hours)">
+      <Action>Endpoint IR on compromised internal hosts; correlate with endpoint/firewall telemetry.</Action>
+    </Phase>
+    <Phase name="Recovery and Hardening (days)">
+      <Action>Tune AED threat categories; integrate AED threat IPs into blocklists and endpoint hunting.</Action>
+    </Phase>
+  </IRForHumans></Response>
+  <QualityChecks>
+    <Check>deviceCustomString6 = threat category; bank AS is 'Jordan Commercial Bank'. Correlate internal C2 sources with endpoint telemetry.</Check>
+  </QualityChecks>
+  <ClosureCriteria><FalsePositiveClosure>
+    <Item>Benign mis-categorisation confirmed; documented.</Item>
+  </FalsePositiveClosure><TruePositiveClosure>
+    <Item>Compromised host(s) IR'd; threat IPs blocked; correlated.</Item>
+  </TruePositiveClosure></ClosureCriteria>
+</Playbook>

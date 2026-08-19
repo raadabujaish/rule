@@ -1,0 +1,215 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<Playbook xmlns="https://soc.example/playbooks" id="PB-JCB-ADW-001" name="AD – Account Created / Enabled - SOC Playbook" version="2.1" status="Production" classification="TLP:AMBER">
+  <Metadata>
+    <Owner>JCB Detection Engineering (WatchWave)</Owner>
+    <LastUpdated>2026-08-19</LastUpdated>
+    <Severity default="Medium">Medium</Severity>
+    <Confidence default="Medium">Medium</Confidence>
+    <Category>Persistence / Account Lifecycle Management</Category>
+    <MitreAttack>
+      <Technique id="T1136.002" name="Create Account: Domain Account"/>
+      <Technique id="T1098" name="Account Manipulation"/>
+      <Tactic id="TA0003" name="Persistence"/>
+    </MitreAttack>
+    <References>
+      <Reference title="MITRE ATT and CK T1136.002 Create Account Domain Account" url="https://attack.mitre.org/techniques/T1136/002/"/>
+      <Reference title="MITRE ATT and CK T1098 Account Manipulation" url="https://attack.mitre.org/techniques/T1098/"/>
+    </References>
+  </Metadata>
+  <ExecutiveSummary>
+    <Overview>A domain or local account was created (4720) or a previously disabled account was re-enabled (4722) in the INTDOM environment. The triage question is whether this is an authorised joiner/mover provisioning action, or an attacker planting a backdoor account or re-activating a dormant account to establish persistence. The strongest signal is not the creation itself but what happens next: the same actor elevating the new account into a privileged group, or the new account authenticating within minutes.</Overview>
+    <BusinessImpact>A rogue or re-enabled account in a banking domain is durable persistence that survives password resets on other accounts and blends into normal logon traffic. If elevated, it grants an attacker a clean, attributable-looking identity for lateral movement and fraud.</BusinessImpact>
+  </ExecutiveSummary>
+  <Scope>
+    <Assets>
+      <AssetType>Active Directory domain controllers (INTDOM)</AssetType>
+      <AssetType>Windows member servers and workstations (local account creation)</AssetType>
+    </Assets>
+    <LogSources>
+      <LogSource>Windows Security event log - logs-system.security-*</LogSource>
+    </LogSources>
+  </Scope>
+  <Prerequisites>
+    <TelemetryRequirements>
+      <Requirement>Windows Security auditing (Account Management subcategory) shipped via Elastic Agent to logs-system.security-* (verified live: 4720/4722/4724/4726/4738 present in the last 30 days).</Requirement>
+      <Requirement>winlog.event_data.SubjectUserName (actor) and winlog.event_data.TargetUserName (created/enabled account) are populated keyword fields (verified live).</Requirement>
+    </TelemetryRequirements>
+    <DetectionSignals>
+      <Signal><Name>Account created</Name><Details>event.code 4720 - a user account was created; TargetUserName is the new account, SubjectUserName is the actor.</Details></Signal>
+      <Signal><Name>Account enabled</Name><Details>event.code 4722 - a previously disabled account was enabled; re-activation of a dormant account is a common persistence move.</Details></Signal>
+      <Signal><Name>Create-then-elevate sequence</Name><Details>4720/4722 followed by 4728/4732/4756 (added to a security-enabled group) or an immediate 4624 logon by the same account within the window.</Details></Signal>
+    </DetectionSignals>
+  </Prerequisites>
+  <Inputs>
+    <Input name="$target_user" description="The account that was created or enabled (winlog.event_data.TargetUserName from the alert)."/>
+    <Input name="$actor_user" description="The account that performed the action (winlog.event_data.SubjectUserName from the alert)."/>
+    <Input name="$host" description="Host/DC that recorded the account-management event (host.name from the alert)."/>
+  </Inputs>
+  <Triage>
+    <ImmediateCapture>
+      <Item>Target account: $target_user (created or enabled)</Item>
+      <Item>Actor: $actor_user; recording host/DC: $host</Item>
+      <Item>event.code (4720 create vs 4722 enable) and event.action from the alert</Item>
+    </ImmediateCapture>
+    <InitialAssessment>
+      <Rule>If $actor_user is a known IAM/service-desk provisioning identity AND the new account matches the standard naming convention AND no privileged-group add or logon follows, lean False Positive (authorised provisioning).</Rule>
+      <Rule>If $actor_user is a human admin acting outside a change window, OR the new account is added to a privileged group, OR it authenticates within the window, escalate and treat as potential backdoor persistence.</Rule>
+    </InitialAssessment>
+  </Triage>
+  <Investigation>
+    <Goal>Determine whether the creation/enable of $target_user was an authorised provisioning action or attacker-planted persistence, and whether the account was elevated or used.</Goal>
+    <Workflow>
+      <Step order="1" name="Reconstruct the lifecycle of the target account">
+        <Purpose>Establish the sequence and actors around $target_user: a create (4720) immediately followed by enable (4722), password set (4723/4724) and group adds in seconds is the rogue-account signature; a lone 4720 by a provisioning identity is routine.</Purpose>
+        <Query platform="Elastic" language="ES|QL" id="INV-01">
+          <![CDATA[
+FROM logs-system.security-*
+| WHERE @timestamp >= NOW() - 4 hours AND winlog.event_data.TargetUserName == "$target_user"
+    AND event.code IN ("4720","4722","4723","4724","4725","4726","4738","4728","4732","4756","4767","4781")
+| STATS events=COUNT(*), first_seen=MIN(@timestamp), last_seen=MAX(@timestamp), actors=VALUES(winlog.event_data.SubjectUserName), hosts=VALUES(host.name) BY event.code, event.action
+| SORT event.code ASC
+| LIMIT 100
+          ]]>
+        </Query>
+        <ExpectedOutput>
+          <Field name="event.code"/>
+          <Field name="actors"/>
+          <Field name="first_seen"/>
+        </ExpectedOutput>
+        <AnalystNotes>4720 then 4722/4724/4728 within seconds from one actor = provisioned-and-armed account. 4722 alone (enable of an old account) with no prior 4720 in history = dormant-account re-activation, investigate why it was re-enabled.</AnalystNotes>
+      </Step>
+      <Step order="2" name="Profile the actor's account-management activity">
+        <Purpose>One actor creating/enabling many accounts, or an actor who is not a known provisioning identity, changes this from routine to suspicious.</Purpose>
+        <Query platform="Elastic" language="ES|QL" id="INV-02">
+          <![CDATA[
+FROM logs-system.security-*
+| WHERE @timestamp >= NOW() - 4 hours AND winlog.event_data.SubjectUserName == "$actor_user"
+    AND event.code IN ("4720","4722","4725","4726","4738","4728","4732","4724")
+| STATS actions=COUNT(*), targets=COUNT_DISTINCT(winlog.event_data.TargetUserName), touched=VALUES(winlog.event_data.TargetUserName), codes=VALUES(event.code), hosts=VALUES(host.name) BY winlog.event_data.SubjectUserName
+| LIMIT 20
+          ]]>
+        </Query>
+        <ExpectedOutput>
+          <Field name="actions"/>
+          <Field name="targets"/>
+          <Field name="touched"/>
+        </ExpectedOutput>
+        <AnalystNotes>A single account created by a known service-desk identity = routine. Many targets, or an actor that is a workstation/interactive human outside IT, or an actor that itself was recently created, is a strong escalate signal.</AnalystNotes>
+      </Step>
+      <Step order="3" name="Detect create-then-elevate by the same actor">
+        <Purpose>The most dangerous pattern is a new account being pushed into a privileged group. This looks at security-enabled group additions the same actor performed in the window.</Purpose>
+        <Query platform="Elastic" language="ES|QL" id="INV-03">
+          <![CDATA[
+FROM logs-system.security-*
+| WHERE @timestamp >= NOW() - 4 hours AND winlog.event_data.SubjectUserName == "$actor_user"
+    AND event.code IN ("4728","4732","4756")
+| STATS adds=COUNT(*), first_seen=MIN(@timestamp), members=VALUES(winlog.event_data.MemberName), hosts=VALUES(host.name) BY winlog.event_data.TargetUserName, event.code
+| SORT adds DESC
+| LIMIT 50
+          ]]>
+        </Query>
+        <ExpectedOutput>
+          <Field name="winlog.event_data.TargetUserName"/>
+          <Field name="members"/>
+          <Field name="adds"/>
+        </ExpectedOutput>
+        <AnalystNotes>TargetUserName here is the GROUP; members contains the DN of the account added. If members references $target_user and the group is Domain Admins / Enterprise Admins / a privileged local group, treat as True Positive (backdoor with elevation).</AnalystNotes>
+      </Step>
+      <Step order="4" name="Check whether the new account authenticated">
+        <Purpose>A brand-new or freshly-enabled account that logs on within the window indicates the account is already in use - the difference between a planted account and an active one.</Purpose>
+        <Query platform="Elastic" language="ES|QL" id="INV-04">
+          <![CDATA[
+FROM logs-system.security-*
+| WHERE @timestamp >= NOW() - 4 hours AND winlog.event_data.TargetUserName == "$target_user"
+    AND event.code IN ("4624","4768","4769","4776")
+| STATS logons=COUNT(*), first_seen=MIN(@timestamp), last_seen=MAX(@timestamp), types=VALUES(winlog.event_data.LogonType), src=VALUES(source.ip), hosts=VALUES(host.name) BY event.code
+| SORT event.code ASC
+| LIMIT 50
+          ]]>
+        </Query>
+        <ExpectedOutput>
+          <Field name="event.code"/>
+          <Field name="types"/>
+          <Field name="src"/>
+        </ExpectedOutput>
+        <AnalystNotes>Interactive (LogonType 2) or Remote-Interactive (10) logons by a just-created account are high-signal. Kerberos 4768/4769 or NTLM 4776 immediately after creation shows the credential is live. Correlate first_seen here against INV-01 creation time.</AnalystNotes>
+      </Step>
+    </Workflow>
+  </Investigation>
+  <DecisionTree>
+    <Node><Condition>INV-03 shows $target_user (in members) added to a privileged group by $actor_user, OR INV-04 shows the new account authenticating, AND the actor/action is not tied to an approved change record.</Condition><Result>True Positive (backdoor / persistence account - escalate to IR immediately)</Result></Node>
+    <Node><Condition>INV-01/INV-02 show creation or enable by an actor who is not an authorised provisioning identity, on an unexpected host, or outside a change window, even without elevation yet.</Condition><Result>Needs Escalation (unattributed account change - confirm with IAM before closing)</Result></Node>
+    <Node><Condition>The action was performed by the documented IAM/service-desk provisioning identity or an admin working under a matching change ticket, the account follows naming standards, and INV-03/INV-04 show no elevation or use.</Condition><Result>False Positive (authorised provisioning)</Result></Node>
+    <Node><Condition>An automated provisioning/HR-sync connector or a test/lab process is repeatedly creating, enabling or disabling accounts by design and firing this rule as noise.</Condition><Result>Misconfiguration (tune the rule for the known provisioning source; do not exception broadly)</Result></Node>
+    <Node><Condition>Actor or target cannot be attributed from IAM/CMDB, or evidence is mixed (provisioning identity but abnormal elevation).</Condition><Result>Needs Escalation</Result></Node>
+  </DecisionTree>
+  <ClassificationGuidance>
+    <FalsePositive>
+      <Definition>An authorised identity created or enabled the account as part of the sanctioned joiner/mover process or an approved change - not a benign guess, an attributable and approved action.</Definition>
+      <Indicators>
+        <Item>$actor_user is the documented IAM/service-desk provisioning account or an admin named on a change ticket covering the window.</Item>
+        <Item>New account matches the standard naming convention and OU for its account class.</Item>
+        <Item>INV-03 shows no privileged-group add and INV-04 shows no logon by the account.</Item>
+      </Indicators>
+      <SOCAction>
+        <Item>Confirm the change ticket / provisioning request reference.</Item>
+        <Item>If a specific provisioning identity is chronically noisy, propose a scoped rule tuning for that actor only.</Item>
+        <Item>Close as false_positive with the ticket reference attached.</Item>
+      </SOCAction>
+    </FalsePositive>
+    <TruePositive>
+      <Definition>An account was created or re-enabled to establish persistence, typically then elevated or used.</Definition>
+      <Indicators>
+        <Item>Create-then-elevate: 4720/4722 followed by a privileged group add (INV-03) referencing $target_user.</Item>
+        <Item>New or re-enabled account authenticates within the window (INV-04), especially interactive or remote-interactive.</Item>
+        <Item>Actor is an unexpected identity, an unusual host, or itself recently created; action outside any change window.</Item>
+      </Indicators>
+      <SOCAction>
+        <Item>Disable $target_user and any sibling accounts created by the same actor in the window.</Item>
+        <Item>Revoke sessions/tickets for the account; reset the actor account if compromise is suspected.</Item>
+        <Item>Open an incident; pull the actor host for forensics; review what the account touched.</Item>
+      </SOCAction>
+    </TruePositive>
+    <Misconfiguration>
+      <Definition>An internal automation (HR sync, IDM connector, provisioning script, lab rebuild) creates/enables/disables accounts on a loop as designed - operational noise, not malicious.</Definition>
+      <Indicators>
+        <Item>Same automation actor repeatedly creating/enabling accounts with machine-generated names.</Item>
+        <Item>No human actor and no privileged-group elevation.</Item>
+      </Indicators>
+      <SOCAction>
+        <Item>Confirm the automation with its owning team.</Item>
+        <Item>Tune the rule for the specific provisioning source; track under detection-tuning, not IR.</Item>
+      </SOCAction>
+    </Misconfiguration>
+  </ClassificationGuidance>
+  <Response>
+    <IRForHumans>
+      <Phase name="Immediate Actions (0-30 minutes)">
+        <Action priority="1">If INV-03/INV-04 show elevation or use, disable $target_user immediately and revoke its sessions/tickets.</Action>
+        <Action priority="2">Identify and freeze any other accounts $actor_user created or enabled in the window (INV-02).</Action>
+      </Phase>
+      <Phase name="Containment and Eradication (hours)">
+        <Action>If $actor_user is compromised, reset it and audit everything it changed.</Action>
+        <Action>Remove the rogue account from any groups it was added to; forensic-triage the actor host.</Action>
+      </Phase>
+      <Phase name="Recovery and Hardening (days)">
+        <Action>Review who holds account-creation and group-management rights; enforce change-control on account provisioning.</Action>
+        <Action>Add alerting on new accounts added to privileged groups within N minutes of creation.</Action>
+      </Phase>
+    </IRForHumans>
+  </Response>
+  <Escalation>
+    <Trigger>Any privileged-group elevation of, or authentication by, a newly created/enabled account; or an account change that cannot be attributed to an approved provisioning process.</Trigger>
+    <To>SOC L2 / IR</To>
+  </Escalation>
+  <Closure>
+    <FalsePositiveClosure>
+      <Item>Provisioning request or change ticket verified and matches actor, account and window.</Item>
+      <Item>INV-03 and INV-04 confirm no elevation and no logon by the account.</Item>
+    </FalsePositiveClosure>
+    <TruePositiveClosure>
+      <Item>Rogue/re-enabled account disabled, removed from all groups, sessions revoked.</Item>
+      <Item>Actor account status resolved and root cause (compromise vs insider) documented.</Item>
+    </TruePositiveClosure>
+  </Closure>
+</Playbook>

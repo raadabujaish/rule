@@ -1,0 +1,102 @@
+{
+  "rule_id": "jcb-win-wmi-winrm-remote-exec",
+  "name": "Windows — Remote Execution via WMI or WinRM",
+  "version": 1,
+  "enabled": true,
+  "interval": "1h",
+  "from": "now-90m",
+  "to": "now",
+  "description": "Attacker objective\nExecute commands on a remote host over WMI or WinRM/PowerShell-Remoting to move laterally after a foothold.\n\nAttack logic\nRemote WMI process creation runs children under WmiPrvSE; WinRM/PS-Remoting runs them under wsmprovhost/winrshost. A shell, scripting host or recon/download tool spawned by these service hosts indicates remote command execution.\n\nWhy this detection works\nProcess-creation lineage ties the WMI/WinRM host process to a suspicious child on the same event, isolating remote execution from local activity.\n\nFalse positives\nLegitimate remote administration and management tooling that uses WMI/WinRM.\n\nTuning\nAllowlist sanctioned management/monitoring source hosts and service accounts; a burst across many destination hosts is higher-risk.\n\nRequired telemetry\nProcess creation with parent process: Sysmon Event ID 1 and Windows Security 4688.",
+  "tags": [
+    "JCB",
+    "Windows",
+    "Phase3",
+    "Use Case: Threat Detection",
+    "Tactic: Lateral Movement"
+  ],
+  "author": [
+    "raadabujaish"
+  ],
+  "license": "",
+  "threat": [
+    {
+      "framework": "MITRE ATT&CK",
+      "tactic": {
+        "id": "TA0008",
+        "name": "Lateral Movement",
+        "reference": "https://attack.mitre.org/tactics/TA0008/"
+      },
+      "technique": [
+        {
+          "id": "T1047",
+          "name": "Windows Management Instrumentation",
+          "reference": "https://attack.mitre.org/techniques/T1047/"
+        }
+      ]
+    },
+    {
+      "framework": "MITRE ATT&CK",
+      "tactic": {
+        "id": "TA0008",
+        "name": "Lateral Movement",
+        "reference": "https://attack.mitre.org/tactics/TA0008/"
+      },
+      "technique": [
+        {
+          "id": "T1021",
+          "name": "Remote Services",
+          "reference": "https://attack.mitre.org/techniques/T1021/",
+          "subtechnique": [
+            {
+              "id": "T1021.006",
+              "name": "Windows Remote Management",
+              "reference": "https://attack.mitre.org/techniques/T1021/006/"
+            }
+          ]
+        }
+      ]
+    }
+  ],
+  "investigation_fields": {
+    "field_names": [
+      "host.name",
+      "user.name",
+      "user.domain",
+      "process.name",
+      "process.executable",
+      "process.command_line",
+      "process.args",
+      "process.parent.name",
+      "process.parent.executable",
+      "event.code",
+      "event.action",
+      "powershell.exe"
+    ]
+  },
+  "related_integrations": [],
+  "required_fields": [],
+  "setup": "",
+  "note": "## Investigation guide\n1. The parent (WmiPrvSE/wsmprovhost) launched a shell/tool — remote WMI/WinRM execution.\n2. Identify the initiating host/user (correlate with 4624 network logons and 5145 shares) and the child command.\n3. If unauthorised, treat as lateral movement and isolate both source and destination.",
+  "false_positives": [
+    "Legitimate remote administration and management tooling that uses WMI/WinRM."
+  ],
+  "references": [
+    "https://attack.mitre.org/techniques/T1047/",
+    "https://attack.mitre.org/techniques/T1021/"
+  ],
+  "risk_score": 73,
+  "risk_score_mapping": [],
+  "severity": "high",
+  "severity_mapping": [],
+  "output_index": "",
+  "max_signals": 100,
+  "exceptions_list": [],
+  "actions": [],
+  "type": "eql",
+  "language": "eql",
+  "index": [
+    "logs-windows.sysmon_operational-*",
+    "logs-system.security-*"
+  ],
+  "query": "process where event.code in (\"1\",\"4688\") and process.parent.name in~ (\"wmiprvse.exe\",\"wsmprovhost.exe\",\"winrshost.exe\") and process.name in~ (\"cmd.exe\",\"powershell.exe\",\"pwsh.exe\",\"mshta.exe\",\"rundll32.exe\",\"regsvr32.exe\",\"cscript.exe\",\"wscript.exe\",\"bitsadmin.exe\",\"certutil.exe\",\"net.exe\",\"net1.exe\",\"whoami.exe\",\"nltest.exe\",\"schtasks.exe\",\"sc.exe\")"
+}

@@ -1,0 +1,179 @@
+{
+  "rule_id": "4cef8def-bb22-4836-a051-9082bc2997e4",
+  "name": "QA - USB/CD Allow/Block Changes",
+  "version": 1,
+  "enabled": true,
+  "interval": "1h",
+  "from": "now-3900s",
+  "to": "now",
+  "description": "USB/CD Allow/Block Changes",
+  "tags": [
+    "IRM",
+    "QA"
+  ],
+  "author": [],
+  "license": "",
+  "threat": [],
+  "investigation_fields": {
+    "field_names": [
+      "destination.domain",
+      "destination.user.name",
+      "destination.ip",
+      "cef.name",
+      "cef.device.event_class_id",
+      "cef.severity",
+      "message",
+      "observer.product",
+      "cef.device.vendor",
+      "event.code",
+      "cef.extensions.message"
+    ]
+  },
+  "related_integrations": [],
+  "required_fields": [],
+  "setup": "",
+  "false_positives": [],
+  "references": [],
+  "risk_score": 47,
+  "risk_score_mapping": [],
+  "severity": "medium",
+  "severity_mapping": [],
+  "output_index": "",
+  "max_signals": 100,
+  "exceptions_list": [],
+  "actions": [],
+  "meta": {
+    "from": "5m",
+    "kibana_siem_app_url": "https://jcb.scanwave.local:8008/app/security"
+  },
+  "type": "query",
+  "language": "kuery",
+  "index": [
+    "apm-*-transaction*",
+    "auditbeat-*",
+    "endgame-*",
+    "filebeat-*",
+    "logs-*",
+    "packetbeat-*",
+    "traces-apm*",
+    "winlogbeat-*",
+    "-*elastic-cloud-logs-*"
+  ],
+  "query": "",
+  "filters": [
+    {
+      "meta": {
+        "index": "3e4648ec-0c9c-48d2-befd-32f744cb6175",
+        "type": "phrase",
+        "disabled": false,
+        "negate": false,
+        "alias": null,
+        "key": "cef.device.vendor",
+        "params": {
+          "query": "KasperskyLab"
+        }
+      },
+      "query": {
+        "match_phrase": {
+          "cef.device.vendor": "KasperskyLab"
+        }
+      },
+      "$state": {
+        "store": "appState"
+      }
+    },
+    {
+      "meta": {
+        "index": "3e4648ec-0c9c-48d2-befd-32f744cb6175",
+        "type": "phrase",
+        "disabled": false,
+        "negate": false,
+        "alias": null,
+        "key": "event.code",
+        "params": {
+          "query": "KLAUD_EV_ADMGROUP_CHANGED"
+        }
+      },
+      "query": {
+        "match_phrase": {
+          "event.code": "KLAUD_EV_ADMGROUP_CHANGED"
+        }
+      },
+      "$state": {
+        "store": "appState"
+      }
+    },
+    {
+      "meta": {
+        "index": "3e4648ec-0c9c-48d2-befd-32f744cb6175",
+        "type": "custom",
+        "disabled": false,
+        "negate": false,
+        "alias": null,
+        "key": "query",
+        "value": "{\"bool\":{\"filter\":[{\"bool\":{\"minimum_should_match\":1,\"should\":[{\"bool\":{\"minimum_should_match\":1,\"should\":[{\"wildcard\":{\"cef.extensions.message\":{\"value\":\"*Allow USB - CD*\"}}}]}},{\"bool\":{\"minimum_should_match\":1,\"should\":[{\"wildcard\":{\"cef.extensions.message\":{\"value\":\"*Allow USB*\"}}}]}},{\"bool\":{\"minimum_should_match\":1,\"should\":[{\"wildcard\":{\"cef.extensions.message\":{\"value\":\"*Allow CD*\"}}}]}}]}}],\"must\":[],\"must_not\":[],\"should\":[]}}"
+      },
+      "$state": {
+        "store": "appState"
+      },
+      "query": {
+        "bool": {
+          "filter": [
+            {
+              "bool": {
+                "minimum_should_match": 1,
+                "should": [
+                  {
+                    "bool": {
+                      "minimum_should_match": 1,
+                      "should": [
+                        {
+                          "wildcard": {
+                            "cef.extensions.message": {
+                              "value": "*Allow USB - CD*"
+                            }
+                          }
+                        }
+                      ]
+                    }
+                  },
+                  {
+                    "bool": {
+                      "minimum_should_match": 1,
+                      "should": [
+                        {
+                          "wildcard": {
+                            "cef.extensions.message": {
+                              "value": "*Allow USB*"
+                            }
+                          }
+                        }
+                      ]
+                    }
+                  },
+                  {
+                    "bool": {
+                      "minimum_should_match": 1,
+                      "should": [
+                        {
+                          "wildcard": {
+                            "cef.extensions.message": {
+                              "value": "*Allow CD*"
+                            }
+                          }
+                        }
+                      ]
+                    }
+                  }
+                ]
+              }
+            }
+          ],
+          "must": [],
+          "must_not": [],
+          "should": []
+        }
+      }
+    }
+  ]
+}

@@ -1,0 +1,179 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<Playbook xmlns="https://soc.example/playbooks" id="PB-JCB-NEW-2" name="Office 365 -  Changes - SOC Playbook" version="2.1" status="Production" classification="TLP:AMBER">
+  <Metadata>
+    <Owner>JCB Detection Engineering (WatchWave)</Owner>
+    <LastUpdated>2026-08-19</LastUpdated>
+    <Severity default="Low">Low</Severity>
+    <Confidence default="Medium">Medium</Confidence>
+    <Category>Persistence / Account and Configuration Changes</Category>
+    <MitreAttack>
+      <Technique id="T1098" name="Account Manipulation"/>
+      <Tactic id="TA0003" name="Persistence"/>
+    </MitreAttack>
+    <References>
+      <Reference title="MITRE ATT and CK T1098 Account Manipulation" url="https://attack.mitre.org/techniques/T1098/"/>
+    </References>
+  </Metadata>
+  <ExecutiveSummary>
+    <Overview>This rule surfaces Microsoft 365 configuration and object changes — any audit event carrying modified properties (mailbox, inbox-rule, permission/delegation, transport-rule, group/role, conditional-access, password and app changes). It is a broad, low-severity monitoring signal: most hits are routine administration. Triage question: is this change authorised administration, or an unauthorised or attacker-driven modification (persistence, privilege change, mail redirection)?</Overview>
+    <BusinessImpact>Unauthorised M365 changes are how attackers persist and pivot in the tenant — adding mailbox delegation, forwarding or transport rules to intercept mail, granting themselves permissions or roles, or weakening conditional access. Catching the unauthorised change early prevents mail interception, fraud and privilege escalation.</BusinessImpact>
+  </ExecutiveSummary>
+  <Scope>
+    <Assets>
+      <AssetType>Microsoft 365 / Entra ID tenant (JCB) — Exchange Online, SharePoint/OneDrive, Entra directory</AssetType>
+    </Assets>
+    <LogSources>
+      <LogSource>Microsoft 365 unified audit log — logs-o365.audit-*</LogSource>
+    </LogSources>
+  </Scope>
+  <Prerequisites>
+    <TelemetryRequirements>
+      <Requirement>M365 unified audit via Elastic Agent — verified live at JCB (8.1M docs/30d). The source rule fires on o365.audit.ModifiedProperties being present. Note: ModifiedProperties is an object with many typed leaves, so it is not directly referenceable in ES|QL; these queries instead identify the same change events through their change-verb event.action values (Set-*, New-*, Remove-*, Add-*, Update*, Change*, *InboxRule*, *Permission*, *member*, *Policy*).</Requirement>
+      <Requirement>JCB-specific: o365.audit.Operation is NOT populated (0 of 8.1M) — the operation/action is carried in event.action. The actor is user.name, the changed object is o365.audit.ObjectId. O365 ingest lag is typically 20-60 min; all queries use a 4h window.</Requirement>
+    </TelemetryRequirements>
+    <DetectionSignals>
+      <Signal><Name>Office 365 -  Changes</Name><Details>An M365 audit event carries modified properties — a configuration or object change, seen as a change-verb event.action.</Details></Signal>
+    </DetectionSignals>
+  </Prerequisites>
+  <Inputs>
+    <Input name="$username" description="The actor who performed the change (user.name)."/>
+    <Input name="$object" description="The changed object / target (o365.audit.ObjectId) — mailbox, user, group, rule or policy."/>
+  </Inputs>
+  <Triage>
+    <ImmediateCapture>
+      <Item>$username: $username</Item>
+      <Item>$object: $object</Item>
+    </ImmediateCapture>
+    <InitialAssessment>
+      <Rule>Weigh the full evidence story per the ClassificationGuidance — an unfamiliar actor, an external source, a security-sensitive change (forwarding, delegation, transport rule, role add) or a change with no ticket is the concern; routine admin under a ticket is not.</Rule>
+    </InitialAssessment>
+  </Triage>
+  <Investigation>
+    <Goal>Determine whether this M365 change is authorised administration or an unauthorised / abusive modification.</Goal>
+    <Workflow>
+      <Step order="1" name="Confirm what changed, who did it and the result">
+        <Purpose>Identify the exact change events by this actor — the action, the target object, the source and the outcome — in the window.</Purpose>
+        <Query platform="Elastic" language="ES|QL" id="INV-01">
+          <![CDATA[
+FROM logs-o365.audit-*
+| WHERE @timestamp >= NOW() - 4 hours AND user.name == "$username" AND (event.action LIKE "Set-*" OR event.action LIKE "New-*" OR event.action LIKE "Remove-*" OR event.action LIKE "Add-*" OR event.action LIKE "Update*" OR event.action LIKE "Change*" OR event.action LIKE "*InboxRule*" OR event.action LIKE "*Permission*" OR event.action LIKE "*member*" OR event.action LIKE "*Policy*")
+| KEEP @timestamp, event.action, user.name, o365.audit.ObjectId, source.ip, event.outcome
+| SORT @timestamp DESC
+| LIMIT 30
+          ]]>
+        </Query>
+        <ExpectedOutput>
+          <Field name="event.action"/>
+          <Field name="o365.audit.ObjectId"/>
+          <Field name="source.ip"/>
+          <Field name="event.outcome"/>
+        </ExpectedOutput>
+        <AnalystNotes>Security-sensitive changes to prioritise: New/UpdateInboxRules, Add-MailboxPermission / Add-RecipientPermission (delegation), Set/New-TransportRule, Set-ConditionalAccessPolicy, Change user password, Add member to a privileged group. An unfamiliar actor or external source raises concern.</AnalystNotes>
+      </Step>
+      <Step order="2" name="Is this a burst of changes by one actor">
+        <Purpose>A burst of distinct change actions by one actor in a short window indicates scripted abuse or a compromised admin session rather than a single deliberate edit.</Purpose>
+        <Query platform="Elastic" language="ES|QL" id="INV-02">
+          <![CDATA[
+FROM logs-o365.audit-*
+| WHERE @timestamp >= NOW() - 4 hours AND user.name == "$username"
+| STATS events = COUNT(*), distinct_actions = COUNT_DISTINCT(event.action), actions = VALUES(event.action), targets = COUNT_DISTINCT(o365.audit.ObjectId), sources = VALUES(source.ip)
+| LIMIT 1
+          ]]>
+        </Query>
+        <ExpectedOutput>
+          <Field name="events"/>
+          <Field name="distinct_actions"/>
+          <Field name="actions"/>
+          <Field name="sources"/>
+        </ExpectedOutput>
+        <AnalystNotes>Many distinct change actions across many targets in minutes, or activity from more than one source IP for the same actor, points to automation or a hijacked session. A single change from the usual admin source is routine.</AnalystNotes>
+      </Step>
+      <Step order="3" name="Who else changed this object recently">
+        <Purpose>Show the recent change history of the target object to see whether this actor is expected to touch it, or whether the object is being modified by multiple / unexpected actors.</Purpose>
+        <Query platform="Elastic" language="ES|QL" id="INV-03">
+          <![CDATA[
+FROM logs-o365.audit-*
+| WHERE @timestamp >= NOW() - 4 hours AND o365.audit.ObjectId == "$object" AND (event.action LIKE "Set-*" OR event.action LIKE "New-*" OR event.action LIKE "Remove-*" OR event.action LIKE "Add-*" OR event.action LIKE "Update*" OR event.action LIKE "Change*")
+| KEEP @timestamp, event.action, user.name, source.ip
+| SORT @timestamp DESC
+| LIMIT 25
+          ]]>
+        </Query>
+        <ExpectedOutput>
+          <Field name="event.action"/>
+          <Field name="user.name"/>
+          <Field name="source.ip"/>
+        </ExpectedOutput>
+        <AnalystNotes>Repeated changes to a sensitive object (a privileged mailbox, a security group, a transport rule) by an unfamiliar actor, or a rapid change-then-revert, warrants escalation.</AnalystNotes>
+      </Step>
+    </Workflow>
+  </Investigation>
+  <DecisionTree>
+    <Node><Condition>A security-sensitive change (external forwarding / inbox rule, mailbox delegation, transport rule, privileged role/group add, conditional-access weakening, password reset) by an unfamiliar actor, from an unexpected source, or with no change ticket.</Condition><Result>True Positive (Unauthorised M365 Change — reverse, contain the actor, escalate)</Result></Node>
+    <Node><Condition>A recognised administrator or approved automation performing the change under a known ticket / maintenance window — authorised, or the change attempt was rejected (event.outcome failure / proven-blocked).</Condition><Result>False Positive (authorised or proven-blocked)</Result></Node>
+    <Node><Condition>A misconfigured policy or automation making unintended changes (e.g. a conditional-access or provisioning job toggling settings) with no malicious actor.</Condition><Result>Misconfiguration (correct the policy / automation)</Result></Node>
+    <Node><Condition>Actor plausibly delegated but the authorisation cannot be confirmed, or the change is sensitive and its intent is unclear.</Condition><Result>Needs Escalation</Result></Node>
+  </DecisionTree>
+  <ClassificationGuidance>
+    <FalsePositive>
+      <Definition>Authorised administration by a recognised admin or approved automation, or a change attempt that was rejected.</Definition>
+      <Indicators>
+        <Item>Recognised identity/Exchange admin or a known service account.</Item>
+        <Item>Change maps to an approved ticket or maintenance window.</Item>
+        <Item>Source is JCB egress NAT 94.249.88.0/24 or a known admin host; event.outcome shows the change failed / was blocked.</Item>
+      </Indicators>
+      <SOCAction>
+        <Item>Verify the change ticket/owner; confirm the actor is authorised; close as false_positive.</Item>
+      </SOCAction>
+    </FalsePositive>
+    <TruePositive>
+      <Definition>An unauthorised or attacker-driven M365 change — persistence, mail redirection, permission or role abuse.</Definition>
+      <Indicators>
+        <Item>Forwarding/inbox rule, delegation, transport rule, role add or CA weakening by an unfamiliar actor.</Item>
+        <Item>External or unusual source IP, or a burst of changes across many targets.</Item>
+        <Item>No corresponding change ticket.</Item>
+      </Indicators>
+      <SOCAction>
+        <Item>Reverse the change; revoke the actor's sessions and tokens; review the actor's other recent audit activity (INV-02).</Item>
+        <Item>If the change enabled mail interception or privilege gain, open IR and treat as account compromise.</Item>
+      </SOCAction>
+    </TruePositive>
+    <Misconfiguration>
+      <Definition>A misconfigured policy or provisioning automation making unintended changes.</Definition>
+      <Indicators>
+        <Item>Changes originate from an automation/service principal, not a person.</Item>
+        <Item>Repetitive, systematic edits inconsistent with a targeted attack.</Item>
+      </Indicators>
+      <SOCAction>
+        <Item>Correct the policy/automation; document; add an exception for the known service principal if appropriate.</Item>
+      </SOCAction>
+    </Misconfiguration>
+  </ClassificationGuidance>
+  <Response>
+    <IRForHumans>
+      <Phase name="Immediate Actions (0-30 minutes)">
+        <Action priority="1">Confirm the change, actor and result in the audit log (INV-01).</Action>
+        <Action priority="2">If unexpected or unauthorised, disable the actor's session and reverse the change.</Action>
+      </Phase>
+      <Phase name="Containment and Eradication (hours)">
+        <Action>Reverse the change; revoke sessions and tokens for the actor and any affected principals; remove attacker-created rules/permissions.</Action>
+        <Action>Review the actor's broader recent audit activity for other changes.</Action>
+      </Phase>
+      <Phase name="Recovery and Hardening (days)">
+        <Action>Restrict who can make sensitive changes; require change tickets; alert specifically on forwarding, delegation, transport-rule and privileged-role changes; tune this broad monitor with exceptions for known admins/automation.</Action>
+      </Phase>
+    </IRForHumans>
+  </Response>
+  <Escalation>
+    <Trigger>An unauthorised security-sensitive change (forwarding/delegation/transport rule/role add/CA weakening), a burst of changes by one actor, or a sensitive change whose authorisation cannot be confirmed.</Trigger>
+    <To>SOC L2 / IR</To>
+  </Escalation>
+  <Closure>
+    <FalsePositiveClosure>
+      <Item>Authorised change confirmed (ticket/owner), or the change was rejected; documented.</Item>
+    </FalsePositiveClosure>
+    <TruePositiveClosure>
+      <Item>Change reversed; attacker-created rules/permissions removed; actor sessions and tokens revoked; actor investigated.</Item>
+    </TruePositiveClosure>
+  </Closure>
+</Playbook>

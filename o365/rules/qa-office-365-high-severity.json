@@ -1,0 +1,108 @@
+{
+  "rule_id": "e9530f9a-0e33-496c-8263-76dbf7d5229c",
+  "name": "QA - Office 365 High Severity",
+  "version": 1,
+  "enabled": true,
+  "interval": "1h",
+  "from": "now-3900s",
+  "to": "now",
+  "description": "Office 365 - High Severity\n",
+  "tags": [
+    "IRM",
+    "QA"
+  ],
+  "author": [],
+  "license": "",
+  "threat": [],
+  "investigation_fields": {
+    "field_names": [
+      "user.name",
+      "user.id",
+      "source.ip",
+      "event.action",
+      "event.code",
+      "event.outcome",
+      "o365.audit.Operation",
+      "o365.audit.ResultStatus",
+      "o365.audit.ObjectId",
+      "o365.audit.Severity",
+      "message",
+      "o365.audit"
+    ]
+  },
+  "related_integrations": [],
+  "required_fields": [],
+  "setup": "",
+  "false_positives": [],
+  "references": [],
+  "risk_score": 73,
+  "risk_score_mapping": [],
+  "severity": "high",
+  "severity_mapping": [],
+  "output_index": "",
+  "max_signals": 100,
+  "exceptions_list": [],
+  "actions": [],
+  "meta": {
+    "from": "5m",
+    "kibana_siem_app_url": "https://jcb.scanwave.local:8008/app/security"
+  },
+  "type": "query",
+  "language": "kuery",
+  "index": [
+    "apm-*-transaction*",
+    "auditbeat-*",
+    "endgame-*",
+    "filebeat-*",
+    "logs-*",
+    "packetbeat-*",
+    "traces-apm*",
+    "winlogbeat-*",
+    "-*elastic-cloud-logs-*"
+  ],
+  "query": "",
+  "filters": [
+    {
+      "meta": {
+        "index": "0fd498d2-8fa6-4ba8-952e-40ce3a2259cb",
+        "type": "phrase",
+        "disabled": false,
+        "negate": false,
+        "alias": null,
+        "key": "data_stream.dataset",
+        "params": {
+          "query": "o365.audit"
+        }
+      },
+      "query": {
+        "match_phrase": {
+          "data_stream.dataset": "o365.audit"
+        }
+      },
+      "$state": {
+        "store": "appState"
+      }
+    },
+    {
+      "meta": {
+        "index": "0fd498d2-8fa6-4ba8-952e-40ce3a2259cb",
+        "type": "phrase",
+        "disabled": false,
+        "negate": false,
+        "alias": null,
+        "key": "o365.audit.Severity",
+        "params": {
+          "query": "High"
+        }
+      },
+      "$state": {
+        "store": "appState"
+      },
+      "query": {
+        "match_phrase": {
+          "o365.audit.Severity": "High"
+        }
+      }
+    }
+  ]
+}

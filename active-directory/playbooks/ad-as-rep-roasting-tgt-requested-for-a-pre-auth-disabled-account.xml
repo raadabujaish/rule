@@ -1,0 +1,172 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<Playbook xmlns="https://soc.example/playbooks" id="PB-AD-004" name="AD — AS-REP Roasting: TGT Requested for a Pre-Auth-Disabled Account - SOC Playbook" version="1.0" status="Production" classification="TLP:AMBER">
+  <Metadata>
+    <Owner>JCB Detection Engineering (WatchWave)</Owner>
+    <LastUpdated>2026-08-14</LastUpdated>
+    <Severity default="High">High</Severity>
+    <Confidence default="High">High</Confidence>
+    <Category>Credential Access / Steal or Forge Kerberos Tickets</Category>
+    <MitreAttack>
+      <Technique id="T1558.004" name="AS-REP Roasting"/>
+      <Tactic id="TA0006" name="Credential Access"/>
+    </MitreAttack>
+    <References>
+      <Reference title="MITRE ATT and CK" url="https://attack.mitre.org/techniques/T1558/"/>
+    </References>
+  </Metadata>
+  <ExecutiveSummary>
+    <Overview>A TGT (4768) was requested for an account with Kerberos pre-authentication DISABLED (PreAuthType 0) - such AS-REP responses can be cracked offline. Triage question: which principal requested it, and is the target one of the known legacy no-preauth accounts or something new?</Overview>
+    <BusinessImpact>An AS-REP-roastable account with a weak password hands the attacker an offline-crackable credential with zero failed-logon telemetry.</BusinessImpact>
+  </ExecutiveSummary>
+  <Scope><Assets>
+    <AssetType>Active Directory domain controllers (INTDOM)</AssetType>
+    <AssetType>Windows member servers and workstations</AssetType>
+  </Assets><LogSources>
+    <LogSource>Windows Security event log - logs-system.security-*</LogSource>
+  </LogSources></Scope>
+  <Prerequisites><TelemetryRequirements>
+    <Requirement>Windows Security auditing shipped via Elastic Agent to logs-system.security-* (verified live).</Requirement>
+  </TelemetryRequirements><DetectionSignals>
+    <Signal><Name>No-preauth TGT</Name><Details>4768 where PreAuthType is 0 - only possible for accounts with DONT_REQ_PREAUTH set.</Details></Signal>
+  </DetectionSignals></Prerequisites>
+  <Inputs>
+    <Input name="$target_user" description="Account whose TGT was requested without pre-auth."/>
+    <Input name="$source_ip" description="Requesting client IP from the alert."/>
+  </Inputs>
+  <Triage><ImmediateCapture>
+    <Item>Roastable account: $target_user</Item>
+    <Item>Requestor: $source_ip</Item>
+  </ImmediateCapture><InitialAssessment>
+    <Rule>If the requesting source shows a wide sweep of MANY accounts, treat as roasting reconnaissance.</Rule>
+    <Rule>A single legacy application account requested from its own app server may be an accepted legacy configuration - verify, do not assume.</Rule>
+  </InitialAssessment></Triage>
+  <Investigation>
+    <Goal>Establish whether this was a targeted/sweeping roast attempt and whether the roastable account shows signs of subsequent use.</Goal>
+    <Workflow>
+      <Step order="1" name="Requesting source behavior - single account or sweep">
+        <Purpose>Roasting tools enumerate; a sweep of 4768/4769 across accounts from the same source in minutes is attacker tradecraft.</Purpose>
+        <Query platform="Elastic" language="ES|QL" id="INV-01-ASREP-SWEEP">
+          <![CDATA[
+FROM logs-system.security-*
+| WHERE source.ip == "$source_ip" AND event.code IN ("4768","4769") AND @timestamp >= NOW() - 2 hours
+| STATS req = COUNT(*), accounts = COUNT_DISTINCT(winlog.event_data.TargetUserName), enc = VALUES(winlog.event_data.TicketEncryptionType), preauth = VALUES(winlog.event_data.PreAuthType) BY event.code
+| LIMIT 5
+          ]]>
+        </Query>
+        <ExpectedOutput>
+          <Field name="event.code"/>
+          <Field name="req"/>
+          <Field name="accounts"/>
+          <Field name="enc"/>
+        </ExpectedOutput>
+        <AnalystNotes>accounts &gt;&gt; 1 in minutes, or RC4 (0x17) mixed in = enumeration/roast sweep. One request for one account = targeted or legacy app behavior.</AnalystNotes>
+      </Step>
+      <Step order="2" name="History of THIS account's no-preauth requests">
+        <Purpose>Distinguish a routinely-requested legacy account from a first-time/rare request (new roast target).</Purpose>
+        <Query platform="Elastic" language="ES|QL" id="INV-02-ASREP-HISTORY">
+          <![CDATA[
+FROM logs-system.security-*
+| WHERE event.code == "4768" AND winlog.event_data.TargetUserName == "$target_user" AND winlog.event_data.PreAuthType == "0" AND @timestamp >= NOW() - 4 hours
+| EVAL src = COALESCE(TO_STRING(source.ip), "local")
+| STATS req = COUNT(*), first_seen = MIN(@timestamp), last_seen = MAX(@timestamp) BY src
+| SORT req DESC
+| LIMIT 15
+          ]]>
+        </Query>
+        <ExpectedOutput>
+          <Field name="src"/>
+          <Field name="req"/>
+          <Field name="first_seen"/>
+        </ExpectedOutput>
+        <AnalystNotes>Multiple distinct requesting sources for a roastable account inside hours is abnormal; legacy apps request from a fixed server.</AnalystNotes>
+      </Step>
+      <Step order="3" name="Was the roastable account then USED (post-crack sign-in)">
+        <Purpose>A successful logon for the roastable account from a new source after the request suggests the hash was cracked.</Purpose>
+        <Query platform="Elastic" language="ES|QL" id="INV-03-ASREP-USE">
+          <![CDATA[
+FROM logs-system.security-*
+| WHERE event.code == "4624" AND winlog.event_data.TargetUserName == "$target_user" AND @timestamp >= NOW() - 4 hours
+| EVAL src = COALESCE(TO_STRING(source.ip), "local")
+| STATS logons = COUNT(*), types = VALUES(winlog.event_data.LogonType), hosts = VALUES(host.name) BY src
+| LIMIT 15
+          ]]>
+        </Query>
+        <ExpectedOutput>
+          <Field name="src"/>
+          <Field name="logons"/>
+          <Field name="types"/>
+        </ExpectedOutput>
+        <AnalystNotes>Cracking usually takes longer than 4h - absence here does NOT clear the alert; presence from an unexpected source is a strong escalation signal.</AnalystNotes>
+      </Step>
+      <Step order="4" name="Finalize classification">
+        <DecisionTree>
+          <Node><Condition>INV-01 shows the source sweeping many accounts (or RC4 service-ticket requests alongside), typical roasting tooling.</Condition><Result>True Positive (Roasting Reconnaissance - escalate)</Result></Node>
+          <Node><Condition>INV-03 shows the roastable account logging on from a source other than its historical requestor.</Condition><Result>True Positive (Possible Cracked Credential - IR immediately)</Result></Node>
+          <Node><Condition>Single request; INV-02 shows the same fixed application server requesting this same account routinely; account is on the documented legacy no-preauth list.</Condition><Result>Misconfiguration</Result></Node>
+          <Node><Condition>Single request from a user workstation with no sweep and no documented legacy justification.</Condition><Result>Needs Escalation</Result></Node>
+        </DecisionTree>
+        <DocumentationChecklist>
+          <Item>Attach outputs of INV-01-ASREP-SWEEP, INV-02-ASREP-HISTORY, INV-03-ASREP-USE to the case.</Item>
+        </DocumentationChecklist>
+      </Step>
+    </Workflow>
+  </Investigation>
+  <ClassificationGuidance>
+    <FalsePositive>
+      <Definition>Genuinely approved security testing that requested AS-REP for audit purposes.</Definition>
+      <Indicators>
+        <Item>Documented pentest window and source.</Item>
+        <Item>Assessment team confirms.</Item>
+      </Indicators>
+      <SOCAction>
+        <Item>Verify engagement scope; close as false_positive referencing the engagement.</Item>
+      </SOCAction>
+    </FalsePositive>
+    <TruePositive>
+      <Definition>Roasting activity: harvesting crackable AS-REP material, possibly followed by use of the cracked account.</Definition>
+      <Indicators>
+        <Item>Sweep across accounts from one source.</Item>
+        <Item>Requests for roastable accounts from sources that never requested them before.</Item>
+        <Item>Subsequent logon from a new source.</Item>
+      </Indicators>
+      <SOCAction>
+        <Item>Reset the roastable account password (long/random) and REMOVE DONT_REQ_PREAUTH.</Item>
+        <Item>Contain the requesting source.</Item>
+        <Item>Hunt the source's other Kerberos activity.</Item>
+      </SOCAction>
+    </TruePositive>
+    <Misconfiguration>
+      <Definition>A legacy application account still configured without pre-auth, requested routinely by its application.</Definition>
+      <Indicators>
+        <Item>Fixed app-server source, regular cadence, same account for months.</Item>
+        <Item>Application owner confirms the dependency.</Item>
+      </Indicators>
+      <SOCAction>
+        <Item>Register the account on the legacy no-preauth risk list with the owner.</Item>
+        <Item>Plan pre-auth enablement or migrate the app; meanwhile enforce a strong password.</Item>
+      </SOCAction>
+    </Misconfiguration>
+  </ClassificationGuidance>
+  <Response><IRForHumans>
+    <Phase name="Immediate Actions (0-30 minutes)">
+      <Action priority="1">Confirm requestor identity/ownership.</Action>
+      <Action priority="2">If sweep: contain source now.</Action>
+    </Phase>
+    <Phase name="Containment and Eradication (hours)">
+      <Action>Reset + harden targeted roastable accounts.</Action>
+      <Action>Remove DONT_REQ_PREAUTH where the app allows.</Action>
+    </Phase>
+    <Phase name="Recovery and Hardening (days)">
+      <Action>Quarterly review of accounts with pre-auth disabled (should trend to zero).</Action>
+    </Phase>
+  </IRForHumans></Response>
+  <QualityChecks>
+    <Check>PreAuthType field verified live ('0' string).</Check>
+    <Check>Cracking happens offline - never close a sweep as benign because no success appeared within 4h.</Check>
+  </QualityChecks>
+  <ClosureCriteria><FalsePositiveClosure>
+    <Item>Legacy dependency documented with owner sign-off; password strength verified.</Item>
+  </FalsePositiveClosure><TruePositiveClosure>
+    <Item>Account reset, pre-auth enabled or risk-accepted with expiry, source contained.</Item>
+  </TruePositiveClosure></ClosureCriteria>
+</Playbook>

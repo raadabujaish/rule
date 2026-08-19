@@ -1,0 +1,81 @@
+{
+  "rule_id": "jcb-rec-file-or-directory-deletion-command",
+  "name": "Windows — File or Directory Deletion Command",
+  "version": 1,
+  "enabled": true,
+  "interval": "5m",
+  "from": "now-9m",
+  "to": "now",
+  "description": "This rule identifies the execution of commands that can be used to delete files and directories. Adversaries may delete files and directories on a host system, such as logs, browser history, or malware.",
+  "tags": [
+    "JCB",
+    "Windows"
+  ],
+  "author": [
+    "raadabujaish"
+  ],
+  "threat": [
+    {
+      "framework": "MITRE ATT&CK",
+      "tactic": {
+        "id": "TA0005",
+        "name": "Defense Evasion",
+        "reference": "https://attack.mitre.org/tactics/TA0005/"
+      },
+      "technique": [
+        {
+          "id": "T1070",
+          "name": "Indicator Removal",
+          "reference": "https://attack.mitre.org/techniques/T1070/",
+          "subtechnique": [
+            {
+              "id": "T1070.004",
+              "name": "File Deletion",
+              "reference": "https://attack.mitre.org/techniques/T1070/004/"
+            }
+          ]
+        }
+      ]
+    }
+  ],
+  "investigation_fields": {
+    "field_names": [
+      "host.name",
+      "user.name",
+      "user.domain",
+      "process.name",
+      "process.executable",
+      "process.command_line",
+      "process.args",
+      "process.parent.name",
+      "process.parent.executable",
+      "event.code",
+      "event.action",
+      "host.os.type",
+      "event.type",
+      "powershell.exe",
+      "user.id"
+    ]
+  },
+  "related_integrations": [],
+  "required_fields": [],
+  "setup": "",
+  "false_positives": [],
+  "references": [],
+  "risk_score": 21,
+  "risk_score_mapping": [],
+  "severity": "low",
+  "severity_mapping": [],
+  "output_index": "",
+  "max_signals": 100,
+  "exceptions_list": [],
+  "actions": [],
+  "type": "eql",
+  "language": "eql",
+  "index": [
+    "logs-windows.sysmon_operational-*",
+    "logs-system.security-*",
+    "logs-windows.powershell_operational-*"
+  ],
+  "query": "process where host.os.type == \"windows\" and event.type == \"start\" and \n(\n  (process.name: \"rundll32.exe\" and process.args: \"*InetCpl.cpl,Clear*\") or \n  (process.name: \"reg.exe\" and process.args:\"delete\") or \n  (\n    process.name: \"cmd.exe\" and process.args: (\"*rmdir*\", \"*rm *\", \"rm\") and\n    not process.args : (\n          \"*\\\\AppData\\\\Local\\\\Microsoft\\\\OneDrive\\\\*\",\n          \"*\\\\AppData\\\\Local\\\\Temp\\\\DockerDesktop\\\\*\",\n          \"*\\\\AppData\\\\Local\\\\Temp\\\\Report.*\",\n          \"*\\\\AppData\\\\Local\\\\Temp\\\\*.PackageExtraction\"\n    )\n  ) or\n  (process.name: \"powershell.exe\" and process.args: (\"*rmdir\", \"rm\", \"rd\", \"*Remove-Item*\", \"del\", \"*]::Delete(*\"))\n) and not user.id : \"S-1-5-18\"\n"
+}

@@ -1,0 +1,150 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<Playbook xmlns="https://soc.example/playbooks" id="PB-WIN-025" name="Windows — UAC Bypass via Auto-Elevated LOLBin - SOC Playbook" version="1.0" status="Production" classification="TLP:AMBER">
+  <Metadata>
+    <Owner>JCB Detection Engineering (WatchWave)</Owner>
+    <LastUpdated>2026-08-14</LastUpdated>
+    <Severity default="High">High</Severity>
+    <Confidence default="Medium">Medium</Confidence>
+    <Category>Privilege Escalation / Abuse Elevation Control Mechanism</Category>
+    <MitreAttack>
+      <Technique id="T1548.002" name="Bypass User Account Control"/>
+      <Tactic id="TA0004" name="Privilege Escalation"/>
+    </MitreAttack>
+    <References>
+      <Reference title="MITRE ATT and CK" url="https://attack.mitre.org/techniques/T1548/"/>
+    </References>
+  </Metadata>
+  <ExecutiveSummary>
+    <Overview>An auto-elevating Windows binary (fodhelper, eventvwr, sdclt, computerdefaults, cmstp, wsreset, slui, changepk, dccw) spawned a shell/LOLBin - the signature of a UAC bypass to run code with elevated rights. Triage question: is this a UAC-bypass privilege escalation, or a rare benign auto-elevation?</Overview>
+    <BusinessImpact>UAC bypass gives an attacker high-integrity (admin) execution from a medium-integrity foothold without a prompt.</BusinessImpact>
+  </ExecutiveSummary>
+  <Scope><Assets>
+    <AssetType>Windows servers and workstations (INTDOM domain)</AssetType>
+    <AssetType>Domain controllers</AssetType>
+  </Assets><LogSources>
+    <LogSource>Sysmon process + Windows Security 4688 - logs-windows.sysmon_operational-*,logs-system.security-*</LogSource>
+  </LogSources></Scope>
+  <Prerequisites><TelemetryRequirements>
+    <Requirement>Windows Security + Sysmon + PowerShell logs via Elastic Agent (verified live). Sysmon event.code 1=process(command_line/parent populated), 11=file, 13/12=registry(registry.path populated); process.code_signature NOT collected.</Requirement>
+  </TelemetryRequirements><DetectionSignals>
+    <Signal><Name>UAC bypass</Name><Details>auto-elevated binary parent spawning cmd/powershell/etc.</Details></Signal>
+  </DetectionSignals></Prerequisites>
+  <Inputs>
+    <Input name="$hostname" description="Host where the bypass ran."/>
+    <Input name="$username" description="Account (user.name)."/>
+  </Inputs>
+  <Triage><ImmediateCapture>
+    <Item>Host: $hostname</Item>
+  </ImmediateCapture><InitialAssessment>
+    <Rule>Weigh the evidence story, not any single fact - see ClassificationGuidance.</Rule>
+  </InitialAssessment></Triage>
+  <Investigation>
+    <Goal>Determine whether the auto-elevated-binary child is a UAC bypass or benign.</Goal>
+    <Workflow>
+      <Step order="1" name="Which auto-elevated binary spawned what">
+        <Purpose>The parent (fodhelper/eventvwr/etc.) and the child command reveal the bypass and its payload.</Purpose>
+        <Query platform="Elastic" language="ES|QL" id="INV-01-UAC-CHILD">
+          <![CDATA[
+FROM logs-windows.sysmon_operational-*,logs-system.security-*
+| WHERE event.code IN ("1","4688") AND host.name == "$hostname" AND process.parent.name RLIKE "(?i)(fodhelper|eventvwr|sdclt|computerdefaults|cmstp|wsreset|slui|changepk|dccw).*" AND @timestamp >= NOW() - 4 hours
+| KEEP @timestamp, process.name, process.parent.name, process.command_line, user.name
+| SORT @timestamp DESC
+| LIMIT 20
+          ]]>
+        </Query>
+        <ExpectedOutput>
+          <Field name="process.name"/>
+          <Field name="process.parent.name"/>
+          <Field name="process.command_line"/>
+          <Field name="user.name"/>
+        </ExpectedOutput>
+        <AnalystNotes>fodhelper.exe or eventvwr.exe spawning cmd/powershell is a textbook UAC bypass (these binaries do not normally spawn shells). The child command shows what the attacker elevated to run.</AnalystNotes>
+      </Step>
+      <Step order="2" name="Process origin and account on the host">
+        <Purpose>The parent process and account reveal whether this was interactive attacker activity or an automated/service context.</Purpose>
+        <Query platform="Elastic" language="ES|QL" id="INV-02-PROC-TREE" optional="true">
+          <![CDATA[
+FROM logs-windows.sysmon_operational-*,logs-system.security-*
+| WHERE event.code IN ("1","4688") AND host.name == "$hostname" AND @timestamp >= NOW() - 2 hours
+| STATS runs = COUNT(*), parents = VALUES(process.parent.name), users = VALUES(user.name) BY process.name
+| SORT runs DESC
+| LIMIT 15
+          ]]>
+        </Query>
+        <ExpectedOutput>
+          <Field name="process.name"/>
+          <Field name="parents"/>
+          <Field name="users"/>
+        </ExpectedOutput>
+        <AnalystNotes>A suspicious process spawned by an office app/browser/script interpreter, run by a normal user, is more concerning than one under a known admin/automation parent.</AnalystNotes>
+      </Step>
+      <Step order="3" name="Finalize classification">
+        <DecisionTree>
+          <Node><Condition>An auto-elevated binary spawning a shell/LOLBin (fodhelper/eventvwr -&gt; cmd/powershell).</Condition><Result>True Positive (UAC Bypass / Privilege Escalation - IR)</Result></Node>
+          <Node><Condition>A rare, explainable benign auto-elevation confirmed harmless on inspection.</Condition><Result>False Positive</Result></Node>
+          <Node><Condition>Auto-elevated child with unclear command.</Condition><Result>Needs Escalation</Result></Node>
+        </DecisionTree>
+        <DocumentationChecklist>
+          <Item>Attach outputs of INV-01-UAC-CHILD, INV-02-PROC-TREE to the case.</Item>
+        </DocumentationChecklist>
+      </Step>
+    </Workflow>
+  </Investigation>
+  <ClassificationGuidance>
+    <FalsePositive>
+      <Definition>A rare benign auto-elevation.</Definition>
+      <Indicators>
+        <Item>Explainable admin/software action.</Item>
+        <Item>Benign child command.</Item>
+        <Item>Confirmed harmless.</Item>
+      </Indicators>
+      <SOCAction>
+        <Item>Verify on the host; close as false_positive.</Item>
+      </SOCAction>
+    </FalsePositive>
+    <TruePositive>
+      <Definition>A UAC bypass for privilege escalation.</Definition>
+      <Indicators>
+        <Item>fodhelper/eventvwr/etc. spawning a shell.</Item>
+        <Item>Suspicious child command.</Item>
+        <Item>Foothold context.</Item>
+      </Indicators>
+      <SOCAction>
+        <Item>Isolate the host; open IR; the account is likely compromised at medium integrity.</Item>
+        <Item>Hunt the foothold origin and what ran elevated.</Item>
+      </SOCAction>
+    </TruePositive>
+    <Misconfiguration>
+      <Definition>A software installer triggering auto-elevation legitimately.</Definition>
+      <Indicators>
+        <Item>A known installer.</Item>
+        <Item>Benign, self-explained.</Item>
+      </Indicators>
+      <SOCAction>
+        <Item>Confirm the installer; document.</Item>
+      </SOCAction>
+    </Misconfiguration>
+  </ClassificationGuidance>
+  <Response><IRForHumans>
+    <Phase name="Immediate Actions (0-30 minutes)">
+      <Action priority="1">Confirm the activity on the host; if malicious indicators, isolate the host.</Action>
+      <Action priority="2">Identify the responsible account/process and its origin.</Action>
+    </Phase>
+    <Phase name="Containment and Eradication (hours)">
+      <Action>Isolate the host; capture volatile evidence; hunt the same pattern across the estate.</Action>
+      <Action>Reset credentials used on the host if compromise is confirmed.</Action>
+    </Phase>
+    <Phase name="Recovery and Hardening (days)">
+      <Action>Remediate the root cause; add/verify EDR coverage; apply relevant hardening.</Action>
+    </Phase>
+  </IRForHumans></Response>
+  <QualityChecks>
+    <Check>Confirm the required telemetry (Sysmon/Security auditing) is present on the host.</Check>
+    <Check>Tune known-benign administrative sources via exceptions, not by disabling the rule.</Check>
+  </QualityChecks>
+  <ClosureCriteria><FalsePositiveClosure>
+    <Item>Activity confirmed benign/authorised and documented.</Item>
+  </FalsePositiveClosure><TruePositiveClosure>
+    <Item>Host contained and triaged; root cause eradicated; estate swept; findings recorded.</Item>
+  </TruePositiveClosure></ClosureCriteria>
+</Playbook>

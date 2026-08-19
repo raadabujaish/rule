@@ -1,0 +1,192 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<Playbook xmlns="https://soc.example/playbooks" id="PB-JCB-F5-05" name="F5-WAF Connectivity Monitor - SOC Playbook" version="2.1" status="Production" classification="TLP:AMBER">
+  <Metadata>
+    <Owner>JCB Detection Engineering (WatchWave)</Owner>
+    <LastUpdated>2026-08-19</LastUpdated>
+    <Severity default="High">High</Severity>
+    <Confidence default="Medium">Medium</Confidence>
+    <Category>Detection Health / Telemetry Availability</Category>
+    <!-- No MitreAttack element: the source rule's threat[] is empty. This is a telemetry-health / detection-availability monitor, not a threat analytic. A defense-evasion consideration (ATT&CK T1562.001 Impair Defenses: Disable or Modify Tools / TA0005) is noted in the ExecutiveSummary for the analyst, but is deliberately not asserted as the rule's own mapping. -->
+    <References>
+      <Reference title="Elastic Security - monitoring rule execution and gaps" url="https://www.elastic.co/guide/en/security/current/rules-ui-monitor.html"/>
+      <Reference title="MITRE ATT&amp;CK T1562.001 Impair Defenses: Disable or Modify Tools (defense-evasion consideration)" url="https://attack.mitre.org/techniques/T1562/001/"/>
+      <Reference title="F5 BIG-IP ASM logging / high-speed logging to CEF over syslog" url="https://techdocs.f5.com/en-us/bigip-15-1-0/big-ip-asm-implementations.html"/>
+    </References>
+  </Metadata>
+  <ExecutiveSummary>
+    <Overview>This is a detection-health monitor for the F5 BIG-IP WAF feed (rule matches tags:"F5-WAFv8"). When it fires, the SOC's job is to confirm that JCB's WAF telemetry is still flowing AND that the WAF is still enforcing — not silently degraded. The decisive questions: is the F5 appliance still shipping CEF events (recency and volume within normal range), and is enforcement still working (a healthy proportion of blocked events across the banking policies) rather than everything flipping to passed with nothing blocked? A telemetry outage or an enforcement collapse both blind the bank's primary web-application defence; where either is abrupt and unexplained, consider a defense-evasion cause (ATT&amp;CK T1562.001) alongside the more common operational ones (syslog/pipeline break, appliance issue, policy change).</Overview>
+    <BusinessImpact>The F5 WAF is the primary control in front of JCB internet banking. If its telemetry stops, every F5-based detection in this environment goes blind and attacks pass unseen. If enforcement silently drops to transparent, attacks are forwarded to banking backends while looking "monitored". Both are high-impact and time-sensitive: the sooner the gap is characterised, the shorter the blind window.</BusinessImpact>
+  </ExecutiveSummary>
+  <Scope>
+    <Assets>
+      <AssetType>F5 BIG-IP ASM / Advanced WAF appliance (verified live: F5-FRNT-WAF-01.JCBank.com.jo — the single F5 WAF sending CEF to this environment)</AssetType>
+      <AssetType>The F5 -&gt; syslog -&gt; Elastic ingest pipeline (CEF parsing into logs-cef.log-*)</AssetType>
+      <AssetType>Internet-banking ASM policies whose protection depends on this feed</AssetType>
+    </Assets>
+    <LogSources>
+      <LogSource>F5 ASM CEF events via syslog - logs-cef.log-* (observer.vendor == "F5"; verified live 1:1 with tag F5-WAFv8, ~906K events/24h from F5-FRNT-WAF-01.JCBank.com.jo)</LogSource>
+    </LogSources>
+  </Scope>
+  <Prerequisites>
+    <TelemetryRequirements>
+      <Requirement>F5 ASM high-speed logging to CEF over syslog, parsed into logs-cef.log-* (verified live).</Requirement>
+      <Requirement>The source rule matches tags:"F5-WAFv8" across the broad index set; every F5 event carries this tag (verified live, 1:1 with observer.vendor == "F5"). Because ES|QL cannot equality-match the multivalued tags field, these investigation queries scope to observer.vendor == "F5" on the verified home index logs-cef.log-*, which is exactly equivalent.</Requirement>
+      <Requirement>Fields for health assessment (verified live populated): @timestamp (recency), cef.extensions.deviceHostName (appliance), cef.extensions.deviceAction (enforcement: passed | alerted | blocked), cef.extensions.deviceCustomString1 (ASM policy).</Requirement>
+    </TelemetryRequirements>
+    <DetectionSignals>
+      <Signal><Name>Feed heartbeat / volume</Name><Details>Presence, recency and hourly volume of F5 CEF events for the appliance. A gap or a sharp volume drop versus the normal business-hours baseline (~48K-60K events/hour, verified live) indicates a telemetry problem.</Details></Signal>
+      <Signal><Name>Enforcement health</Name><Details>A healthy mix includes a non-trivial blocked count across banking policies. Everything flipping to passed with zero blocked, or the policy count collapsing, indicates enforcement degradation rather than a pure feed outage.</Details></Signal>
+    </DetectionSignals>
+  </Prerequisites>
+  <Inputs>
+    <Input name="$f5_device" description="F5 appliance hostname to check (cef.extensions.deviceHostName). Known live value at JCB: F5-FRNT-WAF-01.JCBank.com.jo."/>
+  </Inputs>
+  <Triage>
+    <ImmediateCapture>
+      <Item>Appliance under review: $f5_device (default F5-FRNT-WAF-01.JCBank.com.jo)</Item>
+      <Item>Time the monitor fired and the rule's own recent execution/gap status in the Detection Engine</Item>
+      <Item>Whether any change window (WAF upgrade, syslog/pipeline change, policy deploy) is currently open</Item>
+    </ImmediateCapture>
+    <InitialAssessment>
+      <Rule>If INV-01 shows recent events in the current/last hour at normal volume, the feed is alive — focus on enforcement health (INV-02) and treat as heartbeat/verification.</Rule>
+      <Rule>If INV-01 shows a gap (no events for one or more recent hours) or a steep volume drop, treat as a telemetry outage and drive to restore the feed; note whether it aligns with a change window.</Rule>
+      <Rule>If the feed is alive but INV-02 shows blocked collapsed to zero while volume continues, treat as enforcement degradation (policies transparent/disabled) — a security-impacting condition even though logs still flow.</Rule>
+    </InitialAssessment>
+  </Triage>
+  <Investigation>
+    <Goal>Determine whether the F5 WAF feed for $f5_device is flowing at normal recency/volume, whether enforcement is still healthy across the banking policies, and whether any gap is a telemetry outage, an enforcement collapse, or a benign change-window blip.</Goal>
+    <Workflow>
+      <Step order="1" name="Feed recency and hourly volume for the appliance">
+        <Purpose>Confirm the appliance is still shipping events and quantify the hourly volume trend to spot a gap or a sharp drop against the normal baseline.</Purpose>
+        <Query platform="Elastic" language="ES|QL" id="INV-01-F5-FEED-RECENCY">
+          <![CDATA[
+FROM logs-cef.log-*
+| WHERE observer.vendor == "F5" AND cef.extensions.deviceHostName == "$f5_device" AND @timestamp >= NOW() - 4 hours
+| STATS events = COUNT(*), last_seen = MAX(@timestamp), first_seen = MIN(@timestamp) BY hour = DATE_TRUNC(1 hour, @timestamp)
+| SORT hour DESC
+| LIMIT 6
+          ]]>
+        </Query>
+        <ExpectedOutput>
+          <Field name="hour"/>
+          <Field name="events"/>
+          <Field name="last_seen"/>
+          <Field name="first_seen"/>
+        </ExpectedOutput>
+        <AnalystNotes>Normal business-hours volume is roughly 48K-60K events/hour (verified live). A missing recent hour, or a bucket that collapses to a handful of events, is the telemetry-gap signal. last_seen tells you exactly how stale the feed is: if it is many minutes/hours old, the feed has stopped. A zero-row result (no events in 4h for this device) is itself the outage. Compare against whether a change window is open.</AnalystNotes>
+      </Step>
+      <Step order="2" name="Enforcement health across the feed">
+        <Purpose>Confirm the WAF is still enforcing — a healthy blocked count and a normal spread of ASM policies — rather than silently forwarding everything.</Purpose>
+        <Query platform="Elastic" language="ES|QL" id="INV-02-F5-ENFORCEMENT-HEALTH">
+          <![CDATA[
+FROM logs-cef.log-*
+| WHERE observer.vendor == "F5" AND cef.extensions.deviceHostName == "$f5_device" AND @timestamp >= NOW() - 4 hours
+| STATS events = COUNT(*), blocked = COUNT(CASE(cef.extensions.deviceAction == "blocked", 1, null)), passed = COUNT(CASE(cef.extensions.deviceAction == "passed", 1, null)), alerted = COUNT(CASE(cef.extensions.deviceAction == "alerted", 1, null)), policies = COUNT_DISTINCT(cef.extensions.deviceCustomString1) BY cef.extensions.deviceHostName
+| LIMIT 5
+          ]]>
+        </Query>
+        <ExpectedOutput>
+          <Field name="events"/>
+          <Field name="blocked"/>
+          <Field name="passed"/>
+          <Field name="alerted"/>
+          <Field name="policies"/>
+        </ExpectedOutput>
+        <AnalystNotes>Healthy state (verified live): thousands of blocked events per 4h alongside the passed majority, across ~7 ASM policies. blocked at or near zero while events continue, or the policy count dropping sharply, indicates enforcement degradation (policies flipped to transparent or removed) — a security condition distinct from a feed outage. Very low events overall points back to a telemetry problem (see INV-01).</AnalystNotes>
+      </Step>
+      <Step order="3" name="Per-policy coverage and staleness">
+        <Purpose>Detect a partial gap — a specific banking policy that has gone quiet — by ranking per-policy volume and last-seen time.</Purpose>
+        <Query platform="Elastic" language="ES|QL" id="INV-03-F5-POLICY-COVERAGE">
+          <![CDATA[
+FROM logs-cef.log-*
+| WHERE observer.vendor == "F5" AND cef.extensions.deviceHostName == "$f5_device" AND @timestamp >= NOW() - 4 hours
+| STATS events = COUNT(*), last_seen = MAX(@timestamp) BY cef.extensions.deviceCustomString1
+| SORT events DESC
+| LIMIT 25
+          ]]>
+        </Query>
+        <ExpectedOutput>
+          <Field name="cef.extensions.deviceCustomString1"/>
+          <Field name="events"/>
+          <Field name="last_seen"/>
+        </ExpectedOutput>
+        <AnalystNotes>All the expected banking policies (e.g. /Common/JCBank-Website-Policy, /Common/HQ-Web-*-ICS-Policy, /Common/MenaMobile-WAF_Auto, /Common/Agenda-Policy) should be present with recent last_seen. A previously-busy policy that is now missing or has a stale last_seen indicates a partial telemetry or protection gap for that specific banking app — scope the change to that app/policy.</AnalystNotes>
+      </Step>
+    </Workflow>
+  </Investigation>
+  <DecisionTree>
+    <Node><Condition>INV-01 shows a genuine feed gap (a missing recent hour, a steep volume drop, or a stale last_seen / zero rows for $f5_device) that does not align with an approved change window — the WAF telemetry has stopped or degraded.</Condition><Result>True Positive (F5 WAF Telemetry Outage - restore the feed urgently; the F5-based detections are blind until it returns; consider defense-evasion if abrupt and unexplained)</Result></Node>
+    <Node><Condition>INV-01 shows the feed is alive but INV-02 shows blocked collapsed to zero (or the ASM policy count dropped sharply) while volume continues — enforcement has silently degraded.</Condition><Result>True Positive (F5 WAF Enforcement Degradation - policies transparent/disabled; drive them back to blocking, treat as a protection gap)</Result></Node>
+    <Node><Condition>INV-01 shows normal recency and volume and INV-02 shows a healthy blocked count across the expected policies — telemetry flow and enforcement are proven healthy and the alert reflects the monitor functioning as designed or a transient blip that has self-recovered.</Condition><Result>False Positive (Telemetry proven healthy / monitor working as designed - no outage; document the verification)</Result></Node>
+    <Node><Condition>The alert is explained by a monitor/pipeline configuration issue — an approved change window (WAF upgrade, syslog/pipeline or policy change), a threshold set too sensitively, or duplicate ingest inflating/deflating counts — not a real availability loss.</Condition><Result>Misconfiguration (Monitor threshold or ingest pipeline / change-window artefact - fix the config or align the monitor, do not blanket-suppress)</Result></Node>
+    <Node><Condition>A partial or intermittent gap (INV-03 shows one policy stale) or an ambiguous state that cannot be resolved as healthy, outage, or config from the available data.</Condition><Result>Needs Escalation</Result></Node>
+  </DecisionTree>
+  <ClassificationGuidance>
+    <FalsePositive>
+      <Definition>Telemetry flow and enforcement are verified healthy and within normal tolerance — the monitor is functioning as designed, or a transient blip already self-recovered. This is a proven-healthy verification, not an unexamined dismissal.</Definition>
+      <Indicators>
+        <Item>INV-01 shows events in the current/last hour at normal volume with a fresh last_seen.</Item>
+        <Item>INV-02 shows a healthy blocked count across the expected ~7 ASM policies.</Item>
+        <Item>INV-03 shows all expected banking policies present and recent.</Item>
+      </Indicators>
+      <SOCAction>
+        <Item>Record the health verification (recency, volume, blocked count, policy coverage) on the case.</Item>
+        <Item>Close as false_positive (proven healthy); if the monitor fires repeatedly on healthy state, propose a threshold/tuning change to Detection Engineering rather than suppressing.</Item>
+      </SOCAction>
+    </FalsePositive>
+    <TruePositive>
+      <Definition>A genuine loss of F5 WAF availability — the telemetry feed has stopped/degraded, or enforcement has silently dropped — blinding or weakening the bank's primary web-application defence.</Definition>
+      <Indicators>
+        <Item>INV-01 feed gap: missing recent hour, steep volume drop, stale last_seen, or zero rows for $f5_device.</Item>
+        <Item>INV-02 enforcement collapse: blocked at/near zero or a sharp drop in policy count while volume continues.</Item>
+        <Item>No approved change window explains the gap; onset may be abrupt (consider defense-evasion, T1562.001).</Item>
+      </Indicators>
+      <SOCAction>
+        <Item>Engage the WAF/platform team to restore the feed or re-enforce policies; treat the interval as a detection blind spot.</Item>
+        <Item>For an abrupt, unexplained loss, raise a security incident and check for tampering on the appliance/pipeline in parallel with the ops fix.</Item>
+        <Item>Backfill/hunt over the blind window once telemetry returns; document the outage duration and impact.</Item>
+      </SOCAction>
+    </TruePositive>
+    <Misconfiguration>
+      <Definition>The alert is an artefact of configuration or a planned change — a too-sensitive monitor threshold, an ingest-pipeline change, duplicate ingest, or an approved maintenance window — rather than a real availability loss.</Definition>
+      <Indicators>
+        <Item>An approved change window (WAF upgrade, syslog/pipeline or policy change) coincides with the alert.</Item>
+        <Item>Counts are distorted by duplicate ingest or a threshold that does not match the feed's normal volume.</Item>
+      </Indicators>
+      <SOCAction>
+        <Item>Confirm the change record; align the monitor threshold to the feed's real baseline with Detection Engineering.</Item>
+        <Item>Correct any pipeline/dedup issue; re-triage as True Positive if a real gap remains after the config is fixed.</Item>
+      </SOCAction>
+    </Misconfiguration>
+  </ClassificationGuidance>
+  <Response>
+    <IRForHumans>
+      <Phase name="Immediate Actions (0-30 minutes)">
+        <Action priority="1">From INV-01, decide feed-alive versus feed-gap; from INV-02, decide enforcement-healthy versus degraded. These two answers set the response path.</Action>
+        <Action priority="2">Check for an open change window; if none explains a real gap, engage the WAF/platform on-call and flag the detection blind spot to the SOC.</Action>
+      </Phase>
+      <Phase name="Containment and Eradication (hours)">
+        <Action>Restore the F5 -&gt; syslog -&gt; Elastic feed, or drive degraded ASM policies back to enforcement; verify recovery against INV-01/INV-02.</Action>
+        <Action>If the loss was abrupt and unexplained, investigate the appliance and ingest pipeline for tampering (defense-evasion) alongside the operational fix.</Action>
+      </Phase>
+      <Phase name="Recovery and Hardening (days)">
+        <Action>Hunt/backfill across the blind window once telemetry is restored; confirm no attacks passed unseen.</Action>
+        <Action>Add feed-gap alerting tuned to the real baseline and a secondary heartbeat, so an F5 outage is caught independently of this monitor.</Action>
+      </Phase>
+    </IRForHumans>
+  </Response>
+  <Escalation>
+    <Trigger>A confirmed telemetry outage or enforcement collapse with no approved change window, an abrupt unexplained loss (possible tampering), or a partial gap that cannot be resolved by the SOC.</Trigger>
+    <To>SOC L2 / IR (with WAF / Platform Engineering on-call)</To>
+  </Escalation>
+  <Closure>
+    <FalsePositiveClosure>
+      <Item>INV-01/INV-02/INV-03 verification attached showing normal recency, volume, blocked count and full policy coverage.</Item>
+      <Item>Any recurring-on-healthy pattern referred to Detection Engineering for threshold tuning.</Item>
+    </FalsePositiveClosure>
+    <TruePositiveClosure>
+      <Item>Feed and/or enforcement restored and verified; outage duration and detection blind window documented.</Item>
+      <Item>Blind-window hunt/backfill completed; any tampering ruled in or out; preventive heartbeat/tuning recorded.</Item>
+    </TruePositiveClosure>
+  </Closure>
+</Playbook>

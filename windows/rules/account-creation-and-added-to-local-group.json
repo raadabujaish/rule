@@ -1,0 +1,65 @@
+{
+  "rule_id": "6be14855-58fd-4628-b313-2494d08b98b5",
+  "name": "Account Creation And Added to Local Group",
+  "version": 1,
+  "enabled": true,
+  "interval": "5m",
+  "from": "now-360s",
+  "to": "now",
+  "description": "Account Creation And Added to Local Group ",
+  "tags": [
+    "windows"
+  ],
+  "author": [],
+  "license": "",
+  "threat": [],
+  "investigation_fields": {
+    "field_names": [
+      "host.name",
+      "winlog.event_data.SubjectUserName",
+      "winlog.event_data.SubjectDomainName",
+      "winlog.event_data.TargetUserName",
+      "winlog.event_data.TargetDomainName",
+      "winlog.event_data.MemberName",
+      "winlog.event_data.MemberSid",
+      "event.code",
+      "event.action",
+      "message",
+      "winlog.event_id",
+      "user.target.id",
+      "winlog.task"
+    ]
+  },
+  "related_integrations": [],
+  "required_fields": [],
+  "setup": "",
+  "false_positives": [],
+  "references": [],
+  "risk_score": 47,
+  "risk_score_mapping": [],
+  "severity": "medium",
+  "severity_mapping": [],
+  "output_index": "",
+  "max_signals": 100,
+  "exceptions_list": [],
+  "actions": [],
+  "meta": {
+    "from": "1m",
+    "kibana_siem_app_url": "https://172.31.14.118:16462/app/security"
+  },
+  "type": "eql",
+  "language": "eql",
+  "index": [
+    "apm-*-transaction*",
+    "auditbeat-*",
+    "endgame-*",
+    "filebeat-*",
+    "logs-*",
+    "packetbeat-*",
+    "traces-apm*",
+    "winlogbeat-*",
+    "-*elastic-cloud-logs-*"
+  ],
+  "query": "    sequence  with maxspan=30s\n      [any where winlog.event_id == \"4720\" and user.target.id!= null] by user.target.id\n      [any where winlog.task == \"Security Group Management\" and winlog.event_data.MemberSid !=null] by winlog.event_data.MemberSid",
+  "filters": []
+}

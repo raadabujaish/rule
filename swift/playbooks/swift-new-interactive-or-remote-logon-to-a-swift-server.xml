@@ -1,0 +1,146 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<Playbook xmlns="https://soc.example/playbooks" id="PB-SWIFT-002" name="SWIFT — New Interactive or Remote Logon to a SWIFT Server - SOC Playbook" version="1.0" status="Production" classification="TLP:AMBER">
+  <Metadata>
+    <Owner>JCB Detection Engineering (WatchWave)</Owner>
+    <LastUpdated>2026-08-14</LastUpdated>
+    <Severity default="High">High</Severity>
+    <Confidence default="Medium">Medium</Confidence>
+    <Category>Initial Access / Valid Accounts</Category>
+    <MitreAttack>
+      <Technique id="T1078" name="Valid Accounts"/>
+      <Tactic id="TA0001" name="Initial Access"/>
+    </MitreAttack>
+    <References>
+      <Reference title="MITRE ATT and CK" url="https://attack.mitre.org/techniques/T1078/"/>
+    </References>
+  </Metadata>
+  <ExecutiveSummary>
+    <Overview>A new (account,host) interactive/remote logon to a SWIFT server was observed (4624, new_terms) - a first-seen access relationship to a payment asset. Triage: a newly-authorised operator/admin, or unauthorised access to a SWIFT server?</Overview>
+    <BusinessImpact>New access to a SWIFT server is inherently high-risk given the payment impact; unauthorised access is a serious incident.</BusinessImpact>
+  </ExecutiveSummary>
+  <Scope><Assets>
+    <AssetType>SWIFT Alliance payment servers (saa*, hq-sw-app*, hq-swift*)</AssetType>
+  </Assets><LogSources>
+    <LogSource>Windows Security on SWIFT servers - logs-system.security-*</LogSource>
+  </LogSources></Scope>
+  <Prerequisites><TelemetryRequirements>
+    <Requirement>Windows Security auditing on SWIFT hosts (verified live: saa76dr, hq-sw-app-p, hq-swift-accs-p, saa72live, hq-swift-web-p). SWIFT servers are the highest-value payment assets - any anomaly is high priority.</Requirement>
+  </TelemetryRequirements><DetectionSignals>
+    <Signal><Name>New Interactive or Remote Logon to a SWI</Name><Details>first-seen (account,host) logon to a SWIFT server.</Details></Signal>
+  </DetectionSignals></Prerequisites>
+  <Inputs>
+    <Input name="$hostname" description="SWIFT server (host.name)."/>
+    <Input name="$username" description="The account logging on."/>
+    <Input name="$source_ip" description="Source IP if present."/>
+  </Inputs>
+  <Triage><ImmediateCapture>
+    <Item>$hostname: $hostname</Item>
+  </ImmediateCapture><InitialAssessment>
+    <Rule>Weigh the full evidence story per the ClassificationGuidance, not any single fact.</Rule>
+  </InitialAssessment></Triage>
+  <Investigation>
+    <Goal>Determine whether the new SWIFT-server logon is authorised access or an intrusion.</Goal>
+    <Workflow>
+      <Step order="1" name="The new logon: account, source, type">
+        <Purpose>The account, source and logon type separate an authorised new operator from unauthorised access.</Purpose>
+        <Query platform="Elastic" language="ES|QL" id="INV-01-SWIFTLOGON-DETAIL">
+          <![CDATA[
+FROM logs-system.security-*
+| WHERE host.name == "$hostname" AND event.code == "4624" AND winlog.event_data.TargetUserName == "$username" AND @timestamp >= NOW() - 4 hours
+| EVAL src = COALESCE(TO_STRING(source.ip), "local")
+| STATS logons = COUNT(*), types = VALUES(winlog.event_data.LogonType), first_seen = MIN(@timestamp) BY src
+| SORT logons DESC
+| LIMIT 10
+          ]]>
+        </Query>
+        <ExpectedOutput>
+          <Field name="src"/>
+          <Field name="types"/>
+          <Field name="first_seen"/>
+        </ExpectedOutput>
+        <AnalystNotes>A logon from an approved SWIFT jump host by a newly-onboarded operator is authorised. Interactive/RDP (type 2/10) from an unexpected source, or a non-SWIFT/admin account, is unauthorised access to a payment server.</AnalystNotes>
+      </Step>
+      <Step order="2" name="What the account did after logon">
+        <Purpose>Post-logon tooling/changes on the SWIFT server escalate a new logon to an active incident.</Purpose>
+        <Query platform="Elastic" language="ES|QL" id="INV-02-SWIFTLOGON-ACTIONS" optional="true">
+          <![CDATA[
+FROM logs-system.security-*
+| WHERE host.name == "$hostname" AND winlog.event_data.TargetUserName == "$username" AND event.code IN ("4688","4697","4672") AND @timestamp >= NOW() - 4 hours
+| STATS c = COUNT(*), codes = VALUES(event.code)
+| LIMIT 5
+          ]]>
+        </Query>
+        <ExpectedOutput>
+          <Field name="codes"/>
+          <Field name="c"/>
+        </ExpectedOutput>
+        <AnalystNotes>Process execution, service install or special privileges after the new logon indicate hands-on activity - correlate with PB-SWIFT-001/003.</AnalystNotes>
+      </Step>
+      <Step order="3" name="Finalize classification">
+        <DecisionTree>
+          <Node><Condition>A new SWIFT-server logon from an unexpected source/account, especially with follow-on tooling/changes.</Condition><Result>True Positive (Unauthorised SWIFT Access - CSP incident process, IR)</Result></Node>
+          <Node><Condition>A newly-onboarded, authorised SWIFT operator/admin from an approved jump host.</Condition><Result>False Positive / Benign Activity</Result></Node>
+          <Node><Condition>A new access relationship from a plausible source without an onboarding record.</Condition><Result>Needs Escalation</Result></Node>
+        </DecisionTree>
+        <DocumentationChecklist>
+          <Item>Attach outputs of INV-01-SWIFTLOGON-DETAIL, INV-02-SWIFTLOGON-ACTIONS to the case.</Item>
+        </DocumentationChecklist>
+      </Step>
+    </Workflow>
+  </Investigation>
+  <ClassificationGuidance>
+    <FalsePositive>
+      <Definition>A newly-onboarded authorised operator.</Definition>
+      <Indicators>
+        <Item>Approved jump host.</Item>
+        <Item>Onboarded SWIFT operator.</Item>
+        <Item>Expected activity.</Item>
+      </Indicators>
+      <SOCAction>
+        <Item>Confirm onboarding; close as benign_activity; new_terms learns it.</Item>
+      </SOCAction>
+    </FalsePositive>
+    <TruePositive>
+      <Definition>Unauthorised access to a SWIFT server.</Definition>
+      <Indicators>
+        <Item>Unexpected source/account.</Item>
+        <Item>Non-SWIFT account.</Item>
+        <Item>Follow-on tooling/changes.</Item>
+      </Indicators>
+      <SOCAction>
+        <Item>Invoke the SWIFT CSP incident process; isolate; review payments; open IR.</Item>
+      </SOCAction>
+    </TruePositive>
+    <Misconfiguration>
+      <Definition>A new access relationship pending verification.</Definition>
+      <Indicators>
+        <Item>Plausible source.</Item>
+        <Item>No onboarding record.</Item>
+      </Indicators>
+      <SOCAction>
+        <Item>Verify with the SWIFT team; document.</Item>
+      </SOCAction>
+    </Misconfiguration>
+  </ClassificationGuidance>
+  <Response><IRForHumans>
+    <Phase name="Immediate Actions (0-30 minutes)">
+      <Action priority="1">Confirm the activity on the SWIFT server; SWIFT anomalies are high priority.</Action>
+      <Action priority="2">If unauthorised, isolate per the SWIFT CSP incident process.</Action>
+    </Phase>
+    <Phase name="Containment and Eradication (hours)">
+      <Action>Isolate the SWIFT server per the CSP incident process; preserve evidence; engage the SWIFT/payments team; open IR.</Action>
+      <Action>Review payment activity for fraud.</Action>
+    </Phase>
+    <Phase name="Recovery and Hardening (days)">
+      <Action>Enforce SWIFT CSP controls: restricted access, MFA/jump-host, allowlisted software, segregation from the general network.</Action>
+    </Phase>
+  </IRForHumans></Response>
+  <QualityChecks>
+    <Check>SWIFT servers are in-scope for the SWIFT Customer Security Programme - treat every anomaly as high priority and involve the payments team.</Check>
+  </QualityChecks>
+  <ClosureCriteria><FalsePositiveClosure>
+    <Item>Authorised operator confirmed; documented.</Item>
+  </FalsePositiveClosure><TruePositiveClosure>
+    <Item>Unauthorised access contained per CSP; payments reviewed.</Item>
+  </TruePositiveClosure></ClosureCriteria>
+</Playbook>

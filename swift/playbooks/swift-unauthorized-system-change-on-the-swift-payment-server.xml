@@ -1,0 +1,127 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<Playbook xmlns="https://soc.example/playbooks" id="PB-SWIFT-003" name="SWIFT — Unauthorized System Change on the SWIFT Payment Server - SOC Playbook" version="1.0" status="Production" classification="TLP:AMBER">
+  <Metadata>
+    <Owner>JCB Detection Engineering (WatchWave)</Owner>
+    <LastUpdated>2026-08-14</LastUpdated>
+    <Severity default="High">High</Severity>
+    <Confidence default="Medium">Medium</Confidence>
+    <Category>Persistence / Create or Modify System Process</Category>
+    <MitreAttack>
+      <Technique id="T1543.003" name="Windows Service"/>
+      <Tactic id="TA0003" name="Persistence"/>
+    </MitreAttack>
+    <References>
+      <Reference title="MITRE ATT and CK" url="https://attack.mitre.org/techniques/T1543/"/>
+    </References>
+  </Metadata>
+  <ExecutiveSummary>
+    <Overview>A system change (service install 4697/7045) occurred on a SWIFT server. SWIFT servers should have a frozen software/service set. Triage: an authorised change under the SWIFT change process, or unauthorised persistence/tampering on a payment server?</Overview>
+    <BusinessImpact>Unauthorised system changes on a SWIFT server can plant persistence or tamper with the payment application.</BusinessImpact>
+  </ExecutiveSummary>
+  <Scope><Assets>
+    <AssetType>SWIFT Alliance payment servers (saa*, hq-sw-app*, hq-swift*)</AssetType>
+  </Assets><LogSources>
+    <LogSource>Windows Security on SWIFT servers - logs-system.security-*</LogSource>
+  </LogSources></Scope>
+  <Prerequisites><TelemetryRequirements>
+    <Requirement>Windows Security auditing on SWIFT hosts (verified live: saa76dr, hq-sw-app-p, hq-swift-accs-p, saa72live, hq-swift-web-p). SWIFT servers are the highest-value payment assets - any anomaly is high priority.</Requirement>
+  </TelemetryRequirements><DetectionSignals>
+    <Signal><Name>Unauthorized System Change on the SWIFT </Name><Details>service install / system change on a SWIFT host.</Details></Signal>
+  </DetectionSignals></Prerequisites>
+  <Inputs>
+    <Input name="$hostname" description="SWIFT server (host.name)."/>
+  </Inputs>
+  <Triage><ImmediateCapture>
+    <Item>$hostname: $hostname</Item>
+  </ImmediateCapture><InitialAssessment>
+    <Rule>Weigh the full evidence story per the ClassificationGuidance, not any single fact.</Rule>
+  </InitialAssessment></Triage>
+  <Investigation>
+    <Goal>Determine whether the SWIFT-server system change is authorised or unauthorised persistence/tampering.</Goal>
+    <Workflow>
+      <Step order="1" name="The system change on the SWIFT server">
+        <Purpose>The service/change detail and installer reveal an authorised change vs attacker persistence.</Purpose>
+        <Query platform="Elastic" language="ES|QL" id="INV-01-SWIFTCHG-DETAIL">
+          <![CDATA[
+FROM logs-system.security-*,logs-system.system-*
+| WHERE host.name == "$hostname" AND event.code IN ("4697","7045") AND @timestamp >= NOW() - 4 hours
+| KEEP @timestamp, event.code, winlog.event_data.ServiceName, winlog.event_data.ServiceFileName, winlog.event_data.ImagePath, winlog.event_data.SubjectUserName
+| SORT @timestamp DESC
+| LIMIT 15
+          ]]>
+        </Query>
+        <ExpectedOutput>
+          <Field name="event.code"/>
+          <Field name="winlog.event_data.ServiceName"/>
+          <Field name="winlog.event_data.ServiceFileName"/>
+          <Field name="winlog.event_data.SubjectUserName"/>
+        </ExpectedOutput>
+        <AnalystNotes>A service with a suspicious image path (temp/appdata, random name) on a SWIFT server is attacker persistence. An authorised change installs a known service under the SWIFT change process. Read the image path and installer.</AnalystNotes>
+      </Step>
+      <Step order="2" name="Finalize classification">
+        <DecisionTree>
+          <Node><Condition>A suspicious service (temp path/random name) installed on the SWIFT server, or a change with no CSP change record.</Condition><Result>True Positive (Unauthorised SWIFT System Change - CSP incident process, IR)</Result></Node>
+          <Node><Condition>An authorised change under the SWIFT change-management process.</Condition><Result>False Positive</Result></Node>
+          <Node><Condition>A change by a plausible admin with no change record.</Condition><Result>Needs Escalation</Result></Node>
+        </DecisionTree>
+        <DocumentationChecklist>
+          <Item>Attach outputs of INV-01-SWIFTCHG-DETAIL to the case.</Item>
+        </DocumentationChecklist>
+      </Step>
+    </Workflow>
+  </Investigation>
+  <ClassificationGuidance>
+    <FalsePositive>
+      <Definition>An authorised SWIFT system change.</Definition>
+      <Indicators>
+        <Item>Known service.</Item>
+        <Item>SWIFT change process.</Item>
+        <Item>Approved installer/account.</Item>
+      </Indicators>
+      <SOCAction>
+        <Item>Verify the change record; close as false_positive.</Item>
+      </SOCAction>
+    </FalsePositive>
+    <TruePositive>
+      <Definition>Unauthorised persistence/tampering on a SWIFT server.</Definition>
+      <Indicators>
+        <Item>Suspicious service image path.</Item>
+        <Item>No change record.</Item>
+        <Item>Unexpected installer.</Item>
+      </Indicators>
+      <SOCAction>
+        <Item>Invoke the SWIFT CSP incident process; isolate; remove the change; review payments; open IR.</Item>
+      </SOCAction>
+    </TruePositive>
+    <Misconfiguration>
+      <Definition>A change without proper change control.</Definition>
+      <Indicators>
+        <Item>Legitimate change, no ticket.</Item>
+      </Indicators>
+      <SOCAction>
+        <Item>Require CSP change control; document.</Item>
+      </SOCAction>
+    </Misconfiguration>
+  </ClassificationGuidance>
+  <Response><IRForHumans>
+    <Phase name="Immediate Actions (0-30 minutes)">
+      <Action priority="1">Confirm the activity on the SWIFT server; SWIFT anomalies are high priority.</Action>
+      <Action priority="2">If unauthorised, isolate per the SWIFT CSP incident process.</Action>
+    </Phase>
+    <Phase name="Containment and Eradication (hours)">
+      <Action>Isolate the SWIFT server per the CSP incident process; preserve evidence; engage the SWIFT/payments team; open IR.</Action>
+      <Action>Review payment activity for fraud.</Action>
+    </Phase>
+    <Phase name="Recovery and Hardening (days)">
+      <Action>Enforce SWIFT CSP controls: restricted access, MFA/jump-host, allowlisted software, segregation from the general network.</Action>
+    </Phase>
+  </IRForHumans></Response>
+  <QualityChecks>
+    <Check>SWIFT servers are in-scope for the SWIFT Customer Security Programme - treat every anomaly as high priority and involve the payments team.</Check>
+  </QualityChecks>
+  <ClosureCriteria><FalsePositiveClosure>
+    <Item>Authorised change confirmed; documented.</Item>
+  </FalsePositiveClosure><TruePositiveClosure>
+    <Item>Unauthorised change removed per CSP; payments reviewed; IR recorded.</Item>
+  </TruePositiveClosure></ClosureCriteria>
+</Playbook>

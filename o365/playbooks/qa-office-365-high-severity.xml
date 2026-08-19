@@ -1,0 +1,177 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<Playbook xmlns="https://soc.example/playbooks" id="PB-JCB-NEW-3" name="QA - Office 365 High Severity - SOC Playbook" version="2.1" status="Production" classification="TLP:AMBER">
+  <Metadata>
+    <Owner>JCB Detection Engineering (WatchWave)</Owner>
+    <LastUpdated>2026-08-19</LastUpdated>
+    <Severity default="High">High</Severity>
+    <Confidence default="Medium">Medium</Confidence>
+    <Category>Exfiltration / Data Loss Prevention</Category>
+    <MitreAttack>
+      <Technique id="T1567" name="Exfiltration Over Web Service"/>
+      <Tactic id="TA0010" name="Exfiltration"/>
+    </MitreAttack>
+    <References>
+      <Reference title="MITRE ATT and CK T1567 Exfiltration Over Web Service" url="https://attack.mitre.org/techniques/T1567/"/>
+    </References>
+  </Metadata>
+  <ExecutiveSummary>
+    <Overview>This rule surfaces High-severity Microsoft 365 Security and Compliance alerts (o365.audit.Severity == "High"). At JCB these are dominated by Data Loss Prevention policy matches — the SWIFT, payment-card and Jordan-national-ID DLP policies. Because it is a severity-based catch-all, the specific technique depends on the underlying policy; the common case is sensitive data leaving via email or file sharing. Triage question: is this a genuine attempt to move regulated data out (or an account being misused), or authorised business activity / a transfer the DLP policy already blocked?</Overview>
+    <BusinessImpact>For a bank, a High-severity DLP match means regulated data (SWIFT payment data, card PANs, national IDs) was detected leaving the boundary. Confirmed cases are reportable data-loss events and may indicate a compromised or malicious insider account.</BusinessImpact>
+  </ExecutiveSummary>
+  <Scope>
+    <Assets>
+      <AssetType>Microsoft 365 tenant (JCB) — Exchange Online, SharePoint/OneDrive; Microsoft Purview / Security and Compliance</AssetType>
+    </Assets>
+    <LogSources>
+      <LogSource>Microsoft 365 unified audit log — logs-o365.audit-*</LogSource>
+    </LogSources>
+  </Scope>
+  <Prerequisites>
+    <TelemetryRequirements>
+      <Requirement>M365 unified audit via Elastic Agent — verified live at JCB (8.1M docs/30d). High-severity events are Security and Compliance alerts: event.code IN ("SecurityComplianceAlerts","SecurityComplianceInsights"), event.provider == "SecurityComplianceCenter", event.action IN ("AlertTriggered","AlertEntityGenerated","AlertUpdated"), o365.audit.Severity == "High" (about 100 events/30d at JCB).</Requirement>
+      <Requirement>JCB-specific: the affected user/mailbox is in o365.audit.ObjectId as an email (case varies, e.g. jcbank.com.jo vs JCBANK.COM.JO) — match case-insensitively. rule.name is the DLP/alert policy name. o365.audit.Operation is NOT populated at JCB; the action is in event.action. These alert records carry no source.ip. O365 ingest lag is 20-60 min (these compliance alerts can lag more); queries use a 4h window.</Requirement>
+    </TelemetryRequirements>
+    <DetectionSignals>
+      <Signal><Name>QA - Office 365 High Severity</Name><Details>An M365 Security and Compliance alert with o365.audit.Severity == "High" for an entity.</Details></Signal>
+    </DetectionSignals>
+  </Prerequisites>
+  <Inputs>
+    <Input name="$entity" description="The affected user / mailbox email the alert is about (o365.audit.ObjectId)."/>
+  </Inputs>
+  <Triage>
+    <ImmediateCapture>
+      <Item>$entity: $entity</Item>
+    </ImmediateCapture>
+    <InitialAssessment>
+      <Rule>Weigh the full evidence story per the ClassificationGuidance — identify the policy that matched and whether real sensitive data actually moved (and whether it was blocked), not just that an alert fired.</Rule>
+    </InitialAssessment>
+  </Triage>
+  <Investigation>
+    <Goal>Determine whether the High-severity M365 compliance alert reflects a genuine data-loss / account-misuse event, or authorised activity / a transfer the policy already blocked.</Goal>
+    <Workflow>
+      <Step order="1" name="Identify the alert and the policy that matched">
+        <Purpose>Pull the High-severity compliance alert(s) for this entity and read the policy name (rule.name) and the alert lifecycle actions — this tells you what regulated data and channel triggered it.</Purpose>
+        <Query platform="Elastic" language="ES|QL" id="INV-01">
+          <![CDATA[
+FROM logs-o365.audit-*
+| WHERE @timestamp >= NOW() - 4 hours AND o365.audit.Severity == "High" AND TO_LOWER(o365.audit.ObjectId) == TO_LOWER("$entity")
+| KEEP @timestamp, o365.audit.Severity, rule.name, event.action, event.provider, o365.audit.ObjectId, o365.audit.AlertId
+| SORT @timestamp DESC
+| LIMIT 25
+          ]]>
+        </Query>
+        <ExpectedOutput>
+          <Field name="rule.name"/>
+          <Field name="event.action"/>
+          <Field name="o365.audit.ObjectId"/>
+          <Field name="o365.audit.AlertId"/>
+        </ExpectedOutput>
+        <AnalystNotes>rule.name names the DLP/compliance policy (e.g. DLP-JCB-Swift, DLP-JCB-Card, DLP-JCB-Jordan National ID). A regulated-data policy (SWIFT/card/national ID) is the highest-priority. Use the AlertId to open the full alert in the Microsoft Purview / Defender portal for the matched content and the block/allow action.</AnalystNotes>
+      </Step>
+      <Step order="2" name="Is this a one-off or a pattern for this entity">
+        <Purpose>Summarise this entity's High and Medium compliance alerts across the window — a repeating or escalating pattern (several policies, rising severity) is far more concerning than a single match.</Purpose>
+        <Query platform="Elastic" language="ES|QL" id="INV-02">
+          <![CDATA[
+FROM logs-o365.audit-*
+| WHERE @timestamp >= NOW() - 4 hours AND o365.audit.Severity IN ("High","Medium") AND TO_LOWER(o365.audit.ObjectId) == TO_LOWER("$entity")
+| STATS alerts = COUNT(*), policies = VALUES(rule.name), severities = VALUES(o365.audit.Severity), first_seen = MIN(@timestamp), last_seen = MAX(@timestamp)
+| LIMIT 1
+          ]]>
+        </Query>
+        <ExpectedOutput>
+          <Field name="alerts"/>
+          <Field name="policies"/>
+          <Field name="severities"/>
+        </ExpectedOutput>
+        <AnalystNotes>Multiple distinct DLP policies or a burst of matches for one entity suggests deliberate exfiltration or a compromised account, not an accidental single send.</AnalystNotes>
+      </Step>
+      <Step order="3" name="Corroborate with the entity's real data-movement activity">
+        <Purpose>Look at the affected user's actual exfil-relevant M365 actions in the window — bulk downloads, mailbox access, sends and external sharing — to judge whether real data movement backs the DLP alert.</Purpose>
+        <Query platform="Elastic" language="ES|QL" id="INV-03">
+          <![CDATA[
+FROM logs-o365.audit-*
+| WHERE @timestamp >= NOW() - 4 hours AND (TO_LOWER(user.name) == TO_LOWER("$entity") OR TO_LOWER(user.email) == TO_LOWER("$entity"))
+| STATS events = COUNT(*), sources = VALUES(source.ip) BY event.action
+| SORT events DESC
+| LIMIT 20
+          ]]>
+        </Query>
+        <ExpectedOutput>
+          <Field name="event.action"/>
+          <Field name="events"/>
+          <Field name="sources"/>
+        </ExpectedOutput>
+        <AnalystNotes>The entity's full action profile in the window (JCB keys the actor as the short user.name and the email user.email; this query matches either). Exfil-relevant actions to weigh: Send / SendAs, MailItemsAccessed, AttachmentAccess, FileDownloadedFromBrowser / FileSyncDownloadedFull, FileUploaded, AnonymousLinkCreated / SharingInvitationCreated. A spike in these, or activity from an unfamiliar source (JCB egress NAT is 94.249.88.0/24; Microsoft service IPs are normal), corroborates real data movement. Little activity, or a Purview outcome showing the transfer was blocked, points to a benign/blocked event.</AnalystNotes>
+      </Step>
+    </Workflow>
+  </Investigation>
+  <DecisionTree>
+    <Node><Condition>A regulated-data DLP policy (SWIFT / card / national ID) matched real outbound content (INV-01) and INV-03 shows corroborating data movement (external send/share, bulk download) that was allowed.</Condition><Result>True Positive (Sensitive Data Loss — contain, scope the exposure, notify compliance)</Result></Node>
+    <Node><Condition>The activity is authorised business (an approved recipient/process) OR the DLP policy blocked the transfer so no data actually left (proven-blocked).</Condition><Result>False Positive (authorised or proven-blocked)</Result></Node>
+    <Node><Condition>The policy itself is mis-scoped or over-matching (matching non-sensitive content, or an internal-only flow it should exclude), producing High-severity noise.</Condition><Result>Misconfiguration (tune the DLP/compliance policy)</Result></Node>
+    <Node><Condition>Sensitive content plausibly moved but the recipient, the intent or whether it was blocked cannot be confirmed from telemetry alone.</Condition><Result>Needs Escalation</Result></Node>
+  </DecisionTree>
+  <ClassificationGuidance>
+    <FalsePositive>
+      <Definition>Authorised business activity, or a transfer the DLP policy already blocked so no data left.</Definition>
+      <Indicators>
+        <Item>Recipient/process is an approved business counterpart or internal system.</Item>
+        <Item>The alert / Purview record shows the action was blocked (BlockAccess) — proven-blocked.</Item>
+        <Item>INV-03 shows no unusual external send/share or bulk download for the entity.</Item>
+      </Indicators>
+      <SOCAction>
+        <Item>Confirm the business context or the block in Purview; document; close as false_positive.</Item>
+      </SOCAction>
+    </FalsePositive>
+    <TruePositive>
+      <Definition>Regulated data actually left the boundary — a genuine data-loss event, possibly via a compromised or malicious account.</Definition>
+      <Indicators>
+        <Item>Regulated-data policy (SWIFT/card/national ID) matched and the transfer was allowed.</Item>
+        <Item>Corroborating external sharing / send / bulk download around the alert time.</Item>
+        <Item>Repeating pattern or multiple policies for the same entity.</Item>
+      </Indicators>
+      <SOCAction>
+        <Item>Contain the account (disable/reset, revoke sessions/tokens) if misuse or compromise is indicated; preserve the Purview alert and matched content.</Item>
+        <Item>Scope what data left and to whom; open IR; notify compliance / data-protection.</Item>
+      </SOCAction>
+    </TruePositive>
+    <Misconfiguration>
+      <Definition>The DLP/compliance policy is mis-scoped and over-matching, generating High-severity noise.</Definition>
+      <Indicators>
+        <Item>Matches are on non-sensitive or internal-only content.</Item>
+        <Item>The same benign flow trips the policy repeatedly for many users.</Item>
+      </Indicators>
+      <SOCAction>
+        <Item>Refer the policy to the Purview/DLP owners for tuning; document the over-match pattern.</Item>
+      </SOCAction>
+    </Misconfiguration>
+  </ClassificationGuidance>
+  <Response>
+    <IRForHumans>
+      <Phase name="Immediate Actions (0-30 minutes)">
+        <Action priority="1">Identify the matched policy and entity (INV-01); open the alert in Purview/Defender via the AlertId to see the content and block/allow action.</Action>
+        <Action priority="2">If regulated data was allowed to leave, begin containing the account and preserve the evidence.</Action>
+      </Phase>
+      <Phase name="Containment and Eradication (hours)">
+        <Action>If misuse/compromise is indicated, disable/reset the account, revoke sessions and tokens, and remove any attacker persistence (rules/delegations).</Action>
+        <Action>Scope the exposure using INV-03 and the Purview record: what data, to whom, over which channel.</Action>
+      </Phase>
+      <Phase name="Recovery and Hardening (days)">
+        <Action>Complete data-loss / breach notification as required; reinforce DLP enforcement (block vs audit) on regulated-data policies; user-awareness follow-up.</Action>
+        <Action>Refer over-matching policies to the DLP owners for tuning.</Action>
+      </Phase>
+    </IRForHumans>
+  </Response>
+  <Escalation>
+    <Trigger>A regulated-data policy match with allowed egress, corroborated real data movement, a repeating pattern, or unconfirmed scope of exposure.</Trigger>
+    <To>SOC L2 / IR</To>
+  </Escalation>
+  <Closure>
+    <FalsePositiveClosure>
+      <Item>Authorised business activity or a proven block confirmed in Purview; documented; no data left.</Item>
+    </FalsePositiveClosure>
+    <TruePositiveClosure>
+      <Item>Account contained where needed; exposure scoped (data, recipient, channel); compliance notified; policy enforcement reviewed.</Item>
+    </TruePositiveClosure>
+  </Closure>
+</Playbook>

@@ -1,0 +1,56 @@
+{
+  "rule_id": "jcb-o365-mfa-fatigue",
+  "name": "O365 — MFA Fatigue: Repeated MFA Challenges Rejected/Ignored for One User",
+  "version": 1,
+  "enabled": true,
+  "interval": "15m",
+  "from": "now-60m",
+  "to": "now",
+  "description": "≥5 UserStrongAuthClientAuthNRequiredInterrupt failures for one account within the window — the MFA push-bombing pattern. Baseline: max 10 such events per user per WEEK (measured), so this stays quiet until a real fatigue attack. Attack-shaped watcher, not noise.",
+  "tags": [
+    "JCB",
+    "Detection-QA-2026-08",
+    "Office 365"
+  ],
+  "author": [
+    "JCB Detection Engineering"
+  ],
+  "license": "internal",
+  "threat": [],
+  "investigation_fields": {
+    "field_names": [
+      "user.name",
+      "source.ip",
+      "o365.audit.LogonError",
+      "o365.audit.UserId",
+      "event.action"
+    ]
+  },
+  "related_integrations": [],
+  "required_fields": [],
+  "setup": "",
+  "false_positives": [],
+  "references": [],
+  "risk_score": 73,
+  "risk_score_mapping": [],
+  "severity": "high",
+  "severity_mapping": [],
+  "timestamp_override": "event.ingested",
+  "output_index": "",
+  "max_signals": 100,
+  "exceptions_list": [],
+  "actions": [],
+  "type": "threshold",
+  "language": "kuery",
+  "index": [
+    "logs-o365.audit-*"
+  ],
+  "query": "event.action:\"UserLoginFailed\" and o365.audit.LogonError:\"UserStrongAuthClientAuthNRequiredInterrupt\"",
+  "threshold": {
+    "field": [
+      "user.name"
+    ],
+    "value": 5,
+    "cardinality": []
+  }
+}

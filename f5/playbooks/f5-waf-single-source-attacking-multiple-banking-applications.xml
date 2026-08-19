@@ -1,0 +1,152 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<Playbook xmlns="https://soc.example/playbooks" id="PB-F5-003" name="F5 WAF — Single Source Attacking Multiple Banking Applications - SOC Playbook" version="1.0" status="Production" classification="TLP:AMBER">
+  <Metadata>
+    <Owner>JCB Detection Engineering (WatchWave)</Owner>
+    <LastUpdated>2026-08-14</LastUpdated>
+    <Severity default="High">High</Severity>
+    <Confidence default="Medium">Medium</Confidence>
+    <Category>Reconnaissance / Exploit Public-Facing Application</Category>
+    <MitreAttack>
+      <Technique id="T1595.002" name="Vulnerability Scanning"/>
+      <Tactic id="TA0043" name="Reconnaissance"/>
+    </MitreAttack>
+    <References>
+      <Reference title="MITRE ATT and CK" url="https://attack.mitre.org/techniques/T1595/"/>
+    </References>
+  </Metadata>
+  <ExecutiveSummary>
+    <Overview>One source hit 2+ distinct banking application policies with high-rating (&gt;=4) attacks. Triage question: is this a single actor systematically probing the bank's whole web estate (broad campaign), or shared infrastructure (NAT/proxy) aggregating unrelated traffic?</Overview>
+    <BusinessImpact>A source sweeping multiple banking apps is mapping the attack surface for the weakest entry point - an early, high-value warning.</BusinessImpact>
+  </ExecutiveSummary>
+  <Scope><Assets>
+    <AssetType>F5 BIG-IP ASM / Advanced WAF fronting JCB internet banking and public web apps</AssetType>
+    <AssetType>Published banking applications and their backend servers</AssetType>
+  </Assets><LogSources>
+    <LogSource>F5 ASM CEF events via syslog -&gt; logs-cef.log-* (observer.vendor F5)</LogSource>
+  </LogSources></Scope>
+  <Prerequisites><TelemetryRequirements>
+    <Requirement>F5 ASM logging to CEF over syslog, parsed into logs-cef.log-* (verified live).</Requirement>
+    <Requirement>CEF fields: deviceCustomString4=attack_type, deviceCustomNumber2=violation_rating (&gt;=4 = real attack), deviceCustomString1=security policy, requestUrl, requestMethod, deviceCustomNumber1=HTTP response code, deviceCustomString6=source geo, cef.name=violation name, event.action=passed|alerted|blocked.</Requirement>
+  </TelemetryRequirements><DetectionSignals>
+    <Signal><Name>Cross-application attacker</Name><Details>source.ip with high-rating attacks across cardinality(deviceCustomString1) &gt;= 2.</Details></Signal>
+  </DetectionSignals></Prerequisites>
+  <Inputs>
+    <Input name="$source_ip" description="Source attacking multiple applications."/>
+  </Inputs>
+  <Triage><ImmediateCapture>
+    <Item>Source: $source_ip</Item>
+    <Item>Applications targeted from the alert</Item>
+  </ImmediateCapture><InitialAssessment>
+    <Rule>Broad, methodical coverage of many apps from a single external IP is campaign behavior; a shared corporate NAT hitting apps its users legitimately use is not.</Rule>
+  </InitialAssessment></Triage>
+  <Investigation>
+    <Goal>Determine whether one actor is systematically attacking multiple banking apps or the source is shared infrastructure.</Goal>
+    <Workflow>
+      <Step order="1" name="Per-application attack profile for this source">
+        <Purpose>Show which apps, which attack types per app, and enforcement - a real campaign shows aggressive types across apps.</Purpose>
+        <Query platform="Elastic" language="ES|QL" id="INV-01-F5MULTI-APPS">
+          <![CDATA[
+FROM logs-cef.log-*
+| WHERE observer.vendor == "F5" AND source.ip == "$source_ip" AND cef.extensions.deviceCustomNumber2 >= 4 AND @timestamp >= NOW() - 4 hours
+| STATS events = COUNT(*), attack_types = VALUES(cef.extensions.deviceCustomString4), passed = COUNT(CASE(event.action == "passed", 1, null)), blocked = COUNT(CASE(event.action == "blocked", 1, null)) BY cef.extensions.deviceCustomString1
+| SORT events DESC
+| LIMIT 20
+          ]]>
+        </Query>
+        <ExpectedOutput>
+          <Field name="cef.extensions.deviceCustomString1"/>
+          <Field name="events"/>
+          <Field name="attack_types"/>
+          <Field name="passed"/>
+        </ExpectedOutput>
+        <AnalystNotes>Aggressive exploit types (SQLi/RFI/cmd-exec) across several policies = campaign. If each app shows only its own normal traffic pattern flagged benignly, suspect shared NAT.</AnalystNotes>
+      </Step>
+      <Step order="2" name="Timeline and breadth - methodical sweep vs bursty">
+        <Purpose>A methodical sweep touches apps in sequence; shared NAT shows overlapping, continuous, mixed traffic.</Purpose>
+        <Query platform="Elastic" language="ES|QL" id="INV-02-F5MULTI-TIMING">
+          <![CDATA[
+FROM logs-cef.log-*
+| WHERE observer.vendor == "F5" AND source.ip == "$source_ip" AND @timestamp >= NOW() - 4 hours
+| STATS total = COUNT(*), apps = COUNT_DISTINCT(cef.extensions.deviceCustomString1), high = COUNT(CASE(cef.extensions.deviceCustomNumber2 >= 4, 1, null)), geo = VALUES(cef.extensions.deviceCustomString6), methods = VALUES(cef.extensions.requestMethod)
+| LIMIT 1
+          ]]>
+        </Query>
+        <ExpectedOutput>
+          <Field name="apps"/>
+          <Field name="high"/>
+          <Field name="geo"/>
+          <Field name="total"/>
+        </ExpectedOutput>
+        <AnalystNotes>High ratio of high-rating events to total, from a foreign geo, across many apps = campaign. Low high-rating ratio with huge total from an internal range = shared NAT/proxy noise.</AnalystNotes>
+      </Step>
+      <Step order="3" name="Finalize classification">
+        <DecisionTree>
+          <Node><Condition>INV-01 shows aggressive exploit types across 2+ apps from an external source (methodical coverage).</Condition><Result>True Positive (Multi-Application Attack Campaign - escalate, watch for a successful breach on any app)</Result></Node>
+          <Node><Condition>INV-02 shows any app where events passed with backend responses (pivot to PB-F5-001 for that app).</Condition><Result>True Positive (Campaign with Possible Reach - IR)</Result></Node>
+          <Node><Condition>INV-02 shows an internal shared-NAT source with a low high-rating ratio and normal per-app traffic.</Condition><Result>False Positive</Result></Node>
+          <Node><Condition>Source is external and multi-app but the activity looks like a benign crawler/bot with occasional signature hits.</Condition><Result>Needs Escalation</Result></Node>
+        </DecisionTree>
+        <DocumentationChecklist>
+          <Item>Attach outputs of INV-01-F5MULTI-APPS, INV-02-F5MULTI-TIMING to the case.</Item>
+        </DocumentationChecklist>
+      </Step>
+    </Workflow>
+  </Investigation>
+  <ClassificationGuidance>
+    <FalsePositive>
+      <Definition>Shared infrastructure (corporate NAT/proxy) aggregating many users' legitimate traffic.</Definition>
+      <Indicators>
+        <Item>Internal/known-proxy source.</Item>
+        <Item>Low ratio of high-rating events to total.</Item>
+        <Item>Each app sees its own normal traffic.</Item>
+      </Indicators>
+      <SOCAction>
+        <Item>Confirm the source is a NAT/proxy; consider XFF-based analysis.</Item>
+        <Item>Close as false_positive; tune if needed.</Item>
+      </SOCAction>
+    </FalsePositive>
+    <TruePositive>
+      <Definition>One actor systematically attacking multiple banking applications.</Definition>
+      <Indicators>
+        <Item>Aggressive exploit types across several apps.</Item>
+        <Item>External/foreign source.</Item>
+        <Item>Methodical coverage; any app where requests passed to backend.</Item>
+      </Indicators>
+      <SOCAction>
+        <Item>Escalate; block the source; review each targeted app.</Item>
+        <Item>Enforce blocking across the targeted policies; watch for a breach on the weakest app.</Item>
+      </SOCAction>
+    </TruePositive>
+    <Misconfiguration>
+      <Definition>A misassigned policy or shared VIP causing one source's traffic to appear across multiple app labels.</Definition>
+      <Indicators>
+        <Item>Apps share a VIP/policy mapping making attribution wrong.</Item>
+        <Item>WAF team confirms.</Item>
+      </Indicators>
+      <SOCAction>
+        <Item>Fix the policy/app mapping; re-evaluate.</Item>
+      </SOCAction>
+    </Misconfiguration>
+  </ClassificationGuidance>
+  <Response><IRForHumans>
+    <Phase name="Immediate Actions (0-30 minutes)">
+      <Action priority="1">Block the source if external campaign; list all targeted apps.</Action>
+      <Action priority="2">Prioritize any app that showed passed/backend reach.</Action>
+    </Phase>
+    <Phase name="Containment and Eradication (hours)">
+      <Action>Review each targeted app for compromise; enforce blocking; hunt the source's other activity.</Action>
+    </Phase>
+    <Phase name="Recovery and Hardening (days)">
+      <Action>Reduce shared-VIP ambiguity; enforce blocking on public banking apps; deploy bot defense.</Action>
+    </Phase>
+  </IRForHumans></Response>
+  <QualityChecks>
+    <Check>Cardinality on deviceCustomString1 (policy) verified as the app discriminator.</Check>
+    <Check>XFF (deviceCustomString5) can refine attribution behind proxies.</Check>
+  </QualityChecks>
+  <ClosureCriteria><FalsePositiveClosure>
+    <Item>Shared NAT confirmed; no methodical campaign; documented.</Item>
+  </FalsePositiveClosure><TruePositiveClosure>
+    <Item>All targeted apps reviewed; source blocked; no breach confirmed.</Item>
+  </TruePositiveClosure></ClosureCriteria>
+</Playbook>

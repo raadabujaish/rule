@@ -1,0 +1,83 @@
+{
+  "rule_id": "jcb-m365-teams-app-installed",
+  "name": "Microsoft Teams — Application Installed",
+  "version": 1,
+  "enabled": true,
+  "interval": "1h",
+  "from": "now-90m",
+  "to": "now",
+  "description": "Attacker objective\nDeliver a malicious application into the collaboration platform — a Teams app can request permissions, phish users, or exfiltrate messages and files.\n\nAttack logic\nAttackers publish or side-load a malicious Teams app to gain a foothold in the collaboration environment. A newly-seen app being installed warrants review of its publisher and permissions.\n\nWhy this detection works\nThe unified audit log records Teams app installations; a new-terms model over the app identity surfaces first-seen applications while suppressing the routine re-installation of already-known apps.\n\nFalse positives\nOnboarding of a legitimate, sanctioned Teams application.\n\nTuning\nAllowlist approved apps; review the publisher and requested permissions of any new app.\n\nRequired telemetry\no365.audit RecordType 25 / MicrosoftTeams, Operation 'AppInstalled' (AddOnName/app identity, user.name).",
+  "tags": [
+    "JCB",
+    "M365",
+    "Phase3",
+    "Tactic: Persistence",
+    "Use Case: Threat Detection"
+  ],
+  "author": [
+    "raadabujaish"
+  ],
+  "license": "",
+  "threat": [
+    {
+      "framework": "MITRE ATT&CK",
+      "tactic": {
+        "id": "TA0003",
+        "name": "Persistence",
+        "reference": "https://attack.mitre.org/tactics/TA0003/"
+      },
+      "technique": [
+        {
+          "id": "T1176",
+          "name": "Browser Extensions",
+          "reference": "https://attack.mitre.org/techniques/T1176/"
+        }
+      ]
+    }
+  ],
+  "investigation_fields": {
+    "field_names": [
+      "user.name",
+      "user.id",
+      "source.ip",
+      "event.action",
+      "event.code",
+      "event.outcome",
+      "o365.audit.Operation",
+      "o365.audit.ResultStatus",
+      "o365.audit.ObjectId",
+      "o365.audit.Severity",
+      "message",
+      "event.dataset",
+      "o365.audit"
+    ]
+  },
+  "related_integrations": [],
+  "required_fields": [],
+  "setup": "",
+  "note": "## Investigation guide\n1. Identify the installed application and its publisher; confirm it is sanctioned.\n2. If untrusted, remove the app and review what it accessed and which users it reached.",
+  "false_positives": [
+    "Onboarding of a legitimate, sanctioned Teams application."
+  ],
+  "references": [
+    "https://attack.mitre.org/techniques/T1176/"
+  ],
+  "risk_score": 56,
+  "risk_score_mapping": [],
+  "severity": "medium",
+  "severity_mapping": [],
+  "output_index": "",
+  "max_signals": 100,
+  "exceptions_list": [],
+  "actions": [],
+  "type": "new_terms",
+  "query": "event.dataset:\"o365.audit\" and event.action:\"AppInstalled\"",
+  "new_terms_fields": [
+    "o365.audit.AddOnName"
+  ],
+  "history_window_start": "now-30d",
+  "index": [
+    "logs-o365*"
+  ],
+  "language": "kuery"
+}

@@ -1,0 +1,233 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<Playbook xmlns="https://soc.example/playbooks" id="PB-JCB-ADW-002" name="AD — Domain Reconnaissance via LOLBins / BloodHound - SOC Playbook" version="2.1" status="Production" classification="TLP:AMBER">
+  <Metadata>
+    <Owner>JCB Detection Engineering (WatchWave)</Owner>
+    <LastUpdated>2026-08-19</LastUpdated>
+    <Severity default="Medium">Medium</Severity>
+    <Confidence default="Medium">Medium</Confidence>
+    <Category>Discovery / Active Directory Reconnaissance</Category>
+    <MitreAttack>
+      <Technique id="T1087.002" name="Account Discovery: Domain Account"/>
+      <Technique id="T1482" name="Domain Trust Discovery"/>
+      <Tactic id="TA0007" name="Discovery"/>
+    </MitreAttack>
+    <References>
+      <Reference title="MITRE ATT and CK T1087.002 Account Discovery Domain Account" url="https://attack.mitre.org/techniques/T1087/002/"/>
+      <Reference title="MITRE ATT and CK T1482 Domain Trust Discovery" url="https://attack.mitre.org/techniques/T1482/"/>
+    </References>
+  </Metadata>
+  <ExecutiveSummary>
+    <Overview>A host ran Active Directory reconnaissance using living-off-the-land binaries or offensive tooling: nltest domain/trust enumeration, net group queries against privileged groups, whoami /all, or SharpHound/BloodHound/PowerView collection. This is the enumeration phase that precedes privilege escalation and lateral movement. The triage question is whether an authorised assessment or admin task ran these commands, or an attacker (or a compromised user) is mapping the domain to plan the next move.</Overview>
+    <BusinessImpact>Domain reconnaissance is how an intruder finds the shortest path to Domain Admin in a banking network. BloodHound-style collection reveals ACL abuse paths, high-value groups and delegation weaknesses that let an attacker escalate quietly, so acting on the recon window is the cheapest point to stop a domain-wide compromise.</BusinessImpact>
+  </ExecutiveSummary>
+  <Scope>
+    <Assets>
+      <AssetType>Windows workstations and servers running Sysmon (INTDOM)</AssetType>
+      <AssetType>Active Directory domain controllers (targets of the enumeration)</AssetType>
+    </Assets>
+    <LogSources>
+      <LogSource>Sysmon process creation - logs-windows.sysmon_operational-* (event.code 1)</LogSource>
+      <LogSource>Windows Security process creation - logs-system.security-* (event.code 4688)</LogSource>
+      <LogSource>PowerShell script block logging - logs-windows.powershell_operational-* (event.code 4104)</LogSource>
+    </LogSources>
+  </Scope>
+  <Prerequisites>
+    <TelemetryRequirements>
+      <Requirement>Process creation with command line shipped to logs-windows.sysmon_operational-* and/or logs-system.security-* (process.command_line populated - verified live).</Requirement>
+      <Requirement>PowerShell script block logging to logs-windows.powershell_operational-*; the script text is in powershell.file.script_block_text (verified populated; winlog.event_data.ScriptBlockText is empty in this estate).</Requirement>
+    </TelemetryRequirements>
+    <DetectionSignals>
+      <Signal><Name>LOLBin domain enumeration</Name><Details>nltest with dclist/domain_trusts/dsgetdc/trusted_domains; net group of Domain Admins/Enterprise Admins/Domain Controllers with /domain; whoami /all.</Details></Signal>
+      <Signal><Name>Offensive collectors</Name><Details>SharpHound/BloodHound/Invoke-BloodHound, dsquery, AdFind, or PowerView cmdlets (Get-NetUser/Get-Domain/Get-DomainTrust) in the command line or script block.</Details></Signal>
+    </DetectionSignals>
+  </Prerequisites>
+  <Inputs>
+    <Input name="$host" description="Host that executed the reconnaissance (host.name from the alert)."/>
+    <Input name="$user" description="User context that ran the recon commands (user.name from the alert)."/>
+  </Inputs>
+  <Triage>
+    <ImmediateCapture>
+      <Item>Host: $host; user context: $user</Item>
+      <Item>The matched command line / script block and which recon family it belongs to (LOLBin vs BloodHound vs PowerView)</Item>
+      <Item>Parent process that launched the recon (from the alert's process.parent fields)</Item>
+    </ImmediateCapture>
+    <InitialAssessment>
+      <Rule>If $host is a known assessment source (e.g. the documented scanner 192.168.166.1) or the user is a security-assessment identity with a change record, lean False Positive (authorised) but still confirm scope.</Rule>
+      <Rule>If a standard user account runs SharpHound/BloodHound/PowerView, or recon spawns from an anomalous parent (Office app, browser, web service), or recon spans many hosts, escalate as active enumeration.</Rule>
+    </InitialAssessment>
+  </Triage>
+  <Investigation>
+    <Goal>Determine whether the reconnaissance on $host by $user is authorised assessment/admin activity or attacker enumeration, and how broad and deep it went.</Goal>
+    <Workflow>
+      <Step order="1" name="Reconstruct the recon commands on the host">
+        <Purpose>List the exact recon command lines that ran on $host, with the launching parent and user, so the analyst can see the tool family and intent.</Purpose>
+        <Query platform="Elastic" language="ES|QL" id="INV-01">
+          <![CDATA[
+FROM logs-windows.sysmon_operational-*,logs-system.security-*
+| WHERE @timestamp >= NOW() - 4 hours AND host.name == "$host"
+    AND (event.code == "1" OR event.code == "4688") AND process.command_line IS NOT NULL
+| EVAL cl = TO_LOWER(process.command_line)
+| WHERE (cl LIKE "*nltest*" AND (cl LIKE "*dclist*" OR cl LIKE "*domain_trusts*" OR cl LIKE "*dsgetdc*" OR cl LIKE "*trusted_domains*"))
+    OR (cl LIKE "*net *group*" AND cl LIKE "*/domain*")
+    OR (cl LIKE "*whoami*" AND cl LIKE "*/all*")
+    OR cl LIKE "*sharphound*" OR cl LIKE "*invoke-bloodhound*" OR cl LIKE "*dsquery*" OR cl LIKE "*adfind*"
+    OR cl LIKE "*get-net*" OR cl LIKE "*get-domain*"
+| STATS hits=COUNT(*), first_seen=MIN(@timestamp), last_seen=MAX(@timestamp), cmds=VALUES(process.command_line), parents=VALUES(process.parent.name) BY user.name, process.name
+| SORT hits DESC
+| LIMIT 100
+          ]]>
+        </Query>
+        <ExpectedOutput>
+          <Field name="process.name"/>
+          <Field name="cmds"/>
+          <Field name="parents"/>
+        </ExpectedOutput>
+        <AnalystNotes>A single whoami /all or one net group query by an admin is low signal. A sequence (nltest, net group Domain Admins, then SharpHound) in minutes is a deliberate enumeration playbook. Note the parents column: recon under cmd.exe/powershell.exe in a user session is manual; recon under an odd parent is post-exploitation.</AnalystNotes>
+      </Step>
+      <Step order="2" name="Measure recon breadth by the user across hosts">
+        <Purpose>Distinguish a one-host admin task from a user account enumerating the domain from several machines (spreading foothold or automated collection).</Purpose>
+        <Query platform="Elastic" language="ES|QL" id="INV-02">
+          <![CDATA[
+FROM logs-windows.sysmon_operational-*,logs-system.security-*
+| WHERE @timestamp >= NOW() - 4 hours AND user.name == "$user"
+    AND (event.code == "1" OR event.code == "4688") AND process.command_line IS NOT NULL
+| EVAL cl = TO_LOWER(process.command_line)
+| WHERE cl LIKE "*nltest*" OR (cl LIKE "*net *group*" AND cl LIKE "*/domain*")
+    OR (cl LIKE "*whoami*" AND cl LIKE "*/all*")
+    OR cl LIKE "*sharphound*" OR cl LIKE "*invoke-bloodhound*" OR cl LIKE "*dsquery*" OR cl LIKE "*adfind*"
+    OR cl LIKE "*get-net*" OR cl LIKE "*get-domain*"
+| STATS hits=COUNT(*), hosts=COUNT_DISTINCT(host.name), host_list=VALUES(host.name), tools=VALUES(process.name) BY user.name
+| LIMIT 20
+          ]]>
+        </Query>
+        <ExpectedOutput>
+          <Field name="hosts"/>
+          <Field name="host_list"/>
+          <Field name="tools"/>
+        </ExpectedOutput>
+        <AnalystNotes>Recon from many hosts by one non-admin user is a strong escalate signal. A single assessment workstation running a broad toolset is consistent with an authorised scan - verify against the assessment schedule.</AnalystNotes>
+      </Step>
+      <Step order="3" name="Inspect the launch lineage of the recon tools">
+        <Purpose>Judge whether the recon was human-driven or spawned by an exploited process. The parent/grandparent chain separates an admin at a shell from a malware-driven collector.</Purpose>
+        <Query platform="Elastic" language="ES|QL" id="INV-03">
+          <![CDATA[
+FROM logs-windows.sysmon_operational-*
+| WHERE @timestamp >= NOW() - 4 hours AND host.name == "$host" AND event.code == "1"
+    AND process.command_line IS NOT NULL
+| EVAL cl = TO_LOWER(process.command_line)
+| WHERE cl LIKE "*nltest*" OR (cl LIKE "*net *group*" AND cl LIKE "*/domain*")
+    OR (cl LIKE "*whoami*" AND cl LIKE "*/all*")
+    OR cl LIKE "*sharphound*" OR cl LIKE "*dsquery*" OR cl LIKE "*adfind*" OR cl LIKE "*get-net*"
+| STATS hits=COUNT(*), parent_paths=VALUES(process.parent.executable), parent_names=VALUES(process.parent.name) BY process.name, user.name
+| SORT hits DESC
+| LIMIT 50
+          ]]>
+        </Query>
+        <ExpectedOutput>
+          <Field name="process.name"/>
+          <Field name="parent_paths"/>
+          <Field name="parent_names"/>
+        </ExpectedOutput>
+        <AnalystNotes>Parents like winword.exe, excel.exe, outlook.exe, a browser, w3wp.exe or an unexpected service indicate the recon followed code execution from phishing or a web exploit - treat as True Positive. explorer.exe -&gt; cmd.exe/powershell.exe is a human at the keyboard.</AnalystNotes>
+      </Step>
+      <Step order="4" name="Catch in-memory PowerShell recon">
+        <Purpose>PowerView/BloodHound can run entirely in PowerShell without a distinctive process command line. Script block logging catches the cmdlets even when the process view is clean (evasion coverage).</Purpose>
+        <Query platform="Elastic" language="ES|QL" id="INV-04">
+          <![CDATA[
+FROM logs-windows.powershell_operational-*
+| WHERE @timestamp >= NOW() - 4 hours AND host.name == "$host" AND event.code == "4104"
+| EVAL sb = TO_LOWER(powershell.file.script_block_text)
+| WHERE sb LIKE "*get-netuser*" OR sb LIKE "*get-netgroup*" OR sb LIKE "*get-domain*"
+    OR sb LIKE "*invoke-bloodhound*" OR sb LIKE "*get-aduser*" OR sb LIKE "*get-netcomputer*"
+    OR sb LIKE "*invoke-sharphound*" OR sb LIKE "*get-domaintrust*" OR sb LIKE "*get-netdomaincontroller*"
+| STATS hits=COUNT(*), first_seen=MIN(@timestamp), last_seen=MAX(@timestamp), samples=VALUES(powershell.file.script_block_text) BY user.name, host.name
+| SORT hits DESC
+| LIMIT 50
+          ]]>
+        </Query>
+        <ExpectedOutput>
+          <Field name="hits"/>
+          <Field name="samples"/>
+          <Field name="user.name"/>
+        </ExpectedOutput>
+        <AnalystNotes>PowerView/BloodHound cmdlets in script blocks confirm offensive collection even if INV-01 was clean. samples shows the actual reconnaissance functions; treat any Invoke-BloodHound/Invoke-SharpHound as active enumeration.</AnalystNotes>
+      </Step>
+    </Workflow>
+  </Investigation>
+  <DecisionTree>
+    <Node><Condition>INV-04 shows Invoke-BloodHound/Invoke-SharpHound or PowerView collection, OR INV-03 shows recon spawned by an anomalous parent (Office/browser/web service), OR INV-02 shows a non-admin user enumerating across multiple hosts.</Condition><Result>True Positive (active domain enumeration - escalate to IR, treat host/user as a foothold)</Result></Node>
+    <Node><Condition>INV-01 shows a small number of LOLBin queries (whoami /all, one net group) by a standard user with no assessment attribution and no follow-on, but no offensive collectors.</Condition><Result>Needs Escalation (suspicious but limited - confirm user intent and check for follow-on activity)</Result></Node>
+    <Node><Condition>The activity is attributable to an authorised security assessment (documented scanner such as 192.168.166.1, or a pentest with a change record) or an IT admin performing sanctioned troubleshooting under a ticket.</Condition><Result>False Positive (authorised assessment / admin task)</Result></Node>
+    <Node><Condition>A known inventory/monitoring agent or admin script legitimately runs nltest/net group/AD cmdlets on a schedule and trips the rule as recurring noise.</Condition><Result>Misconfiguration (tune for the specific tool/host; do not broadly exception the recon patterns)</Result></Node>
+    <Node><Condition>User, host or parent cannot be attributed, or signals are mixed.</Condition><Result>Needs Escalation</Result></Node>
+  </DecisionTree>
+  <ClassificationGuidance>
+    <FalsePositive>
+      <Definition>An authorised party ran the enumeration - a sanctioned assessment or an admin task under change control - not a benign coincidence, an approved and attributable action.</Definition>
+      <Indicators>
+        <Item>Source host/user maps to a documented scanner or security-assessment identity with a matching schedule or ticket.</Item>
+        <Item>Commands align with a known assessment window and no offensive collectors run outside it.</Item>
+        <Item>Launch lineage (INV-03) is a human shell under an admin session.</Item>
+      </Indicators>
+      <SOCAction>
+        <Item>Confirm the assessment schedule or change ticket with the owning team.</Item>
+        <Item>Propose a scoped exception for the assessment source host/identity only.</Item>
+        <Item>Close as false_positive with the reference attached.</Item>
+      </SOCAction>
+    </FalsePositive>
+    <TruePositive>
+      <Definition>An attacker or compromised user enumerated Active Directory to plan escalation and lateral movement.</Definition>
+      <Indicators>
+        <Item>SharpHound/BloodHound/PowerView collection (INV-01 or INV-04).</Item>
+        <Item>Recon launched by an anomalous parent process (INV-03).</Item>
+        <Item>Enumeration spanning multiple hosts by a non-admin user (INV-02), or a recon sequence targeting privileged groups and trusts.</Item>
+      </Indicators>
+      <SOCAction>
+        <Item>Isolate $host and suspend/disable $user pending investigation.</Item>
+        <Item>Hunt for the initial access on $host (the parent chain from INV-03) and for follow-on Kerberoasting/lateral movement by $user.</Item>
+        <Item>Open an incident; treat any collected BloodHound data as attacker knowledge of the domain.</Item>
+      </SOCAction>
+    </TruePositive>
+    <Misconfiguration>
+      <Definition>A legitimate inventory/monitoring tool or admin automation runs AD enumeration on a loop by design and generates recurring alerts.</Definition>
+      <Indicators>
+        <Item>Same host/service account runs identical enumeration on a fixed schedule.</Item>
+        <Item>No offensive collectors, no anomalous parent, no human-interactive escalation.</Item>
+      </Indicators>
+      <SOCAction>
+        <Item>Confirm the tool with its owner.</Item>
+        <Item>Tune the rule for that specific tool/account; track under detection-tuning, not IR.</Item>
+      </SOCAction>
+    </Misconfiguration>
+  </ClassificationGuidance>
+  <Response>
+    <IRForHumans>
+      <Phase name="Immediate Actions (0-30 minutes)">
+        <Action priority="1">If offensive collection is confirmed (INV-04) or lineage is anomalous (INV-03), isolate $host from the network.</Action>
+        <Action priority="2">Suspend $user sessions and preserve the process/script-block evidence.</Action>
+      </Phase>
+      <Phase name="Containment and Eradication (hours)">
+        <Action>Determine initial access on $host and remove the attacker foothold.</Action>
+        <Action>Reset $user credentials if compromise is confirmed; review privileged groups the recon targeted.</Action>
+      </Phase>
+      <Phase name="Recovery and Hardening (days)">
+        <Action>Remediate the attack paths BloodHound would have revealed (excessive ACLs, unconstrained delegation, stale admin memberships).</Action>
+        <Action>Ensure script block logging and Sysmon coverage on the affected tier; add detections for follow-on Kerberoasting.</Action>
+      </Phase>
+    </IRForHumans>
+  </Response>
+  <Escalation>
+    <Trigger>Confirmed SharpHound/BloodHound/PowerView collection, recon from an anomalous parent process, or multi-host enumeration by a non-admin user.</Trigger>
+    <To>SOC L2 / IR</To>
+  </Escalation>
+  <Closure>
+    <FalsePositiveClosure>
+      <Item>Assessment schedule or change ticket verified and matches host, user and window.</Item>
+      <Item>No offensive collectors and no anomalous launch lineage observed.</Item>
+    </FalsePositiveClosure>
+    <TruePositiveClosure>
+      <Item>Host isolated/reimaged, user credentials reset, initial access identified.</Item>
+      <Item>Attack paths exposed by the recon reviewed and remediated; follow-on activity ruled out.</Item>
+    </TruePositiveClosure>
+  </Closure>
+</Playbook>

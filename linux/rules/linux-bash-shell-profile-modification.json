@@ -1,0 +1,80 @@
+{
+  "rule_id": "jcb-rec-bash-shell-profile-modification",
+  "name": "Linux — Bash Shell Profile Modification",
+  "version": 1,
+  "enabled": true,
+  "interval": "1h",
+  "from": "now-70m",
+  "to": "now",
+  "description": "Both ~/.bash_profile and ~/.bashrc are files containing shell commands that are run when Bash is invoked. These files are executed in a user's context, either interactively or non-interactively, when a user logs in so that their environment is set correctly. Adversaries may abuse this to establish persistence by executing malicious content triggered by a user’s shell.",
+  "tags": [
+    "JCB",
+    "Linux"
+  ],
+  "author": [
+    "raadabujaish"
+  ],
+  "threat": [
+    {
+      "framework": "MITRE ATT&CK",
+      "tactic": {
+        "id": "TA0003",
+        "name": "Persistence",
+        "reference": "https://attack.mitre.org/tactics/TA0003/"
+      },
+      "technique": [
+        {
+          "id": "T1546",
+          "name": "Event Triggered Execution",
+          "reference": "https://attack.mitre.org/techniques/T1546/",
+          "subtechnique": [
+            {
+              "id": "T1546.004",
+              "name": "Unix Shell Configuration Modification",
+              "reference": "https://attack.mitre.org/techniques/T1546/004/"
+            }
+          ]
+        }
+      ]
+    }
+  ],
+  "investigation_fields": {
+    "field_names": [
+      "host.name",
+      "user.name",
+      "user.id",
+      "process.name",
+      "process.executable",
+      "process.args",
+      "process.parent.name",
+      "file.path",
+      "event.action",
+      "event.outcome",
+      "message",
+      "event.category",
+      "event.type"
+    ]
+  },
+  "related_integrations": [],
+  "required_fields": [],
+  "setup": "",
+  "false_positives": [],
+  "references": [
+    "https://www.anomali.com/blog/pulling-linux-rabbit-rabbot-malware-out-of-a-hat"
+  ],
+  "risk_score": 47,
+  "risk_score_mapping": [],
+  "severity": "medium",
+  "severity_mapping": [],
+  "output_index": "",
+  "max_signals": 100,
+  "exceptions_list": [],
+  "actions": [],
+  "type": "query",
+  "language": "kuery",
+  "index": [
+    "logs-auditd.log-*",
+    "logs-auditd_manager.auditd-*"
+  ],
+  "query": "event.category:file and event.type:change and\n  process.name:(* and not (sudo or vim or zsh or env or nano or bash or Terminal or xpcproxy or login or cat or cp or\n  launchctl or java or dnf or tailwatchd or ldconfig or yum or semodule or cpanellogd or dockerd or authselect or chmod or\n  dnf-automatic or git or dpkg or platform-python)) and\n  not process.executable:(/Applications/* or /private/var/folders/* or /usr/local/* or /opt/saltstack/salt/bin/*) and\n  file.path:(/private/etc/rc.local or\n             /etc/rc.local or\n             /home/*/.profile or\n             /home/*/.profile1 or\n             /home/*/.bash_profile or\n             /home/*/.bash_profile1 or\n             /home/*/.bashrc or\n             /Users/*/.bash_profile or\n             /Users/*/.zshenv)\n"
+}

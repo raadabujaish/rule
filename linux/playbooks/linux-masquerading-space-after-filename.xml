@@ -1,0 +1,212 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<Playbook xmlns="https://soc.example/playbooks" id="PB-LNX-007" name="Linux — Masquerading Space After Filename - SOC Playbook" version="1.0" status="Production" classification="TLP:AMBER">
+  <Metadata>
+    <Owner>JCB Detection Engineering (WatchWave)</Owner>
+    <LastUpdated>2026-08-14</LastUpdated>
+    <Severity default="Medium">Medium</Severity>
+    <Confidence default="Medium">Medium</Confidence>
+    <Category>Defense Evasion / Masquerading</Category>
+    <MitreAttack>
+      <Technique id="T1036.006" name="Space after Filename"/>
+      <Tactic id="TA0005" name="Defense Evasion"/>
+    </MitreAttack>
+    <References>
+      <Reference title="MITRE ATT and CK" url="https://attack.mitre.org/techniques/T1036/"/>
+    </References>
+  </Metadata>
+  <ExecutiveSummary>
+    <Overview>A process executed from a path with a trailing space or space-padded name (process.executable pattern) - a masquerading trick to disguise a malicious file as a benign one. Triage question: malware masquerading, or a benign oddly-named file?</Overview>
+    <BusinessImpact>A space-after-filename executable disguises malware to evade eye-inspection and some controls.</BusinessImpact>
+  </ExecutiveSummary>
+  <Scope><Assets>
+    <AssetType>Linux servers (core banking, app, DB - INTDOM)</AssetType>
+    <AssetType>auditd-monitored Linux hosts</AssetType>
+  </Assets><LogSources>
+    <LogSource>Linux auditd via Elastic Agent - logs-auditd.log-*, logs-auditd_manager.auditd-*</LogSource>
+  </LogSources></Scope>
+  <Prerequisites><TelemetryRequirements>
+    <Requirement>Linux auditd (verified live). AVAILABLE fields: process.name, process.executable, user.name, host.name, event.action, event.category. NOT COLLECTED: process.args, process.command_line, process.parent.name, file.path. Linux FIM is not deployed (logs-fim.event-* holds only Windows paths). Investigation is therefore limited to process identity + acting user; argument/file-content and parent-chain confirmation must be done on the host.</Requirement>
+  </TelemetryRequirements><DetectionSignals>
+    <Signal><Name>Space-after-filename exec</Name><Details>auditd process/exec event matching space-after-filename exec (see telemetry note on field limits).</Details></Signal>
+  </DetectionSignals></Prerequisites>
+  <Inputs>
+    <Input name="$hostname" description="Linux host where the activity occurred."/>
+    <Input name="$username" description="Acting user (user.name)."/>
+  </Inputs>
+  <Triage><ImmediateCapture>
+    <Item>Host: $hostname</Item>
+    <Item>User: $username</Item>
+  </ImmediateCapture><InitialAssessment>
+    <Rule>Weigh the evidence; note auditd field limits (no args/file.path) - some confirmation must occur on the host.</Rule>
+  </InitialAssessment></Triage>
+  <Investigation>
+    <Goal>Determine whether the space-after-filename exec on $hostname is malicious, using available process/user evidence and host inspection.</Goal>
+    <Workflow>
+      <Step order="1" name="Confirm the process execution on the host and the acting user">
+        <Purpose>Confirm the flagged process ran, on which host, by which user, and how often - the core evidence available from auditd.</Purpose>
+        <Query platform="Elastic" language="ES|QL" id="INV-01-LX-EXEC">
+          <![CDATA[
+FROM logs-auditd.log-*,logs-auditd_manager.auditd-*
+| WHERE host.name == "$hostname" AND event.category == "process" AND process.executable RLIKE ".*[ ].*" AND @timestamp >= NOW() - 4 hours
+| STATS runs = COUNT(*), names = VALUES(process.name), users = VALUES(user.name) BY process.executable
+| SORT runs DESC
+| LIMIT 20
+          ]]>
+        </Query>
+        <ExpectedOutput>
+          <Field name="process.executable"/>
+          <Field name="names"/>
+          <Field name="users"/>
+          <Field name="runs"/>
+        </ExpectedOutput>
+        <AnalystNotes>The process.executable path with a trailing/embedded space is the masquerade - examine the executables list. A real binary with such a name is almost always malicious.</AnalystNotes>
+      </Step>
+      <Step order="2" name="Profile the acting user's process activity on the host">
+        <Purpose>The acting user's broader process activity separates an interactive attacker/anomaly from a service/automation account.</Purpose>
+        <Query platform="Elastic" language="ES|QL" id="INV-02-LX-USER" optional="true">
+          <![CDATA[
+FROM logs-auditd.log-*,logs-auditd_manager.auditd-*
+| WHERE host.name == "$hostname" AND event.category == "process" AND user.name == "$username" AND @timestamp >= NOW() - 4 hours
+| STATS runs = COUNT(*), processes = VALUES(process.name), execs = COUNT_DISTINCT(process.executable)
+| LIMIT 1
+          ]]>
+        </Query>
+        <ExpectedOutput>
+          <Field name="runs"/>
+          <Field name="processes"/>
+          <Field name="execs"/>
+        </ExpectedOutput>
+        <AnalystNotes>A root/service account running the flagged tool as part of automation differs from an interactive/unexpected user. Correlate the user with the host's role (DB/app server).</AnalystNotes>
+      </Step>
+      <Step order="3" name="Finalize classification">
+        <DecisionTree>
+          <Node><Condition>An executable whose path has a trailing space or space-padding, in a user/tmp location.</Condition><Result>True Positive (Malicious Activity - investigate on host, IR if confirmed)</Result></Node>
+          <Node><Condition>The process is run by a known service/automation account as part of the host's normal operation.</Condition><Result>False Positive</Result></Node>
+          <Node><Condition>Behavior is consistent with a documented admin/maintenance action.</Condition><Result>Benign Activity</Result></Node>
+          <Node><Condition>Process identity confirms the tool ran but argument/file context (not collected in auditd) is needed to decide, and host inspection is not yet available.</Condition><Result>Needs Escalation</Result></Node>
+        </DecisionTree>
+        <DocumentationChecklist>
+          <Item>Attach outputs of INV-01-LX-EXEC, INV-02-LX-USER to the case.</Item>
+        </DocumentationChecklist>
+      </Step>
+    </Workflow>
+  </Investigation>
+  <ClassificationGuidance>
+    <FalsePositive>
+      <Definition>A legitimately (if oddly) named file confirmed benign.</Definition>
+      <Indicators>
+        <Item>A</Item>
+        <Item> </Item>
+        <Item>b</Item>
+        <Item>e</Item>
+        <Item>n</Item>
+        <Item>i</Item>
+        <Item>g</Item>
+        <Item>n</Item>
+        <Item> </Item>
+        <Item>f</Item>
+        <Item>i</Item>
+        <Item>l</Item>
+        <Item>e</Item>
+        <Item> </Item>
+        <Item>t</Item>
+        <Item>h</Item>
+        <Item>a</Item>
+        <Item>t</Item>
+        <Item> </Item>
+        <Item>h</Item>
+        <Item>a</Item>
+        <Item>p</Item>
+        <Item>p</Item>
+        <Item>e</Item>
+        <Item>n</Item>
+        <Item>s</Item>
+        <Item> </Item>
+        <Item>t</Item>
+        <Item>o</Item>
+        <Item> </Item>
+        <Item>c</Item>
+        <Item>o</Item>
+        <Item>n</Item>
+        <Item>t</Item>
+        <Item>a</Item>
+        <Item>i</Item>
+        <Item>n</Item>
+        <Item> </Item>
+        <Item>a</Item>
+        <Item> </Item>
+        <Item>s</Item>
+        <Item>p</Item>
+        <Item>a</Item>
+        <Item>c</Item>
+        <Item>e</Item>
+        <Item>,</Item>
+        <Item> </Item>
+        <Item>c</Item>
+        <Item>o</Item>
+        <Item>n</Item>
+        <Item>f</Item>
+        <Item>i</Item>
+        <Item>r</Item>
+        <Item>m</Item>
+        <Item>e</Item>
+        <Item>d</Item>
+        <Item> </Item>
+        <Item>o</Item>
+        <Item>n</Item>
+        <Item> </Item>
+        <Item>h</Item>
+        <Item>o</Item>
+        <Item>s</Item>
+        <Item>t</Item>
+        <Item>.</Item>
+      </Indicators>
+      <SOCAction>
+        <Item>Confirm the benign source/automation; close as false_positive.</Item>
+      </SOCAction>
+    </FalsePositive>
+    <TruePositive>
+      <Definition>Malware masquerading via a space-padded filename.</Definition>
+      <Indicators>
+        <Item>process.executable with trailing/embedded space.</Item>
+        <Item>Location in /tmp,/home,/dev/shm.</Item>
+        <Item>Unexpected user.</Item>
+      </Indicators>
+      <SOCAction>
+        <Item>Inspect the host (full command line, files touched, parent process); isolate if confirmed malicious; open IR.</Item>
+        <Item>Reset credentials used on the host; hunt the same activity on peer hosts.</Item>
+      </SOCAction>
+    </TruePositive>
+    <Misconfiguration>
+      <Definition>A software package with an unusual filename convention.</Definition>
+      <Indicators>
+        <Item>A known package with spaced filenames confirmed benign.</Item>
+      </Indicators>
+      <SOCAction>
+        <Item>Correct the configuration/automation; document.</Item>
+      </SOCAction>
+    </Misconfiguration>
+  </ClassificationGuidance>
+  <Response><IRForHumans>
+    <Phase name="Immediate Actions (0-30 minutes)">
+      <Action priority="1">Inspect the host for the full command line and file/parent context auditd did not capture.</Action>
+      <Action priority="2">If malicious indicators, isolate the host.</Action>
+    </Phase>
+    <Phase name="Containment and Eradication (hours)">
+      <Action>Isolate the host; capture the process tree and touched files on-host; open IR.</Action>
+      <Action>Reset credentials used; hunt peers.</Action>
+    </Phase>
+    <Phase name="Recovery and Hardening (days)">
+      <Action>Remediate the technique; expand auditd to collect execve args and file paths (see QualityChecks).</Action>
+    </Phase>
+  </IRForHumans></Response>
+  <QualityChecks>
+    <Check>AUDITD TELEMETRY GAP: process.args, process.command_line, process.parent.name and file.path are NOT collected in JCB auditd; Linux FIM is not deployed. RECOMMENDATION: enable the auditd execve/path rules and Linux FIM so argument- and file-based confirmation is available in-SIEM.</Check>
+    <Check>Tune known service/automation accounts via exceptions, not by disabling the rule.</Check>
+  </QualityChecks>
+  <ClosureCriteria><FalsePositiveClosure>
+    <Item>Process attributed to known automation/admin; documented.</Item>
+  </FalsePositiveClosure><TruePositiveClosure>
+    <Item>Host inspected and contained; technique eradicated; peers swept.</Item>
+  </TruePositiveClosure></ClosureCriteria>
+</Playbook>

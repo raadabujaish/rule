@@ -1,0 +1,67 @@
+{
+  "rule_id": "jcb-ach-maker-checker-self-approval",
+  "name": "ACH — Maker-Checker Self-Approval (Segregation-of-Duties Violation)",
+  "version": 1,
+  "enabled": true,
+  "interval": "1h",
+  "from": "now-3h",
+  "to": "now",
+  "description": "Attacker objective\nBypass dual-control (segregation of duties) by having the same person both request (maker) and approve (checker) a privileged change such as a role assignment or user creation — insider fraud / privilege escalation.\n\nAttack logic\nA maker-checker workflow requires two distinct identities. A record where the maker and the checker are the same principal is a segregation-of-duties violation, whether from a control misconfiguration or deliberate fraud.\n\nWhy this detection works\nThe application audit records both the maker and the checker identity on each change, so comparing them directly surfaces self-approval with no baseline required.\n\nFalse positives\nNone expected under a correctly configured SoD control; a legitimate emergency self-approval would still warrant review.\n\nTuning\nNone required; investigate every hit.\n\nRequired telemetry\nACH application audit (apps-*, type=ACHAPP): USERNAME_MAKER, USERNAME_CHECKER, ACTION_TASK, USERNAME_UPDATED.",
+  "tags": [
+    "JCB",
+    "Oracle",
+    "Phase3",
+    "Use Case: Threat Detection",
+    "Tactic: Privilege Escalation"
+  ],
+  "author": [
+    "raadabujaish"
+  ],
+  "threat": [
+    {
+      "framework": "MITRE ATT&CK",
+      "tactic": {
+        "id": "TA0004",
+        "name": "Privilege Escalation",
+        "reference": "https://attack.mitre.org/tactics/TA0004/"
+      },
+      "technique": [
+        {
+          "id": "T1078",
+          "name": "Valid Accounts",
+          "reference": "https://attack.mitre.org/techniques/T1078/"
+        }
+      ]
+    }
+  ],
+  "investigation_fields": {
+    "field_names": [
+      "USERNAME",
+      "ACTION_NAME",
+      "SQL_TEXT",
+      "type",
+      "TIMESTAMP"
+    ]
+  },
+  "related_integrations": [],
+  "required_fields": [],
+  "setup": "",
+  "note": "## Investigation guide\n1. The same user made and approved a role/user change — a control failure or deliberate fraud.\n2. Review ACTION_TASK and USERNAME_UPDATED (who was affected).\n3. Escalate to the fraud/risk function.",
+  "false_positives": [
+    "None expected under a correctly configured SoD control; a legitimate emergency self-approval would still warrant review."
+  ],
+  "references": [
+    "https://attack.mitre.org/techniques/T1078/"
+  ],
+  "risk_score": 73,
+  "risk_score_mapping": [],
+  "severity": "high",
+  "severity_mapping": [],
+  "output_index": "",
+  "max_signals": 100,
+  "exceptions_list": [],
+  "actions": [],
+  "type": "esql",
+  "language": "esql",
+  "query": "FROM apps-* METADATA _id, _index, _version | WHERE type == \"ACHAPP\" AND USERNAME_MAKER IS NOT NULL AND USERNAME_CHECKER IS NOT NULL AND USERNAME_MAKER == USERNAME_CHECKER | KEEP @timestamp, ACTION_TASK, USERNAME_MAKER, USERNAME_CHECKER, USERNAME_UPDATED"
+}

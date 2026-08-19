@@ -1,0 +1,80 @@
+{
+  "rule_id": "jcb-ad-kerberoasting-rc4",
+  "name": "AD — Kerberoasting: RC4 Service Ticket Requested",
+  "version": 1,
+  "enabled": true,
+  "interval": "30m",
+  "from": "now-1h",
+  "to": "now",
+  "description": "Attacker objective\nRequest RC4 (0x17) Kerberos service tickets for SPN-bearing accounts to crack their passwords offline (Kerberoasting).\n\nAttack logic\nIn an AES-enforced domain, RC4 service tickets are rare and belong to a few legacy accounts. An RC4 service-ticket request for any other account is an encryption downgrade characteristic of Kerberoasting tooling.\n\nWhy this detection works\nEvent 4769 records the ticket encryption type and the target service, so allowlisting known legacy RC4 accounts turns any other 0x17 service ticket into a high-signal event.\n\nFalse positives\nAdditional legacy RC4-only service accounts.\n\nTuning\nAdd verified legacy accounts to the exclusion; investigate any RC4 request for a modern account.\n\nRequired telemetry\nWindows Security 4769 (TicketEncryptionType, ServiceName, TargetUserName).",
+  "tags": [
+    "JCB",
+    "ActiveDirectory",
+    "Phase3",
+    "Use Case: Threat Detection",
+    "Tactic: Credential Access"
+  ],
+  "author": [
+    "raadabujaish"
+  ],
+  "threat": [
+    {
+      "framework": "MITRE ATT&CK",
+      "tactic": {
+        "id": "TA0006",
+        "name": "Credential Access",
+        "reference": "https://attack.mitre.org/tactics/TA0006/"
+      },
+      "technique": [
+        {
+          "id": "T1558",
+          "name": "Steal or Forge Kerberos Tickets",
+          "reference": "https://attack.mitre.org/techniques/T1558/",
+          "subtechnique": [
+            {
+              "id": "T1558.003",
+              "name": "Kerberoasting",
+              "reference": "https://attack.mitre.org/techniques/T1558/003/"
+            }
+          ]
+        }
+      ]
+    }
+  ],
+  "investigation_fields": {
+    "field_names": [
+      "winlog.event_data.SubjectUserName",
+      "winlog.event_data.TargetUserName",
+      "winlog.event_data.ServiceName",
+      "winlog.event_data.AttributeLDAPDisplayName",
+      "winlog.event_data.ObjectDN",
+      "winlog.computer_name",
+      "winlog.event_data.IpAddress"
+    ]
+  },
+  "related_integrations": [],
+  "required_fields": [],
+  "setup": "",
+  "note": "## Investigation guide\n1. TargetUserName = the requesting account; ServiceName = the SPN targeted.\n2. An RC4 downgrade for a non-legacy service is Kerberoasting; reset the SPN account password (long/complex) and hunt for offline cracking follow-on.",
+  "false_positives": [
+    "Additional legacy RC4-only service accounts."
+  ],
+  "references": [
+    "https://attack.mitre.org/techniques/T1558/",
+    "https://attack.mitre.org/techniques/T1558/003/"
+  ],
+  "risk_score": 73,
+  "risk_score_mapping": [],
+  "severity": "high",
+  "severity_mapping": [],
+  "output_index": "",
+  "max_signals": 100,
+  "exceptions_list": [],
+  "actions": [],
+  "type": "query",
+  "language": "kuery",
+  "index": [
+    "logs-system.security-*"
+  ],
+  "query": "event.code:\"4769\" and winlog.event_data.TicketEncryptionType:\"0x17\" and not winlog.event_data.ServiceName:\"rpap\" and not winlog.event_data.ServiceName:\"krbtgt\""
+}

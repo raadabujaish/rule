@@ -1,0 +1,152 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<Playbook xmlns="https://soc.example/playbooks" id="PB-WIN-010" name="Windows — Remote Service Execution via SMB Named Pipe (PsExec / Impacket) - SOC Playbook" version="1.0" status="Production" classification="TLP:AMBER">
+  <Metadata>
+    <Owner>JCB Detection Engineering (WatchWave)</Owner>
+    <LastUpdated>2026-08-14</LastUpdated>
+    <Severity default="High">High</Severity>
+    <Confidence default="High">High</Confidence>
+    <Category>Lateral Movement / Remote Services</Category>
+    <MitreAttack>
+      <Technique id="T1021.002" name="SMB/Windows Admin Shares"/>
+      <Tactic id="TA0008" name="Lateral Movement"/>
+    </MitreAttack>
+    <References>
+      <Reference title="MITRE ATT and CK" url="https://attack.mitre.org/techniques/T1021/"/>
+    </References>
+  </Metadata>
+  <ExecutiveSummary>
+    <Overview>A remote client accessed a service-execution named pipe (svcctl, PSEXESVC, atsvc) over SMB (5145), excluding scanners/machine accounts - the PsExec/Impacket remote-execution signature. Triage question: is this an attacker executing code remotely (lateral movement), or an approved remote-admin tool?</Overview>
+    <BusinessImpact>Remote service execution via SMB pipes is a primary lateral-movement technique; a confirmed instance usually means hands-on-keyboard movement.</BusinessImpact>
+  </ExecutiveSummary>
+  <Scope><Assets>
+    <AssetType>Windows servers and workstations (INTDOM domain)</AssetType>
+    <AssetType>Domain controllers</AssetType>
+  </Assets><LogSources>
+    <LogSource>Windows Security event log - logs-system.security-*</LogSource>
+  </LogSources></Scope>
+  <Prerequisites><TelemetryRequirements>
+    <Requirement>Windows Security + Sysmon + PowerShell logs via Elastic Agent (verified live). Sysmon event.code 1=process(command_line/parent populated), 11=file, 13/12=registry(registry.path populated); process.code_signature NOT collected.</Requirement>
+  </TelemetryRequirements><DetectionSignals>
+    <Signal><Name>Remote service pipe</Name><Details>5145 svcctl/PSEXESVC/atsvc, non-scanner non-machine account.</Details></Signal>
+  </DetectionSignals></Prerequisites>
+  <Inputs>
+    <Input name="$hostname" description="Target host."/>
+    <Input name="$username" description="Executing principal (SubjectUserName)."/>
+    <Input name="$source_ip" description="Source of the remote execution."/>
+  </Inputs>
+  <Triage><ImmediateCapture>
+    <Item>Host: $hostname</Item>
+  </ImmediateCapture><InitialAssessment>
+    <Rule>Weigh the evidence story, not any single fact - see ClassificationGuidance.</Rule>
+  </InitialAssessment></Triage>
+  <Investigation>
+    <Goal>Determine whether the remote service-pipe access is lateral movement or an approved remote-admin tool.</Goal>
+    <Workflow>
+      <Step order="1" name="Who executed remotely, from where, on how many hosts">
+        <Purpose>Fan-out across hosts via service pipes = lateral movement; a single admin action differs.</Purpose>
+        <Query platform="Elastic" language="ES|QL" id="INV-01-PSEXEC-WHO">
+          <![CDATA[
+FROM logs-system.security-*
+| WHERE event.code == "5145" AND winlog.event_data.RelativeTargetName IN ("svcctl","PSEXESVC","atsvc") AND @timestamp >= NOW() - 4 hours
+| EVAL src = COALESCE(TO_STRING(source.ip), "local")
+| STATS accesses = COUNT(*), hosts = COUNT_DISTINCT(host.name), host_list = VALUES(host.name), pipes = VALUES(winlog.event_data.RelativeTargetName) BY src, winlog.event_data.SubjectUserName
+| SORT accesses DESC
+| LIMIT 20
+          ]]>
+        </Query>
+        <ExpectedOutput>
+          <Field name="src"/>
+          <Field name="winlog.event_data.SubjectUserName"/>
+          <Field name="hosts"/>
+          <Field name="pipes"/>
+        </ExpectedOutput>
+        <AnalystNotes>One source hitting svcctl/PSEXESVC across many hosts = lateral movement. A management server doing this to a known set may be legitimate admin. PSEXESVC pipe specifically = PsExec.</AnalystNotes>
+      </Step>
+      <Step order="2" name="Was a service then installed / did the target run a shell">
+        <Purpose>A new service (7045) or shell process on the target right after confirms remote code execution.</Purpose>
+        <Query platform="Elastic" language="ES|QL" id="INV-02-PSEXEC-EXEC" optional="true">
+          <![CDATA[
+FROM logs-system.security-*,logs-system.system-*
+| WHERE host.name == "$hostname" AND event.code IN ("7045","4697","4688") AND @timestamp >= NOW() - 1 hours
+| KEEP @timestamp, event.code, winlog.event_data.ServiceName, winlog.event_data.ServiceFileName, process.name
+| SORT @timestamp DESC
+| LIMIT 10
+          ]]>
+        </Query>
+        <ExpectedOutput>
+          <Field name="event.code"/>
+          <Field name="winlog.event_data.ServiceName"/>
+          <Field name="process.name"/>
+        </ExpectedOutput>
+        <AnalystNotes>A PSEXESVC/random service installed on the target right after the pipe access confirms execution - escalate to IR.</AnalystNotes>
+      </Step>
+      <Step order="3" name="Finalize classification">
+        <DecisionTree>
+          <Node><Condition>Service-pipe access fan-out across hosts, or followed by service install/shell on the target.</Condition><Result>True Positive (Lateral Movement via PsExec/Impacket - IR)</Result></Node>
+          <Node><Condition>A documented remote-admin/management tool performing expected remote service actions.</Condition><Result>False Positive</Result></Node>
+          <Node><Condition>Single access by a plausible admin with no follow-on.</Condition><Result>Needs Escalation</Result></Node>
+        </DecisionTree>
+        <DocumentationChecklist>
+          <Item>Attach outputs of INV-01-PSEXEC-WHO, INV-02-PSEXEC-EXEC to the case.</Item>
+        </DocumentationChecklist>
+      </Step>
+    </Workflow>
+  </Investigation>
+  <ClassificationGuidance>
+    <FalsePositive>
+      <Definition>An approved remote-administration/management tool.</Definition>
+      <Indicators>
+        <Item>Known management host/account.</Item>
+        <Item>Expected target set.</Item>
+        <Item>No random service install.</Item>
+      </Indicators>
+      <SOCAction>
+        <Item>Confirm the tool; baseline; close as false_positive.</Item>
+      </SOCAction>
+    </FalsePositive>
+    <TruePositive>
+      <Definition>Attacker remote code execution / lateral movement.</Definition>
+      <Indicators>
+        <Item>Fan-out via svcctl/PSEXESVC.</Item>
+        <Item>Followed by service install/shell.</Item>
+        <Item>Non-admin source.</Item>
+      </Indicators>
+      <SOCAction>
+        <Item>Isolate source and target; open IR; scope reached hosts.</Item>
+        <Item>Reset credentials used; remove installed services.</Item>
+      </SOCAction>
+    </TruePositive>
+    <Misconfiguration>
+      <Definition>A misconfigured admin tool using PsExec broadly.</Definition>
+      <Indicators>
+        <Item>A known tool over-connecting.</Item>
+        <Item>Owner confirms benign.</Item>
+      </Indicators>
+      <SOCAction>
+        <Item>Baseline/restrict the tool; document.</Item>
+      </SOCAction>
+    </Misconfiguration>
+  </ClassificationGuidance>
+  <Response><IRForHumans>
+    <Phase name="Immediate Actions (0-30 minutes)">
+      <Action priority="1">Confirm the activity on the host; if malicious indicators, isolate the host.</Action>
+      <Action priority="2">Identify the responsible account/process and its origin.</Action>
+    </Phase>
+    <Phase name="Containment and Eradication (hours)">
+      <Action>Isolate the host; capture volatile evidence; hunt the same pattern across the estate.</Action>
+      <Action>Reset credentials used on the host if compromise is confirmed.</Action>
+    </Phase>
+    <Phase name="Recovery and Hardening (days)">
+      <Action>Remediate the root cause; add/verify EDR coverage; apply relevant hardening.</Action>
+    </Phase>
+  </IRForHumans></Response>
+  <QualityChecks>
+    <Check>Confirm the required telemetry (Sysmon/Security auditing) is present on the host.</Check>
+    <Check>Tune known-benign administrative sources via exceptions, not by disabling the rule.</Check>
+  </QualityChecks>
+  <ClosureCriteria><FalsePositiveClosure>
+    <Item>Activity confirmed benign/authorised and documented.</Item>
+  </FalsePositiveClosure><TruePositiveClosure>
+    <Item>Host contained and triaged; root cause eradicated; estate swept; findings recorded.</Item>
+  </TruePositiveClosure></ClosureCriteria>
+</Playbook>

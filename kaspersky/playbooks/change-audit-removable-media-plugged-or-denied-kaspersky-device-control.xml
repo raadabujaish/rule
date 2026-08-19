@@ -1,0 +1,146 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<Playbook xmlns="https://soc.example/playbooks" id="PB-KAS-009" name="Change Audit — Removable Media Plugged or Denied (Kaspersky Device Control) - SOC Playbook" version="1.0" status="Production" classification="TLP:AMBER">
+  <Metadata>
+    <Owner>JCB Detection Engineering (WatchWave)</Owner>
+    <LastUpdated>2026-08-14</LastUpdated>
+    <Severity default="Low">Low</Severity>
+    <Confidence default="Low">Low</Confidence>
+    <Category>Collection / Data from Removable Media</Category>
+    <MitreAttack>
+      <Technique id="T1052.001" name="Exfiltration over USB"/>
+      <Tactic id="TA0010" name="Exfiltration"/>
+    </MitreAttack>
+    <References>
+      <Reference title="MITRE ATT and CK" url="https://attack.mitre.org/techniques/T1052/"/>
+    </References>
+  </Metadata>
+  <ExecutiveSummary>
+    <Overview>Kaspersky Device Control logged a removable-storage device plugged or denied on an endpoint (reshaped from the noisy 6416 rule; storage-scoped, 12h suppressed). Triage: expected user USB use / a blocked device (benign), or unauthorised removable-media use for exfiltration/malware introduction?</Overview>
+    <BusinessImpact>Removable media is a vector for data exfiltration and malware introduction; device-control logs track it.</BusinessImpact>
+  </ExecutiveSummary>
+  <Scope><Assets>
+    <AssetType>Windows/Linux endpoints managed by Kaspersky</AssetType>
+    <AssetType>Kaspersky Security Center</AssetType>
+  </Assets><LogSources>
+    <LogSource>Kaspersky CEF via syslog - logs-cef.log-*</LogSource>
+  </LogSources></Scope>
+  <Prerequisites><TelemetryRequirements>
+    <Requirement>Kaspersky Security Center CEF (verified live). Fields: destination.domain (the affected ENDPOINT, not the collector), destination.user.name, cef.device.event_class_id, cef.name, message (malware name/path/SHA256), source.ip. Use destination.domain as the host of interest.</Requirement>
+  </TelemetryRequirements><DetectionSignals>
+    <Signal><Name>Removable Media Plugged or Denied (Kaspe</Name><Details>Kaspersky removable-storage plug/deny.</Details></Signal>
+  </DetectionSignals></Prerequisites>
+  <Inputs>
+    <Input name="$endpoint" description="Endpoint (destination.domain)."/>
+    <Input name="$user" description="Endpoint user (destination.user.name)."/>
+  </Inputs>
+  <Triage><ImmediateCapture>
+    <Item>$endpoint: $endpoint</Item>
+  </ImmediateCapture><InitialAssessment>
+    <Rule>Weigh the full evidence story per the ClassificationGuidance, not any single fact.</Rule>
+  </InitialAssessment></Triage>
+  <Investigation>
+    <Goal>Determine whether the removable-media event is expected user activity/a benign block or unauthorised use warranting review.</Goal>
+    <Workflow>
+      <Step order="1" name="Removable-media events on the endpoint">
+        <Purpose>Plugged (allowed) vs denied, the device, and the user separate routine use from policy violations.</Purpose>
+        <Query platform="Elastic" language="ES|QL" id="INV-01-USB-EVENTS">
+          <![CDATA[
+FROM logs-cef.log-*
+| WHERE cef.device.vendor == "KasperskyLab" AND cef.device.event_class_id IN ("GNRL_EV_DEVCTRL_DEV_PLUGGED","GNRL_EV_DEVCTRL_DEV_PLUG_DENIED") AND destination.domain == "$endpoint" AND @timestamp >= NOW() - 4 hours
+| STATS events = COUNT(*), classes = VALUES(cef.device.event_class_id), users = VALUES(destination.user.name), devices = VALUES(message)
+| LIMIT 1
+          ]]>
+        </Query>
+        <ExpectedOutput>
+          <Field name="events"/>
+          <Field name="classes"/>
+          <Field name="users"/>
+          <Field name="devices"/>
+        </ExpectedOutput>
+        <AnalystNotes>DENIED = device control blocked the device (policy working - usually benign). PLUGGED (allowed) on a sensitive host by an unexpected user may warrant a data-handling review. Read message for the device (Kingston DataTraveler etc.).</AnalystNotes>
+      </Step>
+      <Step order="2" name="Is this endpoint/user expected to use removable media">
+        <Purpose>Frequency and the host's role separate routine authorised use from anomalous use.</Purpose>
+        <Query platform="Elastic" language="ES|QL" id="INV-02-USB-CONTEXT" optional="true">
+          <![CDATA[
+FROM logs-cef.log-*
+| WHERE cef.device.vendor == "KasperskyLab" AND cef.device.event_class_id RLIKE "(?i).*devctrl.*" AND destination.domain == "$endpoint" AND @timestamp >= NOW() - 4 hours
+| STATS events = COUNT(*), denied = COUNT(CASE(cef.device.event_class_id == "GNRL_EV_DEVCTRL_DEV_PLUG_DENIED", 1, null))
+| LIMIT 1
+          ]]>
+        </Query>
+        <ExpectedOutput>
+          <Field name="events"/>
+          <Field name="denied"/>
+        </ExpectedOutput>
+        <AnalystNotes>Mostly-denied = device control enforcing policy (benign). Allowed use on a restricted host by an unexpected user is the review case.</AnalystNotes>
+      </Step>
+      <Step order="3" name="Finalize classification">
+        <DecisionTree>
+          <Node><Condition>Allowed removable-storage use on a restricted/sensitive host by an unexpected user (data-exfil risk).</Condition><Result>Needs Escalation (data-handling review) or True Positive if exfil confirmed</Result></Node>
+          <Node><Condition>A denied device (device control blocked it - policy working).</Condition><Result>Benign Activity</Result></Node>
+          <Node><Condition>Expected removable-media use by an authorised user per policy.</Condition><Result>False Positive / Benign Activity</Result></Node>
+          <Node><Condition>Repeated denied attempts to bypass device control.</Condition><Result>True Positive (Policy Circumvention Attempt - review user)</Result></Node>
+        </DecisionTree>
+        <DocumentationChecklist>
+          <Item>Attach outputs of INV-01-USB-EVENTS, INV-02-USB-CONTEXT to the case.</Item>
+        </DocumentationChecklist>
+      </Step>
+    </Workflow>
+  </Investigation>
+  <ClassificationGuidance>
+    <FalsePositive>
+      <Definition>Expected/authorised removable-media use, or a benign block.</Definition>
+      <Indicators>
+        <Item>Denied device (blocked).</Item>
+        <Item>Authorised user/host per policy.</Item>
+        <Item>Routine.</Item>
+      </Indicators>
+      <SOCAction>
+        <Item>Confirm policy compliance; close as benign_activity.</Item>
+      </SOCAction>
+    </FalsePositive>
+    <TruePositive>
+      <Definition>Unauthorised removable-media use or circumvention.</Definition>
+      <Indicators>
+        <Item>Allowed use on a restricted host by an unexpected user.</Item>
+        <Item>Repeated bypass attempts.</Item>
+        <Item>Exfil/malware context.</Item>
+      </Indicators>
+      <SOCAction>
+        <Item>Review the data handled; interview the user; tighten device-control policy; escalate if exfil.</Item>
+      </SOCAction>
+    </TruePositive>
+    <Misconfiguration>
+      <Definition>An over-permissive or mis-scoped device-control policy.</Definition>
+      <Indicators>
+        <Item>Policy allows media it should not.</Item>
+        <Item>Broad allow rules.</Item>
+      </Indicators>
+      <SOCAction>
+        <Item>Tighten the device-control policy; document.</Item>
+      </SOCAction>
+    </Misconfiguration>
+  </ClassificationGuidance>
+  <Response><IRForHumans>
+    <Phase name="Immediate Actions (0-30 minutes)">
+      <Action priority="1">Identify the endpoint/user and whether the media use is authorised.</Action>
+      <Action priority="2">For allowed use on sensitive hosts, review data handled.</Action>
+    </Phase>
+    <Phase name="Containment and Eradication (hours)">
+      <Action>Review data handled; interview the user; tighten device-control policy.</Action>
+    </Phase>
+    <Phase name="Recovery and Hardening (days)">
+      <Action>Enforce removable-media encryption/whitelisting; educate users.</Action>
+    </Phase>
+  </IRForHumans></Response>
+  <QualityChecks>
+    <Check>Kaspersky reports the endpoint in destination.domain (host.* is the collector pod) - always pivot on destination.domain.</Check>
+    <Check>The CEF pipeline occasionally mislabels events - see the pipeline health note in the phase-1 report.</Check>
+  </QualityChecks>
+  <ClosureCriteria><FalsePositiveClosure>
+    <Item>Authorised/benign use confirmed; documented.</Item>
+  </FalsePositiveClosure><TruePositiveClosure>
+    <Item>Data handling reviewed; policy tightened; user addressed.</Item>
+  </TruePositiveClosure></ClosureCriteria>
+</Playbook>

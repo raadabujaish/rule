@@ -1,0 +1,148 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<Playbook xmlns="https://soc.example/playbooks" id="PB-AD-011" name="AD — SPN Added by Non-Computer Principal (Kerberoast Setup) - SOC Playbook" version="1.0" status="Production" classification="TLP:AMBER">
+  <Metadata>
+    <Owner>JCB Detection Engineering (WatchWave)</Owner>
+    <LastUpdated>2026-08-14</LastUpdated>
+    <Severity default="Medium">Medium</Severity>
+    <Confidence default="Medium">Medium</Confidence>
+    <Category>Credential Access / Kerberoasting Setup</Category>
+    <MitreAttack>
+      <Technique id="T1558.003" name="Kerberoasting"/>
+      <Tactic id="TA0006" name="Credential Access"/>
+    </MitreAttack>
+    <References>
+      <Reference title="MITRE ATT and CK" url="https://attack.mitre.org/techniques/T1558/"/>
+    </References>
+  </Metadata>
+  <ExecutiveSummary>
+    <Overview>A servicePrincipalName was added (5136) by a non-computer, non-SYSTEM principal - attackers set an SPN on a user account they control so it becomes Kerberoastable. Triage question: legitimate service registration by an app admin, or an attacker priming a target for roasting?</Overview>
+    <BusinessImpact>Adding an SPN to a user account makes its (often weak) password crackable via a service ticket - a self-service route to a stronger credential.</BusinessImpact>
+  </ExecutiveSummary>
+  <Scope><Assets>
+    <AssetType>Active Directory domain controllers (INTDOM)</AssetType>
+    <AssetType>Windows member servers and workstations</AssetType>
+  </Assets><LogSources>
+    <LogSource>Windows Security event log - logs-system.security-*</LogSource>
+  </LogSources></Scope>
+  <Prerequisites><TelemetryRequirements>
+    <Requirement>Windows Security auditing shipped via Elastic Agent to logs-system.security-* (verified live).</Requirement>
+  </TelemetryRequirements><DetectionSignals>
+    <Signal><Name>SPN write by user</Name><Details>5136 AttributeLDAPDisplayName servicePrincipalName, subject not a machine account or SYSTEM.</Details></Signal>
+  </DetectionSignals></Prerequisites>
+  <Inputs>
+    <Input name="$username" description="Principal that added the SPN (SubjectUserName)."/>
+    <Input name="$target_user" description="Object the SPN was added to (ObjectDN)."/>
+  </Inputs>
+  <Triage><ImmediateCapture>
+    <Item>Actor: $username</Item>
+    <Item>SPN added to: $target_user</Item>
+  </ImmediateCapture><InitialAssessment>
+    <Rule>App/service registration by an app-admin onto a service account is routine; a user setting an SPN on itself or a peer user account is the roast-setup shape.</Rule>
+  </InitialAssessment></Triage>
+  <Investigation>
+    <Goal>Determine whether the SPN registration is legitimate service onboarding or Kerberoast preparation.</Goal>
+    <Workflow>
+      <Step order="1" name="Detail the SPN change and target object type">
+        <Purpose>Target being a normal USER account (not a service/computer) is the key roast-setup indicator.</Purpose>
+        <Query platform="Elastic" language="ES|QL" id="INV-01-SPN-CHANGE">
+          <![CDATA[
+FROM logs-system.security-*
+| WHERE event.code IN ("5136","5137") AND winlog.event_data.AttributeLDAPDisplayName == "servicePrincipalName" AND @timestamp >= NOW() - 4 hours
+| KEEP @timestamp, winlog.event_data.SubjectUserName, winlog.event_data.ObjectDN, winlog.event_data.AttributeValue, event.code
+| SORT @timestamp DESC
+| LIMIT 25
+          ]]>
+        </Query>
+        <ExpectedOutput>
+          <Field name="winlog.event_data.SubjectUserName"/>
+          <Field name="winlog.event_data.ObjectDN"/>
+          <Field name="winlog.event_data.AttributeValue"/>
+        </ExpectedOutput>
+        <AnalystNotes>ObjectDN in a service/OU=Service Accounts container = onboarding. ObjectDN being a regular user (especially the actor themselves) = roast setup.</AnalystNotes>
+      </Step>
+      <Step order="2" name="Was the SPN immediately roasted (RC4 4769)">
+        <Purpose>An SPN set and then a service ticket requested for it within minutes is the roast chain executing.</Purpose>
+        <Query platform="Elastic" language="ES|QL" id="INV-02-SPN-ROAST">
+          <![CDATA[
+FROM logs-system.security-*
+| WHERE event.code == "4769" AND winlog.event_data.ServiceName == "$target_user" AND @timestamp >= NOW() - 2 hours
+| EVAL src = COALESCE(TO_STRING(source.ip), "local")
+| STATS req = COUNT(*), enc = VALUES(winlog.event_data.TicketEncryptionType) BY winlog.event_data.TargetUserName, src
+| LIMIT 15
+          ]]>
+        </Query>
+        <ExpectedOutput>
+          <Field name="winlog.event_data.TargetUserName"/>
+          <Field name="enc"/>
+          <Field name="req"/>
+        </ExpectedOutput>
+        <AnalystNotes>A 4769 (especially RC4 0x17) for the just-SPN'd account confirms the roast chain. Empty result does not clear it - roasting may follow later.</AnalystNotes>
+      </Step>
+      <Step order="3" name="Finalize classification">
+        <DecisionTree>
+          <Node><Condition>INV-01 shows the SPN added to a normal user account (or self) by a non-admin, and/or INV-02 shows an immediate RC4 ticket request.</Condition><Result>True Positive (Kerberoast Setup - escalate, reset target)</Result></Node>
+          <Node><Condition>INV-01 shows registration onto a service account within a service-accounts container by an application/IAM admin.</Condition><Result>False Positive</Result></Node>
+          <Node><Condition>Non-standard actor but target is plausibly a service account and no roast followed - provenance unclear.</Condition><Result>Needs Escalation</Result></Node>
+        </DecisionTree>
+        <DocumentationChecklist>
+          <Item>Attach outputs of INV-01-SPN-CHANGE, INV-02-SPN-ROAST to the case.</Item>
+        </DocumentationChecklist>
+      </Step>
+    </Workflow>
+  </Investigation>
+  <ClassificationGuidance>
+    <FalsePositive>
+      <Definition>Legitimate service onboarding registering an SPN on a service account.</Definition>
+      <Indicators>
+        <Item>Actor is an app/IAM admin.</Item>
+        <Item>Target is a service account in the expected container.</Item>
+        <Item>Matches an onboarding change.</Item>
+      </Indicators>
+      <SOCAction>
+        <Item>Verify onboarding record; close as false_positive.</Item>
+      </SOCAction>
+    </FalsePositive>
+    <TruePositive>
+      <Definition>Attacker set an SPN on a controlled account to make it Kerberoastable.</Definition>
+      <Indicators>
+        <Item>SPN added to a regular user or the actor's own account.</Item>
+        <Item>Immediate RC4 service-ticket request for it.</Item>
+        <Item>Actor is not a service admin.</Item>
+      </Indicators>
+      <SOCAction>
+        <Item>Remove the SPN; reset the target account with a strong password.</Item>
+        <Item>Investigate the actor; open IR if roasted.</Item>
+      </SOCAction>
+    </TruePositive>
+    <Misconfiguration>
+      <Definition>An automation registering SPNs too broadly due to misconfiguration.</Definition>
+      <Indicators>
+        <Item>Provisioning account adding SPNs per a broken template.</Item>
+        <Item>Owner confirms benign.</Item>
+      </Indicators>
+      <SOCAction>
+        <Item>Fix the automation; remove stray SPNs.</Item>
+      </SOCAction>
+    </Misconfiguration>
+  </ClassificationGuidance>
+  <Response><IRForHumans>
+    <Phase name="Immediate Actions (0-30 minutes)">
+      <Action priority="1">Remove the SPN if illegitimate; reset the target account.</Action>
+      <Action priority="2">Identify the actor's session.</Action>
+    </Phase>
+    <Phase name="Containment and Eradication (hours)">
+      <Action>Check for roasting of the target and other accounts by the same actor.</Action>
+    </Phase>
+    <Phase name="Recovery and Hardening (days)">
+      <Action>Restrict who can write servicePrincipalName; monitor SPN additions.</Action>
+    </Phase>
+  </IRForHumans></Response>
+  <QualityChecks>
+    <Check>Rule excludes machine accounts and SYSTEM; AttributeValue holds the SPN string.</Check>
+  </QualityChecks>
+  <ClosureCriteria><FalsePositiveClosure>
+    <Item>Service onboarding confirmed; target is a proper service account.</Item>
+  </FalsePositiveClosure><TruePositiveClosure>
+    <Item>SPN removed, target reset, actor investigated.</Item>
+  </TruePositiveClosure></ClosureCriteria>
+</Playbook>

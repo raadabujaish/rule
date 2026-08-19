@@ -1,0 +1,194 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<Playbook xmlns="https://soc.example/playbooks" id="PB-JCB-NEW-5" name="QA - Windows Changes - SOC Playbook" version="2.1" status="Production" classification="TLP:AMBER">
+  <Metadata>
+    <Owner>JCB Detection Engineering (WatchWave)</Owner>
+    <LastUpdated>2026-08-19</LastUpdated>
+    <Severity default="Medium">Medium</Severity>
+    <Confidence default="Medium">Medium</Confidence>
+    <Category>Account Management — Account Manipulation</Category>
+    <MitreAttack>
+      <Technique id="T1098" name="Account Manipulation"/>
+      <Tactic id="TA0003" name="Persistence"/>
+    </MitreAttack>
+    <References>
+      <Reference title="MITRE ATT&amp;CK T1098 Account Manipulation" url="https://attack.mitre.org/techniques/T1098/"/>
+      <Reference title="Windows Security Event 4720 (account created)" url="https://learn.microsoft.com/windows/security/threat-protection/auditing/event-4720"/>
+      <Reference title="Windows Security Event 4732 (member added to security-enabled local group)" url="https://learn.microsoft.com/windows/security/threat-protection/auditing/event-4732"/>
+    </References>
+  </Metadata>
+  <ExecutiveSummary>
+    <Overview>A Windows account or group change was audited (account create/enable/disable/delete, password reset, account modification, or group-membership add/remove) and reached the SOC because the rule deliberately EXCLUDES the known administration path — it drops changes originating from 192.168.166.1 (the admin jump host) and machine-account activity (related.user ending in "$"). So what remains is human-driven account change from a NON-standard source, which is exactly the population worth reviewing. The triage question: is this authorised identity administration performed off the normal path, or an attacker manipulating accounts for persistence or privilege?</Overview>
+    <BusinessImpact>Account and group changes are the levers of persistence and privilege on the INTDOM domain — a backdoor account, a re-enabled dormant account, a password reset on a service account, or an add to a privileged group all grant durable access to banking systems. Changes made off the sanctioned administration path are the ones most likely to be unauthorised.</BusinessImpact>
+  </ExecutiveSummary>
+  <Scope>
+    <Assets>
+      <AssetType>Active Directory domain controllers (INTDOM)</AssetType>
+      <AssetType>Windows member servers and workstations where accounts/groups are managed</AssetType>
+    </Assets>
+    <LogSources>
+      <LogSource>Windows Security event log — logs-system.security-* (verified live: 4720/4722/4724/4725/4726/4738/4740/4732 etc. present; SubjectUserName, TargetUserName, related.user, host.name populated)</LogSource>
+    </LogSources>
+  </Scope>
+  <Prerequisites>
+    <TelemetryRequirements>
+      <Requirement>Windows "User Account Management" and "Security Group Management" auditing shipped via Elastic Agent to logs-system.security-* (verified live).</Requirement>
+      <Requirement>winlog.event_data.SubjectUserName (actor) and winlog.event_data.TargetUserName (affected account) populated on the change events (verified live). MemberName/MemberSid populate on group add/remove (4728/4729/4732/4733/4756/4757).</Requirement>
+      <Requirement>RULE SCOPE: the detection filters out source 192.168.166.1 (admin jump host) and machine accounts (related.user:*$). A change that legitimately comes from that jump host will NOT reach this alert — so an alert here means the change came from somewhere else, which is itself a triage signal.</Requirement>
+    </TelemetryRequirements>
+    <DetectionSignals>
+      <Signal><Name>Account/group change off the admin path</Name><Details>A 47xx account/group-management event for a real (non-machine) account, sourced from something other than the admin jump host. SubjectUserName is the actor; TargetUserName the affected account; host.name the DC/server.</Details></Signal>
+      <Signal><Name>Actor burst</Name><Details>One SubjectUserName performing many changes across distinct targets in a short window indicates mass account manipulation rather than a single administrative edit.</Details></Signal>
+    </DetectionSignals>
+  </Prerequisites>
+  <Inputs>
+    <Input name="$actor" description="The user who performed the change (winlog.event_data.SubjectUserName from the alert)."/>
+    <Input name="$target_user" description="The account that was changed (winlog.event_data.TargetUserName from the alert)."/>
+  </Inputs>
+  <Triage>
+    <ImmediateCapture>
+      <Item>Actor: $actor</Item>
+      <Item>Affected account: $target_user</Item>
+      <Item>Event code / operation from the alert (create, enable, disable, delete, pw-reset, group-add/remove) and the host.name</Item>
+    </ImmediateCapture>
+    <InitialAssessment>
+      <Rule>If $actor is a recognised IAM/helpdesk admin, only $target_user was affected, and the change maps to a ticket, lean authorised administration performed off the usual path (False Positive / authorised).</Rule>
+      <Rule>If $actor changed MANY accounts in the window (INV-02), the operation is a privilege grant (group-add), the target is a service/privileged account, or $actor is a normal user with no admin duty, escalate.</Rule>
+    </InitialAssessment>
+  </Triage>
+  <Investigation>
+    <Goal>Decide whether the account/group change to $target_user is authorised identity administration or attacker account-manipulation, and whether it is part of a broader burst by $actor.</Goal>
+    <Workflow>
+      <Step order="1" name="Reconstruct the change(s) to the target account">
+        <Purpose>Confirm what happened to $target_user, who did it, on which host, and when — the anchor facts for the change-record comparison.</Purpose>
+        <Query platform="Elastic" language="ES|QL" id="INV-01-TARGET-CHANGE">
+          <![CDATA[
+FROM logs-system.security-*
+| WHERE winlog.event_data.TargetUserName == "$target_user" AND event.code IN ("4720","4722","4723","4724","4725","4726","4738","4740","4767","4728","4729","4732","4733","4756","4757") AND @timestamp >= NOW() - 4 hours
+| EVAL op = CASE(event.code=="4720","create",event.code=="4722","enable",event.code=="4723","pw-change",event.code=="4724","pw-reset",event.code=="4725","disable",event.code=="4726","delete",event.code=="4738","account-change",event.code=="4740","lockout",event.code=="4767","unlock",event.code=="4728","group-add-global",event.code=="4729","group-rem-global",event.code=="4732","group-add-local",event.code=="4733","group-rem-local",event.code=="4756","group-add-univ",event.code=="4757","group-rem-univ",event.code)
+| STATS events = COUNT(*), first_seen = MIN(@timestamp), last_seen = MAX(@timestamp), actors = VALUES(winlog.event_data.SubjectUserName), dcs = VALUES(host.name) BY op
+| SORT events DESC
+| LIMIT 25
+          ]]>
+        </Query>
+        <ExpectedOutput>
+          <Field name="op"/>
+          <Field name="actors"/>
+          <Field name="dcs"/>
+        </ExpectedOutput>
+        <AnalystNotes>A single change by a recognised admin identity is routine. Multiple actors touching one account, a group-add (privilege grant), or a create/enable of a previously-unknown account is the higher-risk case. Record first_seen/last_seen to align with the actor-burst window in INV-02.</AnalystNotes>
+      </Step>
+      <Step order="2" name="Profile the actor's account-management activity">
+        <Purpose>Distinguish a one-off administrative edit from mass account manipulation: how many distinct accounts $actor created, enabled, disabled, deleted, reset, or re-grouped in the window.</Purpose>
+        <Query platform="Elastic" language="ES|QL" id="INV-02-ACTOR-BURST">
+          <![CDATA[
+FROM logs-system.security-*
+| WHERE winlog.event_data.SubjectUserName == "$actor" AND event.code IN ("4720","4722","4723","4724","4725","4726","4738","4740","4767","4728","4729","4732","4733","4756","4757") AND @timestamp >= NOW() - 4 hours
+| EVAL op = CASE(event.code IN ("4728","4732","4756"),"group-add",event.code IN ("4729","4733","4757"),"group-remove",event.code=="4720","create",event.code=="4722","enable",event.code=="4725","disable",event.code=="4726","delete",event.code=="4724","pw-reset",event.code=="4738","account-change",event.code)
+| STATS n = COUNT(*), targets = COUNT_DISTINCT(winlog.event_data.TargetUserName), sample_targets = VALUES(winlog.event_data.TargetUserName) BY op
+| SORT n DESC
+| LIMIT 25
+          ]]>
+        </Query>
+        <ExpectedOutput>
+          <Field name="op"/>
+          <Field name="n"/>
+          <Field name="targets"/>
+        </ExpectedOutput>
+        <AnalystNotes>A single change with no other operations is consistent with routine administration. Many changes across many distinct targets = mass manipulation. Note especially create-then-group-add sequences (attacker provisioning a privileged backdoor) or many password resets (account takeover preparation).</AnalystNotes>
+      </Step>
+      <Step order="3" name="Establish where the actor is operating from">
+        <Purpose>Because the rule excludes the admin jump host, the actor reached the DC/server from somewhere else — identify that origin to judge whether it is a legitimate admin workstation or an unexpected/compromised host.</Purpose>
+        <Query platform="Elastic" language="ES|QL" id="INV-03-ACTOR-ORIGIN">
+          <![CDATA[
+FROM logs-system.security-*
+| WHERE winlog.event_data.TargetUserName == "$actor" AND event.code IN ("4624","4625","4672") AND @timestamp >= NOW() - 4 hours
+| EVAL ev = CASE(event.code=="4624","logon-success",event.code=="4625","logon-fail",event.code=="4672","special-privs",event.code)
+| STATS n = COUNT(*), sources = VALUES(source.ip), hosts = VALUES(host.name), logon_types = VALUES(winlog.event_data.LogonType) BY ev
+| SORT n DESC
+| LIMIT 20
+          ]]>
+        </Query>
+        <ExpectedOutput>
+          <Field name="ev"/>
+          <Field name="sources"/>
+          <Field name="hosts"/>
+        </ExpectedOutput>
+        <AnalystNotes>Interactive/RDP logon from a recognised admin workstation aligns with authorised (if off-path) administration. Logon from an unexpected host, a workstation that should not administer AD, or a source with prior failed logons (4625) before the change points to a compromised identity making the change. 4672 (special privileges) confirms the session held admin rights.</AnalystNotes>
+      </Step>
+    </Workflow>
+  </Investigation>
+  <DecisionTree>
+    <Node><Condition>INV-02 shows $actor changed MANY distinct accounts in the window, OR INV-01 shows a create/enable of an unknown account or a privileged group-add, AND $actor is not an authorised administrator or acted outside a change window.</Condition><Result>True Positive (Attacker account manipulation for persistence/privilege — escalate to IR)</Result></Node>
+    <Node><Condition>INV-03 shows $actor logged on from an unexpected/compromised host (or after failed logons) before making the change, and no ticket authorises it.</Condition><Result>True Positive (Change made from a compromised identity/host — escalate to IR)</Result></Node>
+    <Node><Condition>INV-01 shows a single change by a recognised IAM/helpdesk admin, INV-02 shows no burst, INV-03 shows a legitimate admin workstation, and the change maps to an approved ticket.</Condition><Result>False Positive (Authorised identity administration performed off the usual admin path)</Result></Node>
+    <Node><Condition>A provisioning/automation account performed the change per a known job whose scope matches INV-02 (e.g. scheduled group sync) but not via the excluded jump host.</Condition><Result>Misconfiguration (Automation running off-path — correct routing/scope, do not blanket-exception)</Result></Node>
+    <Node><Condition>Actor authorisation or the business justification for the change cannot be established from IAM/CMDB/ticketing, or breadth is borderline.</Condition><Result>Needs Escalation</Result></Node>
+  </DecisionTree>
+  <ClassificationGuidance>
+    <FalsePositive>
+      <Definition>An authorised administrator or approved automation made the account/group change as part of documented identity administration — the authorising context (ticket, admin role, legitimate origin) must be shown, not inferred from the account name alone.</Definition>
+      <Indicators>
+        <Item>$actor is a known IAM/helpdesk/admin identity acting within its role (INV-01).</Item>
+        <Item>No actor burst (INV-02) and a legitimate admin workstation origin (INV-03).</Item>
+        <Item>Change maps to an approved ticket / documented lifecycle event.</Item>
+      </Indicators>
+      <SOCAction>
+        <Item>Verify the ticket and the actor's authorisation; close as false_positive.</Item>
+        <Item>If a legitimate admin routinely administers off the jump host, either route them onto the sanctioned path or scope an exception for that actor/source — do not disable the rule.</Item>
+      </SOCAction>
+    </FalsePositive>
+    <TruePositive>
+      <Definition>An adversary manipulated accounts/groups for persistence or privilege — creating a backdoor account, re-enabling a dormant one, resetting a service-account password, or adding to a privileged group.</Definition>
+      <Indicators>
+        <Item>Actor burst across distinct accounts, or create-then-group-add provisioning (INV-01/INV-02).</Item>
+        <Item>Change made from an unexpected/compromised host or after failed logons (INV-03).</Item>
+        <Item>Actor is a normal/non-admin account, or the target is a privileged/service account.</Item>
+      </Indicators>
+      <SOCAction>
+        <Item>Open an incident; treat $actor as potentially compromised; reverse unauthorised changes (remove backdoor account / group membership; force credential reset).</Item>
+        <Item>Reconstruct the actor's full recent activity (logons, privilege changes, data access); contain the source host.</Item>
+      </SOCAction>
+    </TruePositive>
+    <Misconfiguration>
+      <Definition>An internal automation or admin script made account/group changes off the sanctioned path — operationally driven, not malicious.</Definition>
+      <Indicators>
+        <Item>A service/automation account performed the changes on a schedule from a non-jump-host system.</Item>
+        <Item>Breadth matches a known sync/provisioning job.</Item>
+      </Indicators>
+      <SOCAction>
+        <Item>Engage the automation owner to route it via the sanctioned path or correct its scope; document.</Item>
+        <Item>Track under identity hygiene; keep the rule enabled.</Item>
+      </SOCAction>
+    </Misconfiguration>
+  </ClassificationGuidance>
+  <Response>
+    <IRForHumans>
+      <Phase name="Immediate Actions (0-30 minutes)">
+        <Action priority="1">Confirm scope from INV-02: one change or a burst? A burst is an active-incident trigger.</Action>
+        <Action priority="2">Verify $actor's authorisation and origin (INV-03) with IAM; if unauthorised or from a compromised host, disable $actor and revoke its sessions.</Action>
+      </Phase>
+      <Phase name="Containment and Eradication (hours)">
+        <Action>Reverse unauthorised changes (remove backdoor accounts / group memberships; reset affected credentials); reconstruct the actor's full activity timeline.</Action>
+        <Action>Contain the source host; hunt the same account-manipulation pattern across the estate.</Action>
+      </Phase>
+      <Phase name="Recovery and Hardening (days)">
+        <Action>Review who holds account/group-management rights and enforce administration only via the sanctioned jump host; tighten delegation to IAM roles.</Action>
+        <Action>Alert on off-path privileged-group adds and actor bursts as a higher-severity correlated analytic.</Action>
+      </Phase>
+    </IRForHumans>
+  </Response>
+  <Escalation>
+    <Trigger>Actor-burst changes, create-then-group-add provisioning, a privileged/service-account target, change from a compromised host, or unverifiable actor authorisation.</Trigger>
+    <To>SOC L2 / IR</To>
+  </Escalation>
+  <Closure>
+    <FalsePositiveClosure>
+      <Item>Ticket and actor authorisation verified; origin confirmed as a legitimate admin workstation.</Item>
+      <Item>No actor burst; change consistent with documented identity administration.</Item>
+    </FalsePositiveClosure>
+    <TruePositiveClosure>
+      <Item>Unauthorised changes reversed; $actor contained and full activity timeline reconstructed.</Item>
+      <Item>Source host contained; estate swept; evidence preserved; incident documented.</Item>
+    </TruePositiveClosure>
+  </Closure>
+</Playbook>

@@ -1,0 +1,194 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<Playbook xmlns="https://soc.example/playbooks" id="PB-JCB-NEW-1" name="AD - Account Deleted/Disabled - SOC Playbook" version="2.1" status="Production" classification="TLP:AMBER">
+  <Metadata>
+    <Owner>JCB Detection Engineering (WatchWave)</Owner>
+    <LastUpdated>2026-08-19</LastUpdated>
+    <Severity default="Medium">Medium</Severity>
+    <Confidence default="Medium">Medium</Confidence>
+    <Category>Account Management / Account Access Removal</Category>
+    <MitreAttack>
+      <Technique id="T1531" name="Account Access Removal"/>
+      <Tactic id="TA0040" name="Impact"/>
+    </MitreAttack>
+    <References>
+      <Reference title="MITRE ATT&amp;CK T1531 Account Access Removal" url="https://attack.mitre.org/techniques/T1531/"/>
+      <Reference title="Windows Security Event 4726 (account deleted)" url="https://learn.microsoft.com/windows/security/threat-protection/auditing/event-4726"/>
+      <Reference title="Windows Security Event 4725 (account disabled)" url="https://learn.microsoft.com/windows/security/threat-protection/auditing/event-4725"/>
+    </References>
+  </Metadata>
+  <ExecutiveSummary>
+    <Overview>A Windows Active Directory account was deleted (event 4726) or disabled (event 4725). The triage question: is this routine identity lifecycle (HR-driven offboarding, a scripted cleanup) performed by an authorised administrator, or an attacker removing access - cleaning up a throwaway account they created, or disabling a legitimate account to deny availability and slow response?</Overview>
+    <BusinessImpact>Deleting or disabling accounts can break access removal audit trails, destroy the primary evidence of an attacker-created identity, or lock defenders and business users out of banking systems during an incident. A burst of deletions/disables by one actor is a hallmark of destructive impact or anti-forensics.</BusinessImpact>
+  </ExecutiveSummary>
+  <Scope>
+    <Assets>
+      <AssetType>Active Directory domain controllers (INTDOM)</AssetType>
+      <AssetType>Windows member servers where local accounts are managed</AssetType>
+    </Assets>
+    <LogSources>
+      <LogSource>Windows Security event log - logs-system.security-* (verified live: 4726 and 4725 present with Subject/Target fields populated)</LogSource>
+    </LogSources>
+  </Scope>
+  <Prerequisites>
+    <TelemetryRequirements>
+      <Requirement>Windows Security "User Account Management" auditing shipped via Elastic Agent to logs-system.security-* (verified live).</Requirement>
+      <Requirement>winlog.event_data.SubjectUserName (actor) and winlog.event_data.TargetUserName (affected account) populated on 4725/4726 (verified live).</Requirement>
+    </TelemetryRequirements>
+    <DetectionSignals>
+      <Signal><Name>Account removed</Name><Details>event.code 4726 (deleted) or 4725 (disabled) on a domain controller. SubjectUserName is the actor; TargetUserName is the account removed; TargetDomainName is the account domain.</Details></Signal>
+      <Signal><Name>Actor burst</Name><Details>One SubjectUserName performing many delete/disable operations in a short window indicates mass account tampering rather than a single lifecycle change.</Details></Signal>
+    </DetectionSignals>
+  </Prerequisites>
+  <Inputs>
+    <Input name="$target_user" description="The account that was deleted or disabled (winlog.event_data.TargetUserName from the alert)."/>
+    <Input name="$actor" description="The user who performed the deletion/disable (winlog.event_data.SubjectUserName from the alert)."/>
+  </Inputs>
+  <Triage>
+    <ImmediateCapture>
+      <Item>Affected account: $target_user</Item>
+      <Item>Actor: $actor</Item>
+      <Item>Event code from the alert (4726 = deleted, 4725 = disabled) and the DC (host.name)</Item>
+    </ImmediateCapture>
+    <InitialAssessment>
+      <Rule>If $actor is a known IAM/helpdesk offboarding identity AND only $target_user was affected AND the account maps to a departing employee, lean routine lifecycle (False Positive / authorised).</Rule>
+      <Rule>If $actor deleted/disabled MANY accounts in the window, or $target_user was created within the same window (throwaway cleanup), or the actor is a normal user/service account with no admin duty, escalate.</Rule>
+    </InitialAssessment>
+  </Triage>
+  <Investigation>
+    <Goal>Decide whether the deletion/disabling of $target_user was an authorised lifecycle action or attacker-driven access removal / anti-forensics, and whether it is part of a broader burst.</Goal>
+    <Workflow>
+      <Step order="1" name="Reconstruct the delete/disable of the target account">
+        <Purpose>Confirm what happened to $target_user, who did it, on which DC, and when - the anchor facts for the case.</Purpose>
+        <Query platform="Elastic" language="ES|QL" id="INV-01-REMOVAL-EVENT">
+          <![CDATA[
+FROM logs-system.security-*
+| WHERE event.code IN ("4725","4726") AND winlog.event_data.TargetUserName == "$target_user" AND @timestamp >= NOW() - 4 hours
+| EVAL action = CASE(event.code=="4726","account-deleted", event.code=="4725","account-disabled", event.code)
+| STATS events = COUNT(*), first_seen = MIN(@timestamp), last_seen = MAX(@timestamp), actors = VALUES(winlog.event_data.SubjectUserName), dcs = VALUES(host.name), domains = VALUES(winlog.event_data.TargetDomainName) BY action
+| SORT events DESC
+| LIMIT 20
+          ]]>
+        </Query>
+        <ExpectedOutput>
+          <Field name="action"/>
+          <Field name="actors"/>
+          <Field name="dcs"/>
+        </ExpectedOutput>
+        <AnalystNotes>A single action by a recognised admin identity is routine. Multiple actors, or an actor that is not an administrator, is suspicious. Record first_seen/last_seen to align with the actor-burst window in INV-02.</AnalystNotes>
+      </Step>
+      <Step order="2" name="Profile the actor's account-management activity">
+        <Purpose>Distinguish a one-off lifecycle change from mass account tampering: how many accounts did $actor create, enable, disable, delete, reset, or re-group in the window.</Purpose>
+        <Query platform="Elastic" language="ES|QL" id="INV-02-ACTOR-BURST">
+          <![CDATA[
+FROM logs-system.security-*
+| WHERE winlog.event_data.SubjectUserName == "$actor" AND event.code IN ("4720","4722","4723","4724","4725","4726","4738","4740","4767","4728","4732","4756") AND @timestamp >= NOW() - 4 hours
+| EVAL op = CASE(event.code=="4720","create",event.code=="4722","enable",event.code=="4725","disable",event.code=="4726","delete",event.code=="4740","lockout",event.code=="4767","unlock",event.code=="4728","group-add-global",event.code=="4732","group-add-local",event.code=="4756","group-add-universal",event.code=="4724","pw-reset",event.code=="4738","account-change",event.code)
+| STATS n = COUNT(*), targets = COUNT_DISTINCT(winlog.event_data.TargetUserName), sample_targets = VALUES(winlog.event_data.TargetUserName) BY op
+| SORT n DESC
+| LIMIT 25
+          ]]>
+        </Query>
+        <ExpectedOutput>
+          <Field name="op"/>
+          <Field name="n"/>
+          <Field name="targets"/>
+        </ExpectedOutput>
+        <AnalystNotes>A single delete/disable with no other operations is consistent with offboarding. Many deletes/disables across many distinct targets = destructive impact or clean-up. Note if the SAME actor recently created accounts (4720) then deleted them - attacker throwaway lifecycle.</AnalystNotes>
+      </Step>
+      <Step order="3" name="Establish whether the removed account was live and legitimate">
+        <Purpose>Separate the removal of a real, actively-used identity (business/availability impact) from the removal of a freshly-created throwaway (attacker anti-forensics).</Purpose>
+        <Query platform="Elastic" language="ES|QL" id="INV-03-TARGET-LIFECYCLE">
+          <![CDATA[
+FROM logs-system.security-*
+| WHERE @timestamp >= NOW() - 4 hours AND winlog.event_data.TargetUserName == "$target_user" AND event.code IN ("4624","4625","4720","4722","4738")
+| EVAL ev = CASE(event.code=="4624","logon-success",event.code=="4625","logon-fail",event.code=="4720","created",event.code=="4722","enabled",event.code=="4738","changed",event.code)
+| STATS n = COUNT(*), first_seen = MIN(@timestamp), last_seen = MAX(@timestamp), src_ips = VALUES(source.ip), hosts = VALUES(host.name) BY ev
+| SORT last_seen DESC
+| LIMIT 20
+          ]]>
+        </Query>
+        <ExpectedOutput>
+          <Field name="ev"/>
+          <Field name="last_seen"/>
+          <Field name="src_ips"/>
+        </ExpectedOutput>
+        <AnalystNotes>A "created" event for $target_user inside the same 4h window as its deletion is a strong attacker signal (create-use-delete). Recent logon-success from unusual source IPs before deletion suggests the account was used maliciously and then removed to hide it. No prior activity at all = likely a stale/never-used account being cleaned up.</AnalystNotes>
+      </Step>
+    </Workflow>
+  </Investigation>
+  <DecisionTree>
+    <Node><Condition>INV-02 shows $actor deleted/disabled MANY distinct accounts in the window, OR INV-03 shows $target_user was created (4720) inside the same window it was removed (create-use-delete), OR the actor is not an authorised administrator.</Condition><Result>True Positive (Attacker access removal / anti-forensics - escalate to IR)</Result></Node>
+    <Node><Condition>INV-03 shows $target_user had recent logon-success from unusual source IPs shortly before removal AND the actor cannot be tied to an approved offboarding process.</Condition><Result>True Positive (Compromised account removed to hide activity - escalate to IR)</Result></Node>
+    <Node><Condition>INV-01 shows a single removal by a recognised IAM/helpdesk identity, INV-02 shows no burst, and $target_user maps to a documented leaver / approved offboarding or decommission ticket.</Condition><Result>False Positive (Authorised identity-lifecycle change)</Result></Node>
+    <Node><Condition>A scripted/scheduled cleanup job (stale-account reaper) with a change record performed the disable/delete and INV-02 breadth matches its documented scope.</Condition><Result>Misconfiguration (Over-broad or mistimed automation - fix the job, do not exception blindly)</Result></Node>
+    <Node><Condition>Actor identity or the business justification for $target_user cannot be established from IAM/CMDB/ticketing, or breadth is borderline.</Condition><Result>Needs Escalation</Result></Node>
+  </DecisionTree>
+  <ClassificationGuidance>
+    <FalsePositive>
+      <Definition>An authorised administrator or approved automation removed the account as part of documented identity lifecycle (offboarding, decommission, stale-account cleanup).</Definition>
+      <Indicators>
+        <Item>$actor is a known IAM/helpdesk/admin identity acting within its role.</Item>
+        <Item>A single account affected, matching an HR leaver or decommission ticket.</Item>
+        <Item>No actor burst in INV-02 and no create-use-delete pattern in INV-03.</Item>
+      </Indicators>
+      <SOCAction>
+        <Item>Confirm the offboarding/decommission ticket and the actor's authorisation.</Item>
+        <Item>Close as false_positive; if a recurring automation account trips the rule, propose a scoped exception for that actor only.</Item>
+      </SOCAction>
+    </FalsePositive>
+    <TruePositive>
+      <Definition>An adversary removed access - deleting a throwaway identity to erase evidence, or disabling/deleting a real account to deny availability or slow response.</Definition>
+      <Indicators>
+        <Item>Actor burst: many delete/disable operations across distinct accounts (INV-02).</Item>
+        <Item>Create-use-delete on $target_user within one window (INV-03).</Item>
+        <Item>Actor is not an authorised administrator, or acted outside change windows.</Item>
+      </Indicators>
+      <SOCAction>
+        <Item>Open an incident; treat the actor identity ($actor) as potentially compromised.</Item>
+        <Item>Preserve DC security logs and, where possible, AD object tombstones/backups for the removed accounts.</Item>
+        <Item>Hunt for what the actor did before the removals (logons, privilege changes, data access).</Item>
+      </SOCAction>
+    </TruePositive>
+    <Misconfiguration>
+      <Definition>An internal automation or admin script removed accounts too broadly or at the wrong time - operationally driven, not malicious.</Definition>
+      <Indicators>
+        <Item>A service/automation account performed the operations on a schedule.</Item>
+        <Item>Breadth matches a known cleanup job but caught accounts it should not have.</Item>
+      </Indicators>
+      <SOCAction>
+        <Item>Engage the automation owner to correct scope/timing; restore any wrongly-removed accounts.</Item>
+        <Item>Track under identity-hygiene; do not blanket-exception the rule.</Item>
+      </SOCAction>
+    </Misconfiguration>
+  </ClassificationGuidance>
+  <Response>
+    <IRForHumans>
+      <Phase name="Immediate Actions (0-30 minutes)">
+        <Action priority="1">Confirm scope from INV-02: is this one removal or a burst? A burst is an active-incident trigger.</Action>
+        <Action priority="2">Verify $actor's authorisation with IAM; if unauthorised, disable $actor and revoke its sessions.</Action>
+      </Phase>
+      <Phase name="Containment and Eradication (hours)">
+        <Action>For attacker-driven removals, reconstruct the actor's full activity timeline and contain the source host/identity.</Action>
+        <Action>Restore legitimately-needed accounts from AD tombstone/backup; document what was removed.</Action>
+      </Phase>
+      <Phase name="Recovery and Hardening (days)">
+        <Action>Review who holds account-deletion rights; tighten delegation to IAM roles only.</Action>
+        <Action>Alert on bursts of 4725/4726 by a single actor as a higher-severity correlated analytic.</Action>
+      </Phase>
+    </IRForHumans>
+  </Response>
+  <Escalation>
+    <Trigger>Actor-burst removals, create-use-delete pattern, removal of a privileged/active account, or unverifiable actor authorisation.</Trigger>
+    <To>SOC L2 / IR</To>
+  </Escalation>
+  <Closure>
+    <FalsePositiveClosure>
+      <Item>Offboarding/decommission ticket verified and matches $target_user and $actor.</Item>
+      <Item>No actor burst and no create-use-delete pattern.</Item>
+    </FalsePositiveClosure>
+    <TruePositiveClosure>
+      <Item>Actor identity contained and full activity timeline reconstructed.</Item>
+      <Item>Wrongly-removed accounts restored; evidence preserved; incident documented.</Item>
+    </TruePositiveClosure>
+  </Closure>
+</Playbook>

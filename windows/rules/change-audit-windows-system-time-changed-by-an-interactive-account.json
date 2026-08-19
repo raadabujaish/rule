@@ -1,0 +1,85 @@
+{
+  "rule_id": "jcb-chg-win-system-time",
+  "name": "Change Audit — Windows System Time Changed by an Interactive Account",
+  "version": 1,
+  "enabled": true,
+  "interval": "1h",
+  "from": "now-70m",
+  "to": "now",
+  "description": "Change objective\nAudit changes to a host's system clock by an interactive account — time changes can disrupt logging/forensics, Kerberos, and time-sensitive banking processes.\n\nDetection logic\nWindows logs system-time changes with the acting subject. Routine changes are made by the time service under machine/SYSTEM context; a change made under an interactive (human) account is a notable, auditable configuration change.\n\nWhy this works\nExcluding machine/service accounts isolates human-driven time changes, which are rare and worth reviewing.\n\nFalse positives\nA legitimate administrator correcting the clock; a VM time-sync event under an unusual account.\n\nTuning\nAllowlist verified time-administration; correlate with the host's time-sync configuration.\n\nRequired telemetry\nWindows Security: event.code 4616; winlog.event_data.SubjectUserName, PreviousTime, NewTime.",
+  "tags": [
+    "JCB",
+    "Change-Monitoring",
+    "Use Case: Change Audit",
+    "Phase3",
+    "Tactic: Defense Evasion"
+  ],
+  "author": [
+    "raadabujaish"
+  ],
+  "license": "",
+  "threat": [
+    {
+      "framework": "MITRE ATT&CK",
+      "tactic": {
+        "id": "TA0005",
+        "name": "Defense Evasion",
+        "reference": "https://attack.mitre.org/tactics/TA0005/"
+      },
+      "technique": [
+        {
+          "id": "T1070",
+          "name": "Indicator Removal",
+          "reference": "https://attack.mitre.org/techniques/T1070/",
+          "subtechnique": [
+            {
+              "id": "T1070.006",
+              "name": "Timestomp",
+              "reference": "https://attack.mitre.org/techniques/T1070/006/"
+            }
+          ]
+        }
+      ]
+    }
+  ],
+  "investigation_fields": {
+    "field_names": [
+      "host.name",
+      "user.name",
+      "user.domain",
+      "process.name",
+      "process.executable",
+      "process.command_line",
+      "process.args",
+      "process.parent.name",
+      "process.parent.executable",
+      "event.code",
+      "event.action",
+      "winlog.event_data.SubjectUserName"
+    ]
+  },
+  "related_integrations": [],
+  "required_fields": [],
+  "setup": "",
+  "note": "## Investigation / audit guide\n1. SubjectUserName = who changed the clock; PreviousTime/NewTime show the shift.\n2. A large or unexplained time change under a human account can indicate anti-forensics or misconfiguration — verify.",
+  "false_positives": [
+    "A legitimate administrator correcting the clock; a VM time-sync event under an unusual account."
+  ],
+  "references": [
+    "https://attack.mitre.org/techniques/T1070/006/"
+  ],
+  "risk_score": 30,
+  "risk_score_mapping": [],
+  "severity": "low",
+  "severity_mapping": [],
+  "output_index": "",
+  "max_signals": 100,
+  "exceptions_list": [],
+  "actions": [],
+  "type": "query",
+  "language": "kuery",
+  "index": [
+    "logs-system.security-*"
+  ],
+  "query": "event.code:\"4616\" and not winlog.event_data.SubjectUserName:(\"*$\" or \"LOCAL SERVICE\" or \"SYSTEM\" or \"NETWORK SERVICE\")"
+}

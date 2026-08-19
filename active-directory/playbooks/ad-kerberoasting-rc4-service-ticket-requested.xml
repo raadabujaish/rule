@@ -1,0 +1,174 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<Playbook xmlns="https://soc.example/playbooks" id="PB-AD-005" name="AD — Kerberoasting: RC4 Service Ticket Requested - SOC Playbook" version="1.0" status="Production" classification="TLP:AMBER">
+  <Metadata>
+    <Owner>JCB Detection Engineering (WatchWave)</Owner>
+    <LastUpdated>2026-08-14</LastUpdated>
+    <Severity default="High">High</Severity>
+    <Confidence default="Medium">Medium</Confidence>
+    <Category>Credential Access / Steal or Forge Kerberos Tickets</Category>
+    <MitreAttack>
+      <Technique id="T1558.003" name="Kerberoasting"/>
+      <Tactic id="TA0006" name="Credential Access"/>
+    </MitreAttack>
+    <References>
+      <Reference title="MITRE ATT and CK" url="https://attack.mitre.org/techniques/T1558/"/>
+    </References>
+  </Metadata>
+  <ExecutiveSummary>
+    <Overview>A service ticket (4769) was requested with RC4 encryption (0x17) for a service account - RC4 tickets are the offline-crackable material Kerberoasting harvests. Triage question: is the REQUESTING principal sweeping many SPNs, or is this a legacy RC4-only service doing business as usual?</Overview>
+    <BusinessImpact>Cracked service-account passwords in a bank frequently carry high privilege (DB engines, middleware) and rarely rotate - one cracked SPN can be domain-wide impact.</BusinessImpact>
+  </ExecutiveSummary>
+  <Scope><Assets>
+    <AssetType>Active Directory domain controllers (INTDOM)</AssetType>
+    <AssetType>Windows member servers and workstations</AssetType>
+  </Assets><LogSources>
+    <LogSource>Windows Security event log - logs-system.security-*</LogSource>
+  </LogSources></Scope>
+  <Prerequisites><TelemetryRequirements>
+    <Requirement>Windows Security auditing shipped via Elastic Agent to logs-system.security-* (verified live).</Requirement>
+  </TelemetryRequirements><DetectionSignals>
+    <Signal><Name>RC4 service ticket</Name><Details>4769 TicketEncryptionType 0x17; krbtgt and known-noise SPN rpap excluded by the rule.</Details></Signal>
+  </DetectionSignals></Prerequisites>
+  <Inputs>
+    <Input name="$username" description="Requesting account (4769 TargetUserName = the requestor)."/>
+    <Input name="$source_ip" description="Requesting client IP."/>
+    <Input name="$service" description="Requested service/SPN account (ServiceName)."/>
+  </Inputs>
+  <Triage><ImmediateCapture>
+    <Item>Requestor: $username from $source_ip</Item>
+    <Item>Service requested: $service</Item>
+  </ImmediateCapture><InitialAssessment>
+    <Rule>Sweep = many distinct SPNs from one requestor in minutes: treat as active Kerberoasting.</Rule>
+    <Rule>Single SPN + legacy RC4-only service + fixed source: verify legacy status before closing.</Rule>
+  </InitialAssessment></Triage>
+  <Investigation>
+    <Goal>Determine whether $username/$source_ip harvested crackable service tickets (sweep) or a legacy RC4 dependency fired the rule.</Goal>
+    <Workflow>
+      <Step order="1" name="Requestor SPN breadth in the last hour">
+        <Purpose>Kerberoasting tools request many SPNs quickly; business clients request the handful they use.</Purpose>
+        <Query platform="Elastic" language="ES|QL" id="INV-01-ROAST-BREADTH">
+          <![CDATA[
+FROM logs-system.security-*
+| WHERE event.code == "4769" AND winlog.event_data.TargetUserName == "$username" AND @timestamp >= NOW() - 1 hours
+| STATS req = COUNT(*), spns = COUNT_DISTINCT(winlog.event_data.ServiceName), enc_types = VALUES(winlog.event_data.TicketEncryptionType), services = VALUES(winlog.event_data.ServiceName)
+| LIMIT 1
+          ]]>
+        </Query>
+        <ExpectedOutput>
+          <Field name="req"/>
+          <Field name="spns"/>
+          <Field name="enc_types"/>
+        </ExpectedOutput>
+        <AnalystNotes>spns &gt;= 5 in an hour with RC4 = sweep. spns 1-2 = normal usage or a single-target roast (check INV-02).</AnalystNotes>
+      </Step>
+      <Step order="2" name="Who else requested this SPN with RC4 today">
+        <Purpose>If ONLY legacy clients ever request this SPN in RC4, the account is RC4-limited (misconfig). If a new requestor appeared, that requestor is the suspect.</Purpose>
+        <Query platform="Elastic" language="ES|QL" id="INV-02-ROAST-SPN">
+          <![CDATA[
+FROM logs-system.security-*
+| WHERE event.code == "4769" AND winlog.event_data.ServiceName == "$service" AND winlog.event_data.TicketEncryptionType == "0x17" AND @timestamp >= NOW() - 4 hours
+| EVAL src = COALESCE(TO_STRING(source.ip), "local")
+| STATS req = COUNT(*), first_seen = MIN(@timestamp) BY winlog.event_data.TargetUserName, src
+| SORT req DESC
+| LIMIT 20
+          ]]>
+        </Query>
+        <ExpectedOutput>
+          <Field name="winlog.event_data.TargetUserName"/>
+          <Field name="src"/>
+          <Field name="req"/>
+        </ExpectedOutput>
+        <AnalystNotes>A stable small set of requestors = the service's normal clients negotiating RC4 (account lacks AES keys). A one-off new requestor = roast attempt against this SPN.</AnalystNotes>
+      </Step>
+      <Step order="3" name="Requestor's own session origin">
+        <Purpose>Roasts are run from a foothold - identify where the requesting account is logged on from.</Purpose>
+        <Query platform="Elastic" language="ES|QL" id="INV-03-ROAST-ORIGIN">
+          <![CDATA[
+FROM logs-system.security-*
+| WHERE event.code == "4624" AND winlog.event_data.TargetUserName == "$username" AND @timestamp >= NOW() - 4 hours
+| EVAL src = COALESCE(TO_STRING(source.ip), "local")
+| STATS logons = COUNT(*), types = VALUES(winlog.event_data.LogonType), hosts = VALUES(host.name) BY src
+| SORT logons DESC
+| LIMIT 10
+          ]]>
+        </Query>
+        <ExpectedOutput>
+          <Field name="src"/>
+          <Field name="hosts"/>
+          <Field name="types"/>
+        </ExpectedOutput>
+        <AnalystNotes>Requestor active on an unusual workstation/server for that user, or via network logon from a non-standard host, raises suspicion of a compromised session being used to roast.</AnalystNotes>
+      </Step>
+      <Step order="4" name="Finalize classification">
+        <DecisionTree>
+          <Node><Condition>INV-01 shows the requestor pulling RC4 tickets for 5+ distinct SPNs within the hour.</Condition><Result>True Positive (Kerberoasting Sweep - escalate, reset exposed service accounts)</Result></Node>
+          <Node><Condition>INV-02 shows a NEW requestor for this SPN while its historical RC4 clients are a fixed legacy set.</Condition><Result>True Positive (Targeted Roast Attempt)</Result></Node>
+          <Node><Condition>INV-02 shows only the same stable legacy clients requesting this SPN in RC4 (service account has no AES keys).</Condition><Result>Misconfiguration</Result></Node>
+          <Node><Condition>Requestor is a vulnerability scanner or audit tool with a documented schedule.</Condition><Result>False Positive</Result></Node>
+          <Node><Condition>Breadth is 2-4 SPNs with no clear legacy explanation and requestor origin is unclear.</Condition><Result>Needs Escalation</Result></Node>
+        </DecisionTree>
+        <DocumentationChecklist>
+          <Item>Attach outputs of INV-01-ROAST-BREADTH, INV-02-ROAST-SPN, INV-03-ROAST-ORIGIN to the case.</Item>
+        </DocumentationChecklist>
+      </Step>
+    </Workflow>
+  </Investigation>
+  <ClassificationGuidance>
+    <FalsePositive>
+      <Definition>Approved assessment tooling enumerating SPN tickets on schedule.</Definition>
+      <Indicators>
+        <Item>Requestor is the documented scanner account/host (e.g. Nessus service).</Item>
+        <Item>Schedule matches.</Item>
+      </Indicators>
+      <SOCAction>
+        <Item>Verify with vulnerability management; close as false_positive.</Item>
+      </SOCAction>
+    </FalsePositive>
+    <TruePositive>
+      <Definition>Harvesting of crackable RC4 service tickets - single target or sweep.</Definition>
+      <Indicators>
+        <Item>Many SPNs from one requestor in minutes.</Item>
+        <Item>New requestor for an SPN with an otherwise stable client set.</Item>
+        <Item>Requestor session originates from an unusual host.</Item>
+      </Indicators>
+      <SOCAction>
+        <Item>Reset passwords of all SPN accounts requested (long/random or gMSA).</Item>
+        <Item>Contain the requesting session/host.</Item>
+        <Item>Review those service accounts' privileges.</Item>
+      </SOCAction>
+    </TruePositive>
+    <Misconfiguration>
+      <Definition>A service account limited to RC4 (no AES keys / msDS-SupportedEncryptionTypes not set) makes every normal client request look roast-like.</Definition>
+      <Indicators>
+        <Item>Same legacy client set requesting for months.</Item>
+        <Item>Account created long ago; password predates AES.</Item>
+      </Indicators>
+      <SOCAction>
+        <Item>Rotate the service-account password to (re)generate AES keys and set supported-encryption-types.</Item>
+        <Item>Re-test; alerts for that SPN should disappear.</Item>
+      </SOCAction>
+    </Misconfiguration>
+  </ClassificationGuidance>
+  <Response><IRForHumans>
+    <Phase name="Immediate Actions (0-30 minutes)">
+      <Action priority="1">Identify the requestor's live session and owner.</Action>
+    </Phase>
+    <Phase name="Containment and Eradication (hours)">
+      <Action>Reset exposed SPN account passwords; prefer gMSA migration.</Action>
+      <Action>Contain the roasting host.</Action>
+    </Phase>
+    <Phase name="Recovery and Hardening (days)">
+      <Action>Eliminate RC4-only service accounts (rotate passwords to mint AES keys).</Action>
+      <Action>Alert on new SPN additions (companion rule PB-AD-012).</Action>
+    </Phase>
+  </IRForHumans></Response>
+  <QualityChecks>
+    <Check>Rule already excludes krbtgt and the rpap noise SPN - verify rpap is still expected.</Check>
+    <Check>Cracking is offline; absence of immediate misuse does not clear a sweep.</Check>
+  </QualityChecks>
+  <ClosureCriteria><FalsePositiveClosure>
+    <Item>Legacy RC4 client set documented; remediation plan for AES recorded.</Item>
+  </FalsePositiveClosure><TruePositiveClosure>
+    <Item>All requested SPN accounts rotated; roasting host contained and examined.</Item>
+  </TruePositiveClosure></ClosureCriteria>
+</Playbook>

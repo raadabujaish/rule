@@ -1,0 +1,151 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<Playbook xmlns="https://soc.example/playbooks" id="PB-WIN-019" name="Windows — Inhibit System Recovery (Ransomware Precursor) - SOC Playbook" version="1.0" status="Production" classification="TLP:AMBER">
+  <Metadata>
+    <Owner>JCB Detection Engineering (WatchWave)</Owner>
+    <LastUpdated>2026-08-14</LastUpdated>
+    <Severity default="High">High</Severity>
+    <Confidence default="High">High</Confidence>
+    <Category>Impact / Inhibit System Recovery</Category>
+    <MitreAttack>
+      <Technique id="T1490" name="Inhibit System Recovery"/>
+      <Tactic id="TA0040" name="Impact"/>
+    </MitreAttack>
+    <References>
+      <Reference title="MITRE ATT and CK" url="https://attack.mitre.org/techniques/T1490/"/>
+    </References>
+  </Metadata>
+  <ExecutiveSummary>
+    <Overview>A command to delete backups/shadow copies ran - vssadmin/wmic shadowcopy delete, bcdedit recovery disable, or wbadmin delete. This is the step ransomware takes just before encryption. Triage question: is this a ransomware precursor, or a legitimate admin/backup maintenance action?</Overview>
+    <BusinessImpact>Deleting shadow copies removes the ability to recover from encryption - almost always immediately precedes ransomware detonation.</BusinessImpact>
+  </ExecutiveSummary>
+  <Scope><Assets>
+    <AssetType>Windows servers and workstations (INTDOM domain)</AssetType>
+    <AssetType>Domain controllers</AssetType>
+  </Assets><LogSources>
+    <LogSource>Sysmon process + Windows Security 4688 - logs-windows.sysmon_operational-*,logs-system.security-*</LogSource>
+  </LogSources></Scope>
+  <Prerequisites><TelemetryRequirements>
+    <Requirement>Windows Security + Sysmon + PowerShell logs via Elastic Agent (verified live). Sysmon event.code 1=process(command_line/parent populated), 11=file, 13/12=registry(registry.path populated); process.code_signature NOT collected.</Requirement>
+  </TelemetryRequirements><DetectionSignals>
+    <Signal><Name>Recovery inhibition</Name><Details>vssadmin/wmic shadowcopy delete, bcdedit recoveryenabled no, wbadmin delete.</Details></Signal>
+  </DetectionSignals></Prerequisites>
+  <Inputs>
+    <Input name="$hostname" description="Host where recovery was inhibited."/>
+    <Input name="$username" description="Account (user.name)."/>
+  </Inputs>
+  <Triage><ImmediateCapture>
+    <Item>Host: $hostname</Item>
+  </ImmediateCapture><InitialAssessment>
+    <Rule>Weigh the evidence story, not any single fact - see ClassificationGuidance.</Rule>
+  </InitialAssessment></Triage>
+  <Investigation>
+    <Goal>Determine whether the recovery-inhibition command is a ransomware precursor or sanctioned maintenance.</Goal>
+    <Workflow>
+      <Step order="1" name="Confirm the recovery-inhibition command">
+        <Purpose>The exact command distinguishes shadow-copy deletion (ransomware tell) from routine bcdedit.</Purpose>
+        <Query platform="Elastic" language="ES|QL" id="INV-01-RECOVERY-CMD">
+          <![CDATA[
+FROM logs-windows.sysmon_operational-*,logs-system.security-*
+| WHERE event.code IN ("1","4688") AND host.name == "$hostname" AND process.command_line IS NOT NULL AND @timestamp >= NOW() - 4 hours
+| EVAL cl = TO_LOWER(process.command_line)
+| WHERE (cl LIKE "*vssadmin*" AND cl LIKE "*delete*shadow*") OR (cl LIKE "*wmic*" AND cl LIKE "*shadowcopy*delete*") OR (cl LIKE "*bcdedit*" AND cl LIKE "*recoveryenabled*no*") OR (cl LIKE "*wbadmin*" AND cl LIKE "*delete*") OR cl LIKE "*wbadmin delete catalog*"
+| KEEP @timestamp, process.name, process.parent.name, user.name, process.command_line
+| SORT @timestamp DESC
+| LIMIT 20
+          ]]>
+        </Query>
+        <ExpectedOutput>
+          <Field name="process.name"/>
+          <Field name="process.parent.name"/>
+          <Field name="user.name"/>
+          <Field name="process.command_line"/>
+        </ExpectedOutput>
+        <AnalystNotes>vssadmin delete shadows /all is the classic ransomware precursor. Note the account - SYSTEM/normal-user context by a non-backup process is malicious. A backup admin rotating catalogs under a window is benign.</AnalystNotes>
+      </Step>
+      <Step order="2" name="Signs of mass file changes on the host (encryption underway)">
+        <Purpose>Shadow deletion followed by mass file writes is active ransomware - this is time-critical.</Purpose>
+        <Query platform="Elastic" language="ES|QL" id="INV-02-RECOVERY-ENCRYPT" optional="true">
+          <![CDATA[
+FROM logs-windows.sysmon_operational-*
+| WHERE event.code == "11" AND host.name == "$hostname" AND @timestamp >= NOW() - 30 minutes
+| STATS files = COUNT(*), procs = VALUES(process.name), exts = VALUES(file.extension)
+| LIMIT 1
+          ]]>
+        </Query>
+        <ExpectedOutput>
+          <Field name="files"/>
+          <Field name="procs"/>
+          <Field name="exts"/>
+        </ExpectedOutput>
+        <AnalystNotes>A spike of file creations with unusual/uniform extensions right after shadow deletion means encryption is underway - isolate the host IMMEDIATELY.</AnalystNotes>
+      </Step>
+      <Step order="3" name="Finalize classification">
+        <DecisionTree>
+          <Node><Condition>Shadow-copy deletion by a non-backup process/account, especially with mass file changes following.</Condition><Result>True Positive (Ransomware - ISOLATE HOST NOW, activate ransomware IR)</Result></Node>
+          <Node><Condition>A documented backup admin rotating shadow storage/catalogs under a maintenance window.</Condition><Result>False Positive</Result></Node>
+          <Node><Condition>Recovery-inhibition command with unclear context and no encryption signs yet.</Condition><Result>Needs Escalation (treat as high-priority)</Result></Node>
+        </DecisionTree>
+        <DocumentationChecklist>
+          <Item>Attach outputs of INV-01-RECOVERY-CMD, INV-02-RECOVERY-ENCRYPT to the case.</Item>
+        </DocumentationChecklist>
+      </Step>
+    </Workflow>
+  </Investigation>
+  <ClassificationGuidance>
+    <FalsePositive>
+      <Definition>Sanctioned backup/storage maintenance.</Definition>
+      <Indicators>
+        <Item>Known backup admin/process.</Item>
+        <Item>Maintenance window.</Item>
+        <Item>No mass file changes.</Item>
+      </Indicators>
+      <SOCAction>
+        <Item>Verify the maintenance; close as false_positive.</Item>
+      </SOCAction>
+    </FalsePositive>
+    <TruePositive>
+      <Definition>A ransomware precursor (recovery inhibition before encryption).</Definition>
+      <Indicators>
+        <Item>Shadow deletion by a non-backup context.</Item>
+        <Item>Mass file changes following.</Item>
+        <Item>Ransom-note/lock file creation.</Item>
+      </Indicators>
+      <SOCAction>
+        <Item>ISOLATE the host immediately; activate ransomware IR.</Item>
+        <Item>Identify patient zero and scope; protect backups; hunt the same command on other hosts.</Item>
+      </SOCAction>
+    </TruePositive>
+    <Misconfiguration>
+      <Definition>A software installer/uninstaller clearing shadows.</Definition>
+      <Indicators>
+        <Item>A known installer.</Item>
+        <Item>Isolated, self-explained.</Item>
+      </Indicators>
+      <SOCAction>
+        <Item>Confirm the installer; document.</Item>
+      </SOCAction>
+    </Misconfiguration>
+  </ClassificationGuidance>
+  <Response><IRForHumans>
+    <Phase name="Immediate Actions (0-30 minutes)">
+      <Action priority="1">Confirm the activity on the host; if malicious indicators, isolate the host.</Action>
+      <Action priority="2">Identify the responsible account/process and its origin.</Action>
+    </Phase>
+    <Phase name="Containment and Eradication (hours)">
+      <Action>Isolate the host; capture volatile evidence; hunt the same pattern across the estate.</Action>
+      <Action>Reset credentials used on the host if compromise is confirmed.</Action>
+    </Phase>
+    <Phase name="Recovery and Hardening (days)">
+      <Action>Remediate the root cause; add/verify EDR coverage; apply relevant hardening.</Action>
+    </Phase>
+  </IRForHumans></Response>
+  <QualityChecks>
+    <Check>Confirm the required telemetry (Sysmon/Security auditing) is present on the host.</Check>
+    <Check>Tune known-benign administrative sources via exceptions, not by disabling the rule.</Check>
+  </QualityChecks>
+  <ClosureCriteria><FalsePositiveClosure>
+    <Item>Activity confirmed benign/authorised and documented.</Item>
+  </FalsePositiveClosure><TruePositiveClosure>
+    <Item>Host contained and triaged; root cause eradicated; estate swept; findings recorded.</Item>
+  </TruePositiveClosure></ClosureCriteria>
+</Playbook>

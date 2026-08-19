@@ -1,0 +1,84 @@
+{
+  "rule_id": "jcb-swift-server-system-change",
+  "name": "SWIFT — Unauthorized System Change on the SWIFT Payment Server",
+  "version": 1,
+  "enabled": true,
+  "interval": "1h",
+  "from": "now-90m",
+  "to": "now",
+  "description": "Attacker objective\nTamper with the SWIFT payment server — install a service, create/enable a local account, add an account to a privileged group, or clear the security log — to establish persistence or fraudulently manipulate international payments.\n\nAttack logic\nThe SWIFT application server is a Tier-0 payment asset; any OS-level change to it (new service, new/enabled account, privileged-group addition, log clearing) outside authorized change control is high-risk and can enable payment fraud or hide it.\n\nWhy this detection works\nScoping Windows service-installation, account-management, privileged-group and log-clear events to the SWIFT server surfaces integrity-affecting changes to the payment platform; these events are rare or zero on this server in normal operation.\n\nFalse positives\nAn authorized, change-controlled maintenance action on the SWIFT server.\n\nTuning\nAllowlist scheduled maintenance windows and sanctioned admin service/account changes; correlate every hit with the change-management record; treat any log-clear (1102) or new privileged account as an incident until proven authorized.\n\nRequired telemetry\nWindows Security on the SWIFT server: event.code 4697/7045 (service), 4720/4722/4738 (account), 4728/4732/4756 (group), 1102 (log cleared), host.name.",
+  "tags": [
+    "JCB",
+    "BankingSystem",
+    "Change-Control",
+    "Phase3",
+    "Tactic: Persistence",
+    "Use Case: Threat Detection"
+  ],
+  "author": [
+    "raadabujaish"
+  ],
+  "license": "",
+  "threat": [
+    {
+      "framework": "MITRE ATT&CK",
+      "tactic": {
+        "id": "TA0003",
+        "name": "Persistence",
+        "reference": "https://attack.mitre.org/tactics/TA0003/"
+      },
+      "technique": [
+        {
+          "id": "T1543",
+          "name": "Create or Modify System Process",
+          "reference": "https://attack.mitre.org/techniques/T1543/",
+          "subtechnique": [
+            {
+              "id": "T1543.003",
+              "name": "Windows Service",
+              "reference": "https://attack.mitre.org/techniques/T1543/003/"
+            }
+          ]
+        }
+      ]
+    }
+  ],
+  "investigation_fields": {
+    "field_names": [
+      "host.name",
+      "winlog.event_data.SubjectUserName",
+      "winlog.event_data.SubjectDomainName",
+      "winlog.event_data.TargetUserName",
+      "winlog.event_data.TargetDomainName",
+      "winlog.event_data.MemberName",
+      "winlog.event_data.MemberSid",
+      "event.code",
+      "event.action",
+      "message"
+    ]
+  },
+  "related_integrations": [],
+  "required_fields": [],
+  "setup": "",
+  "note": "## Investigation guide\n1. host.name = the SWIFT server; event.code identifies the change (service install, account, group, log clear).\n2. Verify against change management; a new service, new privileged account, or a cleared log on the SWIFT server is a suspected integrity/fraud event — escalate immediately.\n3. Correlate with the acting account's logons and with any SWIFT application activity in the same window.",
+  "false_positives": [
+    "An authorized, change-controlled maintenance action on the SWIFT server."
+  ],
+  "references": [
+    "https://attack.mitre.org/techniques/T1543/003/"
+  ],
+  "risk_score": 90,
+  "risk_score_mapping": [],
+  "severity": "critical",
+  "severity_mapping": [],
+  "output_index": "",
+  "max_signals": 100,
+  "exceptions_list": [],
+  "actions": [],
+  "type": "query",
+  "language": "kuery",
+  "index": [
+    "logs-system.security-*"
+  ],
+  "query": "(host.name:*sw-app* or host.name:saa* or host.name:*swift*) and event.code:(\"4697\" or \"7045\" or \"1102\" or \"4720\" or \"4722\" or \"4732\" or \"4756\" or \"4728\" or \"4738\" or \"4719\" or \"4739\" or \"4964\")"
+}

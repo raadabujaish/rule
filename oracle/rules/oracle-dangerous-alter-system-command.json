@@ -1,0 +1,79 @@
+{
+  "rule_id": "jcb-ora-alter-system-dangerous",
+  "name": "Oracle — Dangerous ALTER SYSTEM Command",
+  "version": 1,
+  "enabled": true,
+  "interval": "1h",
+  "from": "now-3h",
+  "to": "now",
+  "description": "Attacker objective\nWeaken database security (disable auditing, change security parameters) or cause disruption via ALTER SYSTEM.\n\nAttack logic\nRoutine ALTER SYSTEM in production is almost entirely session management (for example KILL SESSION) performed by a known service account. An ALTER SYSTEM that is not a kill-session, or is issued by a different principal, may be a parameter or security change.\n\nWhy this detection works\nUnified Audit records the full statement text and the acting principal, so filtering out the routine session-management pattern isolates security-relevant ALTER SYSTEM.\n\nFalse positives\nA DBA legitimately changing a parameter during a maintenance window.\n\nTuning\nReview SQL_TEXT; allowlist specific approved parameter changes or maintenance windows.\n\nRequired telemetry\nOracle Unified Audit shipped as apps-* (ACTION_NAME, USERNAME, SQL_TEXT.keyword).",
+  "tags": [
+    "JCB",
+    "Oracle",
+    "Phase3",
+    "Use Case: Threat Detection",
+    "Tactic: Defense Evasion"
+  ],
+  "author": [
+    "raadabujaish"
+  ],
+  "threat": [
+    {
+      "framework": "MITRE ATT&CK",
+      "tactic": {
+        "id": "TA0005",
+        "name": "Defense Evasion",
+        "reference": "https://attack.mitre.org/tactics/TA0005/"
+      },
+      "technique": [
+        {
+          "id": "T1562",
+          "name": "Impair Defenses",
+          "reference": "https://attack.mitre.org/techniques/T1562/",
+          "subtechnique": [
+            {
+              "id": "T1562.001",
+              "name": "Disable or Modify Tools",
+              "reference": "https://attack.mitre.org/techniques/T1562/001/"
+            }
+          ]
+        }
+      ]
+    }
+  ],
+  "investigation_fields": {
+    "field_names": [
+      "USERNAME",
+      "ACTION_NAME",
+      "SQL_TEXT",
+      "type",
+      "TIMESTAMP"
+    ]
+  },
+  "related_integrations": [],
+  "required_fields": [],
+  "setup": "",
+  "note": "## Investigation guide\n1. SQL_TEXT shows the exact command; a non-session-management ALTER SYSTEM (e.g. SET audit_trail, security params) is the concern.\n2. Confirm change control and DBA authorisation.",
+  "false_positives": [
+    "A DBA legitimately changing a parameter during a maintenance window."
+  ],
+  "references": [
+    "https://attack.mitre.org/techniques/T1562/",
+    "https://attack.mitre.org/techniques/T1562/001/"
+  ],
+  "risk_score": 73,
+  "risk_score_mapping": [],
+  "severity": "high",
+  "severity_mapping": [],
+  "output_index": "",
+  "max_signals": 100,
+  "exceptions_list": [],
+  "actions": [],
+  "type": "query",
+  "language": "kuery",
+  "index": [
+    "apps-*",
+    "-apps-*-2025"
+  ],
+  "query": "ACTION_NAME.keyword:\"ALTER SYSTEM\" and (not USERNAME.keyword:\"INH_LIFE\" or (not SQL_TEXT.keyword:*KILL* and not SQL_TEXT.keyword:*kill*))"
+}

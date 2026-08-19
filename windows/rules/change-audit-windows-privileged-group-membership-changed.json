@@ -1,0 +1,77 @@
+{
+  "rule_id": "jcb-chg-win-privileged-group",
+  "name": "Change Audit — Windows Privileged Group Membership Changed",
+  "version": 1,
+  "enabled": true,
+  "interval": "1h",
+  "from": "now-70m",
+  "to": "now",
+  "description": "Change objective\nAudit additions to and removals from privileged Windows/AD groups (Administrators, Domain/Enterprise Admins, built-in Operators, Remote Desktop/Management Users, DnsAdmins) for change control.\n\nDetection logic\nMembership changes to privileged groups grant or remove significant access. This rule surfaces every add/remove on the privileged group set as an auditable change, complementing the attack-focused Tier-0 addition detection.\n\nWhy this works\nGroup-membership event codes record the group, the member and the actor; scoping to privileged group names/SIDs yields a high-value, low-volume change-audit trail.\n\nFalse positives\nAuthorized administration and role rotation.\n\nTuning\nCorrelate each change with a change/access-request ticket; additions are higher priority than removals; the attack-focused Tier-0 rule handles the critical additions at high severity.\n\nRequired telemetry\nWindows Security: event.code 4728/4732/4756 (add), 4729/4733/4757 (remove); TargetUserName/TargetSid (group), MemberName/MemberSid (member), SubjectUserName (actor).",
+  "tags": [
+    "JCB",
+    "Change-Monitoring",
+    "Use Case: Change Audit",
+    "Phase3",
+    "Tactic: Persistence"
+  ],
+  "author": [
+    "raadabujaish"
+  ],
+  "license": "",
+  "threat": [
+    {
+      "framework": "MITRE ATT&CK",
+      "tactic": {
+        "id": "TA0003",
+        "name": "Persistence",
+        "reference": "https://attack.mitre.org/tactics/TA0003/"
+      },
+      "technique": [
+        {
+          "id": "T1098",
+          "name": "Account Manipulation",
+          "reference": "https://attack.mitre.org/techniques/T1098/"
+        }
+      ]
+    }
+  ],
+  "investigation_fields": {
+    "field_names": [
+      "host.name",
+      "winlog.event_data.SubjectUserName",
+      "winlog.event_data.SubjectDomainName",
+      "winlog.event_data.TargetUserName",
+      "winlog.event_data.TargetDomainName",
+      "winlog.event_data.MemberName",
+      "winlog.event_data.MemberSid",
+      "event.code",
+      "event.action",
+      "message",
+      "winlog.event_data.TargetSid"
+    ]
+  },
+  "related_integrations": [],
+  "required_fields": [],
+  "setup": "",
+  "note": "## Investigation / audit guide\n1. event.code = add/remove; TargetUserName = the privileged group; MemberName = who was added/removed; SubjectUserName = actor.\n2. Verify against an access-request/change ticket; correlate additions with the member's subsequent privileged activity.",
+  "false_positives": [
+    "Authorized administration and role rotation."
+  ],
+  "references": [
+    "https://attack.mitre.org/techniques/T1098/"
+  ],
+  "risk_score": 47,
+  "risk_score_mapping": [],
+  "severity": "medium",
+  "severity_mapping": [],
+  "output_index": "",
+  "max_signals": 100,
+  "exceptions_list": [],
+  "actions": [],
+  "type": "query",
+  "language": "kuery",
+  "index": [
+    "logs-system.security-*"
+  ],
+  "query": "event.code:(\"4728\" or \"4729\" or \"4732\" or \"4733\" or \"4756\" or \"4757\") and (winlog.event_data.TargetUserName:(*Admins or *Administrators or *Operators or \"Remote Desktop Users\" or \"Remote Management Users\" or DnsAdmins or \"Group Policy Creator Owners\") or winlog.event_data.TargetSid:(\"S-1-5-32-544\" or \"S-1-5-32-548\" or \"S-1-5-32-549\" or \"S-1-5-32-550\" or \"S-1-5-32-551\" or \"S-1-5-32-552\"))"
+}

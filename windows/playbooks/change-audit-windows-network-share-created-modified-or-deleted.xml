@@ -1,0 +1,150 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<Playbook xmlns="https://soc.example/playbooks" id="PB-WIN-001" name="Change Audit — Windows Network Share Created, Modified or Deleted - SOC Playbook" version="1.0" status="Production" classification="TLP:AMBER">
+  <Metadata>
+    <Owner>JCB Detection Engineering (WatchWave)</Owner>
+    <LastUpdated>2026-08-14</LastUpdated>
+    <Severity default="Medium">Medium</Severity>
+    <Confidence default="Medium">Medium</Confidence>
+    <Category>Persistence / Defense Evasion - Network Share</Category>
+    <MitreAttack>
+      <Technique id="T1070.005" name="Network Share Connection Removal"/>
+      <Tactic id="TA0005" name="Defense Evasion"/>
+    </MitreAttack>
+    <References>
+      <Reference title="MITRE ATT and CK" url="https://attack.mitre.org/techniques/T1070/"/>
+    </References>
+  </Metadata>
+  <ExecutiveSummary>
+    <Overview>A network share was created, modified or deleted (5142/5143/5144). Triage question: is this authorised share administration, or an attacker creating an exposure/exfil share or removing evidence of one?</Overview>
+    <BusinessImpact>Rogue shares expose data or provide an exfil channel; deleting a share can hide lateral-movement infrastructure.</BusinessImpact>
+  </ExecutiveSummary>
+  <Scope><Assets>
+    <AssetType>Windows servers and workstations (INTDOM domain)</AssetType>
+    <AssetType>Domain controllers</AssetType>
+  </Assets><LogSources>
+    <LogSource>Windows Security event log - logs-system.security-*</LogSource>
+  </LogSources></Scope>
+  <Prerequisites><TelemetryRequirements>
+    <Requirement>Windows Security + Sysmon + PowerShell logs via Elastic Agent (verified live). Sysmon event.code 1=process(command_line/parent populated), 11=file, 13/12=registry(registry.path populated); process.code_signature NOT collected.</Requirement>
+  </TelemetryRequirements><DetectionSignals>
+    <Signal><Name>Share change</Name><Details>Event 5142 (created) / 5143 (modified) / 5144 (deleted).</Details></Signal>
+  </DetectionSignals></Prerequisites>
+  <Inputs>
+    <Input name="$hostname" description="Host where the share changed."/>
+    <Input name="$username" description="Principal that changed it (SubjectUserName)."/>
+  </Inputs>
+  <Triage><ImmediateCapture>
+    <Item>Host: $hostname</Item>
+  </ImmediateCapture><InitialAssessment>
+    <Rule>Weigh the evidence story, not any single fact - see ClassificationGuidance.</Rule>
+  </InitialAssessment></Triage>
+  <Investigation>
+    <Goal>Determine whether the share change is authorised administration or the creation/removal of a rogue share.</Goal>
+    <Workflow>
+      <Step order="1" name="Detail the share change and actor">
+        <Purpose>Identify the share name, path, actor and whether several shares were changed at once.</Purpose>
+        <Query platform="Elastic" language="ES|QL" id="INV-01-SHARE-CHANGE">
+          <![CDATA[
+FROM logs-system.security-*
+| WHERE event.code IN ("5142","5143","5144") AND host.name == "$hostname" AND @timestamp >= NOW() - 4 hours
+| KEEP @timestamp, event.code, winlog.event_data.SubjectUserName, winlog.event_data.ShareName, winlog.event_data.ShareLocalPath
+| SORT @timestamp DESC
+| LIMIT 30
+          ]]>
+        </Query>
+        <ExpectedOutput>
+          <Field name="event.code"/>
+          <Field name="winlog.event_data.SubjectUserName"/>
+          <Field name="winlog.event_data.ShareName"/>
+          <Field name="winlog.event_data.ShareLocalPath"/>
+        </ExpectedOutput>
+        <AnalystNotes>A share on a sensitive path (C:\, Windows, user profiles) created by a non-admin is concerning. Admin shares (C$/ADMIN$) are default; a NEW named share pointing at a broad path is the exposure risk.</AnalystNotes>
+      </Step>
+      <Step order="2" name="Is the actor an admin, and did they change shares on multiple hosts">
+        <Purpose>Broad share changes by one principal across hosts indicate scripted attacker activity vs a single admin task.</Purpose>
+        <Query platform="Elastic" language="ES|QL" id="INV-02-SHARE-ACTOR" optional="true">
+          <![CDATA[
+FROM logs-system.security-*
+| WHERE event.code IN ("5142","5143","5144") AND winlog.event_data.SubjectUserName == "$username" AND @timestamp >= NOW() - 4 hours
+| STATS changes = COUNT(*), hosts = COUNT_DISTINCT(host.name), shares = VALUES(winlog.event_data.ShareName)
+| LIMIT 1
+          ]]>
+        </Query>
+        <ExpectedOutput>
+          <Field name="changes"/>
+          <Field name="hosts"/>
+          <Field name="shares"/>
+        </ExpectedOutput>
+        <AnalystNotes>Many hosts/shares by one actor in minutes = scripted. One change by a known admin = routine.</AnalystNotes>
+      </Step>
+      <Step order="3" name="Finalize classification">
+        <DecisionTree>
+          <Node><Condition>A new share on a sensitive/broad path created by a non-admin, or shares changed across multiple hosts by one actor.</Condition><Result>True Positive (Rogue Share / Exposure - escalate)</Result></Node>
+          <Node><Condition>A known admin creating/adjusting an expected share under a change record.</Condition><Result>False Positive</Result></Node>
+          <Node><Condition>Share deletion that removes a previously-flagged rogue share (cleanup) - benign but note.</Condition><Result>Benign Activity</Result></Node>
+          <Node><Condition>Share change by a plausible admin with no change record.</Condition><Result>Needs Escalation</Result></Node>
+        </DecisionTree>
+        <DocumentationChecklist>
+          <Item>Attach outputs of INV-01-SHARE-CHANGE, INV-02-SHARE-ACTOR to the case.</Item>
+        </DocumentationChecklist>
+      </Step>
+    </Workflow>
+  </Investigation>
+  <ClassificationGuidance>
+    <FalsePositive>
+      <Definition>Authorised share administration.</Definition>
+      <Indicators>
+        <Item>Known admin.</Item>
+        <Item>Expected share/path.</Item>
+        <Item>Matches a change ticket.</Item>
+      </Indicators>
+      <SOCAction>
+        <Item>Verify the change; close as false_positive.</Item>
+      </SOCAction>
+    </FalsePositive>
+    <TruePositive>
+      <Definition>Creation of a rogue exposure/exfil share or removal of evidence.</Definition>
+      <Indicators>
+        <Item>New share on a broad/sensitive path by a non-admin.</Item>
+        <Item>Scripted changes across hosts.</Item>
+        <Item>Share points at data of value.</Item>
+      </Indicators>
+      <SOCAction>
+        <Item>Remove the rogue share; inspect what it exposed; open IR.</Item>
+        <Item>Hunt the actor's other activity.</Item>
+      </SOCAction>
+    </TruePositive>
+    <Misconfiguration>
+      <Definition>An automation/provisioning tool managing shares unexpectedly.</Definition>
+      <Indicators>
+        <Item>A known provisioning account per a broken job.</Item>
+        <Item>Owner confirms benign.</Item>
+      </Indicators>
+      <SOCAction>
+        <Item>Fix the automation; document.</Item>
+      </SOCAction>
+    </Misconfiguration>
+  </ClassificationGuidance>
+  <Response><IRForHumans>
+    <Phase name="Immediate Actions (0-30 minutes)">
+      <Action priority="1">Confirm the activity on the host; if malicious indicators, isolate the host.</Action>
+      <Action priority="2">Identify the responsible account/process and its origin.</Action>
+    </Phase>
+    <Phase name="Containment and Eradication (hours)">
+      <Action>Isolate the host; capture volatile evidence; hunt the same pattern across the estate.</Action>
+      <Action>Reset credentials used on the host if compromise is confirmed.</Action>
+    </Phase>
+    <Phase name="Recovery and Hardening (days)">
+      <Action>Remediate the root cause; add/verify EDR coverage; apply relevant hardening.</Action>
+    </Phase>
+  </IRForHumans></Response>
+  <QualityChecks>
+    <Check>Confirm the required telemetry (Sysmon/Security auditing) is present on the host.</Check>
+    <Check>Tune known-benign administrative sources via exceptions, not by disabling the rule.</Check>
+  </QualityChecks>
+  <ClosureCriteria><FalsePositiveClosure>
+    <Item>Activity confirmed benign/authorised and documented.</Item>
+  </FalsePositiveClosure><TruePositiveClosure>
+    <Item>Host contained and triaged; root cause eradicated; estate swept; findings recorded.</Item>
+  </TruePositiveClosure></ClosureCriteria>
+</Playbook>

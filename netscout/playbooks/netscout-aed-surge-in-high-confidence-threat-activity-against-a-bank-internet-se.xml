@@ -1,0 +1,150 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<Playbook xmlns="https://soc.example/playbooks" id="PB-JCB-NEW-5" name="NETSCOUT AED — Surge in High-Confidence Threat Activity Against a Bank Internet Service - SOC Playbook" version="2.1" status="Production" classification="TLP:AMBER">
+  <Metadata>
+    <Owner>JCB Detection Engineering (WatchWave)</Owner>
+    <LastUpdated>2026-08-19</LastUpdated>
+    <Severity default="High">High</Severity>
+    <Confidence default="Medium">Medium</Confidence>
+    <Category>Initial Access / Exploit Public-Facing Application</Category>
+    <MitreAttack>
+      <Technique id="T1190" name="Exploit Public-Facing Application"/>
+      <Tactic id="TA0001" name="Initial Access"/>
+    </MitreAttack>
+    <References>
+      <Reference title="MITRE ATT and CK - T1190 Exploit Public-Facing Application" url="https://attack.mitre.org/techniques/T1190/"/>
+    </References>
+  </Metadata>
+  <ExecutiveSummary>
+    <Overview>NETSCOUT Arbor Edge Defense reported a surge of high-confidence threat events - ATLAS threat categories "Botnet Command and Control", "Active Exploiters", "DNS Flood" (and cs7 "Command and Control") - against JCB internet-facing banking services. Triage question: is this a coordinated threat campaign / attempted exploitation reaching a bank service, or high-confidence reputation traffic that AED is blocking at the perimeter with no reach or impact?</Overview>
+    <BusinessImpact>High-confidence AED categories such as active exploiters and botnet C2 targeting an internet-facing banking service represent the initial-access stage against the bank's exposed infrastructure. A source that reaches (is not blocked by) a real service, or a coordinated surge from many sources, can precede exploitation and a foothold.</BusinessImpact>
+  </ExecutiveSummary>
+  <Scope>
+    <Assets>
+      <AssetType>JCB internet-facing banking services behind NETSCOUT AED (bank range 91.223.202.0/24 - AED protection groups such as "Mena Mobile", "JCB Mobile ICS", "TEJARI WEBSITE", "NEW OWA ONPREM", "Middleware Prod", "Corporate Online")</AssetType>
+    </Assets>
+    <LogSources>
+      <LogSource>NETSCOUT Arbor Edge Defense CEF - logs-cef.log-*</LogSource>
+    </LogSources>
+  </Scope>
+  <Prerequisites>
+    <TelemetryRequirements>
+      <Requirement>NETSCOUT AED CEF (verified live on JCB). Populated fields: source.ip, source.geo.country_name, source.as.organization.name, destination.ip, destination.port, network.transport, cef.name, cef.device.event_class_id, cef.extensions.deviceCustomString2 (protection group / bank service), cef.extensions.deviceCustomString6 (ATLAS threat category), cef.extensions.cs7 (ATLAS threat class, e.g. "Command and Control"), cef.severity.</Requirement>
+      <Requirement>High-confidence categories observed live on JCB: deviceCustomString6 in "Botnet Command and Control", "Active Exploiters", "DNS Flood" (also "MOVEit Transfer"/"CnC Other"/"Eleven11 Botnet" when present) and cs7 == "Command and Control". Perimeter caveat: AED sees inbound external sources hitting bank destinations - it does not show internal host beaconing. Endpoint/firewall telemetry is required to confirm any internal C2.</Requirement>
+    </TelemetryRequirements>
+    <DetectionSignals>
+      <Signal><Name>Surge in High-Confidence Threat Activity</Name><Details>A volume of high-confidence ATLAS threat events (botnet C2 / active exploiters / DNS flood) against a bank service above the rule threshold.</Details></Signal>
+    </DetectionSignals>
+  </Prerequisites>
+  <Inputs>
+    <Input name="$srcip" description="Source IP flagged under a high-confidence threat category (source.ip - alert entity)."/>
+    <Input name="$protgroup" description="Bank service / AED protection group under threat (cef.extensions.deviceCustomString2). Used to measure the campaign scope against the service."/>
+  </Inputs>
+  <Triage>
+    <ImmediateCapture>
+      <Item>$srcip: $srcip</Item>
+      <Item>$protgroup: $protgroup</Item>
+    </ImmediateCapture>
+    <InitialAssessment>
+      <Rule>Weigh the full evidence story per the ClassificationGuidance - the threat category, whether the source reached (vs was blocked by) a real bank service, and whether it is one source or a coordinated surge - not any single fact. "Active Exploiters" reaching a live service is far more serious than a blocked reputation hit.</Rule>
+    </InitialAssessment>
+  </Triage>
+  <Investigation>
+    <Goal>Determine whether the high-confidence threat surge is real attacker activity reaching JCB banking services (which categories, which assets, whether blocked, and whether it is a coordinated campaign) versus perimeter-blocked reputation traffic.</Goal>
+    <Workflow>
+      <Step order="1" name="Threat categories and assets for the source">
+        <Purpose>Establish what the source is flagged as (Botnet C2 / Active Exploiters / DNS Flood / cs7 Command and Control), against which bank services and assets, its volume and origin.</Purpose>
+        <Query platform="Elastic" language="ES|QL" id="INV-01">
+          <![CDATA[
+FROM logs-cef.log-*
+| WHERE observer.vendor == "NETSCOUT" AND source.ip == "$srcip" AND @timestamp >= NOW() - 4 hours
+| STATS events = COUNT(*), threat_cats = VALUES(cef.extensions.deviceCustomString6), cs7 = VALUES(cef.extensions.cs7), classes = VALUES(cef.device.event_class_id), services = VALUES(cef.extensions.deviceCustomString2), dst_ips = VALUES(destination.ip), country = VALUES(source.geo.country_name), asn = VALUES(source.as.organization.name)
+| LIMIT 1
+          ]]>
+        </Query>
+        <AnalystNotes>"Active Exploiters" / "Botnet Command and Control" / cs7 "Command and Control" are the highest-value categories - attempted exploitation or C2 against a bank service. Check whether $srcip is external (expected - AED is a perimeter device) or, unusually, a bank-range address (91.223.202.0/24); a bank-range source would imply an internal compromised host and must be corroborated on endpoint/firewall telemetry (AED alone will not show internal beaconing).</AnalystNotes>
+      </Step>
+      <Step order="2" name="Bank assets, ports and whether the source was blocked">
+        <Purpose>The specific destination IPs, services and ports the source hit, and the AED detection class (blocked vs reached), show real exposure and reach.</Purpose>
+        <Query platform="Elastic" language="ES|QL" id="INV-02">
+          <![CDATA[
+FROM logs-cef.log-*
+| WHERE observer.vendor == "NETSCOUT" AND source.ip == "$srcip" AND @timestamp >= NOW() - 4 hours
+| STATS hits = COUNT(*), ports = VALUES(destination.port), transports = VALUES(network.transport), classes = VALUES(cef.device.event_class_id), names = VALUES(cef.name), cats = VALUES(cef.extensions.deviceCustomString6) BY destination.ip, cef.extensions.deviceCustomString2
+| SORT hits DESC
+| LIMIT 20
+          ]]>
+        </Query>
+        <AnalystNotes>cef.name/class of "Blocked Host" means AED blocked it at the perimeter (mitigated). Any indication the source reached a live service, or repeated attempts against a real, exposed banking service/port, raises priority. Map the destination.ip / protection group to the actual service and confirm its exposure and patch state.</AnalystNotes>
+      </Step>
+      <Step order="3" name="Campaign scope against the bank service">
+        <Purpose>Whether this source is one of many high-confidence threats hitting the same bank service establishes a coordinated surge/campaign versus an isolated source.</Purpose>
+        <Query platform="Elastic" language="ES|QL" id="INV-03">
+          <![CDATA[
+FROM logs-cef.log-*
+| WHERE observer.vendor == "NETSCOUT" AND cef.extensions.deviceCustomString2 == "$protgroup" AND (cef.extensions.deviceCustomString6 IN ("Botnet Command and Control","Active Exploiters","MOVEit Transfer","CnC Other","Eleven11 Botnet","DNS Flood") OR cef.extensions.cs7 == "Command and Control") AND @timestamp >= NOW() - 4 hours
+| STATS events = COUNT(*), distinct_sources = COUNT_DISTINCT(source.ip), countries = COUNT_DISTINCT(source.geo.country_name), cats = VALUES(cef.extensions.deviceCustomString6) BY cef.extensions.deviceCustomString2
+| LIMIT 5
+          ]]>
+        </Query>
+        <AnalystNotes>Many distinct high-confidence sources across many countries against one bank service = a coordinated campaign (elevate). A single source is an isolated attempt. Grounding: live JCB shows "Active Exploiters" activity spread across bank services (Mena Mobile, TEJARI WEBSITE, JCB Mobile ICS, NEW OWA ONPREM), typically one event per external source - a broad reputation-driven surge that AED blocks.</AnalystNotes>
+      </Step>
+    </Workflow>
+  </Investigation>
+  <DecisionTree>
+    <Node><Condition>A source flagged "Active Exploiters" / "Botnet Command and Control" / cs7 "Command and Control" reached (was not blocked by) a real bank service, or a coordinated surge of many high-confidence sources is hitting one service.</Condition><Result>True Positive (Threat Campaign / attempted exploitation reaching a bank service - escalate)</Result></Node>
+    <Node><Condition>A bank-range (91.223.202.0/24) address appears as the source of C2 activity.</Condition><Result>True Positive (Compromised internal host / C2 - corroborate on endpoint and hand to IR)</Result></Node>
+    <Node><Condition>High-confidence reputation events fully blocked by AED at the perimeter, no reach to a live service and no coordinated surge - or an authorised security assessment.</Condition><Result>False Positive (proven-blocked reputation traffic, or authorised assessment)</Result></Node>
+    <Node><Condition>High-confidence activity against a bank service where reach, exposure or campaign scope cannot be established from available telemetry.</Condition><Result>Needs Escalation</Result></Node>
+  </DecisionTree>
+  <ClassificationGuidance>
+    <FalsePositive>
+      <Definition>An authorised assessment OR proven-blocked high-confidence reputation traffic that AED mitigated at the perimeter with no reach or impact. Never classify simply as "benign".</Definition>
+      <Indicators>
+        <Item>Every event is "Blocked Host" at the perimeter; no reach to a live service.</Item>
+        <Item>Isolated source(s), no coordinated surge, low volume against a given service.</Item>
+        <Item>Activity maps to an authorised penetration test / security scan window.</Item>
+      </Indicators>
+      <SOCAction>
+        <Item>Confirm the blocks held / the authorised assessment; document; close as proven-blocked or authorised. Add notable source IPs/ASNs to blocklists and threat hunting.</Item>
+      </SOCAction>
+    </FalsePositive>
+    <TruePositive>
+      <Definition>Real high-confidence threat activity against JCB banking services: attempted exploitation or C2 reaching a service, a coordinated campaign, or an internal host acting as a C2 source.</Definition>
+      <Indicators>
+        <Item>"Active Exploiters" / "Botnet Command and Control" / cs7 "Command and Control" against a real, exposed bank service.</Item>
+        <Item>A surge of many distinct high-confidence sources across countries against one service (coordinated campaign).</Item>
+        <Item>Any bank-range IP appearing as a C2 source (internal compromise), or evidence the source reached a live service.</Item>
+      </Indicators>
+      <SOCAction>
+        <Item>If a bank-range source or a reached service is present: treat as an intrusion - endpoint IR on the internal host and/or verify the exposed service is patched and not compromised. Otherwise: blocklist the sources/ASNs, confirm AED blocking, and hunt for follow-on activity across WAF/firewall/endpoint telemetry.</Item>
+      </SOCAction>
+    </TruePositive>
+  </ClassificationGuidance>
+  <Response>
+    <IRForHumans>
+      <Phase name="Immediate Actions (0-30 minutes)">
+        <Action priority="1">Identify the threat categories and whether $srcip is external or a bank-range address (INV-01). A bank-range C2 source is an internal compromise - escalate to endpoint IR immediately.</Action>
+        <Action priority="2">Determine whether the source reached or was blocked, and which real bank services/ports were targeted (INV-02).</Action>
+        <Action priority="3">Assess campaign scope against the service (INV-03) - one source vs a coordinated surge.</Action>
+      </Phase>
+      <Phase name="Containment and Eradication (hours)">
+        <Action>For internal C2 sources: endpoint IR on the host and correlate with endpoint/firewall telemetry. For inbound threats: blocklist sources/ASNs, confirm AED blocking, and verify the targeted services are patched and not compromised.</Action>
+      </Phase>
+      <Phase name="Recovery and Hardening (days)">
+        <Action>Tune AED threat categories; integrate high-confidence threat IPs/ASNs into perimeter blocklists and endpoint hunting; reduce exposure of targeted services; document the campaign.</Action>
+      </Phase>
+    </IRForHumans>
+  </Response>
+  <Escalation>
+    <Trigger>A bank-range C2 source (internal compromise), a high-confidence source that reached a live bank service, or a coordinated multi-source campaign against a banking service.</Trigger>
+    <To>SOC L2 / IR</To>
+  </Escalation>
+  <Closure>
+    <FalsePositiveClosure>
+      <Item>Proven-blocked reputation traffic or authorised assessment confirmed; no reach and no campaign; notable sources blocklisted; documented.</Item>
+    </FalsePositiveClosure>
+    <TruePositiveClosure>
+      <Item>Internal C2 host IR'd and/or targeted services confirmed patched and uncompromised; sources/ASNs blocklisted; AED blocking confirmed; campaign correlated across telemetry and documented for hunting.</Item>
+    </TruePositiveClosure>
+  </Closure>
+</Playbook>

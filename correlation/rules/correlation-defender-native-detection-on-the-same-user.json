@@ -1,0 +1,74 @@
+{
+  "rule_id": "jcb-corr-defender-native-user",
+  "name": "Correlation — Defender + Native Detection on the Same User",
+  "version": 1,
+  "enabled": true,
+  "interval": "1h",
+  "from": "now-1d",
+  "to": "now",
+  "description": "Attacker objective\nCompromise an identity and use it — Microsoft Defender detects the identity/endpoint activity while the JCB Windows/AD analytics independently detect the same account performing an attack technique (Kerberoasting, DCSync, privileged-group change, credential dumping, and similar).\n\nAttack logic\nA single account that is independently flagged by Microsoft Defender and by a JCB-native Active Directory/Windows detection within a short window is exhibiting corroborated malicious behaviour — for example a Defender identity alert alongside a Kerberoasting, DCSync or Tier-0 group change by the same user.\n\nWhy this detection works\nCorrelating a Defender-sourced alert and a native JCB detection on the same user over the alert stream confirms account compromise that either source alone cannot, and joins the two telemetry domains on the reliable user identity.\n\nFalse positives\nA shared/service account whose legitimate activity independently trips both domains; an authorised scanner identity (excluded).\n\nTuning\nExclude verified shared/service and scanner accounts; require a specific high-value native technique if noisy.\n\nRequired telemetry\nThe Defender detection alerts (user.name) and the JCB Windows/AD detection alerts (user.name).",
+  "tags": [
+    "JCB",
+    "Defender",
+    "Correlation",
+    "Phase3",
+    "Tactic: Credential Access",
+    "Use Case: Threat Detection"
+  ],
+  "author": [
+    "raadabujaish"
+  ],
+  "license": "",
+  "threat": [
+    {
+      "framework": "MITRE ATT&CK",
+      "tactic": {
+        "id": "TA0006",
+        "name": "Credential Access",
+        "reference": "https://attack.mitre.org/tactics/TA0006/"
+      },
+      "technique": [
+        {
+          "id": "T1078",
+          "name": "Valid Accounts",
+          "reference": "https://attack.mitre.org/techniques/T1078/"
+        }
+      ]
+    }
+  ],
+  "investigation_fields": {
+    "field_names": [
+      "user.name",
+      "kibana.alert.rule.name",
+      "kibana.alert.severity",
+      "host.name",
+      "source.ip",
+      "destination.ip",
+      "message"
+    ]
+  },
+  "related_integrations": [],
+  "required_fields": [],
+  "setup": "",
+  "note": "## Investigation guide\n1. The user was flagged by both Microsoft Defender and a native AD/Windows detection — review both.\n2. This is corroborated identity compromise — disable/rotate the account, and investigate the hosts and privileged changes involved.\n3. Pivot to the incident in the Defender console and the AD change for full scope.",
+  "false_positives": [
+    "A shared/service account whose legitimate activity independently trips both domains; an authorised scanner identity (excluded)."
+  ],
+  "references": [
+    "https://attack.mitre.org/techniques/T1078/"
+  ],
+  "risk_score": 90,
+  "risk_score_mapping": [],
+  "severity": "critical",
+  "severity_mapping": [],
+  "output_index": "",
+  "max_signals": 100,
+  "exceptions_list": [],
+  "actions": [],
+  "meta": {
+    "kibana_siem_app_url": ""
+  },
+  "type": "esql",
+  "language": "esql",
+  "query": "FROM .alerts-security.alerts-* METADATA _id, _index, _version\n| WHERE user.name IS NOT NULL AND NOT user.name IN (\"nessus\",\"-\",\"SYSTEM\",\"System\",\"LOCAL SERVICE\",\"NETWORK SERVICE\") AND NOT user.name LIKE \"*$\" AND (kibana.alert.rule.name LIKE \"Defender*\" OR kibana.alert.rule.name IN (\"Windows — LSASS Memory Dump via Known Credential-Theft Tooling\", \"Windows — Credential Theft: Registry Hive or NTDS.dit Extraction\", \"Windows — Malicious PowerShell: AMSI/ETW Bypass or Offensive Tooling\", \"Windows — Pass-the-Hash / Overpass-the-Hash Logon Pattern\", \"Windows — Ingress Tool Transfer via LOLBin\", \"Windows — Signed Binary Proxy Execution (LOLBin)\", \"Windows — UAC Bypass via Auto-Elevated LOLBin\", \"Windows — Remote Execution via WMI or WinRM\", \"Windows — Service Installed with Suspicious Image Path\", \"Windows — Inhibit System Recovery (Ransomware Precursor)\", \"Windows — Defender / EDR / Firewall Tampering\", \"Windows — Registry Persistence: IFEO / Winlogon / AppInit\", \"Windows — Scheduled Task Created with Suspicious Action\", \"AD — DCSync: Directory Replication by an Unexpected Principal\", \"AD — Kerberoasting: RC4 Service Ticket Requested\", \"AD — AS-REP Roasting: TGT Requested for a Pre-Auth-Disabled Account\", \"AD — Shadow Credentials (msDS-KeyCredentialLink Modified)\", \"AD — SPN Added by Non-Computer Principal (Kerberoast Setup)\", \"AD — Object Security Descriptor Modified (DACL Backdoor)\", \"AD — Member Added to a Privileged (Tier-0) Group\", \"AD — KRBTGT Account Password Reset (Golden Ticket Prep / Remediation)\", \"AD — Group Policy Object Modified by an Unexpected Principal\", \"AD — Domain Reconnaissance via LOLBins / BloodHound\", \"AD — New Computer (Machine) Account Created\", \"AD/Windows — Security Event Log Cleared\", \"AD/Windows — Audit Policy Changed by Interactive Account\"))\n| EVAL src = CASE(kibana.alert.rule.name LIKE \"Defender*\", \"defender\", \"native\")\n| STATS sources = COUNT_DISTINCT(src), detections = VALUES(kibana.alert.rule.name), counterparties = VALUES(host.name) BY user.name\n| WHERE sources >= 2"
+}

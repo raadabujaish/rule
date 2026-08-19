@@ -1,0 +1,81 @@
+{
+  "rule_id": "jcb-win-registry-persistence",
+  "name": "Windows — Registry Persistence: IFEO / Winlogon / AppInit",
+  "version": 1,
+  "enabled": true,
+  "interval": "1h",
+  "from": "now-90m",
+  "to": "now",
+  "description": "Attacker objective\nPersist or hijack execution by writing a boot/logon or image-hijack registry value — Image File Execution Options debugger, Winlogon Shell/Userinit, or AppInit_DLLs.\n\nAttack logic\nSetting an IFEO Debugger launches attacker code whenever a target program runs; changing Winlogon Shell/Userinit or AppInit_DLLs loads attacker code at logon or into processes. These keys are rarely modified legitimately.\n\nWhy this detection works\nRegistry-modification auditing records the key path and value name; scoping to the specific persistence values isolates the technique.\n\nFalse positives\nA debugging tool that legitimately sets an IFEO Debugger, or a management agent modifying Userinit (rare).\n\nTuning\nAllowlist verified management tooling; investigate any unexpected write to these values.\n\nRequired telemetry\nSysmon Event ID 13 (registry.path, registry.value). Covers hosts running Sysmon.",
+  "tags": [
+    "JCB",
+    "Windows",
+    "Phase3",
+    "Use Case: Threat Detection",
+    "Tactic: Persistence"
+  ],
+  "author": [
+    "raadabujaish"
+  ],
+  "license": "",
+  "threat": [
+    {
+      "framework": "MITRE ATT&CK",
+      "tactic": {
+        "id": "TA0003",
+        "name": "Persistence",
+        "reference": "https://attack.mitre.org/tactics/TA0003/"
+      },
+      "technique": [
+        {
+          "id": "T1546",
+          "name": "Event Triggered Execution",
+          "reference": "https://attack.mitre.org/techniques/T1546/",
+          "subtechnique": [
+            {
+              "id": "T1546.012",
+              "name": "Image File Execution Options Injection",
+              "reference": "https://attack.mitre.org/techniques/T1546/012/"
+            }
+          ]
+        }
+      ]
+    }
+  ],
+  "investigation_fields": {
+    "field_names": [
+      "host.name",
+      "user.name",
+      "process.name",
+      "process.executable",
+      "registry.path",
+      "registry.value",
+      "registry.data.strings",
+      "event.code"
+    ]
+  },
+  "related_integrations": [],
+  "required_fields": [],
+  "setup": "",
+  "note": "## Investigation guide\n1. Identify the host and the value written (Debugger / Shell / Userinit / AppInit_DLLs) and its data.\n2. If the data points to an attacker binary/script, remove it and investigate the writing process and user.",
+  "false_positives": [
+    "A debugging tool that legitimately sets an IFEO Debugger, or a management agent modifying Userinit (rare)."
+  ],
+  "references": [
+    "https://attack.mitre.org/techniques/T1546/"
+  ],
+  "risk_score": 68,
+  "risk_score_mapping": [],
+  "severity": "high",
+  "severity_mapping": [],
+  "output_index": "",
+  "max_signals": 100,
+  "exceptions_list": [],
+  "actions": [],
+  "type": "query",
+  "language": "kuery",
+  "index": [
+    "logs-windows.sysmon_operational-*"
+  ],
+  "query": "event.code:\"13\" and ((registry.path:\"*Image File Execution Options*\" and registry.value:(\"Debugger\" or \"GlobalFlag\")) or registry.value:\"AppInit_DLLs\" or (registry.path:\"*Winlogon*\" and registry.value:(\"Shell\" or \"Userinit\" or \"Notify\")))"
+}

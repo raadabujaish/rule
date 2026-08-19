@@ -1,0 +1,149 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<Playbook xmlns="https://soc.example/playbooks" id="PB-WIN-007" name="Windows — Event Log Cleared (All Channels) - SOC Playbook" version="1.0" status="Production" classification="TLP:AMBER">
+  <Metadata>
+    <Owner>JCB Detection Engineering (WatchWave)</Owner>
+    <LastUpdated>2026-08-14</LastUpdated>
+    <Severity default="High">High</Severity>
+    <Confidence default="Medium">Medium</Confidence>
+    <Category>Defense Evasion / Indicator Removal</Category>
+    <MitreAttack>
+      <Technique id="T1070.001" name="Clear Windows Event Logs"/>
+      <Tactic id="TA0005" name="Defense Evasion"/>
+    </MitreAttack>
+    <References>
+      <Reference title="MITRE ATT and CK" url="https://attack.mitre.org/techniques/T1070/"/>
+    </References>
+  </Metadata>
+  <ExecutiveSummary>
+    <Overview>A Windows event log was cleared - Security (1102) or System/Application (104) - across channels, excluding the known benign hq-adsync-app-p Application clear. Triage question: anti-forensic evidence destruction, or sanctioned maintenance?</Overview>
+    <BusinessImpact>Clearing event logs removes local evidence of intrusion activity; doing it across channels is a strong post-exploitation signal.</BusinessImpact>
+  </ExecutiveSummary>
+  <Scope><Assets>
+    <AssetType>Windows servers and workstations (INTDOM domain)</AssetType>
+    <AssetType>Domain controllers</AssetType>
+  </Assets><LogSources>
+    <LogSource>Windows Security/System/Application logs - logs-system.security-*, logs-system.system-*, logs-system.application-*</LogSource>
+  </LogSources></Scope>
+  <Prerequisites><TelemetryRequirements>
+    <Requirement>Windows Security + Sysmon + PowerShell logs via Elastic Agent (verified live). Sysmon event.code 1=process(command_line/parent populated), 11=file, 13/12=registry(registry.path populated); process.code_signature NOT collected.</Requirement>
+  </TelemetryRequirements><DetectionSignals>
+    <Signal><Name>Log cleared</Name><Details>1102 or 104 (excluding the known hq-adsync-app-p Application 104).</Details></Signal>
+  </DetectionSignals></Prerequisites>
+  <Inputs>
+    <Input name="$hostname" description="Host whose log was cleared."/>
+    <Input name="$username" description="Principal that cleared it (SubjectUserName)."/>
+  </Inputs>
+  <Triage><ImmediateCapture>
+    <Item>Host: $hostname</Item>
+  </ImmediateCapture><InitialAssessment>
+    <Rule>Weigh the evidence story, not any single fact - see ClassificationGuidance.</Rule>
+  </InitialAssessment></Triage>
+  <Investigation>
+    <Goal>Determine whether the log clear is anti-forensic evidence destruction or sanctioned maintenance.</Goal>
+    <Workflow>
+      <Step order="1" name="Which channels were cleared, by whom, and on how many hosts">
+        <Purpose>Multiple channels/hosts cleared close together is broad anti-forensics; a single maintenance clear differs.</Purpose>
+        <Query platform="Elastic" language="ES|QL" id="INV-01-CLEARALL-EVENT">
+          <![CDATA[
+FROM logs-system.security-*,logs-system.system-*,logs-system.application-*
+| WHERE event.code IN ("1102","104") AND @timestamp >= NOW() - 4 hours
+| KEEP @timestamp, host.name, event.code, winlog.channel, winlog.event_data.SubjectUserName
+| SORT @timestamp DESC
+| LIMIT 30
+          ]]>
+        </Query>
+        <ExpectedOutput>
+          <Field name="host.name"/>
+          <Field name="event.code"/>
+          <Field name="winlog.channel"/>
+          <Field name="winlog.event_data.SubjectUserName"/>
+        </ExpectedOutput>
+        <AnalystNotes>Security(1102) + System/Application(104) cleared on one host in minutes = anti-forensics. Isolated Application 104 on a known host = benign service behavior.</AnalystNotes>
+      </Step>
+      <Step order="2" name="Preceding suspicious activity on the host">
+        <Purpose>Suspicious privileged activity just before the clear is what the actor is erasing.</Purpose>
+        <Query platform="Elastic" language="ES|QL" id="INV-02-CLEARALL-PRECEDING">
+          <![CDATA[
+FROM logs-system.security-*
+| WHERE host.name == "$hostname" AND event.code IN ("4624","4672","4688","7045","4720") AND @timestamp >= NOW() - 4 hours
+| STATS c = COUNT(*), codes = VALUES(event.code), users = VALUES(winlog.event_data.TargetUserName) BY winlog.event_data.LogonType
+| LIMIT 15
+          ]]>
+        </Query>
+        <ExpectedOutput>
+          <Field name="codes"/>
+          <Field name="users"/>
+          <Field name="c"/>
+        </ExpectedOutput>
+        <AnalystNotes>New privileged logon + service install before the clear = intrusion sequence. Quiet history = maintenance.</AnalystNotes>
+      </Step>
+      <Step order="3" name="Finalize classification">
+        <DecisionTree>
+          <Node><Condition>Multiple channels/hosts cleared, or suspicious activity precedes the clear.</Condition><Result>True Positive (Anti-forensics - IR)</Result></Node>
+          <Node><Condition>Non-admin or unexpected principal clearing a production host with no maintenance record.</Condition><Result>True Positive (Unauthorised clear - escalate)</Result></Node>
+          <Node><Condition>Known admin clearing during a documented maintenance/reimage.</Condition><Result>False Positive</Result></Node>
+          <Node><Condition>Admin clear, no ticket, quiet history.</Condition><Result>Needs Escalation</Result></Node>
+        </DecisionTree>
+        <DocumentationChecklist>
+          <Item>Attach outputs of INV-01-CLEARALL-EVENT, INV-02-CLEARALL-PRECEDING to the case.</Item>
+        </DocumentationChecklist>
+      </Step>
+    </Workflow>
+  </Investigation>
+  <ClassificationGuidance>
+    <FalsePositive>
+      <Definition>Sanctioned maintenance/reimage.</Definition>
+      <Indicators>
+        <Item>Known admin/build account.</Item>
+        <Item>Maintenance window.</Item>
+        <Item>Quiet history.</Item>
+      </Indicators>
+      <SOCAction>
+        <Item>Verify; close as false_positive.</Item>
+      </SOCAction>
+    </FalsePositive>
+    <TruePositive>
+      <Definition>Evidence destruction after intrusion.</Definition>
+      <Indicators>
+        <Item>Multiple channels/hosts.</Item>
+        <Item>Preceding suspicious activity.</Item>
+        <Item>Non-admin/compromised actor.</Item>
+      </Indicators>
+      <SOCAction>
+        <Item>Preserve SIEM copies; isolate the host; reconstruct from forwarded logs; open IR.</Item>
+      </SOCAction>
+    </TruePositive>
+    <Misconfiguration>
+      <Definition>A misconfigured job clearing logs.</Definition>
+      <Indicators>
+        <Item>Automation per a broken script.</Item>
+        <Item>Owner confirms.</Item>
+      </Indicators>
+      <SOCAction>
+        <Item>Fix the job; ensure forwarding precedes any clear.</Item>
+      </SOCAction>
+    </Misconfiguration>
+  </ClassificationGuidance>
+  <Response><IRForHumans>
+    <Phase name="Immediate Actions (0-30 minutes)">
+      <Action priority="1">Confirm the activity on the host; if malicious indicators, isolate the host.</Action>
+      <Action priority="2">Identify the responsible account/process and its origin.</Action>
+    </Phase>
+    <Phase name="Containment and Eradication (hours)">
+      <Action>Isolate the host; capture volatile evidence; hunt the same pattern across the estate.</Action>
+      <Action>Reset credentials used on the host if compromise is confirmed.</Action>
+    </Phase>
+    <Phase name="Recovery and Hardening (days)">
+      <Action>Remediate the root cause; add/verify EDR coverage; apply relevant hardening.</Action>
+    </Phase>
+  </IRForHumans></Response>
+  <QualityChecks>
+    <Check>Confirm the required telemetry (Sysmon/Security auditing) is present on the host.</Check>
+    <Check>Tune known-benign administrative sources via exceptions, not by disabling the rule.</Check>
+  </QualityChecks>
+  <ClosureCriteria><FalsePositiveClosure>
+    <Item>Activity confirmed benign/authorised and documented.</Item>
+  </FalsePositiveClosure><TruePositiveClosure>
+    <Item>Host contained and triaged; root cause eradicated; estate swept; findings recorded.</Item>
+  </TruePositiveClosure></ClosureCriteria>
+</Playbook>

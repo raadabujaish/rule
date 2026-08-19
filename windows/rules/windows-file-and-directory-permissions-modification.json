@@ -1,0 +1,81 @@
+{
+  "rule_id": "jcb-rec-file-and-directory-permissions-modification",
+  "name": "Windows — File and Directory Permissions Modification",
+  "version": 1,
+  "enabled": true,
+  "interval": "5m",
+  "from": "now-9m",
+  "to": "now",
+  "description": "Identifies the change of permissions/ownership of files/folders through built-in Windows utilities. Threat actors may require permission modification of files/folders to change, modify or delete them.",
+  "tags": [
+    "JCB",
+    "Windows"
+  ],
+  "author": [
+    "raadabujaish"
+  ],
+  "threat": [
+    {
+      "framework": "MITRE ATT&CK",
+      "tactic": {
+        "id": "TA0005",
+        "name": "Defense Evasion",
+        "reference": "https://attack.mitre.org/tactics/TA0005/"
+      },
+      "technique": [
+        {
+          "id": "T1222",
+          "name": "File and Directory Permissions Modification",
+          "reference": "https://attack.mitre.org/techniques/T1222/",
+          "subtechnique": [
+            {
+              "id": "T1222.001",
+              "name": "Windows File and Directory Permissions Modification",
+              "reference": "https://attack.mitre.org/techniques/T1222/001/"
+            }
+          ]
+        }
+      ]
+    }
+  ],
+  "investigation_fields": {
+    "field_names": [
+      "host.name",
+      "user.name",
+      "user.domain",
+      "process.name",
+      "process.executable",
+      "process.command_line",
+      "process.args",
+      "process.parent.name",
+      "process.parent.executable",
+      "event.code",
+      "event.action",
+      "event.type",
+      "host.os.type",
+      "process.pe.original_file_name",
+      "user.id"
+    ]
+  },
+  "related_integrations": [],
+  "required_fields": [],
+  "setup": "",
+  "false_positives": [],
+  "references": [],
+  "risk_score": 21,
+  "risk_score_mapping": [],
+  "severity": "low",
+  "severity_mapping": [],
+  "output_index": "",
+  "max_signals": 100,
+  "exceptions_list": [],
+  "actions": [],
+  "type": "eql",
+  "language": "eql",
+  "index": [
+    "logs-windows.sysmon_operational-*",
+    "logs-system.security-*",
+    "logs-windows.powershell_operational-*"
+  ],
+  "query": "process where event.type == \"start\" and host.os.type == \"windows\" and\n(\n  ((process.name: \"icacls.exe\" or process.pe.original_file_name == \"iCACLS.EXE\") and process.args: (\"*:F\", \"/reset\", \"/setowner\", \"*grant*\")) or\n  ((process.name: \"cacls.exe\" or process.pe.original_file_name == \"CACLS.EXE\") and process.args: (\"/g\", \"*:f\")) or\n  ((process.name: \"takeown.exe\" or process.pe.original_file_name == \"takeown.exe\") and process.args: (\"/F\")) or\n  ((process.name: \"attrib.exe\" or process.pe.original_file_name== \"ATTRIB.EXE\") and process.args: \"-r\")\n) and not user.id : \"S-1-5-18\" and\nnot (\n  process.args : (\"C:\\\\ProgramData\\\\Lenovo\\\\*\", \"C:\\\\ProgramData\\\\Adobe\\\\*\", \"C:\\\\ProgramData\\\\ASUS\\\\ASUS*\")\n)\n"
+}

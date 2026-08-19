@@ -1,0 +1,91 @@
+{
+  "rule_id": "0fb5cf22-4f38-410a-9457-6996e36e9dc2",
+  "name": "Windows — DPAPI Master Key Backup Retrieved from a New Host",
+  "version": 1,
+  "enabled": true,
+  "interval": "30m",
+  "from": "now-40m",
+  "to": "now",
+  "description": "Event 4692 records an attempt to back up the DPAPI master key. Offensive tooling — Mimikatz `dpapi::`, SharpDPAPI and DonPAPI — triggers this event while harvesting the domain backup key in order to decrypt every user's stored browser passwords, certificates, RDP credentials and Credential Manager entries offline. JCB has a routine baseline of roughly 40 such events a day across 87 hosts, so a flat rule would be noisy; this rule instead alerts only when a **host that has not done this in 14 days** starts doing it. No existing rule covers this event code.",
+  "tags": [
+    "JCB",
+    "ScanWave",
+    "Windows",
+    "Credential Access",
+    "DPAPI",
+    "MITRE T1555.004"
+  ],
+  "author": [
+    "ScanWave"
+  ],
+  "license": "ScanWave — JCB Managed Detection",
+  "threat": [
+    {
+      "framework": "MITRE ATT&CK",
+      "tactic": {
+        "id": "TA0006",
+        "name": "Credential Access",
+        "reference": "https://attack.mitre.org/tactics/TA0006/"
+      },
+      "technique": [
+        {
+          "id": "T1555",
+          "name": "Credentials from Password Stores",
+          "reference": "https://attack.mitre.org/techniques/T1555/",
+          "subtechnique": [
+            {
+              "id": "T1555.004",
+              "name": "Windows Credential Manager",
+              "reference": "https://attack.mitre.org/techniques/T1555/004/"
+            }
+          ]
+        }
+      ]
+    }
+  ],
+  "investigation_fields": {
+    "field_names": [
+      "host.name",
+      "user.name",
+      "user.domain",
+      "process.name",
+      "process.executable",
+      "process.command_line",
+      "process.args",
+      "process.parent.name",
+      "process.parent.executable",
+      "event.code",
+      "event.action"
+    ]
+  },
+  "related_integrations": [],
+  "required_fields": [],
+  "setup": "",
+  "note": "### Triage\n1. Determine whether the host is a workstation performing normal credential-roaming or a server with no reason to touch DPAPI keys.\n2. Review 4693 (DPAPI recovery) on the same host and account immediately afterwards — retrieval followed by mass recovery indicates credential harvesting rather than routine operation.\n3. Correlate with `Windows — LSASS Memory Dump via Known Credential-Theft Tooling` and `Windows — Credential Theft: Registry Hive or NTDS.dit Extraction` for the same host.\n4. If the account involved is privileged, treat the domain DPAPI backup key as potentially compromised.",
+  "false_positives": [
+    "A newly built or newly imaged host performing its first credential-roaming operation.",
+    "Certificate enrolment or credential-manager migration activity.",
+    "Backup software that legitimately exercises DPAPI."
+  ],
+  "references": [
+    "https://attack.mitre.org/techniques/T1555/004/"
+  ],
+  "risk_score": 47,
+  "risk_score_mapping": [],
+  "severity": "medium",
+  "severity_mapping": [],
+  "output_index": "",
+  "max_signals": 100,
+  "exceptions_list": [],
+  "actions": [],
+  "type": "new_terms",
+  "query": "event.code:\"4692\"",
+  "new_terms_fields": [
+    "host.name"
+  ],
+  "history_window_start": "now-14d",
+  "index": [
+    "logs-system.security-*"
+  ],
+  "language": "kuery"
+}

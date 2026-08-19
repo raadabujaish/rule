@@ -1,0 +1,53 @@
+{
+  "rule_id": "jcb-o365-dlp-user-daily-aggregate",
+  "name": "O365 DLP — High Endpoint DLP Volume by One User (Daily Aggregate)",
+  "version": 1,
+  "enabled": true,
+  "interval": "1h",
+  "from": "now-25h",
+  "to": "now",
+  "description": "Replaces per-event Purview DLP promotion (71k alerts/7d) with one daily aggregate per heavy user: ≥50 endpoint DLP events in 24h, with action breakdown. Suppression per user per day. Extended to include Exchange DLP policy matches (393/7d measured) so disabling the per-event Purview promotion loses no channel.",
+  "tags": [
+    "JCB",
+    "Detection-QA-2026-08",
+    "DLP"
+  ],
+  "author": [
+    "JCB Detection Engineering"
+  ],
+  "license": "internal",
+  "threat": [],
+  "investigation_fields": {
+    "field_names": [
+      "user.name",
+      "dlp_events",
+      "actions"
+    ]
+  },
+  "related_integrations": [],
+  "required_fields": [],
+  "setup": "",
+  "false_positives": [],
+  "references": [],
+  "risk_score": 47,
+  "risk_score_mapping": [],
+  "severity": "medium",
+  "severity_mapping": [],
+  "output_index": "",
+  "max_signals": 1000,
+  "exceptions_list": [],
+  "actions": [],
+  "type": "esql",
+  "language": "esql",
+  "query": "FROM logs-o365.audit-* METADATA _id, _index, _version | WHERE event.code IN (\"DLPEndpoint\",\"ComplianceDLPExchange\") | STATS dlp_events = COUNT(), actions = VALUES(event.action), channels = VALUES(event.code) BY user.name | WHERE dlp_events >= 200",
+  "alert_suppression": {
+    "group_by": [
+      "user.name"
+    ],
+    "duration": {
+      "value": 24,
+      "unit": "h"
+    },
+    "missing_fields_strategy": "suppress"
+  }
+}

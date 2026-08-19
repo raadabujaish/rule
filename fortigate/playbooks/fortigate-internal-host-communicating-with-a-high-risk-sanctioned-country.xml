@@ -1,0 +1,152 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<Playbook xmlns="https://soc.example/playbooks" id="PB-FG-005" name="FortiGate — Internal Host Communicating with a High-Risk/Sanctioned Country - SOC Playbook" version="1.0" status="Production" classification="TLP:AMBER">
+  <Metadata>
+    <Owner>JCB Detection Engineering (WatchWave)</Owner>
+    <LastUpdated>2026-08-14</LastUpdated>
+    <Severity default="High">High</Severity>
+    <Confidence default="Medium">Medium</Confidence>
+    <Category>Command and Control / Exfiltration</Category>
+    <MitreAttack>
+      <Technique id="T1071" name="Application Layer Protocol"/>
+      <Tactic id="TA0011" name="Command and Control"/>
+    </MitreAttack>
+    <References>
+      <Reference title="MITRE ATT and CK" url="https://attack.mitre.org/techniques/T1071/"/>
+    </References>
+  </Metadata>
+  <ExecutiveSummary>
+    <Overview>An internal host made an ACCEPTED connection to a high-risk/sanctioned country (Iran, Russia, etc.) - first-seen for this (host,country) via new_terms. Triage question: is this unexpected communication with a sanctioned destination (C2/exfil or compliance breach), or legitimate business traffic?</Overview>
+    <BusinessImpact>For a bank, connections to sanctioned countries carry both security (C2/exfil) and regulatory/compliance risk.</BusinessImpact>
+  </ExecutiveSummary>
+  <Scope><Assets>
+    <AssetType>FortiGate perimeter and internal firewalls (HQ + DR)</AssetType>
+    <AssetType>Internal server and user segments behind the FortiGate</AssetType>
+  </Assets><LogSources>
+    <LogSource>FortiGate traffic - logs-fortinet_fortigate.traffic-*</LogSource>
+  </LogSources></Scope>
+  <Prerequisites><TelemetryRequirements>
+    <Requirement>FortiGate logs shipped via Elastic Agent to logs-fortinet_fortigate.* (verified live).</Requirement>
+    <Requirement>Fields: fortinet.firewall.subtype (ips/dns/...), fortinet.firewall.action, fortinet.firewall.severity, fortinet.firewall.attack, fortinet.firewall.srccountry/dstcountry ('Reserved' = RFC1918 internal), fortinet.firewall.cfgpath, dns.question.name, source.ip, destination.ip, destination.port.</Requirement>
+  </TelemetryRequirements><DetectionSignals>
+    <Signal><Name>High-risk country comms</Name><Details>internal source, action accept, dstcountry in the high-risk set; first-seen (host,country).</Details></Signal>
+  </DetectionSignals></Prerequisites>
+  <Inputs>
+    <Input name="$source_ip" description="Internal host."/>
+    <Input name="$dst_country" description="Destination country from the alert."/>
+  </Inputs>
+  <Triage><ImmediateCapture>
+    <Item>Host: $source_ip</Item>
+    <Item>Destination country: $dst_country</Item>
+  </ImmediateCapture><InitialAssessment>
+    <Rule>Business may have legitimate ties (correspondent banking, remittance) to some listed countries; unexpected host-to-sanctioned-country traffic, especially from a workstation/server with no such role, is the concern.</Rule>
+  </InitialAssessment></Triage>
+  <Investigation>
+    <Goal>Determine whether the sanctioned-country communication is expected business traffic or unexpected C2/exfil/compliance-relevant activity.</Goal>
+    <Workflow>
+      <Step order="1" name="Connection detail - destination, ports, volume">
+        <Purpose>See what the host connected to, on which ports, and how much data-shaped the traffic is.</Purpose>
+        <Query platform="Elastic" language="ES|QL" id="INV-01-FGHR-CONN">
+          <![CDATA[
+FROM logs-fortinet_fortigate.traffic-*
+| WHERE source.ip == "$source_ip" AND fortinet.firewall.action == "accept" AND @timestamp >= NOW() - 4 hours
+| STATS conns = COUNT(*), dsts = VALUES(destination.ip), dports = VALUES(destination.port), dcountries = VALUES(fortinet.firewall.dstcountry) BY fortinet.firewall.dstcountry
+| SORT conns DESC
+| LIMIT 15
+          ]]>
+        </Query>
+        <ExpectedOutput>
+          <Field name="fortinet.firewall.dstcountry"/>
+          <Field name="conns"/>
+          <Field name="dports"/>
+          <Field name="dsts"/>
+        </ExpectedOutput>
+        <AnalystNotes>Web ports (443) to a CDN edge in a listed country may be benign; non-standard ports, large sustained transfers, or direct-IP connections to sanctioned countries are concerning.</AnalystNotes>
+      </Step>
+      <Step order="2" name="What is this host and does it have a business reason">
+        <Purpose>A SWIFT/correspondent-banking server may legitimately talk internationally; a user workstation should not reach sanctioned countries.</Purpose>
+        <Query platform="Elastic" language="ES|QL" id="INV-02-FGHR-HOST">
+          <![CDATA[
+FROM logs-fortinet_fortigate.traffic-*
+| WHERE source.ip == "$source_ip" AND @timestamp >= NOW() - 4 hours
+| STATS total = COUNT(*), countries = COUNT_DISTINCT(fortinet.firewall.dstcountry), country_list = VALUES(fortinet.firewall.dstcountry)
+| LIMIT 1
+          ]]>
+        </Query>
+        <ExpectedOutput>
+          <Field name="total"/>
+          <Field name="countries"/>
+          <Field name="country_list"/>
+        </ExpectedOutput>
+        <AnalystNotes>A host talking to many countries may be a proxy/gateway; a workstation reaching only the one sanctioned country is more suspicious. Correlate the IP with its role/segment.</AnalystNotes>
+      </Step>
+      <Step order="3" name="Finalize classification">
+        <DecisionTree>
+          <Node><Condition>INV-01 shows sustained/large or non-web connections to the sanctioned country from a host with no business role for it.</Condition><Result>True Positive (Unexpected Sanctioned-Country Comms - escalate to IR + compliance)</Result></Node>
+          <Node><Condition>INV-01 shows the traffic is web (443) to a CDN edge that merely geolocates to a listed country, from a normal browsing host.</Condition><Result>False Positive (geo/CDN artifact)</Result></Node>
+          <Node><Condition>INV-02 shows the host is a documented international-banking gateway with a business reason.</Condition><Result>Benign Activity (with compliance note)</Result></Node>
+          <Node><Condition>Unexpected comms but business justification cannot be confirmed.</Condition><Result>Needs Escalation (to IR and compliance)</Result></Node>
+        </DecisionTree>
+        <DocumentationChecklist>
+          <Item>Attach outputs of INV-01-FGHR-CONN, INV-02-FGHR-HOST to the case.</Item>
+        </DocumentationChecklist>
+      </Step>
+    </Workflow>
+  </Investigation>
+  <ClassificationGuidance>
+    <FalsePositive>
+      <Definition>Geo/CDN artifact or legitimate business communication.</Definition>
+      <Indicators>
+        <Item>Web traffic to a CDN edge that geolocates to a listed country.</Item>
+        <Item>Host is a documented international gateway.</Item>
+        <Item>Normal volume/ports.</Item>
+      </Indicators>
+      <SOCAction>
+        <Item>Confirm the destination is a benign CDN/business partner.</Item>
+        <Item>Document; add (host,country) to the learned baseline; close.</Item>
+      </SOCAction>
+    </FalsePositive>
+    <TruePositive>
+      <Definition>C2/exfiltration or unauthorised communication with a sanctioned destination.</Definition>
+      <Indicators>
+        <Item>Non-web ports or large transfers.</Item>
+        <Item>Host has no business reason.</Item>
+        <Item>Direct-IP to sanctioned country.</Item>
+      </Indicators>
+      <SOCAction>
+        <Item>Isolate the host; capture the connection detail; open IR.</Item>
+        <Item>Notify compliance/AML (sanctions relevance); block the destination.</Item>
+      </SOCAction>
+    </TruePositive>
+    <Misconfiguration>
+      <Definition>A misconfigured proxy/route sending traffic through a listed country unintentionally.</Definition>
+      <Indicators>
+        <Item>A routing/proxy misconfig geolocating traffic to a listed country.</Item>
+        <Item>Network team confirms.</Item>
+      </Indicators>
+      <SOCAction>
+        <Item>Fix the route/proxy; document.</Item>
+      </SOCAction>
+    </Misconfiguration>
+  </ClassificationGuidance>
+  <Response><IRForHumans>
+    <Phase name="Immediate Actions (0-30 minutes)">
+      <Action priority="1">Assess the destination and host role.</Action>
+      <Action priority="2">If unexpected: isolate the host and notify IR + compliance.</Action>
+    </Phase>
+    <Phase name="Containment and Eradication (hours)">
+      <Action>Scope the communication; check for exfil; eradicate if C2.</Action>
+    </Phase>
+    <Phase name="Recovery and Hardening (days)">
+      <Action>Enforce geo-blocking for sanctioned countries except approved business flows; monitor exceptions.</Action>
+    </Phase>
+  </IRForHumans></Response>
+  <QualityChecks>
+    <Check>new_terms keys on (host, dstcountry) - legitimate business pairs fire once then learn. 'Reserved' src = internal.</Check>
+    <Check>Compliance/AML has a parallel interest - route confirmed sanctioned comms to them.</Check>
+  </QualityChecks>
+  <ClosureCriteria><FalsePositiveClosure>
+    <Item>Geo/CDN artifact or business flow confirmed; documented.</Item>
+  </FalsePositiveClosure><TruePositiveClosure>
+    <Item>Host isolated; no exfil/C2; compliance notified; destination blocked.</Item>
+  </TruePositiveClosure></ClosureCriteria>
+</Playbook>

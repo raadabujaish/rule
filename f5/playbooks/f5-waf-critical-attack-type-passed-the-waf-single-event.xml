@@ -1,0 +1,154 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<Playbook xmlns="https://soc.example/playbooks" id="PB-F5-004" name="F5 WAF — Critical Attack Type Passed the WAF (Single Event) - SOC Playbook" version="1.0" status="Production" classification="TLP:AMBER">
+  <Metadata>
+    <Owner>JCB Detection Engineering (WatchWave)</Owner>
+    <LastUpdated>2026-08-14</LastUpdated>
+    <Severity default="Critical">Critical</Severity>
+    <Confidence default="High">High</Confidence>
+    <Category>Initial Access / Exploit Public-Facing Application</Category>
+    <MitreAttack>
+      <Technique id="T1190" name="Exploit Public-Facing Application"/>
+      <Tactic id="TA0001" name="Initial Access"/>
+    </MitreAttack>
+    <References>
+      <Reference title="MITRE ATT and CK" url="https://attack.mitre.org/techniques/T1190/"/>
+    </References>
+  </Metadata>
+  <ExecutiveSummary>
+    <Overview>A single, highest-fidelity event: a rating&gt;=4 Command Execution, SQL-Injection, Remote File Include, Server-Side Code Injection, Trojan or Other-Application-Attack that the WAF did NOT block. One such event is enough to warrant investigation. Triage question: did this specific critical request reach and affect the backend?</Overview>
+    <BusinessImpact>A single successful command-exec or SQLi against a banking app can compromise the server or database outright.</BusinessImpact>
+  </ExecutiveSummary>
+  <Scope><Assets>
+    <AssetType>F5 BIG-IP ASM / Advanced WAF fronting JCB internet banking and public web apps</AssetType>
+    <AssetType>Published banking applications and their backend servers</AssetType>
+  </Assets><LogSources>
+    <LogSource>F5 ASM CEF events via syslog -&gt; logs-cef.log-* (observer.vendor F5)</LogSource>
+  </LogSources></Scope>
+  <Prerequisites><TelemetryRequirements>
+    <Requirement>F5 ASM logging to CEF over syslog, parsed into logs-cef.log-* (verified live).</Requirement>
+    <Requirement>CEF fields: deviceCustomString4=attack_type, deviceCustomNumber2=violation_rating (&gt;=4 = real attack), deviceCustomString1=security policy, requestUrl, requestMethod, deviceCustomNumber1=HTTP response code, deviceCustomString6=source geo, cef.name=violation name, event.action=passed|alerted|blocked.</Requirement>
+  </TelemetryRequirements><DetectionSignals>
+    <Signal><Name>Critical attack passed</Name><Details>One rating&gt;=4 critical-class attack type with action != blocked.</Details></Signal>
+  </DetectionSignals></Prerequisites>
+  <Inputs>
+    <Input name="$source_ip" description="Source of the critical attack."/>
+    <Input name="$attack_type" description="The attack type (deviceCustomString4) from the alert."/>
+  </Inputs>
+  <Triage><ImmediateCapture>
+    <Item>Source: $source_ip</Item>
+    <Item>Attack type: $attack_type</Item>
+  </ImmediateCapture><InitialAssessment>
+    <Rule>A single passed critical exploit is treated as an incident until backend integrity is confirmed; do not down-rank because it was 'only one event'.</Rule>
+  </InitialAssessment></Triage>
+  <Investigation>
+    <Goal>Determine whether this critical exploit reached the backend and whether the source is running a broader campaign.</Goal>
+    <Workflow>
+      <Step order="1" name="Full context of the critical request(s)">
+        <Purpose>Get the exact URL, method, policy, and backend response for the critical passed event.</Purpose>
+        <Query platform="Elastic" language="ES|QL" id="INV-01-F5CRIT-REQUEST">
+          <![CDATA[
+FROM logs-cef.log-*
+| WHERE observer.vendor == "F5" AND source.ip == "$source_ip" AND cef.extensions.deviceCustomNumber2 >= 4 AND event.action != "blocked" AND cef.extensions.deviceCustomString4 IN ("Command Execution","SQL-Injection","Remote File Include","Server Side Code Injection","Trojan/Backdoor/Spyware","Other Application Attacks") AND @timestamp >= NOW() - 4 hours
+| KEEP @timestamp, cef.extensions.deviceCustomString4, cef.extensions.requestMethod, cef.extensions.requestUrl, cef.extensions.deviceCustomNumber1, cef.extensions.deviceCustomString1, cef.name, event.action
+| SORT @timestamp DESC
+| LIMIT 20
+          ]]>
+        </Query>
+        <ExpectedOutput>
+          <Field name="cef.extensions.deviceCustomString4"/>
+          <Field name="cef.extensions.requestUrl"/>
+          <Field name="cef.extensions.deviceCustomNumber1"/>
+          <Field name="event.action"/>
+        </ExpectedOutput>
+        <AnalystNotes>deviceCustomNumber1 (response) 2xx/5xx on a command-exec/SQLi URL is the decisive reached-backend evidence. Read the URL for the payload (e.g. ;cat /etc/passwd, UNION SELECT). action=passed is worse than alerted.</AnalystNotes>
+      </Step>
+      <Step order="2" name="Is this source running a broader attack">
+        <Purpose>A critical single event from a source already flagged for sustained/multi-app activity is part of a live intrusion.</Purpose>
+        <Query platform="Elastic" language="ES|QL" id="INV-02-F5CRIT-BROADER">
+          <![CDATA[
+FROM logs-cef.log-*
+| WHERE observer.vendor == "F5" AND source.ip == "$source_ip" AND @timestamp >= NOW() - 4 hours
+| STATS events = COUNT(*), high = COUNT(CASE(cef.extensions.deviceCustomNumber2 >= 4, 1, null)), passed = COUNT(CASE(event.action == "passed", 1, null)), types = VALUES(cef.extensions.deviceCustomString4), apps = COUNT_DISTINCT(cef.extensions.deviceCustomString1), geo = VALUES(cef.extensions.deviceCustomString6)
+| LIMIT 1
+          ]]>
+        </Query>
+        <ExpectedOutput>
+          <Field name="events"/>
+          <Field name="high"/>
+          <Field name="passed"/>
+          <Field name="types"/>
+          <Field name="geo"/>
+        </ExpectedOutput>
+        <AnalystNotes>Context around the single critical event: many high-rating events and multiple apps = active intrusion; a lone event from an otherwise-quiet internal tester may be a scan artifact.</AnalystNotes>
+      </Step>
+      <Step order="3" name="Finalize classification">
+        <DecisionTree>
+          <Node><Condition>INV-01 shows the critical exploit with an HTTP 2xx/5xx backend response.</Condition><Result>True Positive (Critical Exploit Reached Backend - immediate IR, treat app/DB as compromised)</Result></Node>
+          <Node><Condition>INV-01 shows action=passed for a critical exploit even without a captured response, from an external source.</Condition><Result>True Positive (Critical Exploit Forwarded - escalate, inspect backend)</Result></Node>
+          <Node><Condition>INV-02 shows the source is a documented internal scanner and INV-01 shows no backend response.</Condition><Result>False Positive</Result></Node>
+          <Node><Condition>Single critical event, action=alerted (transparent), internal source, ambiguous ownership.</Condition><Result>Needs Escalation</Result></Node>
+        </DecisionTree>
+        <DocumentationChecklist>
+          <Item>Attach outputs of INV-01-F5CRIT-REQUEST, INV-02-F5CRIT-BROADER to the case.</Item>
+        </DocumentationChecklist>
+      </Step>
+    </Workflow>
+  </Investigation>
+  <ClassificationGuidance>
+    <FalsePositive>
+      <Definition>An approved scanner/tester generating a critical-signature request that did not reach the backend.</Definition>
+      <Indicators>
+        <Item>Internal/contracted source on schedule.</Item>
+        <Item>action=alerted in a test policy.</Item>
+        <Item>No backend response.</Item>
+      </Indicators>
+      <SOCAction>
+        <Item>Confirm the engagement; close as false_positive.</Item>
+      </SOCAction>
+    </FalsePositive>
+    <TruePositive>
+      <Definition>A critical web exploit forwarded by the WAF, potentially compromising the backend.</Definition>
+      <Indicators>
+        <Item>Command-exec/SQLi/RFI/code-injection passed.</Item>
+        <Item>Backend HTTP response present.</Item>
+        <Item>External source or part of a broader attack.</Item>
+      </Indicators>
+      <SOCAction>
+        <Item>Immediate IR: inspect the target app server and DB for compromise/web-shell.</Item>
+        <Item>Block the source; enforce blocking; preserve the full request.</Item>
+        <Item>Rotate app/DB credentials if injection reached the DB.</Item>
+      </SOCAction>
+    </TruePositive>
+    <Misconfiguration>
+      <Definition>A transparent/staging policy forwarding a genuine critical detection.</Definition>
+      <Indicators>
+        <Item>Policy in transparent mode.</Item>
+        <Item>action=passed/alerted for a real signature.</Item>
+      </Indicators>
+      <SOCAction>
+        <Item>Move the policy to blocking immediately; re-triage as TP if backend reach is found.</Item>
+      </SOCAction>
+    </Misconfiguration>
+  </ClassificationGuidance>
+  <Response><IRForHumans>
+    <Phase name="Immediate Actions (0-30 minutes)">
+      <Action priority="1">Inspect the targeted app server/DB now; block the source.</Action>
+      <Action priority="2">Preserve the full request for forensics.</Action>
+    </Phase>
+    <Phase name="Containment and Eradication (hours)">
+      <Action>Enforce blocking; hunt web-shell/persistence; rotate credentials if the DB was reached.</Action>
+    </Phase>
+    <Phase name="Recovery and Hardening (days)">
+      <Action>Enforce blocking on all public banking policies; virtual-patch the exploited vector.</Action>
+    </Phase>
+  </IRForHumans></Response>
+  <QualityChecks>
+    <Check>Attack-type list matches the critical-class set in the detection.</Check>
+    <Check>Single-event fidelity relies on rating&gt;=4 + not-blocked - do not widen without care.</Check>
+  </QualityChecks>
+  <ClosureCriteria><FalsePositiveClosure>
+    <Item>Approved test confirmed; no backend reach; documented.</Item>
+  </FalsePositiveClosure><TruePositiveClosure>
+    <Item>Backend integrity verified/restored; source blocked; policy enforced; forensics retained.</Item>
+  </TruePositiveClosure></ClosureCriteria>
+</Playbook>

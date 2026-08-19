@@ -1,0 +1,82 @@
+{
+  "rule_id": "jcb-kav-endpoint-unmanaged",
+  "name": "Kaspersky — Endpoint Dropped Off Central Management (Agent Unmanaged)",
+  "version": 1,
+  "enabled": true,
+  "interval": "1h",
+  "from": "now-90m",
+  "to": "now",
+  "description": "Attacker objective\nEvade endpoint protection by removing or disabling the security agent so the host stops reporting to central management and loses protection and telemetry.\n\nAttack logic\nWhen an endpoint stops being managed by the central security server, its protection state and event stream are lost. This can be benign (a long-offline or decommissioned device) or an attacker disabling the agent to operate unobserved.\n\nWhy this detection works\nThe management server emits an event, naming the device, whenever a host becomes unmanaged — a tripwire for lost endpoint visibility.\n\nFalse positives\nA device legitimately offline for a long period, reimaged, or decommissioned.\n\nTuning\nCorrelate with asset lifecycle/change records; prioritise servers and recently-active hosts that suddenly become unmanaged.\n\nRequired telemetry\nKaspersky Security Center CEF (KLSRV_HOST_OUT_CONTROL; the affected device is named in the event message).",
+  "tags": [
+    "JCB",
+    "Kaspersky",
+    "Phase3",
+    "Tactic: Defense Evasion",
+    "Use Case: Threat Detection"
+  ],
+  "author": [
+    "raadabujaish"
+  ],
+  "license": "",
+  "threat": [
+    {
+      "framework": "MITRE ATT&CK",
+      "tactic": {
+        "id": "TA0005",
+        "name": "Defense Evasion",
+        "reference": "https://attack.mitre.org/tactics/TA0005/"
+      },
+      "technique": [
+        {
+          "id": "T1562",
+          "name": "Impair Defenses",
+          "reference": "https://attack.mitre.org/techniques/T1562/",
+          "subtechnique": [
+            {
+              "id": "T1562.001",
+              "name": "Disable or Modify Tools",
+              "reference": "https://attack.mitre.org/techniques/T1562/001/"
+            }
+          ]
+        }
+      ]
+    }
+  ],
+  "investigation_fields": {
+    "field_names": [
+      "destination.domain",
+      "destination.user.name",
+      "destination.ip",
+      "cef.name",
+      "cef.device.event_class_id",
+      "cef.severity",
+      "message",
+      "observer.product",
+      "observer.vendor"
+    ]
+  },
+  "related_integrations": [],
+  "required_fields": [],
+  "setup": "",
+  "note": "## Investigation guide\n1. Identify the named device from the event message.\n2. Confirm whether it was decommissioned or simply offline; if unexplained, treat as possible agent tampering and investigate the host directly.\n3. A server or active workstation going unmanaged is higher priority.",
+  "false_positives": [
+    "A device legitimately offline for a long period, reimaged, or decommissioned."
+  ],
+  "references": [
+    "https://attack.mitre.org/techniques/T1562/"
+  ],
+  "risk_score": 56,
+  "risk_score_mapping": [],
+  "severity": "medium",
+  "severity_mapping": [],
+  "output_index": "",
+  "max_signals": 100,
+  "exceptions_list": [],
+  "actions": [],
+  "type": "query",
+  "language": "kuery",
+  "index": [
+    "logs-cef.log-*"
+  ],
+  "query": "observer.vendor:\"KasperskyLab\" and cef.device.event_class_id:\"KLSRV_HOST_OUT_CONTROL\""
+}

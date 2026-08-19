@@ -1,0 +1,149 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<Playbook xmlns="https://soc.example/playbooks" id="PB-WIN-041" name="Windows — Browser Extension Install - SOC Playbook" version="1.0" status="Production" classification="TLP:AMBER">
+  <Metadata>
+    <Owner>JCB Detection Engineering (WatchWave)</Owner>
+    <LastUpdated>2026-08-14</LastUpdated>
+    <Severity default="Medium">Medium</Severity>
+    <Confidence default="Low">Low</Confidence>
+    <Category>Persistence / Browser Extensions</Category>
+    <MitreAttack>
+      <Technique id="T1176" name="Browser Extensions"/>
+      <Tactic id="TA0003" name="Persistence"/>
+    </MitreAttack>
+    <References>
+      <Reference title="MITRE ATT and CK" url="https://attack.mitre.org/techniques/T1176/"/>
+    </References>
+  </Metadata>
+  <ExecutiveSummary>
+    <Overview>A browser extension file (.xpi in a Firefox profile Extensions path, or similar) was created outside the normal install flow. Triage question: is this a malicious/unwanted extension being sideloaded for persistence/data theft, or a normal user extension install?</Overview>
+    <BusinessImpact>Malicious browser extensions steal session cookies/credentials and provide persistence within the user's browsing.</BusinessImpact>
+  </ExecutiveSummary>
+  <Scope><Assets>
+    <AssetType>Windows servers and workstations (INTDOM domain)</AssetType>
+    <AssetType>Domain controllers</AssetType>
+  </Assets><LogSources>
+    <LogSource>Sysmon file events - logs-windows.sysmon_operational-*</LogSource>
+  </LogSources></Scope>
+  <Prerequisites><TelemetryRequirements>
+    <Requirement>Windows Security + Sysmon + PowerShell logs via Elastic Agent (verified live). Sysmon event.code 1=process(command_line/parent populated), 11=file, 13/12=registry(registry.path populated); process.code_signature NOT collected.</Requirement>
+  </TelemetryRequirements><DetectionSignals>
+    <Signal><Name>Browser extension created</Name><Details>.xpi/extension file written to a browser profile Extensions path.</Details></Signal>
+  </DetectionSignals></Prerequisites>
+  <Inputs>
+    <Input name="$hostname" description="Host where the extension was written."/>
+    <Input name="$username" description="Account (user.name) if present."/>
+  </Inputs>
+  <Triage><ImmediateCapture>
+    <Item>Host: $hostname</Item>
+  </ImmediateCapture><InitialAssessment>
+    <Rule>Weigh the evidence story, not any single fact - see ClassificationGuidance.</Rule>
+  </InitialAssessment></Triage>
+  <Investigation>
+    <Goal>Determine whether the browser-extension file is a malicious sideload or a normal user install.</Goal>
+    <Workflow>
+      <Step order="1" name="The extension file and the writing process">
+        <Purpose>A .xpi written by a non-browser process, or to an unusual path, indicates sideloading vs a user-initiated install.</Purpose>
+        <Query platform="Elastic" language="ES|QL" id="INV-01-EXT-WRITE">
+          <![CDATA[
+FROM logs-windows.sysmon_operational-*
+| WHERE event.code == "11" AND host.name == "$hostname" AND @timestamp >= NOW() - 4 hours
+| WHERE file.path RLIKE "(?i).*(.*extensions.*.*.*.xpi|.*extensions.*.*.*.crx)"
+| KEEP @timestamp, process.name, file.path, user.name
+| SORT @timestamp DESC
+| LIMIT 20
+          ]]>
+        </Query>
+        <ExpectedOutput>
+          <Field name="process.name"/>
+          <Field name="file.path"/>
+          <Field name="user.name"/>
+        </ExpectedOutput>
+        <AnalystNotes>A .xpi/.crx written by the browser itself during a user install is normal. Written by a script/installer/other process, or into another user's profile, indicates sideloading. Note the process and path.</AnalystNotes>
+      </Step>
+      <Step order="2" name="Process context">
+        <Purpose>Reveal whether a non-browser process placed the extension.</Purpose>
+        <Query platform="Elastic" language="ES|QL" id="INV-02-EXT-CONTEXT" optional="true">
+          <![CDATA[
+FROM logs-windows.sysmon_operational-*,logs-system.security-*
+| WHERE event.code IN ("1","4688") AND host.name == "$hostname" AND @timestamp >= NOW() - 2 hours
+| STATS runs = COUNT(*), parents = VALUES(process.parent.name) BY process.name
+| SORT runs DESC
+| LIMIT 15
+          ]]>
+        </Query>
+        <ExpectedOutput>
+          <Field name="process.name"/>
+          <Field name="parents"/>
+        </ExpectedOutput>
+        <AnalystNotes>A dropper/script running near the extension write supports a malicious sideload.</AnalystNotes>
+      </Step>
+      <Step order="3" name="Finalize classification">
+        <DecisionTree>
+          <Node><Condition>An extension file placed by a non-browser process or into an unusual/other-user profile path.</Condition><Result>True Positive (Malicious/Unwanted Extension Sideload - investigate, remove)</Result></Node>
+          <Node><Condition>A user installing an extension through the browser's normal flow.</Condition><Result>False Positive / Benign Activity</Result></Node>
+          <Node><Condition>Extension write with unclear process/path.</Condition><Result>Needs Escalation</Result></Node>
+        </DecisionTree>
+        <DocumentationChecklist>
+          <Item>Attach outputs of INV-01-EXT-WRITE, INV-02-EXT-CONTEXT to the case.</Item>
+        </DocumentationChecklist>
+      </Step>
+    </Workflow>
+  </Investigation>
+  <ClassificationGuidance>
+    <FalsePositive>
+      <Definition>A normal user extension install.</Definition>
+      <Indicators>
+        <Item>Browser process wrote it.</Item>
+        <Item>User's own profile.</Item>
+        <Item>Normal flow.</Item>
+      </Indicators>
+      <SOCAction>
+        <Item>Confirm with the user if needed; close as benign_activity.</Item>
+      </SOCAction>
+    </FalsePositive>
+    <TruePositive>
+      <Definition>A malicious/unwanted extension sideload.</Definition>
+      <Indicators>
+        <Item>Non-browser process wrote it.</Item>
+        <Item>Unusual/other-user path.</Item>
+        <Item>Dropper context.</Item>
+      </Indicators>
+      <SOCAction>
+        <Item>Remove the extension; inspect it for credential/cookie theft; open IR if malicious.</Item>
+        <Item>Check the browser for session/credential exposure.</Item>
+      </SOCAction>
+    </TruePositive>
+    <Misconfiguration>
+      <Definition>An enterprise extension-deployment tool installing extensions.</Definition>
+      <Indicators>
+        <Item>A known deployment tool.</Item>
+        <Item>Expected extension.</Item>
+      </Indicators>
+      <SOCAction>
+        <Item>Baseline; document.</Item>
+      </SOCAction>
+    </Misconfiguration>
+  </ClassificationGuidance>
+  <Response><IRForHumans>
+    <Phase name="Immediate Actions (0-30 minutes)">
+      <Action priority="1">Confirm the activity on the host; if malicious indicators, isolate the host.</Action>
+      <Action priority="2">Identify the responsible account/process and its origin.</Action>
+    </Phase>
+    <Phase name="Containment and Eradication (hours)">
+      <Action>Isolate the host; capture volatile evidence; hunt the same pattern across the estate.</Action>
+      <Action>Reset credentials used on the host if compromise is confirmed.</Action>
+    </Phase>
+    <Phase name="Recovery and Hardening (days)">
+      <Action>Remediate the root cause; add/verify EDR coverage; apply relevant hardening.</Action>
+    </Phase>
+  </IRForHumans></Response>
+  <QualityChecks>
+    <Check>Confirm the required telemetry (Sysmon/Security auditing) is present on the host.</Check>
+    <Check>Tune known-benign administrative sources via exceptions, not by disabling the rule.</Check>
+  </QualityChecks>
+  <ClosureCriteria><FalsePositiveClosure>
+    <Item>Activity confirmed benign/authorised and documented.</Item>
+  </FalsePositiveClosure><TruePositiveClosure>
+    <Item>Host contained and triaged; root cause eradicated; estate swept; findings recorded.</Item>
+  </TruePositiveClosure></ClosureCriteria>
+</Playbook>

@@ -1,0 +1,53 @@
+{
+  "rule_id": "jcb-f5-critical-attack-passed",
+  "name": "F5 WAF — Critical Attack Type Passed the WAF (Single Event)",
+  "version": 1,
+  "enabled": true,
+  "interval": "5m",
+  "from": "now-10m",
+  "to": "now",
+  "description": "Single-event promotion for the highest-fidelity case: violation rating >= 4 AND attack type in (Command Execution, SQL-Injection, Remote File Include, Server Side Code Injection, Trojan/Backdoor/Spyware) AND the request was NOT blocked. Low volume, high confidence: each alert is a likely exploit reaching a banking app.",
+  "tags": [
+    "JCB",
+    "Detection-QA-2026-08",
+    "F5 WAF"
+  ],
+  "author": [
+    "JCB Detection Engineering"
+  ],
+  "license": "internal",
+  "threat": [],
+  "investigation_fields": {
+    "field_names": [
+      "source.ip",
+      "cef.extensions.deviceCustomString6",
+      "cef.extensions.deviceCustomString4",
+      "cef.extensions.deviceCustomNumber2",
+      "cef.extensions.requestUrl",
+      "cef.extensions.requestMethod",
+      "cef.extensions.deviceCustomString1",
+      "cef.name",
+      "destination.ip",
+      "event.action"
+    ]
+  },
+  "related_integrations": [],
+  "required_fields": [],
+  "setup": "",
+  "false_positives": [],
+  "references": [],
+  "risk_score": 90,
+  "risk_score_mapping": [],
+  "severity": "critical",
+  "severity_mapping": [],
+  "output_index": "",
+  "max_signals": 100,
+  "exceptions_list": [],
+  "actions": [],
+  "type": "query",
+  "language": "kuery",
+  "index": [
+    "logs-cef.log-*"
+  ],
+  "query": "observer.vendor:\"F5\" and cef.extensions.deviceCustomString4:(\"Command Execution\" or \"SQL-Injection\" or \"Remote File Include\" or \"Server Side Code Injection\" or \"Trojan/Backdoor/Spyware\" or \"Other Application Attacks\") and cef.extensions.deviceCustomNumber2 >= 4 and not cef.extensions.deviceAction:\"blocked\""
+}

@@ -1,0 +1,150 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<Playbook xmlns="https://soc.example/playbooks" id="PB-WIN-044" name="Windows — Potential Ransomware Behavior - High count of Readme files by System - SOC Playbook" version="1.0" status="Production" classification="TLP:AMBER">
+  <Metadata>
+    <Owner>JCB Detection Engineering (WatchWave)</Owner>
+    <LastUpdated>2026-08-14</LastUpdated>
+    <Severity default="High">High</Severity>
+    <Confidence default="High">High</Confidence>
+    <Category>Impact / Data Encrypted for Impact</Category>
+    <MitreAttack>
+      <Technique id="T1486" name="Data Encrypted for Impact"/>
+      <Tactic id="TA0040" name="Impact"/>
+    </MitreAttack>
+    <References>
+      <Reference title="MITRE ATT and CK" url="https://attack.mitre.org/techniques/T1486/"/>
+    </References>
+  </Metadata>
+  <ExecutiveSummary>
+    <Overview>The System process (PID 4) created a high count of ransom-note-style files (readme/lock/how-to/recover/decrypt/restore names) - the ransom-note-dropping behavior of ransomware writing over SMB. Triage question: is ransomware actively encrypting/dropping notes, or a false match on legitimate files?</Overview>
+    <BusinessImpact>Mass ransom-note creation by System (PID 4, i.e. remote SMB writes) indicates ransomware encrypting file shares - time-critical.</BusinessImpact>
+  </ExecutiveSummary>
+  <Scope><Assets>
+    <AssetType>Windows servers and workstations (INTDOM domain)</AssetType>
+    <AssetType>Domain controllers</AssetType>
+  </Assets><LogSources>
+    <LogSource>Sysmon file events + Windows Security SMB - logs-windows.sysmon_operational-*,logs-system.security-*</LogSource>
+  </LogSources></Scope>
+  <Prerequisites><TelemetryRequirements>
+    <Requirement>Windows Security + Sysmon + PowerShell logs via Elastic Agent (verified live). Sysmon event.code 1=process(command_line/parent populated), 11=file, 13/12=registry(registry.path populated); process.code_signature NOT collected.</Requirement>
+  </TelemetryRequirements><DetectionSignals>
+    <Signal><Name>Ransom-note burst</Name><Details>PID 4 file creation of many readme/lock/recover/decrypt-named files.</Details></Signal>
+  </DetectionSignals></Prerequisites>
+  <Inputs>
+    <Input name="$hostname" description="Host (file server) where the notes appeared."/>
+    <Input name="$username" description="N/A (System/PID 4 remote writes)."/>
+  </Inputs>
+  <Triage><ImmediateCapture>
+    <Item>Host: $hostname</Item>
+  </ImmediateCapture><InitialAssessment>
+    <Rule>Weigh the evidence story, not any single fact - see ClassificationGuidance.</Rule>
+  </InitialAssessment></Triage>
+  <Investigation>
+    <Goal>Confirm whether ransomware is actively dropping ransom notes / encrypting, and identify the source of the SMB writes.</Goal>
+    <Workflow>
+      <Step order="1" name="Confirm the ransom-note-style file burst">
+        <Purpose>Confirm the volume and naming of the created files - a real ransom-note burst has many uniform-named notes.</Purpose>
+        <Query platform="Elastic" language="ES|QL" id="INV-01-RANSOM-FILES">
+          <![CDATA[
+FROM logs-windows.sysmon_operational-*
+| WHERE event.code == "11" AND host.name == "$hostname" AND process.pid == 4 AND @timestamp >= NOW() - 1 hours
+| STATS files = COUNT(*), sample_names = VALUES(file.name), exts = VALUES(file.extension), dirs = COUNT_DISTINCT(file.directory)
+| LIMIT 1
+          ]]>
+        </Query>
+        <ExpectedOutput>
+          <Field name="files"/>
+          <Field name="sample_names"/>
+          <Field name="exts"/>
+          <Field name="dirs"/>
+        </ExpectedOutput>
+        <AnalystNotes>Many identically-named readme/decrypt files across many directories = active ransomware. A handful of legitimately-named readme files is a false match. dirs count shows spread.</AnalystNotes>
+      </Step>
+      <Step order="2" name="Which remote source is writing over SMB">
+        <Purpose>PID 4 writes come from a remote SMB client - identify it to contain the encrypting host.</Purpose>
+        <Query platform="Elastic" language="ES|QL" id="INV-02-RANSOM-SOURCE">
+          <![CDATA[
+FROM logs-system.security-*
+| WHERE host.name == "$hostname" AND event.code == "5145" AND @timestamp >= NOW() - 1 hours
+| EVAL src = COALESCE(TO_STRING(source.ip), "local")
+| STATS accesses = COUNT(*), shares = VALUES(winlog.event_data.ShareName), users = VALUES(winlog.event_data.SubjectUserName) BY src
+| SORT accesses DESC
+| LIMIT 15
+          ]]>
+        </Query>
+        <ExpectedOutput>
+          <Field name="src"/>
+          <Field name="accesses"/>
+          <Field name="users"/>
+        </ExpectedOutput>
+        <AnalystNotes>The top SMB source writing to the shares during the note burst is the encrypting host - isolate it immediately. The account tells you which credential is compromised.</AnalystNotes>
+      </Step>
+      <Step order="3" name="Finalize classification">
+        <DecisionTree>
+          <Node><Condition>INV-01 confirms many uniform ransom-note files across directories, and INV-02 identifies a remote SMB source.</Condition><Result>True Positive (Active Ransomware - ISOLATE the source host NOW, activate ransomware IR)</Result></Node>
+          <Node><Condition>INV-01 shows only a few legitimately-named readme files (documentation), no encryption pattern.</Condition><Result>False Positive</Result></Node>
+          <Node><Condition>Ransom-note-like files present but the encrypting source cannot yet be identified.</Condition><Result>Needs Escalation (treat as high-priority)</Result></Node>
+        </DecisionTree>
+        <DocumentationChecklist>
+          <Item>Attach outputs of INV-01-RANSOM-FILES, INV-02-RANSOM-SOURCE to the case.</Item>
+        </DocumentationChecklist>
+      </Step>
+    </Workflow>
+  </Investigation>
+  <ClassificationGuidance>
+    <FalsePositive>
+      <Definition>A false match on legitimate readme/documentation files.</Definition>
+      <Indicators>
+        <Item>Few files.</Item>
+        <Item>Legitimate names/content.</Item>
+        <Item>No spread/encryption.</Item>
+      </Indicators>
+      <SOCAction>
+        <Item>Confirm the files are benign; close as false_positive; tune the name patterns if needed.</Item>
+      </SOCAction>
+    </FalsePositive>
+    <TruePositive>
+      <Definition>Active ransomware dropping notes / encrypting shares.</Definition>
+      <Indicators>
+        <Item>Many uniform ransom notes across directories.</Item>
+        <Item>Remote SMB source writing them.</Item>
+        <Item>Encryption/extension changes.</Item>
+      </Indicators>
+      <SOCAction>
+        <Item>Isolate the encrypting source host and the file server immediately; activate ransomware IR.</Item>
+        <Item>Disable the compromised account; protect/verify backups; scope the spread.</Item>
+      </SOCAction>
+    </TruePositive>
+    <Misconfiguration>
+      <Definition>A misconfigured app mass-creating files matching the pattern.</Definition>
+      <Indicators>
+        <Item>A known app creating many readme-named files.</Item>
+        <Item>No encryption/ransom content.</Item>
+      </Indicators>
+      <SOCAction>
+        <Item>Confirm the app; tune the rule; document.</Item>
+      </SOCAction>
+    </Misconfiguration>
+  </ClassificationGuidance>
+  <Response><IRForHumans>
+    <Phase name="Immediate Actions (0-30 minutes)">
+      <Action priority="1">Confirm the activity on the host; if malicious indicators, isolate the host.</Action>
+      <Action priority="2">Identify the responsible account/process and its origin.</Action>
+    </Phase>
+    <Phase name="Containment and Eradication (hours)">
+      <Action>Isolate the host; capture volatile evidence; hunt the same pattern across the estate.</Action>
+      <Action>Reset credentials used on the host if compromise is confirmed.</Action>
+    </Phase>
+    <Phase name="Recovery and Hardening (days)">
+      <Action>Remediate the root cause; add/verify EDR coverage; apply relevant hardening.</Action>
+    </Phase>
+  </IRForHumans></Response>
+  <QualityChecks>
+    <Check>Confirm the required telemetry (Sysmon/Security auditing) is present on the host.</Check>
+    <Check>Tune known-benign administrative sources via exceptions, not by disabling the rule.</Check>
+  </QualityChecks>
+  <ClosureCriteria><FalsePositiveClosure>
+    <Item>Activity confirmed benign/authorised and documented.</Item>
+  </FalsePositiveClosure><TruePositiveClosure>
+    <Item>Host contained and triaged; root cause eradicated; estate swept; findings recorded.</Item>
+  </TruePositiveClosure></ClosureCriteria>
+</Playbook>

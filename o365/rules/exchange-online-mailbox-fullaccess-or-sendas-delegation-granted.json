@@ -1,0 +1,87 @@
+{
+  "rule_id": "jcb-m365-mailbox-delegation",
+  "name": "Exchange Online — Mailbox FullAccess or SendAs Delegation Granted",
+  "version": 1,
+  "enabled": true,
+  "interval": "1h",
+  "from": "now-90m",
+  "to": "now",
+  "description": "Attacker objective\nGain persistent access to another user's mailbox, or the ability to send as them, by granting FullAccess or SendAs delegation — used for BEC, data theft and impersonation.\n\nAttack logic\nFullAccess lets a principal read an entire mailbox; SendAs lets them send mail as the mailbox owner. Attackers grant these to a controlled account to persist access and impersonate staff after a compromise.\n\nWhy this detection works\nThe unified audit log records mailbox-permission and recipient-permission grants with the grantee, access right and acting principal; excluding built-in service/role assignees isolates human-driven delegation.\n\nFalse positives\nLegitimate delegation for shared mailboxes, assistants or team mailboxes.\n\nTuning\nAllowlist sanctioned shared-mailbox delegation; prioritise FullAccess/SendAs granted to individual user accounts; correlate with the grantee's activity.\n\nRequired telemetry\no365.audit RecordType 1, Operations 'Add-MailboxPermission' (FullAccess) / 'Add-RecipientPermission' (SendAs) (Parameters.User=grantee, ObjectId=mailbox, user.name=actor).",
+  "tags": [
+    "JCB",
+    "M365",
+    "Phase3",
+    "Tactic: Persistence",
+    "Use Case: Threat Detection"
+  ],
+  "author": [
+    "raadabujaish"
+  ],
+  "license": "",
+  "threat": [
+    {
+      "framework": "MITRE ATT&CK",
+      "tactic": {
+        "id": "TA0003",
+        "name": "Persistence",
+        "reference": "https://attack.mitre.org/tactics/TA0003/"
+      },
+      "technique": [
+        {
+          "id": "T1098",
+          "name": "Account Manipulation",
+          "reference": "https://attack.mitre.org/techniques/T1098/",
+          "subtechnique": [
+            {
+              "id": "T1098.002",
+              "name": "Additional Email Delegate Permissions",
+              "reference": "https://attack.mitre.org/techniques/T1098/002/"
+            }
+          ]
+        }
+      ]
+    }
+  ],
+  "investigation_fields": {
+    "field_names": [
+      "user.name",
+      "user.id",
+      "source.ip",
+      "event.action",
+      "event.code",
+      "event.outcome",
+      "o365.audit.Operation",
+      "o365.audit.ResultStatus",
+      "o365.audit.ObjectId",
+      "o365.audit.Severity",
+      "message",
+      "event.dataset",
+      "o365.audit",
+      "o365.audit.Parameters.User"
+    ]
+  },
+  "related_integrations": [],
+  "required_fields": [],
+  "setup": "",
+  "note": "## Investigation guide\n1. Identify the mailbox, the grantee (Parameters.User) and the access right; confirm the delegation is authorised.\n2. If unauthorised, remove the permission and investigate both the actor and the grantee for compromise.",
+  "false_positives": [
+    "Legitimate delegation for shared mailboxes, assistants or team mailboxes."
+  ],
+  "references": [
+    "https://attack.mitre.org/techniques/T1098/"
+  ],
+  "risk_score": 70,
+  "risk_score_mapping": [],
+  "severity": "high",
+  "severity_mapping": [],
+  "output_index": "",
+  "max_signals": 100,
+  "exceptions_list": [],
+  "actions": [],
+  "type": "query",
+  "language": "kuery",
+  "index": [
+    "logs-o365*"
+  ],
+  "query": "event.dataset:\"o365.audit\" and event.action:(\"Add-MailboxPermission\" or \"Add-RecipientPermission\") and not o365.audit.Parameters.User:(\"Discovery Management\" or \"Organization Management\" or \"Exchange Servers\" or \"NT AUTHORITY\\SYSTEM\")"
+}

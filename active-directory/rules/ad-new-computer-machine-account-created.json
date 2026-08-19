@@ -1,0 +1,80 @@
+{
+  "rule_id": "jcb-ad-new-computer-account",
+  "name": "AD — New Computer (Machine) Account Created",
+  "version": 1,
+  "enabled": true,
+  "interval": "30m",
+  "from": "now-1h",
+  "to": "now",
+  "description": "Attacker objective\nCreate a machine account for resource-based constrained delegation (RBCD) abuse, DCShadow, or as a stealthy foothold.\n\nAttack logic\nComputer-account creation is low-volume and is abused in several modern AD attacks. Creation by a non-standard principal is higher-risk.\n\nWhy this detection works\nEvent 4741 records machine-account creation with the acting subject and the new account.\n\nFalse positives\nLegitimate device onboarding/imaging.\n\nTuning\nAllowlist provisioning accounts; prioritise creation by non-standard principals.\n\nRequired telemetry\nWindows Security 4741 (SubjectUserName, TargetUserName).",
+  "tags": [
+    "JCB",
+    "ActiveDirectory",
+    "Phase3",
+    "Use Case: Threat Detection",
+    "Tactic: Persistence"
+  ],
+  "author": [
+    "raadabujaish"
+  ],
+  "threat": [
+    {
+      "framework": "MITRE ATT&CK",
+      "tactic": {
+        "id": "TA0003",
+        "name": "Persistence",
+        "reference": "https://attack.mitre.org/tactics/TA0003/"
+      },
+      "technique": [
+        {
+          "id": "T1136",
+          "name": "Create Account",
+          "reference": "https://attack.mitre.org/techniques/T1136/",
+          "subtechnique": [
+            {
+              "id": "T1136.002",
+              "name": "Domain Account",
+              "reference": "https://attack.mitre.org/techniques/T1136/002/"
+            }
+          ]
+        }
+      ]
+    }
+  ],
+  "investigation_fields": {
+    "field_names": [
+      "winlog.event_data.SubjectUserName",
+      "winlog.event_data.TargetUserName",
+      "winlog.event_data.ServiceName",
+      "winlog.event_data.AttributeLDAPDisplayName",
+      "winlog.event_data.ObjectDN",
+      "winlog.computer_name",
+      "winlog.event_data.IpAddress"
+    ]
+  },
+  "related_integrations": [],
+  "required_fields": [],
+  "setup": "",
+  "note": "## Investigation guide\n1. SubjectUserName created TargetUserName (the machine account).\n2. Confirm it maps to a real device onboarding, not RBCD/DCShadow preparation; watch for a subsequent msDS-AllowedToActOnBehalfOfOtherIdentity write on a target host.",
+  "false_positives": [
+    "Legitimate device onboarding/imaging."
+  ],
+  "references": [
+    "https://attack.mitre.org/techniques/T1136/",
+    "https://attack.mitre.org/techniques/T1136/002/"
+  ],
+  "risk_score": 56,
+  "risk_score_mapping": [],
+  "severity": "medium",
+  "severity_mapping": [],
+  "output_index": "",
+  "max_signals": 100,
+  "exceptions_list": [],
+  "actions": [],
+  "type": "query",
+  "language": "kuery",
+  "index": [
+    "logs-system.security-*"
+  ],
+  "query": "event.code:\"4741\""
+}

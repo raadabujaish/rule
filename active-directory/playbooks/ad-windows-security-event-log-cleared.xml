@@ -1,0 +1,149 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<Playbook xmlns="https://soc.example/playbooks" id="PB-AD-017" name="AD/Windows — Security Event Log Cleared - SOC Playbook" version="1.0" status="Production" classification="TLP:AMBER">
+  <Metadata>
+    <Owner>JCB Detection Engineering (WatchWave)</Owner>
+    <LastUpdated>2026-08-14</LastUpdated>
+    <Severity default="High">High</Severity>
+    <Confidence default="Medium">Medium</Confidence>
+    <Category>Defense Evasion / Indicator Removal</Category>
+    <MitreAttack>
+      <Technique id="T1070.001" name="Clear Windows Event Logs"/>
+      <Tactic id="TA0005" name="Defense Evasion"/>
+    </MitreAttack>
+    <References>
+      <Reference title="MITRE ATT and CK" url="https://attack.mitre.org/techniques/T1070/"/>
+    </References>
+  </Metadata>
+  <ExecutiveSummary>
+    <Overview>The Windows Security event log was cleared (1102). Triage question: is this an attacker destroying evidence after an intrusion, or a sanctioned maintenance/reimage action?</Overview>
+    <BusinessImpact>Clearing the Security log removes the primary record of authentication and privilege activity - a classic post-exploitation anti-forensics step.</BusinessImpact>
+  </ExecutiveSummary>
+  <Scope><Assets>
+    <AssetType>Active Directory domain controllers (INTDOM)</AssetType>
+    <AssetType>Windows member servers and workstations</AssetType>
+  </Assets><LogSources>
+    <LogSource>Windows Security event log - logs-system.security-*</LogSource>
+  </LogSources></Scope>
+  <Prerequisites><TelemetryRequirements>
+    <Requirement>Windows Security auditing shipped via Elastic Agent to logs-system.security-* (verified live).</Requirement>
+  </TelemetryRequirements><DetectionSignals>
+    <Signal><Name>Security log cleared</Name><Details>Event 1102.</Details></Signal>
+  </DetectionSignals></Prerequisites>
+  <Inputs>
+    <Input name="$hostname" description="Host whose Security log was cleared."/>
+    <Input name="$username" description="Principal that cleared it (SubjectUserName)."/>
+  </Inputs>
+  <Triage><ImmediateCapture>
+    <Item>Host: $hostname</Item>
+    <Item>Cleared by: $username</Item>
+  </ImmediateCapture><InitialAssessment>
+    <Rule>Reimaging/decommission clears logs legitimately; an interactive clear on a production server by a non-admin, or right after suspicious activity, is anti-forensics.</Rule>
+  </InitialAssessment></Triage>
+  <Investigation>
+    <Goal>Determine whether the log clear is sanctioned maintenance or evidence destruction following intrusion activity.</Goal>
+    <Workflow>
+      <Step order="1" name="Confirm the clear event and actor">
+        <Purpose>Identify who cleared the log on which host and whether multiple hosts were cleared (broad anti-forensics).</Purpose>
+        <Query platform="Elastic" language="ES|QL" id="INV-01-CLEAR-EVENT">
+          <![CDATA[
+FROM logs-system.security-*
+| WHERE event.code == "1102" AND @timestamp >= NOW() - 4 hours
+| KEEP @timestamp, host.name, winlog.event_data.SubjectUserName, winlog.event_data.SubjectDomainName
+| SORT @timestamp DESC
+| LIMIT 20
+          ]]>
+        </Query>
+        <ExpectedOutput>
+          <Field name="host.name"/>
+          <Field name="winlog.event_data.SubjectUserName"/>
+          <Field name="@timestamp"/>
+        </ExpectedOutput>
+        <AnalystNotes>One host by a known admin during a maintenance window = likely benign. Several hosts cleared close together, or a non-admin actor, = anti-forensics.</AnalystNotes>
+      </Step>
+      <Step order="2" name="What happened on this host just before the clear">
+        <Purpose>Suspicious activity (new admin logon, service install, privilege use) shortly BEFORE the clear is what the attacker is trying to erase.</Purpose>
+        <Query platform="Elastic" language="ES|QL" id="INV-02-CLEAR-PRECEDING">
+          <![CDATA[
+FROM logs-system.security-*
+| WHERE host.name == "$hostname" AND event.code IN ("4624","4672","4688","7045","4720","4728") AND @timestamp >= NOW() - 4 hours
+| STATS c = COUNT(*), codes = VALUES(event.code), users = VALUES(winlog.event_data.TargetUserName) BY winlog.event_data.LogonType
+| LIMIT 20
+          ]]>
+        </Query>
+        <ExpectedOutput>
+          <Field name="codes"/>
+          <Field name="users"/>
+          <Field name="c"/>
+        </ExpectedOutput>
+        <AnalystNotes>A new interactive/RDP logon then service install then log clear is a textbook intrusion sequence. Quiet history before a maintenance clear supports benign.</AnalystNotes>
+      </Step>
+      <Step order="3" name="Finalize classification">
+        <DecisionTree>
+          <Node><Condition>INV-02 shows suspicious activity (new privileged logon, service/account creation) shortly before the clear, or INV-01 shows multiple hosts cleared.</Condition><Result>True Positive (Anti-forensics after intrusion - IR)</Result></Node>
+          <Node><Condition>INV-01 shows a non-admin or unexpected principal clearing a production host's log with no maintenance record.</Condition><Result>True Positive (Unauthorised log clear - escalate)</Result></Node>
+          <Node><Condition>INV-01 shows a known admin clearing during a documented reimage/maintenance window.</Condition><Result>False Positive</Result></Node>
+          <Node><Condition>Actor is an admin but no maintenance record and no clear preceding activity.</Condition><Result>Needs Escalation</Result></Node>
+        </DecisionTree>
+        <DocumentationChecklist>
+          <Item>Attach outputs of INV-01-CLEAR-EVENT, INV-02-CLEAR-PRECEDING to the case.</Item>
+        </DocumentationChecklist>
+      </Step>
+    </Workflow>
+  </Investigation>
+  <ClassificationGuidance>
+    <FalsePositive>
+      <Definition>Sanctioned maintenance, reimaging, or decommissioning that clears logs.</Definition>
+      <Indicators>
+        <Item>Known admin/build account.</Item>
+        <Item>Documented maintenance/reimage window.</Item>
+        <Item>Quiet, normal history before the clear.</Item>
+      </Indicators>
+      <SOCAction>
+        <Item>Verify the maintenance record; close as false_positive.</Item>
+      </SOCAction>
+    </FalsePositive>
+    <TruePositive>
+      <Definition>Evidence destruction to cover intrusion activity.</Definition>
+      <Indicators>
+        <Item>Suspicious privileged activity immediately before the clear.</Item>
+        <Item>Multiple hosts cleared.</Item>
+        <Item>Non-admin or compromised account performing it.</Item>
+      </Indicators>
+      <SOCAction>
+        <Item>Preserve remaining/forwarded logs; treat the host as compromised and isolate.</Item>
+        <Item>Reconstruct from forwarded/SIEM copies; open IR.</Item>
+      </SOCAction>
+    </TruePositive>
+    <Misconfiguration>
+      <Definition>A misconfigured job or tool clearing logs unintentionally.</Definition>
+      <Indicators>
+        <Item>An automation account clearing per a broken maintenance script.</Item>
+        <Item>Owner confirms benign misfire.</Item>
+      </Indicators>
+      <SOCAction>
+        <Item>Fix the job; ensure logs forward before any clear.</Item>
+      </SOCAction>
+    </Misconfiguration>
+  </ClassificationGuidance>
+  <Response><IRForHumans>
+    <Phase name="Immediate Actions (0-30 minutes)">
+      <Action priority="1">Preserve forwarded copies; isolate the host if intrusion indicators exist.</Action>
+      <Action priority="2">Identify the actor's session.</Action>
+    </Phase>
+    <Phase name="Containment and Eradication (hours)">
+      <Action>Full host forensics; reconstruct the cleared window from SIEM; hunt lateral movement.</Action>
+    </Phase>
+    <Phase name="Recovery and Hardening (days)">
+      <Action>Ensure real-time log forwarding so local clears do not lose evidence; restrict who can clear logs.</Action>
+    </Phase>
+  </IRForHumans></Response>
+  <QualityChecks>
+    <Check>SIEM already holds forwarded copies - the clear does not blind the investigation, it IS the signal.</Check>
+    <Check>Companion rule 'Windows - Event Log Cleared (All Channels)' covers 1102/104 across channels.</Check>
+  </QualityChecks>
+  <ClosureCriteria><FalsePositiveClosure>
+    <Item>Maintenance record verified; no preceding suspicious activity.</Item>
+  </FalsePositiveClosure><TruePositiveClosure>
+    <Item>Host forensics complete; intrusion scope reconstructed from SIEM; eradication done.</Item>
+  </TruePositiveClosure></ClosureCriteria>
+</Playbook>

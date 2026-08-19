@@ -1,0 +1,153 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<Playbook xmlns="https://soc.example/playbooks" id="PB-FG-004" name="FortiGate — Internal Host Beaconing to Malicious/C2 Domain (DNS) - SOC Playbook" version="1.0" status="Production" classification="TLP:AMBER">
+  <Metadata>
+    <Owner>JCB Detection Engineering (WatchWave)</Owner>
+    <LastUpdated>2026-08-14</LastUpdated>
+    <Severity default="High">High</Severity>
+    <Confidence default="Medium">Medium</Confidence>
+    <Category>Command and Control / DNS</Category>
+    <MitreAttack>
+      <Technique id="T1071.004" name="DNS"/>
+      <Tactic id="TA0011" name="Command and Control"/>
+    </MitreAttack>
+    <References>
+      <Reference title="MITRE ATT and CK" url="https://attack.mitre.org/techniques/T1071/"/>
+    </References>
+  </Metadata>
+  <ExecutiveSummary>
+    <Overview>An internal host repeatedly queried domains the FortiGate DNS filter REDIRECTED (blocked as malicious/C2) - 10+ queries to a flagged domain in the window. Triage question: is an internal host infected and beaconing to C2, or is this benign software hitting a domain that is over-categorised?</Overview>
+    <BusinessImpact>DNS beaconing to C2 indicates an active infection; even though redirected, the host is compromised and trying to reach its controller.</BusinessImpact>
+  </ExecutiveSummary>
+  <Scope><Assets>
+    <AssetType>FortiGate perimeter and internal firewalls (HQ + DR)</AssetType>
+    <AssetType>Internal server and user segments behind the FortiGate</AssetType>
+  </Assets><LogSources>
+    <LogSource>FortiGate DNS filter log - logs-fortinet_fortigate.log-*</LogSource>
+    <LogSource>FortiGate traffic - logs-fortinet_fortigate.traffic-*</LogSource>
+  </LogSources></Scope>
+  <Prerequisites><TelemetryRequirements>
+    <Requirement>FortiGate logs shipped via Elastic Agent to logs-fortinet_fortigate.* (verified live).</Requirement>
+    <Requirement>Fields: fortinet.firewall.subtype (ips/dns/...), fortinet.firewall.action, fortinet.firewall.severity, fortinet.firewall.attack, fortinet.firewall.srccountry/dstcountry ('Reserved' = RFC1918 internal), fortinet.firewall.cfgpath, dns.question.name, source.ip, destination.ip, destination.port.</Requirement>
+  </TelemetryRequirements><DetectionSignals>
+    <Signal><Name>C2 DNS beaconing</Name><Details>subtype dns, action redirect, &gt;=10 queries to a flagged domain; known infra excluded.</Details></Signal>
+  </DetectionSignals></Prerequisites>
+  <Inputs>
+    <Input name="$source_ip" description="Internal beaconing host."/>
+    <Input name="$domain" description="The flagged domain (dns.question.name) if in the alert."/>
+  </Inputs>
+  <Triage><ImmediateCapture>
+    <Item>Host: $source_ip</Item>
+    <Item>Domain: $domain</Item>
+  </ImmediateCapture><InitialAssessment>
+    <Rule>Redirected DNS = the filter caught it, but the QUERY means something on the host wants that domain; distinguish malware beaconing from benign apps hitting a mis-categorised domain (e.g. a legit CDN flagged).</Rule>
+  </InitialAssessment></Triage>
+  <Investigation>
+    <Goal>Determine whether the internal host is infected and beaconing to C2, or querying a benign-but-miscategorised domain.</Goal>
+    <Workflow>
+      <Step order="1" name="Beacon cadence and domain set for this host">
+        <Purpose>Regular, repeated queries to one flagged domain = beaconing; a one-off or human-driven pattern differs.</Purpose>
+        <Query platform="Elastic" language="ES|QL" id="INV-01-FGDNS-BEACON">
+          <![CDATA[
+FROM logs-fortinet_fortigate.log-*
+| WHERE fortinet.firewall.subtype == "dns" AND fortinet.firewall.action == "redirect" AND source.ip == "$source_ip" AND @timestamp >= NOW() - 4 hours
+| STATS queries = COUNT(*), first_seen = MIN(@timestamp), last_seen = MAX(@timestamp) BY dns.question.name
+| SORT queries DESC
+| LIMIT 20
+          ]]>
+        </Query>
+        <ExpectedOutput>
+          <Field name="dns.question.name"/>
+          <Field name="queries"/>
+          <Field name="first_seen"/>
+          <Field name="last_seen"/>
+        </ExpectedOutput>
+        <AnalystNotes>Steady queries evenly spread across the window to a random-looking or known-bad domain = beaconing. A burst then silence, or a well-known domain, suggests benign software or a miscategorisation. DGA-style names strongly indicate malware.</AnalystNotes>
+      </Step>
+      <Step order="2" name="Is the host also making external connections (exfil/C2 over IP)">
+        <Purpose>A beaconing host may also reach C2 directly by IP; check its accepted outbound connections.</Purpose>
+        <Query platform="Elastic" language="ES|QL" id="INV-02-FGDNS-CONNS" optional="true">
+          <![CDATA[
+FROM logs-fortinet_fortigate.traffic-*
+| WHERE source.ip == "$source_ip" AND fortinet.firewall.action == "accept" AND @timestamp >= NOW() - 2 hours
+| STATS conns = COUNT(*), ext_dsts = COUNT_DISTINCT(destination.ip), dcountries = VALUES(fortinet.firewall.dstcountry), dports = VALUES(destination.port)
+| LIMIT 1
+          ]]>
+        </Query>
+        <ExpectedOutput>
+          <Field name="conns"/>
+          <Field name="ext_dsts"/>
+          <Field name="dcountries"/>
+        </ExpectedOutput>
+        <AnalystNotes>Accepted outbound to foreign/high-risk countries or unusual ports alongside the DNS beaconing strengthens the C2 conclusion. Normal browsing patterns weaken it.</AnalystNotes>
+      </Step>
+      <Step order="3" name="Finalize classification">
+        <DecisionTree>
+          <Node><Condition>INV-01 shows regular beacon cadence to a bad/DGA domain, or INV-02 shows corroborating external C2-like connections.</Condition><Result>True Positive (Infected Host Beaconing - isolate and IR)</Result></Node>
+          <Node><Condition>INV-01 shows the flagged domain is a well-known benign service (CDN/analytics) queried by normal software.</Condition><Result>False Positive (domain miscategorisation - propose recategorisation)</Result></Node>
+          <Node><Condition>INV-01 shows queries to a flagged ad/tracking domain by a browser (benign but policy-blocked).</Condition><Result>Benign Activity</Result></Node>
+          <Node><Condition>Beaconing-like cadence to an unclear domain with no corroboration.</Condition><Result>Needs Escalation</Result></Node>
+        </DecisionTree>
+        <DocumentationChecklist>
+          <Item>Attach outputs of INV-01-FGDNS-BEACON, INV-02-FGDNS-CONNS to the case.</Item>
+        </DocumentationChecklist>
+      </Step>
+    </Workflow>
+  </Investigation>
+  <ClassificationGuidance>
+    <FalsePositive>
+      <Definition>Benign software or browsing hitting a domain the filter over-categorises (CDN, analytics, ads).</Definition>
+      <Indicators>
+        <Item>Flagged domain is a known-benign service.</Item>
+        <Item>Query pattern matches app/browser behavior.</Item>
+        <Item>No external C2-like connections.</Item>
+      </Indicators>
+      <SOCAction>
+        <Item>Verify the domain reputation; propose recategorisation/allowlist.</Item>
+        <Item>Close as false_positive/benign_activity.</Item>
+      </SOCAction>
+    </FalsePositive>
+    <TruePositive>
+      <Definition>An infected internal host beaconing to command-and-control.</Definition>
+      <Indicators>
+        <Item>Regular beacon cadence to a bad/DGA domain.</Item>
+        <Item>Corroborating external connections to high-risk destinations.</Item>
+        <Item>Host has no legitimate reason to query the domain.</Item>
+      </Indicators>
+      <SOCAction>
+        <Item>Isolate the host; capture memory/process for the beaconing malware.</Item>
+        <Item>Block the domain/IP estate-wide; open IR; hunt for the same beacon on other hosts.</Item>
+      </SOCAction>
+    </TruePositive>
+    <Misconfiguration>
+      <Definition>A misconfigured internal tool repeatedly querying a blocked domain (e.g. stale integration endpoint).</Definition>
+      <Indicators>
+        <Item>A known app repeatedly resolving a decommissioned/blocked endpoint.</Item>
+        <Item>Owner confirms benign misconfig.</Item>
+      </Indicators>
+      <SOCAction>
+        <Item>Fix the tool's endpoint config; document.</Item>
+      </SOCAction>
+    </Misconfiguration>
+  </ClassificationGuidance>
+  <Response><IRForHumans>
+    <Phase name="Immediate Actions (0-30 minutes)">
+      <Action priority="1">Isolate the host if beaconing confirmed; capture volatile evidence.</Action>
+      <Action priority="2">Block the domain estate-wide.</Action>
+    </Phase>
+    <Phase name="Containment and Eradication (hours)">
+      <Action>Malware analysis on the host; hunt the beacon across the estate; eradicate.</Action>
+    </Phase>
+    <Phase name="Recovery and Hardening (days)">
+      <Action>Keep DNS filtering enforcing; add the C2 to blocklists; EDR sweep for the malware family.</Action>
+    </Phase>
+  </IRForHumans></Response>
+  <QualityChecks>
+    <Check>action 'redirect' = the DNS filter blocked/sinkholed. Rule excludes known internal DNS infra.</Check>
+    <Check>Suppression 24h per source - repeated daily alerts = infection not remediated.</Check>
+  </QualityChecks>
+  <ClosureCriteria><FalsePositiveClosure>
+    <Item>Domain miscategorisation confirmed; recategorised; documented.</Item>
+  </FalsePositiveClosure><TruePositiveClosure>
+    <Item>Host isolated and cleaned; C2 blocked; estate swept; no other infections.</Item>
+  </TruePositiveClosure></ClosureCriteria>
+</Playbook>

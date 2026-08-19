@@ -1,0 +1,150 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<Playbook xmlns="https://soc.example/playbooks" id="PB-WIN-046" name="Windows — Windows System Network Connections Discovery - SOC Playbook" version="1.0" status="Production" classification="TLP:AMBER">
+  <Metadata>
+    <Owner>JCB Detection Engineering (WatchWave)</Owner>
+    <LastUpdated>2026-08-14</LastUpdated>
+    <Severity default="Low">Low</Severity>
+    <Confidence default="Low">Low</Confidence>
+    <Category>Discovery / System Network Connections Discovery</Category>
+    <MitreAttack>
+      <Technique id="T1049" name="System Network Connections Discovery"/>
+      <Tactic id="TA0007" name="Discovery"/>
+    </MitreAttack>
+    <References>
+      <Reference title="MITRE ATT and CK" url="https://attack.mitre.org/techniques/T1049/"/>
+    </References>
+  </Metadata>
+  <ExecutiveSummary>
+    <Overview>Built-in tools enumerated network connections - netstat, net use/session/config, or nbtstat. This rule fires heavily on the Forcepoint host (websense2 python-&gt;netstat, ~92% of alerts) which should be excepted. Triage question: attacker network-connection reconnaissance, or the known monitoring loop / normal admin?</Overview>
+    <BusinessImpact>Network-connection enumeration maps active sessions and services for lateral-movement targeting.</BusinessImpact>
+  </ExecutiveSummary>
+  <Scope><Assets>
+    <AssetType>Windows servers and workstations (INTDOM domain)</AssetType>
+    <AssetType>Domain controllers</AssetType>
+  </Assets><LogSources>
+    <LogSource>Sysmon process + Windows Security - logs-windows.sysmon_operational-*,logs-system.security-*</LogSource>
+  </LogSources></Scope>
+  <Prerequisites><TelemetryRequirements>
+    <Requirement>Windows Security + Sysmon + PowerShell logs via Elastic Agent (verified live). Sysmon event.code 1=process(command_line/parent populated), 11=file, 13/12=registry(registry.path populated); process.code_signature NOT collected.</Requirement>
+  </TelemetryRequirements><DetectionSignals>
+    <Signal><Name>Network connection discovery</Name><Details>netstat / net use/session/config / nbtstat.</Details></Signal>
+  </DetectionSignals></Prerequisites>
+  <Inputs>
+    <Input name="$hostname" description="Host running the discovery."/>
+    <Input name="$username" description="Account (user.name)."/>
+  </Inputs>
+  <Triage><ImmediateCapture>
+    <Item>Host: $hostname</Item>
+  </ImmediateCapture><InitialAssessment>
+    <Rule>Weigh the evidence story, not any single fact - see ClassificationGuidance.</Rule>
+  </InitialAssessment></Triage>
+  <Investigation>
+    <Goal>Determine whether the network-connection enumeration is attacker recon, the known monitoring loop, or normal admin.</Goal>
+    <Workflow>
+      <Step order="1" name="The discovery command, parent and account">
+        <Purpose>Immediately separates the known websense2/Nessus monitoring loop from unexpected recon.</Purpose>
+        <Query platform="Elastic" language="ES|QL" id="INV-01-NETDISC-CMD">
+          <![CDATA[
+FROM logs-windows.sysmon_operational-*,logs-system.security-*
+| WHERE event.code IN ("1","4688") AND host.name == "$hostname" AND process.command_line IS NOT NULL AND @timestamp >= NOW() - 4 hours
+| WHERE process.name RLIKE "(?i)(netstat|nbtstat|net1?)(.exe)?"
+| STATS runs = COUNT(*), parents = VALUES(process.parent.name), users = VALUES(user.name), cmds = VALUES(process.command_line) BY process.name
+| SORT runs DESC
+| LIMIT 15
+          ]]>
+        </Query>
+        <ExpectedOutput>
+          <Field name="process.name"/>
+          <Field name="parents"/>
+          <Field name="users"/>
+          <Field name="runs"/>
+        </ExpectedOutput>
+        <AnalystNotes>user websense2 with parent python.exe on hq-fsm-app-p = the known Forcepoint monitoring loop (except it). Nessus = scanner. Any OTHER account/host running netstat repeatedly with an unusual parent = recon.</AnalystNotes>
+      </Step>
+      <Step order="2" name="Broader discovery from the same host/account">
+        <Purpose>Network discovery alongside account/system discovery indicates an active recon phase, not a monitoring loop.</Purpose>
+        <Query platform="Elastic" language="ES|QL" id="INV-02-NETDISC-BURST" optional="true">
+          <![CDATA[
+FROM logs-windows.sysmon_operational-*,logs-system.security-*
+| WHERE event.code IN ("1","4688") AND host.name == "$hostname" AND @timestamp >= NOW() - 2 hours
+| WHERE process.name RLIKE "(?i)(whoami|nltest|dsquery|net1?|ipconfig|systeminfo|tasklist|quser|arp|route)(.exe)?"
+| STATS tools = COUNT_DISTINCT(process.name), tool_list = VALUES(process.name)
+| LIMIT 1
+          ]]>
+        </Query>
+        <ExpectedOutput>
+          <Field name="tools"/>
+          <Field name="tool_list"/>
+        </ExpectedOutput>
+        <AnalystNotes>Multiple distinct discovery tools = hands-on recon (not the single-tool monitoring loop) - escalate.</AnalystNotes>
+      </Step>
+      <Step order="3" name="Finalize classification">
+        <DecisionTree>
+          <Node><Condition>Network-connection enumeration by an unexpected account/parent, or alongside broader discovery tooling.</Condition><Result>True Positive (Network Reconnaissance - investigate)</Result></Node>
+          <Node><Condition>The known websense2 (Forcepoint) python-&gt;netstat loop or the Nessus scanner.</Condition><Result>False Positive</Result></Node>
+          <Node><Condition>Netstat/net use by an admin for a plausible task.</Condition><Result>Benign Activity</Result></Node>
+          <Node><Condition>Enumeration with unclear parent/intent.</Condition><Result>Needs Escalation</Result></Node>
+        </DecisionTree>
+        <DocumentationChecklist>
+          <Item>Attach outputs of INV-01-NETDISC-CMD, INV-02-NETDISC-BURST to the case.</Item>
+        </DocumentationChecklist>
+      </Step>
+    </Workflow>
+  </Investigation>
+  <ClassificationGuidance>
+    <FalsePositive>
+      <Definition>The known monitoring loop or an approved scanner/admin.</Definition>
+      <Indicators>
+        <Item>websense2/python on hq-fsm-app-p, or Nessus.</Item>
+        <Item>Single-tool repetition.</Item>
+        <Item>Known admin context.</Item>
+      </Indicators>
+      <SOCAction>
+        <Item>Confirm the source; ensure it is in the rule exception; close as false_positive.</Item>
+      </SOCAction>
+    </FalsePositive>
+    <TruePositive>
+      <Definition>Attacker network-connection reconnaissance.</Definition>
+      <Indicators>
+        <Item>Unexpected account/parent.</Item>
+        <Item>Alongside other discovery.</Item>
+        <Item>Unusual host.</Item>
+      </Indicators>
+      <SOCAction>
+        <Item>Investigate the parent/account/host; correlate with other discovery; open IR if warranted.</Item>
+      </SOCAction>
+    </TruePositive>
+    <Misconfiguration>
+      <Definition>A monitoring tool not yet excepted.</Definition>
+      <Indicators>
+        <Item>A known monitoring agent.</Item>
+        <Item>Single-tool repetition.</Item>
+      </Indicators>
+      <SOCAction>
+        <Item>Add to the rule exception; document.</Item>
+      </SOCAction>
+    </Misconfiguration>
+  </ClassificationGuidance>
+  <Response><IRForHumans>
+    <Phase name="Immediate Actions (0-30 minutes)">
+      <Action priority="1">Confirm the activity on the host; if malicious indicators, isolate the host.</Action>
+      <Action priority="2">Identify the responsible account/process and its origin.</Action>
+    </Phase>
+    <Phase name="Containment and Eradication (hours)">
+      <Action>Isolate the host; capture volatile evidence; hunt the same pattern across the estate.</Action>
+      <Action>Reset credentials used on the host if compromise is confirmed.</Action>
+    </Phase>
+    <Phase name="Recovery and Hardening (days)">
+      <Action>Remediate the root cause; add/verify EDR coverage; apply relevant hardening.</Action>
+    </Phase>
+  </IRForHumans></Response>
+  <QualityChecks>
+    <Check>Confirm the required telemetry (Sysmon/Security auditing) is present on the host.</Check>
+    <Check>Tune known-benign administrative sources via exceptions, not by disabling the rule.</Check>
+  </QualityChecks>
+  <ClosureCriteria><FalsePositiveClosure>
+    <Item>Activity confirmed benign/authorised and documented.</Item>
+  </FalsePositiveClosure><TruePositiveClosure>
+    <Item>Host contained and triaged; root cause eradicated; estate swept; findings recorded.</Item>
+  </TruePositiveClosure></ClosureCriteria>
+</Playbook>

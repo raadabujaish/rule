@@ -1,0 +1,175 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<Playbook xmlns="https://soc.example/playbooks" id="PB-AD-007" name="AD — DCSync: Directory Replication by an Unexpected Principal - SOC Playbook" version="1.0" status="Production" classification="TLP:AMBER">
+  <Metadata>
+    <Owner>JCB Detection Engineering (WatchWave)</Owner>
+    <LastUpdated>2026-08-14</LastUpdated>
+    <Severity default="High">High</Severity>
+    <Confidence default="High">High</Confidence>
+    <Category>Credential Access / DCSync</Category>
+    <MitreAttack>
+      <Technique id="T1003.006" name="DCSync"/>
+      <Tactic id="TA0006" name="Credential Access"/>
+    </MitreAttack>
+    <References>
+      <Reference title="MITRE ATT and CK" url="https://attack.mitre.org/techniques/T1003/"/>
+    </References>
+  </Metadata>
+  <ExecutiveSummary>
+    <Overview>A principal that is not a domain controller requested directory-replication rights (4662 with the DS-Replication-Get-Changes GUIDs). Triage question: was the requesting account actually a DC/approved replication identity, or a user/host abusing replication to pull password hashes?</Overview>
+    <BusinessImpact>DCSync extracts any account's NTLM hash - including krbtgt - straight from AD, enabling Golden Tickets and full domain compromise.</BusinessImpact>
+  </ExecutiveSummary>
+  <Scope><Assets>
+    <AssetType>Active Directory domain controllers (INTDOM)</AssetType>
+    <AssetType>Windows member servers and workstations</AssetType>
+  </Assets><LogSources>
+    <LogSource>Windows Security event log - logs-system.security-*</LogSource>
+  </LogSources></Scope>
+  <Prerequisites><TelemetryRequirements>
+    <Requirement>Windows Security auditing shipped via Elastic Agent to logs-system.security-* (verified live).</Requirement>
+  </TelemetryRequirements><DetectionSignals>
+    <Signal><Name>Replication access</Name><Details>4662 AccessMask 0x100 with the replication property GUIDs 1131f6aa/1131f6ad/9923a32a; SYSTEM excluded.</Details></Signal>
+  </DetectionSignals></Prerequisites>
+  <Inputs>
+    <Input name="$username" description="Principal that requested replication (SubjectUserName)."/>
+    <Input name="$hostname" description="Host where the 4662 was logged (a DC)."/>
+    <Input name="$source_ip" description="Source IP if present in the alert."/>
+    <Input name="$logon_id" description="Subject LogonId for session pivot."/>
+  </Inputs>
+  <Triage><ImmediateCapture>
+    <Item>Principal: $username</Item>
+    <Item>On DC: $hostname</Item>
+  </ImmediateCapture><InitialAssessment>
+    <Rule>If $username resolves to a domain controller computer account or the documented AAD-Connect/Azure sync account, likely benign - VERIFY against the approved list.</Rule>
+    <Rule>Any interactive user or non-DC host requesting replication is treated as TP until proven otherwise.</Rule>
+  </InitialAssessment></Triage>
+  <Investigation>
+    <Goal>Confirm whether $username is an approved replication identity; if not, scope what it accessed and where the session originated.</Goal>
+    <Workflow>
+      <Step order="1" name="Confirm the requesting principal and repetition">
+        <Purpose>Approved replication comes from DC computer accounts (name$) or the AAD sync account; anything else is the finding.</Purpose>
+        <Query platform="Elastic" language="ES|QL" id="INV-01-DCSYNC-WHO">
+          <![CDATA[
+FROM logs-system.security-*
+| WHERE event.code == "4662" AND winlog.event_data.SubjectUserName == "$username" AND @timestamp >= NOW() - 4 hours
+| STATS accesses = COUNT(*), first_seen = MIN(@timestamp), last_seen = MAX(@timestamp), dcs = VALUES(host.name), masks = VALUES(winlog.event_data.AccessMask)
+| LIMIT 1
+          ]]>
+        </Query>
+        <ExpectedOutput>
+          <Field name="accesses"/>
+          <Field name="first_seen"/>
+          <Field name="dcs"/>
+        </ExpectedOutput>
+        <AnalystNotes>A DC computer account ends in $ and appears constantly (normal replication). An interactive human/service name here = DCSync abuse. Note whether it hit multiple DCs.</AnalystNotes>
+      </Step>
+      <Step order="2" name="Where is this principal logged on from (foothold)">
+        <Purpose>A non-DC principal doing DCSync is running from a foothold - find the source host/session.</Purpose>
+        <Query platform="Elastic" language="ES|QL" id="INV-02-DCSYNC-SESSION">
+          <![CDATA[
+FROM logs-system.security-*
+| WHERE winlog.event_data.TargetUserName == "$username" AND event.code == "4624" AND @timestamp >= NOW() - 4 hours
+| EVAL src = COALESCE(TO_STRING(source.ip), "local")
+| STATS logons = COUNT(*), first_seen = MIN(@timestamp), types = VALUES(winlog.event_data.LogonType), hosts = VALUES(host.name) BY src
+| SORT logons DESC
+| LIMIT 10
+          ]]>
+        </Query>
+        <ExpectedOutput>
+          <Field name="src"/>
+          <Field name="hosts"/>
+          <Field name="types"/>
+        </ExpectedOutput>
+        <AnalystNotes>Identify the workstation/server the principal is operating from; that host is the pivot for containment. Network logon (type 3) into a DC from a workstation just before the 4662 is the classic DCSync-from-foothold trail.</AnalystNotes>
+      </Step>
+      <Step order="3" name="Did the same principal grant itself the rights recently (4670/5136)">
+        <Purpose>Attackers often add replication rights just before using them; a matching permission change is strong intent evidence.</Purpose>
+        <Query platform="Elastic" language="ES|QL" id="INV-03-DCSYNC-GRANT" optional="true">
+          <![CDATA[
+FROM logs-system.security-*
+| WHERE event.code IN ("4670","5136") AND @timestamp >= NOW() - 4 hours
+  AND (winlog.event_data.SubjectUserName == "$username" OR winlog.event_data.TargetUserName == "$username")
+| KEEP @timestamp, event.code, winlog.event_data.SubjectUserName, winlog.event_data.ObjectName, winlog.event_data.AttributeLDAPDisplayName
+| SORT @timestamp DESC
+| LIMIT 15
+          ]]>
+        </Query>
+        <ExpectedOutput>
+          <Field name="event.code"/>
+          <Field name="winlog.event_data.ObjectName"/>
+        </ExpectedOutput>
+        <AnalystNotes>A recent DACL/permission change adding Get-Changes rights to this principal, followed by the replication, is near-conclusive TP.</AnalystNotes>
+      </Step>
+      <Step order="4" name="Finalize classification">
+        <DecisionTree>
+          <Node><Condition>INV-01 principal is NOT a DC computer account or the approved sync identity (an interactive/service account or non-DC host).</Condition><Result>True Positive (DCSync - domain compromise, immediate IR)</Result></Node>
+          <Node><Condition>INV-03 shows the principal recently granted itself replication rights before using them.</Condition><Result>True Positive (DCSync with privilege setup - immediate IR)</Result></Node>
+          <Node><Condition>INV-01 principal is a known DC computer account ($) or the documented Azure AD Connect/MSOL sync account replicating normally.</Condition><Result>False Positive</Result></Node>
+          <Node><Condition>Principal identity/role cannot be confirmed against the approved replication list.</Condition><Result>Needs Escalation</Result></Node>
+        </DecisionTree>
+        <DocumentationChecklist>
+          <Item>Attach outputs of INV-01-DCSYNC-WHO, INV-02-DCSYNC-SESSION, INV-03-DCSYNC-GRANT to the case.</Item>
+        </DocumentationChecklist>
+      </Step>
+    </Workflow>
+  </Investigation>
+  <ClassificationGuidance>
+    <FalsePositive>
+      <Definition>Legitimate directory replication by a DC or the approved directory-sync identity.</Definition>
+      <Indicators>
+        <Item>SubjectUserName is a DC computer account (ends in $) or the documented MSOL_/AAD sync account.</Item>
+        <Item>Behavior is continuous and historical, not first-seen.</Item>
+      </Indicators>
+      <SOCAction>
+        <Item>Confirm the principal against the approved replication allowlist.</Item>
+        <Item>Close as false_positive; add to the allowlist if missing.</Item>
+      </SOCAction>
+    </FalsePositive>
+    <TruePositive>
+      <Definition>Abuse of replication rights to extract password hashes from AD.</Definition>
+      <Indicators>
+        <Item>Non-DC principal requesting Get-Changes.</Item>
+        <Item>Session originates from a workstation/server foothold.</Item>
+        <Item>Recent self-granted replication rights.</Item>
+      </Indicators>
+      <SOCAction>
+        <Item>Treat as domain compromise: isolate the foothold host, disable the principal.</Item>
+        <Item>Rotate krbtgt TWICE and reset privileged/service accounts.</Item>
+        <Item>Full IR engagement.</Item>
+      </SOCAction>
+    </TruePositive>
+    <Misconfiguration>
+      <Definition>A monitoring/backup tool mis-granted replication rights it does not truly need.</Definition>
+      <Indicators>
+        <Item>A known backup/monitoring service account with replication rights it was over-provisioned.</Item>
+        <Item>Vendor confirms the tool reads directory data legitimately but should not have Get-Changes.</Item>
+      </Indicators>
+      <SOCAction>
+        <Item>Remove excess replication rights; validate the tool still functions.</Item>
+        <Item>Document; do not treat as incident if provenance is clean.</Item>
+      </SOCAction>
+    </Misconfiguration>
+  </ClassificationGuidance>
+  <Response><IRForHumans>
+    <Phase name="Immediate Actions (0-30 minutes)">
+      <Action priority="1">Isolate the foothold host from INV-02.</Action>
+      <Action priority="2">Disable $username; preserve DC logs.</Action>
+    </Phase>
+    <Phase name="Containment and Eradication (hours)">
+      <Action>Rotate krbtgt twice; reset all privileged and service accounts; revoke tickets.</Action>
+      <Action>Hunt for Golden/Silver ticket usage.</Action>
+    </Phase>
+    <Phase name="Recovery and Hardening (days)">
+      <Action>Tighten replication ACLs to DCs + approved sync account only.</Action>
+      <Action>Alert on replication-rights DACL changes (INV-03 pattern) as its own detection.</Action>
+    </Phase>
+  </IRForHumans></Response>
+  <QualityChecks>
+    <Check>Replication GUIDs and AccessMask 0x100 verified in the rule; SYSTEM excluded.</Check>
+    <Check>Maintain the approved-replication allowlist for fast triage.</Check>
+  </QualityChecks>
+  <ClosureCriteria><FalsePositiveClosure>
+    <Item>Principal confirmed on the approved replication allowlist.</Item>
+  </FalsePositiveClosure><TruePositiveClosure>
+    <Item>krbtgt rotated x2, privileged accounts reset, foothold eradicated, tickets revoked.</Item>
+  </TruePositiveClosure></ClosureCriteria>
+</Playbook>

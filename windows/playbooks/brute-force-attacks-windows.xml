@@ -1,0 +1,209 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<Playbook xmlns="https://soc.example/playbooks" id="PB-JCB-ADW-003" name="Brute Force Attacks - Windows - SOC Playbook" version="2.1" status="Production" classification="TLP:AMBER">
+  <Metadata>
+    <Owner>JCB Detection Engineering (WatchWave)</Owner>
+    <LastUpdated>2026-08-19</LastUpdated>
+    <Severity default="High">High</Severity>
+    <Confidence default="Medium">Medium</Confidence>
+    <Category>Credential Access / Brute Force</Category>
+    <MitreAttack>
+      <Technique id="T1110" name="Brute Force"/>
+      <Technique id="T1110.001" name="Password Guessing"/>
+      <Tactic id="TA0006" name="Credential Access"/>
+    </MitreAttack>
+    <References>
+      <Reference title="MITRE ATT and CK T1110 Brute Force" url="https://attack.mitre.org/techniques/T1110/"/>
+    </References>
+  </Metadata>
+  <ExecutiveSummary>
+    <Overview>A source generated a burst of Windows authentication failures (4625 interactive/network, 4771 Kerberos pre-auth) against one or more accounts. The triage question is whether this is an attacker guessing passwords against a target account, an application looping with stale credentials, or an approved scanner - and, critically, whether any attempt succeeded (4624).</Overview>
+    <BusinessImpact>A successful Windows brute force yields a valid domain or local credential and interactive/remote access to a banking host. Concentrated guessing against a privileged or service account, or credential stuffing against a single account from many sources, is a direct path to hands-on-keyboard compromise.</BusinessImpact>
+  </ExecutiveSummary>
+  <Scope>
+    <Assets>
+      <AssetType>Windows member servers and workstations (INTDOM)</AssetType>
+      <AssetType>Active Directory domain controllers (Kerberos pre-auth failures)</AssetType>
+    </Assets>
+    <LogSources>
+      <LogSource>Windows Security event log - logs-system.security-*</LogSource>
+    </LogSources>
+  </Scope>
+  <Prerequisites>
+    <TelemetryRequirements>
+      <Requirement>Windows logon auditing shipped to logs-system.security-* with 4625/4771/4624 present (verified live: 4625 volume ~11M/7d, source.ip populated on network failures).</Requirement>
+      <Requirement>winlog.event_data.TargetUserName and winlog.event_data.LogonType populated; source.ip populated for network-borne failures (verified live).</Requirement>
+    </TelemetryRequirements>
+    <DetectionSignals>
+      <Signal><Name>Failure burst</Name><Details>Many 4625/4771 failures from one source.ip or against one account in a short window.</Details></Signal>
+      <Signal><Name>Success after failures</Name><Details>A 4624 from the same source for an account that was being guessed - the escalation from attempt to compromise.</Details></Signal>
+    </DetectionSignals>
+  </Prerequisites>
+  <Inputs>
+    <Input name="$source_ip" description="Source IP generating the authentication failures (source.ip from the alert)."/>
+    <Input name="$target_user" description="Account being targeted (winlog.event_data.TargetUserName / user.name from the alert)."/>
+  </Inputs>
+  <Triage>
+    <ImmediateCapture>
+      <Item>Source: $source_ip; primary targeted account: $target_user</Item>
+      <Item>Failure volume and window from the alert; whether failures are 4625 (NTLM/interactive) or 4771 (Kerberos)</Item>
+      <Item>Whether the source is external, an internal app server, or an approved scanner</Item>
+    </ImmediateCapture>
+    <InitialAssessment>
+      <Rule>If failures concentrate on 1-3 service accounts with an identical error from an application server, lean Misconfiguration (stale-credential loop). Related pattern: the JCB spray playbook covers one-source-many-accounts.</Rule>
+      <Rule>If there is ANY 4624 success from $source_ip for a guessed account, or high-volume guessing against a privileged account, escalate immediately.</Rule>
+    </InitialAssessment>
+  </Triage>
+  <Investigation>
+    <Goal>Determine whether $source_ip conducted a deliberate Windows password-guessing attack, whether it obtained a valid credential, and whether the target account is under distributed attack.</Goal>
+    <Workflow>
+      <Step order="1" name="Profile the failures from the source">
+        <Purpose>Establish the brute-force shape: many failures against one/few accounts = classic guessing; identical errors on 1-3 service accounts = credential loop.</Purpose>
+        <Query platform="Elastic" language="ES|QL" id="INV-01">
+          <![CDATA[
+FROM logs-system.security-*
+| WHERE source.ip == "$source_ip" AND event.code IN ("4625","4771") AND @timestamp >= NOW() - 4 hours
+| STATS fails=COUNT(*), first_seen=MIN(@timestamp), last_seen=MAX(@timestamp), hosts=VALUES(host.name), codes=VALUES(event.code) BY winlog.event_data.TargetUserName
+| SORT fails DESC
+| LIMIT 100
+          ]]>
+        </Query>
+        <ExpectedOutput>
+          <Field name="winlog.event_data.TargetUserName"/>
+          <Field name="fails"/>
+          <Field name="codes"/>
+        </ExpectedOutput>
+        <AnalystNotes>High per-account counts on one or a few accounts = targeted guessing. A handful of service accounts with steady identical failures over hours = stale-credential loop (Misconfiguration). Many distinct human accounts = spraying (route to the spray playbook).</AnalystNotes>
+      </Step>
+      <Step order="2" name="Check for any successful logon from the source">
+        <Purpose>A 4624 success from the guessing source is the difference between attempted and successful credential access.</Purpose>
+        <Query platform="Elastic" language="ES|QL" id="INV-02">
+          <![CDATA[
+FROM logs-system.security-*
+| WHERE source.ip == "$source_ip" AND event.code == "4624" AND @timestamp >= NOW() - 4 hours
+| STATS logons=COUNT(*), first_success=MIN(@timestamp), types=VALUES(winlog.event_data.LogonType), hosts=VALUES(host.name) BY winlog.event_data.TargetUserName
+| SORT logons DESC
+| LIMIT 25
+          ]]>
+        </Query>
+        <ExpectedOutput>
+          <Field name="winlog.event_data.TargetUserName"/>
+          <Field name="first_success"/>
+          <Field name="types"/>
+        </ExpectedOutput>
+        <AnalystNotes>Compare first_success against the failure window in INV-01. A success DURING or AFTER the burst for an account that was being guessed is strong TP evidence. Machine accounts (name$) authenticating are normal noise.</AnalystNotes>
+      </Step>
+      <Step order="3" name="Assess distributed pressure on the target account">
+        <Purpose>Determine whether $target_user is being attacked from many sources (distributed brute force / credential stuffing) and whether it has any success.</Purpose>
+        <Query platform="Elastic" language="ES|QL" id="INV-03">
+          <![CDATA[
+FROM logs-system.security-*
+| WHERE winlog.event_data.TargetUserName == "$target_user" AND event.code IN ("4625","4771","4624") AND @timestamp >= NOW() - 4 hours
+| STATS events=COUNT(*), sources=COUNT_DISTINCT(source.ip), src_list=VALUES(source.ip) BY event.code
+| SORT events DESC
+| LIMIT 20
+          ]]>
+        </Query>
+        <ExpectedOutput>
+          <Field name="event.code"/>
+          <Field name="sources"/>
+          <Field name="src_list"/>
+        </ExpectedOutput>
+        <AnalystNotes>Many distinct sources failing against one account = distributed attack; a 4624 row appearing here means the account authenticated during the attack window - cross-check the source of that success against the failing sources.</AnalystNotes>
+      </Step>
+      <Step order="4" name="Measure host and account breadth from the source">
+        <Purpose>Separate a source hammering one host (broken client behind it) from one walking many hosts (attack infrastructure).</Purpose>
+        <Query platform="Elastic" language="ES|QL" id="INV-04">
+          <![CDATA[
+FROM logs-system.security-*
+| WHERE source.ip == "$source_ip" AND event.code IN ("4625","4771") AND @timestamp >= NOW() - 4 hours
+| STATS fails=COUNT(*), users=COUNT_DISTINCT(winlog.event_data.TargetUserName), logontypes=VALUES(winlog.event_data.LogonType) BY host.name
+| SORT fails DESC
+| LIMIT 20
+          ]]>
+        </Query>
+        <ExpectedOutput>
+          <Field name="host.name"/>
+          <Field name="fails"/>
+          <Field name="users"/>
+        </ExpectedOutput>
+        <AnalystNotes>One receiving host + few users = broken client or app loop on/behind that host. Many hosts receiving guesses, especially with LogonType 3 (network) or 10 (RemoteInteractive/RDP), = attack infrastructure.</AnalystNotes>
+      </Step>
+    </Workflow>
+  </Investigation>
+  <DecisionTree>
+    <Node><Condition>INV-02 (or INV-03) shows a 4624 success for a human/privileged account that INV-01 shows was being guessed from the same source during the window.</Condition><Result>True Positive (credential compromised - escalate to IR immediately)</Result></Node>
+    <Node><Condition>INV-01/INV-04 show sustained high-volume guessing against one or few accounts (especially privileged) from an unowned or external source, with no success yet.</Condition><Result>True Positive (brute force attempted, no success confirmed)</Result></Node>
+    <Node><Condition>Failures concentrate on 1-3 service/application accounts with identical Status/SubStatus for hours from an application/management server (stale stored credential).</Condition><Result>Misconfiguration</Result></Node>
+    <Node><Condition>Source is the documented Nessus scanner 192.168.166.1 or another approved assessment host, failures align to a scheduled scan, and no success follows.</Condition><Result>False Positive (authorised assessment, proven no success)</Result></Node>
+    <Node><Condition>Source cannot be attributed from CMDB/ownership, or the shape is borderline (mixed service and human accounts), or a success needs owner confirmation.</Condition><Result>Needs Escalation</Result></Node>
+  </DecisionTree>
+  <ClassificationGuidance>
+    <FalsePositive>
+      <Definition>An approved scanner or assessment tool generated the failures by design and no attempt succeeded - authorised and proven non-impacting, not merely assumed benign.</Definition>
+      <Indicators>
+        <Item>Source is 192.168.166.1 (Nessus) or another documented assessment host.</Item>
+        <Item>Failures align exactly to a scheduled scan window.</Item>
+        <Item>INV-02/INV-03 show no 4624 success for any targeted account.</Item>
+      </Indicators>
+      <SOCAction>
+        <Item>Verify the scan schedule with vulnerability management.</Item>
+        <Item>Propose a scoped exception for the scanner source only.</Item>
+        <Item>Close as false_positive.</Item>
+      </SOCAction>
+    </FalsePositive>
+    <TruePositive>
+      <Definition>A deliberate password-guessing attack against Windows authentication from one or many sources.</Definition>
+      <Indicators>
+        <Item>High-volume 4625/4771 failures concentrated on a target account, especially a privileged or service account.</Item>
+        <Item>Any 4624 success from the guessing source for a targeted account (upgrade to compromise).</Item>
+        <Item>Distributed pressure: many distinct sources failing against one account (INV-03), consistent with credential stuffing.</Item>
+      </Indicators>
+      <SOCAction>
+        <Item>Block or isolate $source_ip at the firewall/switch; if distributed, block the source set and rate-limit at the edge.</Item>
+        <Item>Force password reset and session/ticket revocation for any account with a success.</Item>
+        <Item>Open an incident; pull the source host for forensics if internal.</Item>
+      </SOCAction>
+    </TruePositive>
+    <Misconfiguration>
+      <Definition>An internal system authenticating with wrong/stale credentials on a loop - operational, not malicious.</Definition>
+      <Indicators>
+        <Item>Same 1-3 service accounts failing continuously with identical Status/SubStatus from an app/management server.</Item>
+        <Item>No human accounts targeted and no successes.</Item>
+      </Indicators>
+      <SOCAction>
+        <Item>Open a ticket with the application owner to fix the stored credential.</Item>
+        <Item>Track under the credential-hygiene program; fix the source rather than exception the rule.</Item>
+      </SOCAction>
+    </Misconfiguration>
+  </ClassificationGuidance>
+  <Response>
+    <IRForHumans>
+      <Phase name="Immediate Actions (0-30 minutes)">
+        <Action priority="1">Block/quarantine $source_ip if external or unowned; block the source set if the attack is distributed.</Action>
+        <Action priority="2">Check INV-02 accounts for active sessions and revoke them.</Action>
+      </Phase>
+      <Phase name="Containment and Eradication (hours)">
+        <Action>Reset passwords for accounts with post-attack successes and revoke Kerberos tickets.</Action>
+        <Action>Forensic triage of the source host if internal (identify the process driving the authentication).</Action>
+      </Phase>
+      <Phase name="Recovery and Hardening (days)">
+        <Action>Review account lockout/smart-lockout policy and edge exposure of RDP/SMB.</Action>
+        <Action>Add confirmed stale-credential loops to the credential-hygiene remediation list.</Action>
+      </Phase>
+    </IRForHumans>
+  </Response>
+  <Escalation>
+    <Trigger>Any 4624 success from a guessing source, high-volume guessing against a privileged account, or a distributed attack against a single account.</Trigger>
+    <To>SOC L2 / IR</To>
+  </Escalation>
+  <Closure>
+    <FalsePositiveClosure>
+      <Item>Scan/assessment schedule verified with the owning team and matches the source and window.</Item>
+      <Item>No 4624 success from the source in INV-02/INV-03.</Item>
+    </FalsePositiveClosure>
+    <TruePositiveClosure>
+      <Item>Compromised accounts reset, sessions and tickets revoked.</Item>
+      <Item>Source contained (single or distributed set) and the driving process identified if internal.</Item>
+    </TruePositiveClosure>
+  </Closure>
+</Playbook>

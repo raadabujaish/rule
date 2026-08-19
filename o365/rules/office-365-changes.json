@@ -1,0 +1,81 @@
+{
+  "rule_id": "b074fb17-0e19-451a-9e6e-02132f497d2d",
+  "name": "Office 365 -  Changes",
+  "version": 1,
+  "enabled": true,
+  "interval": "5m",
+  "from": "now-900s",
+  "to": "now",
+  "description": "This rule monitors Office 365 audit activity for any changes made to user or account properties. Such updates may include adjustments to authentication methods, security settings, or account attributes. While these actions can be part of normal administration, unexpected or unauthorized modifications could indicate attempts to weaken security controls or gain unauthorized access. This rule provides visibility into all account property changes so they can be reviewed and validated.",
+  "tags": [
+    "office356-changes",
+    "change",
+    "office356"
+  ],
+  "author": [],
+  "license": "",
+  "threat": [],
+  "investigation_fields": {
+    "field_names": [
+      "user.name",
+      "user.id",
+      "source.ip",
+      "event.action",
+      "event.code",
+      "event.outcome",
+      "o365.audit.Operation",
+      "o365.audit.ResultStatus",
+      "o365.audit.ObjectId",
+      "o365.audit.Severity",
+      "message",
+      "o365.audit.ModifiedProperties"
+    ]
+  },
+  "related_integrations": [],
+  "required_fields": [],
+  "setup": "",
+  "false_positives": [],
+  "references": [],
+  "risk_score": 21,
+  "risk_score_mapping": [],
+  "severity": "low",
+  "severity_mapping": [],
+  "output_index": "",
+  "max_signals": 100,
+  "exceptions_list": [],
+  "actions": [],
+  "meta": {
+    "from": "10m",
+    "kibana_siem_app_url": "https://jcb.scanwave.local:8008/app/security"
+  },
+  "type": "query",
+  "language": "kuery",
+  "index": [
+    "logs-*"
+  ],
+  "query": "o365.audit.ModifiedProperties:*",
+  "filters": [
+    {
+      "meta": {
+        "disabled": false,
+        "negate": false,
+        "alias": null,
+        "index": "29925507-fbc0-48f3-8433-473c7fa4b097",
+        "key": "tags",
+        "field": "tags",
+        "params": {
+          "query": "Office365"
+        },
+        "type": "phrase"
+      },
+      "query": {
+        "match_phrase": {
+          "tags": "Office365"
+        }
+      },
+      "$state": {
+        "store": "appState"
+      }
+    }
+  ]
+}

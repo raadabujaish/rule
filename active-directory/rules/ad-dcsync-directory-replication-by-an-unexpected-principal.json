@@ -1,0 +1,87 @@
+{
+  "rule_id": "jcb-ad-dcsync-unexpected-principal",
+  "name": "AD — DCSync: Directory Replication by an Unexpected Principal",
+  "version": 1,
+  "enabled": true,
+  "interval": "1h",
+  "from": "now-90m",
+  "to": "now",
+  "description": "Attacker objective\nReplicate the directory (DCSync) to pull password hashes for any account — including krbtgt — without touching a Domain Controller's disk.\n\nAttack logic\nThe Directory Replication Service exposes the DS-Replication-Get-Changes(-All) control-access rights. Only Domain Controllers and sanctioned directory-sync services should exercise them; any other principal doing so is running DCSync (e.g. via Mimikatz).\n\nWhy this detection works\nObject-access auditing (4662) records the replication access-control GUIDs and the requesting principal. Excluding Domain Controller computer accounts and sanctioned sync/identity services leaves only anomalous replication.\n\nFalse positives\nA directory-sync or identity-management service not yet in the exclusion, or a new Domain Controller. Human/interactive accounts triggering replication are almost never legitimate.\n\nTuning\nAllowlist verified replication service accounts (identity sync, IGA tooling) after confirmation; investigate every human account that replicates.\n\nRequired telemetry\nWindows Security 4662 with Properties containing the replication GUIDs (1131f6aa / 1131f6ad) and AccessMask 0x100. Requires directory-object replication-property SACL auditing (already enabled here).",
+  "tags": [
+    "JCB",
+    "ActiveDirectory",
+    "Phase3",
+    "Use Case: Threat Detection",
+    "Tactic: Credential Access"
+  ],
+  "author": [
+    "raadabujaish"
+  ],
+  "license": "",
+  "threat": [
+    {
+      "framework": "MITRE ATT&CK",
+      "tactic": {
+        "id": "TA0006",
+        "name": "Credential Access",
+        "reference": "https://attack.mitre.org/tactics/TA0006/"
+      },
+      "technique": [
+        {
+          "id": "T1003",
+          "name": "OS Credential Dumping",
+          "reference": "https://attack.mitre.org/techniques/T1003/",
+          "subtechnique": [
+            {
+              "id": "T1003.006",
+              "name": "DCSync",
+              "reference": "https://attack.mitre.org/techniques/T1003/006/"
+            }
+          ]
+        }
+      ]
+    }
+  ],
+  "investigation_fields": {
+    "field_names": [
+      "host.name",
+      "user.name",
+      "user.domain",
+      "process.name",
+      "process.executable",
+      "process.command_line",
+      "process.args",
+      "process.parent.name",
+      "process.parent.executable",
+      "event.code",
+      "event.action",
+      "winlog.event_data.AccessMask",
+      "winlog.event_data.Properties",
+      "winlog.event_data.SubjectUserName"
+    ]
+  },
+  "related_integrations": [],
+  "required_fields": [],
+  "setup": "",
+  "note": "## Investigation guide\n1. SubjectUserName is the replicating principal; a non-DC, non-service account performing GetChanges is DCSync.\n2. If confirmed, treat the domain as compromised: reset all privileged accounts and rotate KRBTGT twice.\n3. Correlate with the host the principal logged on from and any preceding privilege escalation.",
+  "false_positives": [
+    "A directory-sync or identity-management service not yet in the exclusion, or a new Domain Controller. Human/interactive accounts triggering replication are almost never legitimate."
+  ],
+  "references": [
+    "https://attack.mitre.org/techniques/T1003/"
+  ],
+  "risk_score": 90,
+  "risk_score_mapping": [],
+  "severity": "critical",
+  "severity_mapping": [],
+  "output_index": "",
+  "max_signals": 100,
+  "exceptions_list": [],
+  "actions": [],
+  "type": "query",
+  "language": "kuery",
+  "index": [
+    "logs-system.security-*"
+  ],
+  "query": "event.code:\"4662\" and winlog.event_data.AccessMask:\"0x100\" and (winlog.event_data.Properties:*1131f6aa* or winlog.event_data.Properties:*1131f6ad* or winlog.event_data.Properties:*9923a32a*) and not winlog.event_data.SubjectUserName:(*$ or MSOL_* or manageengine or \"ANONYMOUS LOGON\")"
+}

@@ -1,0 +1,153 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<Playbook xmlns="https://soc.example/playbooks" id="PB-FG-001" name="Change Audit — FortiGate Firewall Configuration Changed - SOC Playbook" version="1.0" status="Production" classification="TLP:AMBER">
+  <Metadata>
+    <Owner>JCB Detection Engineering (WatchWave)</Owner>
+    <LastUpdated>2026-08-14</LastUpdated>
+    <Severity default="Medium">Medium</Severity>
+    <Confidence default="Medium">Medium</Confidence>
+    <Category>Defense Evasion / Firewall Configuration Change</Category>
+    <MitreAttack>
+      <Technique id="T1562.004" name="Disable or Modify System Firewall"/>
+      <Tactic id="TA0005" name="Defense Evasion"/>
+    </MitreAttack>
+    <References>
+      <Reference title="MITRE ATT and CK" url="https://attack.mitre.org/techniques/T1562/"/>
+    </References>
+  </Metadata>
+  <ExecutiveSummary>
+    <Overview>A FortiGate configuration object was changed (Edit/Add/Move/Delete on a cfgpath). Triage question: was this a change-controlled firewall administration action, or an unexpected/unauthorized modification (e.g. opening a path an attacker needs)?</Overview>
+    <BusinessImpact>Unauthorised firewall changes can open inbound exposure, disable protection, or exfil paths - a single rule change can breach segmentation.</BusinessImpact>
+  </ExecutiveSummary>
+  <Scope><Assets>
+    <AssetType>FortiGate perimeter and internal firewalls (HQ + DR)</AssetType>
+    <AssetType>Internal server and user segments behind the FortiGate</AssetType>
+  </Assets><LogSources>
+    <LogSource>FortiGate config/event log - logs-fortinet_fortigate.log-*</LogSource>
+  </LogSources></Scope>
+  <Prerequisites><TelemetryRequirements>
+    <Requirement>FortiGate logs shipped via Elastic Agent to logs-fortinet_fortigate.* (verified live).</Requirement>
+    <Requirement>Fields: fortinet.firewall.subtype (ips/dns/...), fortinet.firewall.action, fortinet.firewall.severity, fortinet.firewall.attack, fortinet.firewall.srccountry/dstcountry ('Reserved' = RFC1918 internal), fortinet.firewall.cfgpath, dns.question.name, source.ip, destination.ip, destination.port.</Requirement>
+  </TelemetryRequirements><DetectionSignals>
+    <Signal><Name>Config change</Name><Details>fortinet.firewall.action Edit/Add/Move/Delete with a cfgpath.</Details></Signal>
+  </DetectionSignals></Prerequisites>
+  <Inputs>
+    <Input name="$admin_ui" description="Admin session origin string (fortinet.firewall.ui, e.g. 'GUI(10.0.0.5)') from the alert - FortiGate config logs carry the administrator in this field, not a user field."/>
+    <Input name="$source_ip" description="Admin source IP parsed from the ui string if present."/>
+  </Inputs>
+  <Triage><ImmediateCapture>
+    <Item>Admin session (ui): $admin_ui</Item>
+    <Item>Source: $source_ip</Item>
+  </ImmediateCapture><InitialAssessment>
+    <Rule>Changes by a known firewall admin during a change window are routine; changes to security policy/address objects by an unexpected admin or outside a window need verification.</Rule>
+  </InitialAssessment></Triage>
+  <Investigation>
+    <Goal>Determine whether the config change is authorised administration or an unexpected modification, and what was changed.</Goal>
+    <Workflow>
+      <Step order="1" name="What configuration paths were changed and from which admin session">
+        <Purpose>The cfgpath and action reveal whether security policy, VPN, or admin objects were touched (high concern) vs benign objects; ui attributes the change to an admin session/source.</Purpose>
+        <Query platform="Elastic" language="ES|QL" id="INV-01-FGCFG-PATHS">
+          <![CDATA[
+FROM logs-fortinet_fortigate.log-*
+| WHERE fortinet.firewall.cfgpath IS NOT NULL AND @timestamp >= NOW() - 4 hours
+| STATS changes = COUNT(*), paths = VALUES(fortinet.firewall.cfgpath), actions = VALUES(fortinet.firewall.action), objects = VALUES(fortinet.firewall.cfgobj), first_seen = MIN(@timestamp), last_seen = MAX(@timestamp) BY fortinet.firewall.ui
+| SORT changes DESC
+| LIMIT 20
+          ]]>
+        </Query>
+        <ExpectedOutput>
+          <Field name="fortinet.firewall.ui"/>
+          <Field name="changes"/>
+          <Field name="paths"/>
+          <Field name="actions"/>
+        </ExpectedOutput>
+        <AnalystNotes>firewall.policy / firewall.address / vpn / system.admin cfgpaths are high concern. ui shows the admin session origin (GUI(ip)/jsconsole/API). A burst of changes from one session in minutes may be legitimate maintenance or an attacker reconfiguring the firewall.</AnalystNotes>
+      </Step>
+      <Step order="2" name="Was there an admin login/session event around the change">
+        <Purpose>Correlate the change with an admin login/logout event and its UI/source to confirm the session was legitimate.</Purpose>
+        <Query platform="Elastic" language="ES|QL" id="INV-02-FGCFG-LOGIN" optional="true">
+          <![CDATA[
+FROM logs-fortinet_fortigate.log-*
+| WHERE fortinet.firewall.action IN ("login","logout") AND @timestamp >= NOW() - 4 hours
+| KEEP @timestamp, fortinet.firewall.ui, source.ip, fortinet.firewall.action, fortinet.firewall.status
+| SORT @timestamp DESC
+| LIMIT 20
+          ]]>
+        </Query>
+        <ExpectedOutput>
+          <Field name="fortinet.firewall.ui"/>
+          <Field name="source.ip"/>
+          <Field name="fortinet.firewall.action"/>
+        </ExpectedOutput>
+        <AnalystNotes>An admin login from an unusual source/UI (e.g. public IP, unexpected jumphost) just before the change is a red flag. fortinet.firewall.ui shows GUI/console/API origin.</AnalystNotes>
+      </Step>
+      <Step order="3" name="Finalize classification">
+        <DecisionTree>
+          <Node><Condition>INV-01 shows security-policy/VPN/admin-object changes by an unrecognised admin or with no change ticket.</Condition><Result>True Positive (Unauthorised Firewall Change - escalate, review and revert)</Result></Node>
+          <Node><Condition>INV-02 shows the change followed an admin login from an unusual/public source.</Condition><Result>True Positive (Suspicious Admin Session - IR)</Result></Node>
+          <Node><Condition>INV-01 shows a known firewall admin making scoped changes during an approved window matching a ticket.</Condition><Result>False Positive</Result></Node>
+          <Node><Condition>Change by a plausible admin but no ticket located.</Condition><Result>Needs Escalation</Result></Node>
+        </DecisionTree>
+        <DocumentationChecklist>
+          <Item>Attach outputs of INV-01-FGCFG-PATHS, INV-02-FGCFG-LOGIN to the case.</Item>
+        </DocumentationChecklist>
+      </Step>
+    </Workflow>
+  </Investigation>
+  <ClassificationGuidance>
+    <FalsePositive>
+      <Definition>Change-controlled firewall administration.</Definition>
+      <Indicators>
+        <Item>Known firewall admin.</Item>
+        <Item>Matches an approved change ticket/window.</Item>
+        <Item>Scoped, expected cfgpaths.</Item>
+      </Indicators>
+      <SOCAction>
+        <Item>Verify the change ticket; close as false_positive.</Item>
+      </SOCAction>
+    </FalsePositive>
+    <TruePositive>
+      <Definition>An unauthorised firewall configuration change (exposure, protection disable, exfil path).</Definition>
+      <Indicators>
+        <Item>Unrecognised admin or unusual source.</Item>
+        <Item>Security-policy/VPN/admin changes with no ticket.</Item>
+        <Item>Burst of changes.</Item>
+      </Indicators>
+      <SOCAction>
+        <Item>Review the changed objects; revert unauthorised changes.</Item>
+        <Item>Disable the admin account if compromised; open IR.</Item>
+        <Item>Check for new inbound exposure created by the change.</Item>
+      </SOCAction>
+    </TruePositive>
+    <Misconfiguration>
+      <Definition>Automation/orchestration making config changes unexpectedly.</Definition>
+      <Indicators>
+        <Item>An API/automation admin per a broken job.</Item>
+        <Item>Owner confirms benign.</Item>
+      </Indicators>
+      <SOCAction>
+        <Item>Fix the automation scope; document the expected admin.</Item>
+      </SOCAction>
+    </Misconfiguration>
+  </ClassificationGuidance>
+  <Response><IRForHumans>
+    <Phase name="Immediate Actions (0-30 minutes)">
+      <Action priority="1">Review the changed configuration; revert if unauthorised.</Action>
+      <Action priority="2">Confirm the admin session legitimacy.</Action>
+    </Phase>
+    <Phase name="Containment and Eradication (hours)">
+      <Action>Audit the full config diff; check for new exposure; reset the admin if compromised.</Action>
+    </Phase>
+    <Phase name="Recovery and Hardening (days)">
+      <Action>Enforce change control + approval on firewall edits; restrict admin access to jump hosts; enable config backup/diff.</Action>
+    </Phase>
+  </IRForHumans></Response>
+  <QualityChecks>
+    <Check>cfgpath present on real config events (206/7d). Include Rename per the patched rule.</Check>
+    <Check>Correlate with admin login (INV-02) for session context.</Check>
+  </QualityChecks>
+  <ClosureCriteria><FalsePositiveClosure>
+    <Item>Authorised change confirmed; config diff benign.</Item>
+  </FalsePositiveClosure><TruePositiveClosure>
+    <Item>Unauthorised change reverted; exposure closed; admin session investigated.</Item>
+  </TruePositiveClosure></ClosureCriteria>
+</Playbook>

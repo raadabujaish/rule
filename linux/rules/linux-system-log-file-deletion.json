@@ -1,0 +1,80 @@
+{
+  "rule_id": "jcb-rec-system-log-file-deletion",
+  "name": "Linux — System Log File Deletion",
+  "version": 1,
+  "enabled": true,
+  "interval": "5m",
+  "from": "now-9m",
+  "to": "now",
+  "description": "Identifies the deletion of sensitive Linux system logs. This may indicate an attempt to evade detection or destroy forensic evidence on a system.",
+  "tags": [
+    "JCB",
+    "Linux"
+  ],
+  "author": [
+    "raadabujaish"
+  ],
+  "threat": [
+    {
+      "framework": "MITRE ATT&CK",
+      "tactic": {
+        "id": "TA0005",
+        "name": "Defense Evasion",
+        "reference": "https://attack.mitre.org/tactics/TA0005/"
+      },
+      "technique": [
+        {
+          "id": "T1070",
+          "name": "Indicator Removal",
+          "reference": "https://attack.mitre.org/techniques/T1070/",
+          "subtechnique": [
+            {
+              "id": "T1070.002",
+              "name": "Clear Linux or Mac System Logs",
+              "reference": "https://attack.mitre.org/techniques/T1070/002/"
+            }
+          ]
+        }
+      ]
+    }
+  ],
+  "investigation_fields": {
+    "field_names": [
+      "host.name",
+      "user.name",
+      "user.id",
+      "process.name",
+      "process.executable",
+      "process.args",
+      "process.parent.name",
+      "file.path",
+      "event.action",
+      "event.outcome",
+      "message",
+      "host.os.type",
+      "event.type"
+    ]
+  },
+  "related_integrations": [],
+  "required_fields": [],
+  "setup": "",
+  "false_positives": [],
+  "references": [
+    "https://www.fireeye.com/blog/threat-research/2020/11/live-off-the-land-an-overview-of-unc1945.html"
+  ],
+  "risk_score": 47,
+  "risk_score_mapping": [],
+  "severity": "medium",
+  "severity_mapping": [],
+  "output_index": "",
+  "max_signals": 100,
+  "exceptions_list": [],
+  "actions": [],
+  "type": "eql",
+  "language": "eql",
+  "index": [
+    "logs-auditd.log-*",
+    "logs-auditd_manager.auditd-*"
+  ],
+  "query": "file where host.os.type == \"linux\" and event.type == \"deletion\" and\n  file.path :\n    (\n    \"/var/run/utmp\",\n    \"/var/log/wtmp\",\n    \"/var/log/btmp\",\n    \"/var/log/lastlog\",\n    \"/var/log/faillog\",\n    \"/var/log/syslog\",\n    \"/var/log/messages\",\n    \"/var/log/secure\",\n    \"/var/log/auth.log\",\n    \"/var/log/boot.log\",\n    \"/var/log/kern.log\"\n    ) and\n    not process.name in (\"gzip\", \"executor\", \"dockerd\")\n"
+}

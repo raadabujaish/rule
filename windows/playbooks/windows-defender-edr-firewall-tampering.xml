@@ -1,0 +1,152 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<Playbook xmlns="https://soc.example/playbooks" id="PB-WIN-017" name="Windows — Defender / EDR / Firewall Tampering - SOC Playbook" version="1.0" status="Production" classification="TLP:AMBER">
+  <Metadata>
+    <Owner>JCB Detection Engineering (WatchWave)</Owner>
+    <LastUpdated>2026-08-14</LastUpdated>
+    <Severity default="High">High</Severity>
+    <Confidence default="Medium">Medium</Confidence>
+    <Category>Defense Evasion / Impair Defenses</Category>
+    <MitreAttack>
+      <Technique id="T1562.001" name="Disable or Modify Tools"/>
+      <Tactic id="TA0005" name="Defense Evasion"/>
+    </MitreAttack>
+    <References>
+      <Reference title="MITRE ATT and CK" url="https://attack.mitre.org/techniques/T1562/"/>
+    </References>
+  </Metadata>
+  <ExecutiveSummary>
+    <Overview>A command line disabling Defender/EDR/firewall ran - Set-MpPreference disabling real-time protection, netsh advfirewall off, stopping AV/EDR services, or adding exclusions. Triage question: is an attacker blinding defenses, or an admin/tool making an authorised change?</Overview>
+    <BusinessImpact>Disabling endpoint defenses precedes payload execution; catching it early can pre-empt the main attack.</BusinessImpact>
+  </ExecutiveSummary>
+  <Scope><Assets>
+    <AssetType>Windows servers and workstations (INTDOM domain)</AssetType>
+    <AssetType>Domain controllers</AssetType>
+  </Assets><LogSources>
+    <LogSource>Sysmon process + Windows Security 4688 - logs-windows.sysmon_operational-*,logs-system.security-*</LogSource>
+  </LogSources></Scope>
+  <Prerequisites><TelemetryRequirements>
+    <Requirement>Windows Security + Sysmon + PowerShell logs via Elastic Agent (verified live). Sysmon event.code 1=process(command_line/parent populated), 11=file, 13/12=registry(registry.path populated); process.code_signature NOT collected.</Requirement>
+  </TelemetryRequirements><DetectionSignals>
+    <Signal><Name>Defense tampering</Name><Details>Set-MpPreference disable, firewall off, AV/EDR service stop, exclusion add.</Details></Signal>
+  </DetectionSignals></Prerequisites>
+  <Inputs>
+    <Input name="$hostname" description="Host where defenses were tampered."/>
+    <Input name="$username" description="Account that ran it (user.name)."/>
+  </Inputs>
+  <Triage><ImmediateCapture>
+    <Item>Host: $hostname</Item>
+  </ImmediateCapture><InitialAssessment>
+    <Rule>Weigh the evidence story, not any single fact - see ClassificationGuidance.</Rule>
+  </InitialAssessment></Triage>
+  <Investigation>
+    <Goal>Determine whether the defense-tampering command is an attacker blinding controls or an authorised administrative change.</Goal>
+    <Workflow>
+      <Step order="1" name="Confirm the tampering command">
+        <Purpose>The command shows what was disabled (RTP, firewall, service) or excluded.</Purpose>
+        <Query platform="Elastic" language="ES|QL" id="INV-01-TAMPER-CMD">
+          <![CDATA[
+FROM logs-windows.sysmon_operational-*,logs-system.security-*
+| WHERE event.code IN ("1","4688") AND host.name == "$hostname" AND process.command_line IS NOT NULL AND @timestamp >= NOW() - 4 hours
+| EVAL cl = TO_LOWER(process.command_line)
+| WHERE cl LIKE "*set-mppreference*" OR cl LIKE "*disablerealtimemonitoring*" OR (cl LIKE "*netsh*" AND cl LIKE "*firewall*" AND cl LIKE "*off*") OR (cl LIKE "*sc *" AND cl LIKE "*stop*" AND (cl LIKE "*sense*" OR cl LIKE "*windefend*")) OR cl LIKE "*add-mppreference*exclusion*"
+| KEEP @timestamp, process.name, process.parent.name, user.name, process.command_line
+| SORT @timestamp DESC
+| LIMIT 20
+          ]]>
+        </Query>
+        <ExpectedOutput>
+          <Field name="process.name"/>
+          <Field name="process.parent.name"/>
+          <Field name="user.name"/>
+          <Field name="process.command_line"/>
+        </ExpectedOutput>
+        <AnalystNotes>DisableRealtimeMonitoring $true or an exclusion path pointing at a payload dir = attacker blinding. netsh firewall off + AV stop together is a strong pre-attack signal. An admin adding a legitimate exclusion under change control is benign.</AnalystNotes>
+      </Step>
+      <Step order="2" name="Process origin and account on the host">
+        <Purpose>The parent process and account reveal whether this was interactive attacker activity or an automated/service context.</Purpose>
+        <Query platform="Elastic" language="ES|QL" id="INV-02-PROC-TREE" optional="true">
+          <![CDATA[
+FROM logs-windows.sysmon_operational-*,logs-system.security-*
+| WHERE event.code IN ("1","4688") AND host.name == "$hostname" AND @timestamp >= NOW() - 2 hours
+| STATS runs = COUNT(*), parents = VALUES(process.parent.name), users = VALUES(user.name) BY process.name
+| SORT runs DESC
+| LIMIT 15
+          ]]>
+        </Query>
+        <ExpectedOutput>
+          <Field name="process.name"/>
+          <Field name="parents"/>
+          <Field name="users"/>
+        </ExpectedOutput>
+        <AnalystNotes>A suspicious process spawned by an office app/browser/script interpreter, run by a normal user, is more concerning than one under a known admin/automation parent.</AnalystNotes>
+      </Step>
+      <Step order="3" name="Finalize classification">
+        <DecisionTree>
+          <Node><Condition>Real-time protection disabled or an exclusion added for a suspicious path, especially by a non-admin or before other execution.</Condition><Result>True Positive (Defense Evasion - IR, re-enable protection)</Result></Node>
+          <Node><Condition>A documented admin change (e.g. approved exclusion for a business app) under a ticket.</Condition><Result>False Positive</Result></Node>
+          <Node><Condition>Defense change with unclear authorisation.</Condition><Result>Needs Escalation</Result></Node>
+        </DecisionTree>
+        <DocumentationChecklist>
+          <Item>Attach outputs of INV-01-TAMPER-CMD, INV-02-PROC-TREE to the case.</Item>
+        </DocumentationChecklist>
+      </Step>
+    </Workflow>
+  </Investigation>
+  <ClassificationGuidance>
+    <FalsePositive>
+      <Definition>An authorised administrative change (approved exclusion, maintenance).</Definition>
+      <Indicators>
+        <Item>Known admin.</Item>
+        <Item>Change ticket.</Item>
+        <Item>Business-justified exclusion.</Item>
+      </Indicators>
+      <SOCAction>
+        <Item>Verify the change; close as false_positive.</Item>
+      </SOCAction>
+    </FalsePositive>
+    <TruePositive>
+      <Definition>An attacker disabling endpoint defenses.</Definition>
+      <Indicators>
+        <Item>RTP disabled / firewall off / EDR stopped.</Item>
+        <Item>Exclusion for a payload path.</Item>
+        <Item>Non-admin or pre-attack timing.</Item>
+      </Indicators>
+      <SOCAction>
+        <Item>Re-enable protection immediately; isolate the host; open IR.</Item>
+        <Item>Hunt for what ran while defenses were down.</Item>
+      </SOCAction>
+    </TruePositive>
+    <Misconfiguration>
+      <Definition>A software installer disabling AV temporarily by design.</Definition>
+      <Indicators>
+        <Item>A known installer process.</Item>
+        <Item>Brief, self-reverting change.</Item>
+      </Indicators>
+      <SOCAction>
+        <Item>Confirm the installer; document.</Item>
+      </SOCAction>
+    </Misconfiguration>
+  </ClassificationGuidance>
+  <Response><IRForHumans>
+    <Phase name="Immediate Actions (0-30 minutes)">
+      <Action priority="1">Confirm the activity on the host; if malicious indicators, isolate the host.</Action>
+      <Action priority="2">Identify the responsible account/process and its origin.</Action>
+    </Phase>
+    <Phase name="Containment and Eradication (hours)">
+      <Action>Isolate the host; capture volatile evidence; hunt the same pattern across the estate.</Action>
+      <Action>Reset credentials used on the host if compromise is confirmed.</Action>
+    </Phase>
+    <Phase name="Recovery and Hardening (days)">
+      <Action>Remediate the root cause; add/verify EDR coverage; apply relevant hardening.</Action>
+    </Phase>
+  </IRForHumans></Response>
+  <QualityChecks>
+    <Check>Confirm the required telemetry (Sysmon/Security auditing) is present on the host.</Check>
+    <Check>Tune known-benign administrative sources via exceptions, not by disabling the rule.</Check>
+  </QualityChecks>
+  <ClosureCriteria><FalsePositiveClosure>
+    <Item>Activity confirmed benign/authorised and documented.</Item>
+  </FalsePositiveClosure><TruePositiveClosure>
+    <Item>Host contained and triaged; root cause eradicated; estate swept; findings recorded.</Item>
+  </TruePositiveClosure></ClosureCriteria>
+</Playbook>

@@ -1,0 +1,117 @@
+{
+  "rule_id": "6e921abf-8fc6-4c43-8d42-e1280e67d7c2",
+  "name": "Brute Force Attack Detection - IP Threshold ",
+  "version": 1,
+  "enabled": true,
+  "interval": "5m",
+  "from": "now-1800s",
+  "to": "now",
+  "description": "Detects potential brute force attacks when an IP address has 100 or more authentication attempts within 5 minutes",
+  "tags": [
+    "brute_force",
+    "authentication",
+    "suspicious_activity"
+  ],
+  "author": [],
+  "license": "",
+  "threat": [
+    {
+      "framework": "MITRE ATT&CK",
+      "tactic": {
+        "id": "TA0006",
+        "name": "Credential Access",
+        "reference": "https://attack.mitre.org/tactics/TA0006"
+      },
+      "technique": [
+        {
+          "id": "T1110",
+          "name": "Brute Force",
+          "reference": "https://attack.mitre.org/techniques/T1110",
+          "subtechnique": []
+        }
+      ]
+    }
+  ],
+  "investigation_fields": {
+    "field_names": [
+      "host.name",
+      "user.name",
+      "source.ip",
+      "destination.ip",
+      "event.action",
+      "event.code",
+      "event.outcome",
+      "message",
+      "event.reason",
+      "event.category"
+    ]
+  },
+  "related_integrations": [],
+  "required_fields": [],
+  "setup": "",
+  "false_positives": [],
+  "references": [],
+  "risk_score": 99,
+  "risk_score_mapping": [],
+  "severity": "critical",
+  "severity_mapping": [],
+  "output_index": "",
+  "max_signals": 100,
+  "exceptions_list": [],
+  "actions": [],
+  "meta": {
+    "from": "25m",
+    "kibana_siem_app_url": "https://172.31.14.118:16462/app/security"
+  },
+  "type": "threshold",
+  "language": "kuery",
+  "data_view_id": "logs-*",
+  "query": "",
+  "filters": [
+    {
+      "meta": {
+        "index": "fe6f732e-ecd9-44e2-8c69-4cc6a0c5ebfc",
+        "type": "custom",
+        "disabled": false,
+        "negate": false,
+        "alias": null,
+        "key": "query",
+        "value": "{\"bool\":{\"must\":[],\"filter\":[{\"exists\":{\"field\":\"event.reason\"}},{\"match_phrase\":{\"event.category\":\"authentication\"}},{\"match_phrase\":{\"event.outcome\":\"failure\"}}],\"should\":[],\"must_not\":[]}}"
+      },
+      "$state": {
+        "store": "appState"
+      },
+      "query": {
+        "bool": {
+          "must": [],
+          "filter": [
+            {
+              "exists": {
+                "field": "event.reason"
+              }
+            },
+            {
+              "match_phrase": {
+                "event.category": "authentication"
+              }
+            },
+            {
+              "match_phrase": {
+                "event.outcome": "failure"
+              }
+            }
+          ],
+          "should": [],
+          "must_not": []
+        }
+      }
+    }
+  ],
+  "threshold": {
+    "field": [
+      "source.ip"
+    ],
+    "value": 10,
+    "cardinality": []
+  }
+}

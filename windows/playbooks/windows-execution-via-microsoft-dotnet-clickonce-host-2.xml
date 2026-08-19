@@ -1,0 +1,135 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<Playbook xmlns="https://soc.example/playbooks" id="PB-JCB-GAP-32" name="Windows — Execution via Microsoft DotNet ClickOnce Host - SOC Playbook" version="2.1" status="Production" classification="TLP:AMBER">
+  <Metadata>
+    <Owner>JCB Detection Engineering (WatchWave)</Owner>
+    <LastUpdated>2026-08-19</LastUpdated>
+    <Severity default="Low">Low</Severity>
+    <Confidence default="Medium">Medium</Confidence>
+    <Category>Defense Evasion / Trusted Developer Utilities Proxy Execution</Category>
+    <MitreAttack>
+      <Technique id="T1127" name="Trusted Developer Utilities Proxy Execution"/>
+      <Tactic id="TA0005" name="Defense Evasion"/>
+    </MitreAttack>
+    <References>
+      <Reference title="MITRE ATT and CK T1127" url="https://attack.mitre.org/techniques/T1127/"/>
+    </References>
+  </Metadata>
+  <ExecutiveSummary>
+    <Overview>The ClickOnce host chain fired: rundll32.exe invoked dfshim.dll (ShOpenVerbApplication) — the Microsoft .NET ClickOnce deployment host (dfsvc.exe) — and a network connection followed within 5 seconds under the same user. ClickOnce lets a signed Microsoft binary launch and network-fetch an application from a URL, which adversaries abuse to proxy-execute code and pull a payload while blending in as trusted .NET tooling. The triage question: is this a user launching a legitimate internal ClickOnce app (e.g. a line-of-business deployment), or attacker proxy-execution/ingress via the ClickOnce host?</Overview>
+    <BusinessImpact>On a banking endpoint, ClickOnce proxy-execution can fetch and run attacker code under a trusted signed host, evading application controls and enabling initial access or tooling delivery that looks like normal .NET activity.</BusinessImpact>
+  </ExecutiveSummary>
+  <Scope>
+    <Assets><AssetType>Windows workstations and member servers (endpoints running .NET / ClickOnce)</AssetType></Assets>
+    <LogSources><LogSource>Sysmon process/network events - logs-windows.sysmon_operational-*</LogSource><LogSource>Windows Security process creation - logs-system.security-*</LogSource></LogSources>
+  </Scope>
+  <Prerequisites>
+    <TelemetryRequirements><Requirement>Sysmon process-create (Event ID 1) and network-connect (Event ID 3) shipped to logs-windows.sysmon_operational-* (verified live).</Requirement></TelemetryRequirements>
+    <DetectionSignals><Signal><Name>ClickOnce host chain</Name><Details>rundll32.exe with dfshim + ShOpenVerbApplication, or dfsvc.exe, followed by a network connection within 5s under the same user.id. ClickOnce (dfsvc/dfshim) is a zero-baseline on JCB — any hit is notable.</Details></Signal></DetectionSignals>
+  </Prerequisites>
+  <Inputs>
+    <Input name="$host" description="Host where the ClickOnce host chain fired (alert host.name)."/>
+    <Input name="$user" description="User account under which the ClickOnce host ran (alert user.name)."/>
+  </Inputs>
+  <Triage>
+    <ImmediateCapture>
+      <Item>Host: $host   User: $user</Item>
+      <Item>The rundll32/dfsvc command line and its parent process (from the alert).</Item>
+      <Item>The destination the follow-on network connection reached.</Item>
+    </ImmediateCapture>
+    <InitialAssessment>
+      <Rule>If the parent is a browser/mail client and the destination is an external/unknown host, lean True Positive (user-initiated ClickOnce ingress).</Rule>
+      <Rule>If the ClickOnce app resolves to a known internal LOB deployment URL and the user routinely runs it, lean False Positive (authorised internal ClickOnce app).</Rule>
+    </InitialAssessment>
+  </Triage>
+  <Investigation>
+    <Goal>Decide whether the ClickOnce host chain on $host under $user is authorised internal-app execution or attacker proxy-execution / payload ingress.</Goal>
+    <Workflow>
+      <Step order="1" name="Confirm the ClickOnce host process and read the command line">
+        <Purpose>Recover the rundll32/dfsvc ClickOnce host invocation on $host and its parent — the primary TP-vs-FP input.</Purpose>
+        <Query platform="Elastic" language="ES|QL" id="INV-01"><![CDATA[
+FROM logs-windows.sysmon_operational-*
+| WHERE host.name == "$host" AND @timestamp >= NOW() - 4 hours
+    AND (TO_LOWER(process.name) IN ("rundll32.exe","dfsvc.exe"))
+    AND (TO_LOWER(process.command_line) LIKE "*dfshim*" OR TO_LOWER(process.command_line) LIKE "*shopenverbapplication*" OR TO_LOWER(process.name) == "dfsvc.exe")
+| KEEP @timestamp, host.name, user.name, process.name, process.executable, process.command_line, process.parent.name, process.parent.executable
+| SORT @timestamp DESC
+| LIMIT 50
+        ]]></Query>
+      </Step>
+      <Step order="2" name="Establish the launching context (parent + user)">
+        <Purpose>See what launched the ClickOnce host and which users invoke it on $host — a browser/mail parent differs sharply from a scripted/unknown parent.</Purpose>
+        <Query platform="Elastic" language="ES|QL" id="INV-02"><![CDATA[
+FROM logs-windows.sysmon_operational-*
+| WHERE host.name == "$host" AND @timestamp >= NOW() - 4 hours
+    AND (TO_LOWER(process.name) == "dfsvc.exe" OR (TO_LOWER(process.name) == "rundll32.exe" AND TO_LOWER(process.command_line) LIKE "*dfshim*"))
+| STATS launches = COUNT(*), last_seen = MAX(@timestamp) BY process.parent.name, user.name
+| SORT launches DESC
+| LIMIT 20
+        ]]></Query>
+      </Step>
+      <Step order="3" name="Profile the user's follow-on activity on the host (the payload)">
+        <Purpose>ClickOnce pulls and runs an application; profile what $user executed on $host around the event to spot a delivered payload or hands-on tooling.</Purpose>
+        <Query platform="Elastic" language="ES|QL" id="INV-03"><![CDATA[
+FROM logs-windows.sysmon_operational-*
+| WHERE host.name == "$host" AND user.name == "$user" AND @timestamp >= NOW() - 4 hours
+| STATS execs = COUNT(*), last_seen = MAX(@timestamp) BY process.name, process.parent.name
+| SORT execs DESC
+| LIMIT 30
+        ]]></Query>
+      </Step>
+    </Workflow>
+  </Investigation>
+  <DecisionTree>
+    <Node><Condition>INV-01 shows the ClickOnce host launched from a browser/mail/unknown parent, and INV-03 shows a new/unusual child process or hands-on tooling by $user after it — proxy-execution/ingress via ClickOnce.</Condition><Result>True Positive (ClickOnce proxy-execution / payload ingress — begin IR on $host)</Result></Node>
+    <Node><Condition>The ClickOnce app maps to a documented internal LOB deployment routinely run by $user, parent is Explorer/a known launcher, and no anomalous follow-on — authorised internal ClickOnce app; OR the network fetch was positively proven blocked at the proxy/firewall (record as blocked, never "benign").</Condition><Result>False Positive (authorised internal ClickOnce app OR proven-blocked fetch — record which)</Result></Node>
+    <Node><Condition>A legitimate but un-baselined internal ClickOnce deployment is triggering the rule for many users.</Condition><Result>Misconfiguration (baseline the internal ClickOnce URL/app; add a scoped exception)</Result></Node>
+    <Node><Condition>The launching parent, the ClickOnce URL, or the follow-on cannot be recovered from telemetry, so intent is unclear.</Condition><Result>Needs Escalation</Result></Node>
+  </DecisionTree>
+  <ClassificationGuidance>
+    <FalsePositive>
+      <Definition>An authorised internal ClickOnce line-of-business application, or a ClickOnce fetch positively proven blocked. Not "benign" — record which.</Definition>
+      <Indicators>
+        <Item>ClickOnce URL/app is a documented internal deployment; $user runs it routinely; parent is Explorer/known launcher.</Item>
+        <Item>The follow-on network connection was denied at the proxy/firewall.</Item>
+      </Indicators>
+      <SOCAction>
+        <Item>Confirm the internal ClickOnce app owner/URL; propose a scoped exception for that app.</Item>
+        <Item>If blocked, document the blocked fetch, preserve evidence, close as false_positive (blocked).</Item>
+      </SOCAction>
+    </FalsePositive>
+    <TruePositive>
+      <Definition>ClickOnce host was used to proxy-execute code and/or fetch a payload from an untrusted source.</Definition>
+      <Indicators>
+        <Item>Browser/mail/unknown parent; external or unknown destination.</Item>
+        <Item>New/unusual child process or hands-on tooling by $user after the event.</Item>
+      </Indicators>
+      <SOCAction>
+        <Item>Isolate $host; capture the ClickOnce URL and any fetched artifact; hunt for persistence and lateral movement from $user/$host.</Item>
+        <Item>Reset $user credentials if compromise is confirmed; open an incident.</Item>
+      </SOCAction>
+    </TruePositive>
+  </ClassificationGuidance>
+  <Response>
+    <IRForHumans>
+      <Phase name="Immediate Actions (0-30 minutes)">
+        <Action priority="1">Recover the ClickOnce command line, parent, and destination (INV-01/02); if the parent/destination is untrusted, queue $host for isolation.</Action>
+        <Action priority="2">Identify and preserve any application/artifact fetched by the ClickOnce host.</Action>
+      </Phase>
+      <Phase name="Containment and Eradication (hours)">
+        <Action>Isolate $host, remove the fetched payload and any persistence, and block the ingress URL/destination at the proxy.</Action>
+        <Action>Reset $user credentials if hands-on compromise is confirmed.</Action>
+      </Phase>
+      <Phase name="Recovery and Hardening (days)">
+        <Action>Baseline/allow-list authorised internal ClickOnce deployments; restrict ClickOnce to known internal URLs via policy; alert on ClickOnce host reaching external destinations.</Action>
+      </Phase>
+    </IRForHumans>
+  </Response>
+  <Escalation>
+    <Trigger>Untrusted parent/destination, a delivered payload, hands-on follow-on, or a server/privileged host involved.</Trigger>
+    <To>SOC L2 / IR</To>
+  </Escalation>
+  <Closure>
+    <FalsePositiveClosure><Item>ClickOnce tied to a documented internal app (or fetch proven blocked); no anomalous follow-on; exception scoped if needed.</Item></FalsePositiveClosure>
+    <TruePositiveClosure><Item>$host isolated, payload/persistence removed, ingress destination blocked, credentials reset, incident documented with INV-01/02/03 evidence.</Item></TruePositiveClosure>
+  </Closure>
+</Playbook>

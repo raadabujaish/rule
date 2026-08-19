@@ -1,0 +1,88 @@
+{
+  "rule_id": "jcb-ad-tier0-group-add",
+  "name": "AD — Member Added to a Privileged (Tier-0) Group",
+  "version": 1,
+  "enabled": true,
+  "interval": "30m",
+  "from": "now-1h",
+  "to": "now",
+  "description": "Attacker objective\nGain domain dominance or persistence by adding an account to a highly-privileged group (Domain/Enterprise/Schema Admins, built-in Operators, or privileged Exchange groups).\n\nAttack logic\nMembership changes to Tier-0 groups are rare and among the most consequential directory changes. An addition to these groups grants far-reaching control and warrants verification.\n\nWhy this detection works\nGroup-membership events (4728/4756/4732) record the group, the added member and the acting subject.\n\nFalse positives\nAuthorised administration.\n\nTuning\nCorrelate with change tickets; the local Administrators group can be noisier and can be split out if needed.\n\nRequired telemetry\nWindows Security 4728/4756/4732 (TargetUserName/group, MemberName, SubjectUserName).",
+  "tags": [
+    "JCB",
+    "ActiveDirectory",
+    "Phase3",
+    "Use Case: Threat Detection",
+    "Tactic: Persistence",
+    "Tactic: Privilege Escalation"
+  ],
+  "author": [
+    "raadabujaish"
+  ],
+  "threat": [
+    {
+      "framework": "MITRE ATT&CK",
+      "tactic": {
+        "id": "TA0003",
+        "name": "Persistence",
+        "reference": "https://attack.mitre.org/tactics/TA0003/"
+      },
+      "technique": [
+        {
+          "id": "T1098",
+          "name": "Account Manipulation",
+          "reference": "https://attack.mitre.org/techniques/T1098/"
+        }
+      ]
+    },
+    {
+      "framework": "MITRE ATT&CK",
+      "tactic": {
+        "id": "TA0004",
+        "name": "Privilege Escalation",
+        "reference": "https://attack.mitre.org/tactics/TA0004/"
+      },
+      "technique": [
+        {
+          "id": "T1098",
+          "name": "Account Manipulation",
+          "reference": "https://attack.mitre.org/techniques/T1098/"
+        }
+      ]
+    }
+  ],
+  "investigation_fields": {
+    "field_names": [
+      "winlog.event_data.SubjectUserName",
+      "winlog.event_data.TargetUserName",
+      "winlog.event_data.ServiceName",
+      "winlog.event_data.AttributeLDAPDisplayName",
+      "winlog.event_data.ObjectDN",
+      "winlog.computer_name",
+      "winlog.event_data.IpAddress"
+    ]
+  },
+  "related_integrations": [],
+  "required_fields": [],
+  "setup": "",
+  "note": "## Investigation guide\n1. SubjectUserName added a member to a Tier-0 group; MemberName = who was added.\n2. Verify authorisation; if unauthorised, remove the member and investigate the subject and the added account's subsequent activity.",
+  "false_positives": [
+    "Authorised administration."
+  ],
+  "references": [
+    "https://attack.mitre.org/techniques/T1098/"
+  ],
+  "risk_score": 88,
+  "risk_score_mapping": [],
+  "severity": "critical",
+  "severity_mapping": [],
+  "output_index": "",
+  "max_signals": 100,
+  "exceptions_list": [],
+  "actions": [],
+  "type": "query",
+  "language": "kuery",
+  "index": [
+    "logs-system.security-*"
+  ],
+  "query": "event.code:(\"4728\" or \"4756\" or \"4732\") and winlog.event_data.TargetUserName:(\"Domain Admins\" or \"Enterprise Admins\" or \"Schema Admins\" or \"Group Policy Creator Owners\" or \"DnsAdmins\" or \"Cert Publishers\" or \"Exchange Organization Administrators\" or \"Exchange Trusted Subsystem\" or \"Account Operators\" or \"Backup Operators\" or \"Server Operators\" or \"Administrators\")"
+}

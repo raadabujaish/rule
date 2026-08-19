@@ -1,0 +1,148 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<Playbook xmlns="https://soc.example/playbooks" id="PB-WIN-032" name="Windows — File or Directory Deletion Command - SOC Playbook" version="1.0" status="Production" classification="TLP:AMBER">
+  <Metadata>
+    <Owner>JCB Detection Engineering (WatchWave)</Owner>
+    <LastUpdated>2026-08-14</LastUpdated>
+    <Severity default="Low">Low</Severity>
+    <Confidence default="Low">Low</Confidence>
+    <Category>Defense Evasion / Indicator Removal - File Deletion</Category>
+    <MitreAttack>
+      <Technique id="T1070.004" name="File Deletion"/>
+      <Tactic id="TA0005" name="Defense Evasion"/>
+    </MitreAttack>
+    <References>
+      <Reference title="MITRE ATT and CK" url="https://attack.mitre.org/techniques/T1070/"/>
+    </References>
+  </Metadata>
+  <ExecutiveSummary>
+    <Overview>A command to delete files/history ran - rundll32 InetCpl.cpl Clear (clear browser history), reg delete, or cmd/del of files. Triage question: is this anti-forensic evidence removal, or routine cleanup?</Overview>
+    <BusinessImpact>Deleting files/history removes forensic artifacts; done after other suspicious activity it is anti-forensics.</BusinessImpact>
+  </ExecutiveSummary>
+  <Scope><Assets>
+    <AssetType>Windows servers and workstations (INTDOM domain)</AssetType>
+    <AssetType>Domain controllers</AssetType>
+  </Assets><LogSources>
+    <LogSource>Sysmon process + Windows Security 4688 - logs-windows.sysmon_operational-*,logs-system.security-*</LogSource>
+  </LogSources></Scope>
+  <Prerequisites><TelemetryRequirements>
+    <Requirement>Windows Security + Sysmon + PowerShell logs via Elastic Agent (verified live). Sysmon event.code 1=process(command_line/parent populated), 11=file, 13/12=registry(registry.path populated); process.code_signature NOT collected.</Requirement>
+  </TelemetryRequirements><DetectionSignals>
+    <Signal><Name>File deletion</Name><Details>rundll32 InetCpl Clear, reg delete, cmd del.</Details></Signal>
+  </DetectionSignals></Prerequisites>
+  <Inputs>
+    <Input name="$hostname" description="Host where deletion ran."/>
+    <Input name="$username" description="Account (user.name)."/>
+  </Inputs>
+  <Triage><ImmediateCapture>
+    <Item>Host: $hostname</Item>
+  </ImmediateCapture><InitialAssessment>
+    <Rule>Weigh the evidence story, not any single fact - see ClassificationGuidance.</Rule>
+  </InitialAssessment></Triage>
+  <Investigation>
+    <Goal>Determine whether the deletion is anti-forensic cleanup after activity or routine.</Goal>
+    <Workflow>
+      <Step order="1" name="What was deleted and by which parent">
+        <Purpose>The deletion target and parent separate routine cleanup from evidence removal.</Purpose>
+        <Query platform="Elastic" language="ES|QL" id="INV-01-DELETE-DETAIL">
+          <![CDATA[
+FROM logs-windows.sysmon_operational-*,logs-system.security-*
+| WHERE event.code IN ("1","4688") AND host.name == "$hostname" AND process.command_line IS NOT NULL AND @timestamp >= NOW() - 4 hours
+| EVAL cl = TO_LOWER(process.command_line)
+| WHERE (cl LIKE "*inetcpl.cpl,clear*") OR (process.name RLIKE "(?i)reg(.exe)?" AND cl LIKE "*delete*") OR (process.name RLIKE "(?i)cmd(.exe)?" AND (cl LIKE "*del *" OR cl LIKE "*rmdir*" OR cl LIKE "*erase *"))
+| KEEP @timestamp, process.name, process.parent.name, process.command_line, user.name
+| SORT @timestamp DESC
+| LIMIT 20
+          ]]>
+        </Query>
+        <ExpectedOutput>
+          <Field name="process.name"/>
+          <Field name="process.command_line"/>
+          <Field name="user.name"/>
+        </ExpectedOutput>
+        <AnalystNotes>Clearing browser history via rundll32 InetCpl, or deleting logs/tool artifacts, right after suspicious activity = anti-forensics. Routine temp cleanup is benign. Correlate with what preceded it.</AnalystNotes>
+      </Step>
+      <Step order="2" name="Did suspicious activity precede the deletion">
+        <Purpose>Deletion right after credential/execution activity is evidence removal.</Purpose>
+        <Query platform="Elastic" language="ES|QL" id="INV-02-DELETE-PRECEDING" optional="true">
+          <![CDATA[
+FROM logs-system.security-*
+| WHERE host.name == "$hostname" AND event.code IN ("4688","4624","4672","7045") AND @timestamp >= NOW() - 2 hours
+| STATS c = COUNT(*), codes = VALUES(event.code)
+| LIMIT 5
+          ]]>
+        </Query>
+        <ExpectedOutput>
+          <Field name="codes"/>
+          <Field name="c"/>
+        </ExpectedOutput>
+        <AnalystNotes>Privileged/execution activity before the deletion supports anti-forensics; a quiet host supports routine cleanup.</AnalystNotes>
+      </Step>
+      <Step order="3" name="Finalize classification">
+        <DecisionTree>
+          <Node><Condition>Deletion of history/logs/tool artifacts following suspicious activity on the host.</Condition><Result>True Positive (Anti-forensics - investigate the preceding activity)</Result></Node>
+          <Node><Condition>Routine temp/cache cleanup with no suspicious context.</Condition><Result>False Positive / Benign Activity</Result></Node>
+          <Node><Condition>Deletion with unclear target/context.</Condition><Result>Needs Escalation</Result></Node>
+        </DecisionTree>
+        <DocumentationChecklist>
+          <Item>Attach outputs of INV-01-DELETE-DETAIL, INV-02-DELETE-PRECEDING to the case.</Item>
+        </DocumentationChecklist>
+      </Step>
+    </Workflow>
+  </Investigation>
+  <ClassificationGuidance>
+    <FalsePositive>
+      <Definition>Routine cleanup.</Definition>
+      <Indicators>
+        <Item>Temp/cache targets.</Item>
+        <Item>No suspicious context.</Item>
+        <Item>Normal user/maintenance.</Item>
+      </Indicators>
+      <SOCAction>
+        <Item>Confirm benign; close as benign_activity.</Item>
+      </SOCAction>
+    </FalsePositive>
+    <TruePositive>
+      <Definition>Anti-forensic evidence removal.</Definition>
+      <Indicators>
+        <Item>History/log/tool-artifact deletion.</Item>
+        <Item>Follows suspicious activity.</Item>
+        <Item>Attacker context.</Item>
+      </Indicators>
+      <SOCAction>
+        <Item>Investigate what was deleted and what preceded it; reconstruct from SIEM; open IR if intrusion confirmed.</Item>
+      </SOCAction>
+    </TruePositive>
+    <Misconfiguration>
+      <Definition>A cleanup tool deleting broadly by design.</Definition>
+      <Indicators>
+        <Item>A known cleanup utility.</Item>
+        <Item>Expected scope.</Item>
+      </Indicators>
+      <SOCAction>
+        <Item>Baseline; document.</Item>
+      </SOCAction>
+    </Misconfiguration>
+  </ClassificationGuidance>
+  <Response><IRForHumans>
+    <Phase name="Immediate Actions (0-30 minutes)">
+      <Action priority="1">Confirm the activity on the host; if malicious indicators, isolate the host.</Action>
+      <Action priority="2">Identify the responsible account/process and its origin.</Action>
+    </Phase>
+    <Phase name="Containment and Eradication (hours)">
+      <Action>Isolate the host; capture volatile evidence; hunt the same pattern across the estate.</Action>
+      <Action>Reset credentials used on the host if compromise is confirmed.</Action>
+    </Phase>
+    <Phase name="Recovery and Hardening (days)">
+      <Action>Remediate the root cause; add/verify EDR coverage; apply relevant hardening.</Action>
+    </Phase>
+  </IRForHumans></Response>
+  <QualityChecks>
+    <Check>Confirm the required telemetry (Sysmon/Security auditing) is present on the host.</Check>
+    <Check>Tune known-benign administrative sources via exceptions, not by disabling the rule.</Check>
+  </QualityChecks>
+  <ClosureCriteria><FalsePositiveClosure>
+    <Item>Activity confirmed benign/authorised and documented.</Item>
+  </FalsePositiveClosure><TruePositiveClosure>
+    <Item>Host contained and triaged; root cause eradicated; estate swept; findings recorded.</Item>
+  </TruePositiveClosure></ClosureCriteria>
+</Playbook>

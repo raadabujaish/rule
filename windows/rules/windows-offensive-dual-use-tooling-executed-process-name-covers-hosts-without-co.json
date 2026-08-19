@@ -1,0 +1,137 @@
+{
+  "rule_id": "df2ac96f-d405-43e7-b1be-309983210067",
+  "name": "Windows — Offensive / Dual-Use Tooling Executed (Process Name — Covers Hosts Without Command-Line Auditing)",
+  "version": 1,
+  "enabled": true,
+  "interval": "10m",
+  "from": "now-20m",
+  "to": "now",
+  "description": "Detects execution of well-known credential-theft, discovery, tunnelling, remote-access and anti-forensics tooling by **process name only**. This deliberately avoids `process.command_line`, which at JCB is populated on just 119 of the 288 hosts that emit event 4688 (19% of events) because the 'Include command line in process creation events' policy is not applied fleet-wide. Every existing command-line-based rule is blind on the remaining 169 hosts; this rule restores baseline coverage there. Validated baseline over 14 days: 3 events (csvde.exe on a domain controller, netscan.exe and procdump.exe on workstations) — all of which are themselves worth investigating.",
+  "tags": [
+    "JCB",
+    "ScanWave",
+    "Windows",
+    "Credential Access",
+    "Discovery",
+    "Command and Control",
+    "Visibility Gap Compensating Control",
+    "MITRE T1003",
+    "MITRE T1219"
+  ],
+  "author": [
+    "ScanWave"
+  ],
+  "license": "ScanWave — JCB Managed Detection",
+  "threat": [
+    {
+      "framework": "MITRE ATT&CK",
+      "tactic": {
+        "id": "TA0006",
+        "name": "Credential Access",
+        "reference": "https://attack.mitre.org/tactics/TA0006/"
+      },
+      "technique": [
+        {
+          "id": "T1003",
+          "name": "OS Credential Dumping",
+          "reference": "https://attack.mitre.org/techniques/T1003/",
+          "subtechnique": [
+            {
+              "id": "T1003.001",
+              "name": "LSASS Memory",
+              "reference": "https://attack.mitre.org/techniques/T1003/001/"
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "framework": "MITRE ATT&CK",
+      "tactic": {
+        "id": "TA0007",
+        "name": "Discovery",
+        "reference": "https://attack.mitre.org/tactics/TA0007/"
+      },
+      "technique": [
+        {
+          "id": "T1046",
+          "name": "Network Service Discovery",
+          "reference": "https://attack.mitre.org/techniques/T1046/"
+        }
+      ]
+    },
+    {
+      "framework": "MITRE ATT&CK",
+      "tactic": {
+        "id": "TA0011",
+        "name": "Command and Control",
+        "reference": "https://attack.mitre.org/tactics/TA0011/"
+      },
+      "technique": [
+        {
+          "id": "T1219",
+          "name": "Remote Access Tools",
+          "reference": "https://attack.mitre.org/techniques/T1219/"
+        }
+      ]
+    },
+    {
+      "framework": "MITRE ATT&CK",
+      "tactic": {
+        "id": "TA0011",
+        "name": "Command and Control",
+        "reference": "https://attack.mitre.org/tactics/TA0011/"
+      },
+      "technique": [
+        {
+          "id": "T1572",
+          "name": "Protocol Tunneling",
+          "reference": "https://attack.mitre.org/techniques/T1572/"
+        }
+      ]
+    }
+  ],
+  "investigation_fields": {
+    "field_names": [
+      "host.name",
+      "user.name",
+      "user.domain",
+      "process.name",
+      "process.executable",
+      "process.command_line",
+      "process.args",
+      "process.parent.name",
+      "process.parent.executable",
+      "event.code",
+      "event.action"
+    ]
+  },
+  "related_integrations": [],
+  "required_fields": [],
+  "setup": "",
+  "note": "### Triage\n1. `process.name` names the tool; `process.parent.name` shows how it was launched (a browser, Office, or a shell parent raises severity).\n2. `winlog.event_data.SubjectUserName` is the invoking account — confirm it belongs to a person authorised to run security tooling.\n3. Remote-access tools (AnyDesk, RustDesk, ScreenConnect, Atera) on a banking endpoint are a common initial-access and ransomware-affiliate pattern — verify against the approved software list.\n4. Tunnelling tools (ngrok, frp, chisel, plink, gost) indicate command-and-control or data-egress preparation; pivot to FortiGate traffic for the same host.\n\n### Tuning\nIf the bank's IT or security team legitimately runs a tool from this list, remove that single value or add a host/user exception — do not disable the rule. Renamed binaries will evade it, which is precisely why fleet-wide command-line auditing is also recommended.",
+  "false_positives": [
+    "Authorised penetration testing or internal red-team activity.",
+    "IT administrators using Sysinternals, nmap or Advanced IP Scanner for legitimate diagnostics.",
+    "Approved remote-support software, if any of the listed products are sanctioned at JCB."
+  ],
+  "references": [
+    "https://attack.mitre.org/techniques/T1003/",
+    "https://attack.mitre.org/techniques/T1219/"
+  ],
+  "risk_score": 73,
+  "risk_score_mapping": [],
+  "severity": "high",
+  "severity_mapping": [],
+  "output_index": "",
+  "max_signals": 100,
+  "exceptions_list": [],
+  "actions": [],
+  "type": "query",
+  "language": "kuery",
+  "index": [
+    "logs-system.security-*",
+    "logs-windows.sysmon_operational-*"
+  ],
+  "query": "event.code:(\"4688\" or \"1\") and process.name:(mimikatz.exe or mimilib.dll or procdump.exe or procdump64.exe or rubeus.exe or sharphound.exe or bloodhound.exe or psexec.exe or psexec64.exe or psexesvc.exe or paexec.exe or remcom.exe or csexec.exe or winexesvc.exe or secretsdump.exe or wce.exe or fgdump.exe or pwdump.exe or gsecdump.exe or lazagne.exe or nanodump.exe or dumpert.exe or seatbelt.exe or winpeas.exe or winpeas64.exe or sharpup.exe or powerup.exe or sharpview.exe or sharphound3.exe or juicypotato.exe or printspoofer.exe or rottenpotato.exe or godpotato.exe or sweetpotato.exe or certipy.exe or certify.exe or kerbrute.exe or crackmapexec.exe or nltestk.exe or adfind.exe or advanced_port_scanner.exe or advanced_ip_scanner.exe or netscan.exe or softperfect.exe or nmap.exe or masscan.exe or nc.exe or ncat.exe or netcat.exe or plink.exe or ngrok.exe or frp.exe or frpc.exe or frps.exe or chisel.exe or gost.exe or htran.exe or rclone.exe or megasync.exe or anydesk.exe or rustdesk.exe or atera.exe or screenconnect.exe or meshagent.exe or sdelete.exe or sdelete64.exe or rdpwrap.exe)"
+}

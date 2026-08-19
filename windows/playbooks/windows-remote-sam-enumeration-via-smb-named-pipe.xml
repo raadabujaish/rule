@@ -1,0 +1,151 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<Playbook xmlns="https://soc.example/playbooks" id="PB-WIN-009" name="Windows — Remote SAM Enumeration via SMB Named Pipe - SOC Playbook" version="1.0" status="Production" classification="TLP:AMBER">
+  <Metadata>
+    <Owner>JCB Detection Engineering (WatchWave)</Owner>
+    <LastUpdated>2026-08-14</LastUpdated>
+    <Severity default="High">High</Severity>
+    <Confidence default="Medium">Medium</Confidence>
+    <Category>Discovery / Account Discovery</Category>
+    <MitreAttack>
+      <Technique id="T1087.002" name="Domain Account Discovery"/>
+      <Tactic id="TA0007" name="Discovery"/>
+    </MitreAttack>
+    <References>
+      <Reference title="MITRE ATT and CK" url="https://attack.mitre.org/techniques/T1087/"/>
+    </References>
+  </Metadata>
+  <ExecutiveSummary>
+    <Overview>A remote client accessed the samr named pipe over SMB (5145, RelativeTargetName samr), excluding known scanners and machine accounts - remote SAM/account enumeration (SharpHound/net commands). Triage question: is an actor enumerating accounts for attack planning, or an unlisted legitimate tool?</Overview>
+    <BusinessImpact>Remote SAM enumeration maps users and groups for privilege-escalation and lateral-movement targeting - a recon step before the attack.</BusinessImpact>
+  </ExecutiveSummary>
+  <Scope><Assets>
+    <AssetType>Windows servers and workstations (INTDOM domain)</AssetType>
+    <AssetType>Domain controllers</AssetType>
+  </Assets><LogSources>
+    <LogSource>Windows Security event log - logs-system.security-*</LogSource>
+  </LogSources></Scope>
+  <Prerequisites><TelemetryRequirements>
+    <Requirement>Windows Security + Sysmon + PowerShell logs via Elastic Agent (verified live). Sysmon event.code 1=process(command_line/parent populated), 11=file, 13/12=registry(registry.path populated); process.code_signature NOT collected.</Requirement>
+  </TelemetryRequirements><DetectionSignals>
+    <Signal><Name>Remote SAM access</Name><Details>5145 samr pipe, non-scanner non-machine account.</Details></Signal>
+  </DetectionSignals></Prerequisites>
+  <Inputs>
+    <Input name="$hostname" description="Host whose SAM was enumerated."/>
+    <Input name="$username" description="Enumerating principal (SubjectUserName)."/>
+    <Input name="$source_ip" description="Source of the enumeration."/>
+  </Inputs>
+  <Triage><ImmediateCapture>
+    <Item>Host: $hostname</Item>
+  </ImmediateCapture><InitialAssessment>
+    <Rule>Weigh the evidence story, not any single fact - see ClassificationGuidance.</Rule>
+  </InitialAssessment></Triage>
+  <Investigation>
+    <Goal>Determine whether the SAM enumeration is hostile account discovery or an unlisted legitimate tool.</Goal>
+    <Workflow>
+      <Step order="1" name="Who enumerated, from where, and how broadly">
+        <Purpose>A source enumerating SAM on many hosts is doing recon; a single admin query differs.</Purpose>
+        <Query platform="Elastic" language="ES|QL" id="INV-01-SAMR-WHO">
+          <![CDATA[
+FROM logs-system.security-*
+| WHERE event.code == "5145" AND winlog.event_data.RelativeTargetName == "samr" AND @timestamp >= NOW() - 4 hours
+| EVAL src = COALESCE(TO_STRING(source.ip), "local")
+| STATS accesses = COUNT(*), hosts = COUNT_DISTINCT(host.name), host_list = VALUES(host.name) BY src, winlog.event_data.SubjectUserName
+| SORT accesses DESC
+| LIMIT 20
+          ]]>
+        </Query>
+        <ExpectedOutput>
+          <Field name="src"/>
+          <Field name="winlog.event_data.SubjectUserName"/>
+          <Field name="hosts"/>
+          <Field name="accesses"/>
+        </ExpectedOutput>
+        <AnalystNotes>One source enumerating SAM across many hosts = recon sweep (SharpHound-style). A single access by an admin tool to one host may be benign. Rule already excludes Nessus/manageengine/machine accounts.</AnalystNotes>
+      </Step>
+      <Step order="2" name="Is the same source also doing other discovery/lateral activity">
+        <Purpose>SAM enumeration alongside share access or service-pipe access is an active attack chain.</Purpose>
+        <Query platform="Elastic" language="ES|QL" id="INV-02-SAMR-CONTEXT" optional="true">
+          <![CDATA[
+FROM logs-system.security-*
+| WHERE event.code == "5145" AND source.ip == "$source_ip" AND winlog.event_data.RelativeTargetName IN ("svcctl","atsvc","PSEXESVC","lsarpc","netlogon") AND @timestamp >= NOW() - 2 hours
+| STATS c = COUNT(*), pipes = VALUES(winlog.event_data.RelativeTargetName), hosts = COUNT_DISTINCT(host.name)
+| LIMIT 5
+          ]]>
+        </Query>
+        <ExpectedOutput>
+          <Field name="pipes"/>
+          <Field name="c"/>
+          <Field name="hosts"/>
+        </ExpectedOutput>
+        <AnalystNotes>Access to service-control (svcctl) or lsarpc pipes alongside samr indicates enumeration + lateral-execution tooling - escalate.</AnalystNotes>
+      </Step>
+      <Step order="3" name="Finalize classification">
+        <DecisionTree>
+          <Node><Condition>One source enumerating SAM across multiple hosts, or combined with service-pipe access.</Condition><Result>True Positive (Account Enumeration Recon - escalate, investigate source)</Result></Node>
+          <Node><Condition>A single access by an unlisted but legitimate admin/inventory tool.</Condition><Result>False Positive</Result></Node>
+          <Node><Condition>SAM access from a source whose role is unclear.</Condition><Result>Needs Escalation</Result></Node>
+        </DecisionTree>
+        <DocumentationChecklist>
+          <Item>Attach outputs of INV-01-SAMR-WHO, INV-02-SAMR-CONTEXT to the case.</Item>
+        </DocumentationChecklist>
+      </Step>
+    </Workflow>
+  </Investigation>
+  <ClassificationGuidance>
+    <FalsePositive>
+      <Definition>An unlisted legitimate admin/inventory tool.</Definition>
+      <Indicators>
+        <Item>Known admin/inventory host.</Item>
+        <Item>Single/scoped access.</Item>
+        <Item>No lateral-pipe activity.</Item>
+      </Indicators>
+      <SOCAction>
+        <Item>Confirm the tool; add to the exclusion; close as false_positive.</Item>
+      </SOCAction>
+    </FalsePositive>
+    <TruePositive>
+      <Definition>Hostile remote account enumeration.</Definition>
+      <Indicators>
+        <Item>SAM enumeration across many hosts.</Item>
+        <Item>Combined with service/lsarpc pipe access.</Item>
+        <Item>Non-admin source.</Item>
+      </Indicators>
+      <SOCAction>
+        <Item>Investigate the source host for the enumeration tool; open IR.</Item>
+        <Item>Scope what it mapped; watch for follow-on targeting.</Item>
+      </SOCAction>
+    </TruePositive>
+    <Misconfiguration>
+      <Definition>A misconfigured inventory tool over-enumerating.</Definition>
+      <Indicators>
+        <Item>A known tool per a broken config.</Item>
+        <Item>Owner confirms.</Item>
+      </Indicators>
+      <SOCAction>
+        <Item>Fix/exclude the tool; document.</Item>
+      </SOCAction>
+    </Misconfiguration>
+  </ClassificationGuidance>
+  <Response><IRForHumans>
+    <Phase name="Immediate Actions (0-30 minutes)">
+      <Action priority="1">Confirm the activity on the host; if malicious indicators, isolate the host.</Action>
+      <Action priority="2">Identify the responsible account/process and its origin.</Action>
+    </Phase>
+    <Phase name="Containment and Eradication (hours)">
+      <Action>Isolate the host; capture volatile evidence; hunt the same pattern across the estate.</Action>
+      <Action>Reset credentials used on the host if compromise is confirmed.</Action>
+    </Phase>
+    <Phase name="Recovery and Hardening (days)">
+      <Action>Remediate the root cause; add/verify EDR coverage; apply relevant hardening.</Action>
+    </Phase>
+  </IRForHumans></Response>
+  <QualityChecks>
+    <Check>Confirm the required telemetry (Sysmon/Security auditing) is present on the host.</Check>
+    <Check>Tune known-benign administrative sources via exceptions, not by disabling the rule.</Check>
+  </QualityChecks>
+  <ClosureCriteria><FalsePositiveClosure>
+    <Item>Activity confirmed benign/authorised and documented.</Item>
+  </FalsePositiveClosure><TruePositiveClosure>
+    <Item>Host contained and triaged; root cause eradicated; estate swept; findings recorded.</Item>
+  </TruePositiveClosure></ClosureCriteria>
+</Playbook>

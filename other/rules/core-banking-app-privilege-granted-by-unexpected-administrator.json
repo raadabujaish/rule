@@ -1,0 +1,71 @@
+{
+  "rule_id": "jcb-coreapp-grant-unexpected-admin",
+  "name": "Core Banking App — Privilege Granted by Unexpected Administrator",
+  "version": 1,
+  "enabled": true,
+  "interval": "1h",
+  "from": "now-3h",
+  "to": "now",
+  "description": "Attacker objective\nGrant banking application functions/privileges to an attacker-controlled account (privilege escalation / persistence).\n\nAttack logic\nApplication privilege grants are performed by a small set of authorised administrators. A grant performed by any other administrator identity is outside the sanctioned set.\n\nWhy this detection works\nThe application audit records the granting admin, the recipient and the function granted, so allowlisting sanctioned granters makes any other grant a high-signal event.\n\nFalse positives\nA newly authorised administrator.\n\nTuning\nAllowlist verified admin IDs; review the source address for an unexpected origin.\n\nRequired telemetry\nCore Application audit (apps-*, type='Core Application'): GRANTED_BY, USER_ID_GRANTED, FUNCTION_NAME, USR_IPADDRESS.",
+  "tags": [
+    "JCB",
+    "Oracle",
+    "Phase3",
+    "Use Case: Threat Detection",
+    "Tactic: Privilege Escalation"
+  ],
+  "author": [
+    "raadabujaish"
+  ],
+  "threat": [
+    {
+      "framework": "MITRE ATT&CK",
+      "tactic": {
+        "id": "TA0004",
+        "name": "Privilege Escalation",
+        "reference": "https://attack.mitre.org/tactics/TA0004/"
+      },
+      "technique": [
+        {
+          "id": "T1098",
+          "name": "Account Manipulation",
+          "reference": "https://attack.mitre.org/techniques/T1098/"
+        }
+      ]
+    }
+  ],
+  "investigation_fields": {
+    "field_names": [
+      "GRANTED_BY",
+      "USER_ID_GRANTED",
+      "FUNCTION_NAME",
+      "USR_IPADDRESS",
+      "BRA_CODE"
+    ]
+  },
+  "related_integrations": [],
+  "required_fields": [],
+  "setup": "",
+  "note": "## Investigation guide\n1. GRANTED_BY = the granting admin; USER_ID_GRANTED = the recipient; FUNCTION_NAME = the banking function; USR_IPADDRESS = source.\n2. Confirm the grant was authorised and the granter is a sanctioned admin.",
+  "false_positives": [
+    "A newly authorised administrator."
+  ],
+  "references": [
+    "https://attack.mitre.org/techniques/T1098/"
+  ],
+  "risk_score": 56,
+  "risk_score_mapping": [],
+  "severity": "medium",
+  "severity_mapping": [],
+  "output_index": "",
+  "max_signals": 100,
+  "exceptions_list": [],
+  "actions": [],
+  "type": "query",
+  "language": "kuery",
+  "index": [
+    "apps-*",
+    "-apps-*-2025"
+  ],
+  "query": "type.keyword:\"Core Application\" and not GRANTED_BY.keyword:\"3174\""
+}

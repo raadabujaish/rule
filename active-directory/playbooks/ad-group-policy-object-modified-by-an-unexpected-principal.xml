@@ -1,0 +1,169 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<Playbook xmlns="https://soc.example/playbooks" id="PB-AD-010" name="AD — Group Policy Object Modified by an Unexpected Principal - SOC Playbook" version="1.0" status="Production" classification="TLP:AMBER">
+  <Metadata>
+    <Owner>JCB Detection Engineering (WatchWave)</Owner>
+    <LastUpdated>2026-08-14</LastUpdated>
+    <Severity default="High">High</Severity>
+    <Confidence default="Medium">Medium</Confidence>
+    <Category>Defense Evasion / Domain Policy Modification</Category>
+    <MitreAttack>
+      <Technique id="T1484.001" name="Group Policy Modification"/>
+      <Tactic id="TA0005" name="Defense Evasion"/>
+    </MitreAttack>
+    <References>
+      <Reference title="MITRE ATT and CK" url="https://attack.mitre.org/techniques/T1484/"/>
+    </References>
+  </Metadata>
+  <ExecutiveSummary>
+    <Overview>A groupPolicyContainer object was modified (5136) - GPO changes push configuration/scripts to many machines at once. Triage question: was this a sanctioned change by a GPO administrator, or an unexpected principal editing policy (a fast route to mass code execution/persistence)?</Overview>
+    <BusinessImpact>A single malicious GPO edit can deploy scheduled tasks, scripts, or privilege changes to every machine in an OU - bank-wide impact from one change.</BusinessImpact>
+  </ExecutiveSummary>
+  <Scope><Assets>
+    <AssetType>Active Directory domain controllers (INTDOM)</AssetType>
+    <AssetType>Windows member servers and workstations</AssetType>
+  </Assets><LogSources>
+    <LogSource>Windows Security event log - logs-system.security-*</LogSource>
+  </LogSources></Scope>
+  <Prerequisites><TelemetryRequirements>
+    <Requirement>Windows Security auditing shipped via Elastic Agent to logs-system.security-* (verified live).</Requirement>
+  </TelemetryRequirements><DetectionSignals>
+    <Signal><Name>GPO object change</Name><Details>5136 where ObjectClass is groupPolicyContainer (new_terms on the principal).</Details></Signal>
+  </DetectionSignals></Prerequisites>
+  <Inputs>
+    <Input name="$username" description="Principal that modified the GPO (SubjectUserName)."/>
+    <Input name="$hostname" description="DC where the change was recorded."/>
+  </Inputs>
+  <Triage><ImmediateCapture>
+    <Item>Actor: $username</Item>
+    <Item>DC: $hostname</Item>
+  </ImmediateCapture><InitialAssessment>
+    <Rule>Recognised GPO admin during a change window: verify ticket, likely benign.</Rule>
+    <Rule>Unexpected principal (new_terms fired because this actor never edits GPOs) editing policy: escalate.</Rule>
+  </InitialAssessment></Triage>
+  <Investigation>
+    <Goal>Determine whether $username is an authorised GPO administrator and whether the change is limited/expected.</Goal>
+    <Workflow>
+      <Step order="1" name="Scope the GPO change activity by this principal">
+        <Purpose>How many GPO attributes/objects the principal touched signals routine edit vs broad tampering.</Purpose>
+        <Query platform="Elastic" language="ES|QL" id="INV-01-GPO-CHANGE">
+          <![CDATA[
+FROM logs-system.security-*
+| WHERE event.code IN ("5136","5137","5141") AND winlog.event_data.SubjectUserName == "$username" AND @timestamp >= NOW() - 4 hours
+| KEEP @timestamp, host.name, winlog.event_data.ObjectDN, winlog.event_data.AttributeLDAPDisplayName, event.code
+| SORT @timestamp DESC
+| LIMIT 40
+          ]]>
+        </Query>
+        <ExpectedOutput>
+          <Field name="winlog.event_data.ObjectDN"/>
+          <Field name="winlog.event_data.AttributeLDAPDisplayName"/>
+        </ExpectedOutput>
+        <AnalystNotes>Look at which GPOs and attributes changed. gPCMachineExtensionNames / versionNumber edits accompany real policy changes; edits to many GPOs at once is concerning.</AnalystNotes>
+      </Step>
+      <Step order="2" name="Is this principal a habitual GPO editor">
+        <Purpose>new_terms fired because the (principal) is new to this action - confirm whether they have any legitimate directory-admin footprint.</Purpose>
+        <Query platform="Elastic" language="ES|QL" id="INV-02-GPO-ACTOR">
+          <![CDATA[
+FROM logs-system.security-*
+| WHERE winlog.event_data.SubjectUserName == "$username" AND event.code IN ("5136","4728","4732","4756","4738") AND @timestamp >= NOW() - 4 hours
+| STATS ops = COUNT(*), codes = VALUES(event.code)
+| LIMIT 1
+          ]]>
+        </Query>
+        <ExpectedOutput>
+          <Field name="ops"/>
+          <Field name="codes"/>
+        </ExpectedOutput>
+        <AnalystNotes>A principal simultaneously editing GPOs AND changing group memberships is acting like an attacker consolidating control.</AnalystNotes>
+      </Step>
+      <Step order="3" name="Actor's session origin">
+        <Purpose>Locate where the actor is operating from for containment and to spot foothold-driven changes.</Purpose>
+        <Query platform="Elastic" language="ES|QL" id="INV-03-GPO-SESSION">
+          <![CDATA[
+FROM logs-system.security-*
+| WHERE winlog.event_data.TargetUserName == "$username" AND event.code == "4624" AND @timestamp >= NOW() - 4 hours
+| EVAL src = COALESCE(TO_STRING(source.ip), "local")
+| STATS logons = COUNT(*), types = VALUES(winlog.event_data.LogonType), hosts = VALUES(host.name) BY src
+| SORT logons DESC
+| LIMIT 10
+          ]]>
+        </Query>
+        <ExpectedOutput>
+          <Field name="src"/>
+          <Field name="hosts"/>
+          <Field name="types"/>
+        </ExpectedOutput>
+        <AnalystNotes>An admin editing GPOs from their normal admin workstation is expected; edits driven from an unusual host point to a compromised session.</AnalystNotes>
+      </Step>
+      <Step order="4" name="Finalize classification">
+        <DecisionTree>
+          <Node><Condition>INV-02 shows the principal has no legitimate directory-admin footprint, or is concurrently changing groups/rights.</Condition><Result>True Positive (Unauthorised GPO Tampering - IR, review GPO contents)</Result></Node>
+          <Node><Condition>INV-01 shows edits to logon/startup script or scheduled-task policy extensions by an unexpected principal.</Condition><Result>True Positive (Policy-based Deployment - IR immediately)</Result></Node>
+          <Node><Condition>INV-01/02 show a recognised GPO admin making a scoped change during an approved window with a ticket.</Condition><Result>False Positive</Result></Node>
+          <Node><Condition>Principal is plausibly delegated but no change record and change scope is broad.</Condition><Result>Needs Escalation</Result></Node>
+        </DecisionTree>
+        <DocumentationChecklist>
+          <Item>Attach outputs of INV-01-GPO-CHANGE, INV-02-GPO-ACTOR, INV-03-GPO-SESSION to the case.</Item>
+        </DocumentationChecklist>
+      </Step>
+    </Workflow>
+  </Investigation>
+  <ClassificationGuidance>
+    <FalsePositive>
+      <Definition>Sanctioned GPO administration by an authorised admin.</Definition>
+      <Indicators>
+        <Item>Actor is a known GPO/OU admin.</Item>
+        <Item>Change matches an approved ticket.</Item>
+        <Item>Edit is scoped to the intended GPO.</Item>
+      </Indicators>
+      <SOCAction>
+        <Item>Verify the change ticket and GPO diff.</Item>
+        <Item>Close as false_positive.</Item>
+      </SOCAction>
+    </FalsePositive>
+    <TruePositive>
+      <Definition>Unauthorised policy modification to deploy code or persistence domain-wide.</Definition>
+      <Indicators>
+        <Item>Unexpected principal (new_terms) editing GPOs.</Item>
+        <Item>Script/scheduled-task/privilege extensions changed.</Item>
+        <Item>Actor also altering groups/rights or operating from an unusual host.</Item>
+      </Indicators>
+      <SOCAction>
+        <Item>Review the modified GPO's contents immediately; revert unauthorised changes.</Item>
+        <Item>Disable the actor, isolate its host, open IR.</Item>
+        <Item>Check which OUs/machines the GPO applies to for blast radius.</Item>
+      </SOCAction>
+    </TruePositive>
+    <Misconfiguration>
+      <Definition>A configuration-management tool editing GPOs unexpectedly due to misconfiguration.</Definition>
+      <Indicators>
+        <Item>A known automation account making the change per a broken/new job.</Item>
+        <Item>Owner confirms benign intent.</Item>
+      </Indicators>
+      <SOCAction>
+        <Item>Correct the automation scope; document the expected principal so new_terms stops firing.</Item>
+      </SOCAction>
+    </Misconfiguration>
+  </ClassificationGuidance>
+  <Response><IRForHumans>
+    <Phase name="Immediate Actions (0-30 minutes)">
+      <Action priority="1">Pull the modified GPO contents; revert if unauthorised.</Action>
+      <Action priority="2">Disable actor and isolate its host if suspicious.</Action>
+    </Phase>
+    <Phase name="Containment and Eradication (hours)">
+      <Action>Determine blast radius (linked OUs/machines); hunt for deployed tasks/scripts on clients.</Action>
+    </Phase>
+    <Phase name="Recovery and Hardening (days)">
+      <Action>Restrict GPO edit rights; enable GPO change approval; back up GPOs for rapid diff/restore.</Action>
+    </Phase>
+  </IRForHumans></Response>
+  <QualityChecks>
+    <Check>ObjectClass groupPolicyContainer confirmed; new_terms keys on principal - expected admins will each fire once then be learned.</Check>
+    <Check>Consider pairing with SYSVOL file-change monitoring for script payloads.</Check>
+  </QualityChecks>
+  <ClosureCriteria><FalsePositiveClosure>
+    <Item>Authorised admin + ticket + scoped GPO diff confirmed benign.</Item>
+  </FalsePositiveClosure><TruePositiveClosure>
+    <Item>Malicious GPO reverted; blast radius cleaned; actor eradicated.</Item>
+  </TruePositiveClosure></ClosureCriteria>
+</Playbook>

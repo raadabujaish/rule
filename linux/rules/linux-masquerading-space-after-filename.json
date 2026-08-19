@@ -1,0 +1,80 @@
+{
+  "rule_id": "jcb-rec-masquerading-space-after-filename",
+  "name": "Linux — Masquerading Space After Filename",
+  "version": 1,
+  "enabled": true,
+  "interval": "5m",
+  "from": "now-9m",
+  "to": "now",
+  "description": "This rules identifies a process created from an executable with a space appended to the end of the filename. This may indicate an attempt to masquerade a malicious file as benign to gain user execution. When a space is added to the end of certain files, the OS will execute the file according to it's true filetype instead of it's extension. Adversaries can hide a program's true filetype by changing the extension of the file. They can then add a space to the end of the name so that the OS automatically executes the file when it's double-clicked.",
+  "tags": [
+    "JCB",
+    "Linux"
+  ],
+  "author": [
+    "raadabujaish"
+  ],
+  "threat": [
+    {
+      "framework": "MITRE ATT&CK",
+      "tactic": {
+        "id": "TA0005",
+        "name": "Defense Evasion",
+        "reference": "https://attack.mitre.org/tactics/TA0005/"
+      },
+      "technique": [
+        {
+          "id": "T1036",
+          "name": "Masquerading",
+          "reference": "https://attack.mitre.org/techniques/T1036/",
+          "subtechnique": [
+            {
+              "id": "T1036.006",
+              "name": "Space after Filename",
+              "reference": "https://attack.mitre.org/techniques/T1036/006/"
+            }
+          ]
+        }
+      ]
+    }
+  ],
+  "investigation_fields": {
+    "field_names": [
+      "host.name",
+      "user.name",
+      "user.id",
+      "process.name",
+      "process.executable",
+      "process.args",
+      "process.parent.name",
+      "file.path",
+      "event.action",
+      "event.outcome",
+      "message",
+      "host.os.type",
+      "event.type"
+    ]
+  },
+  "related_integrations": [],
+  "required_fields": [],
+  "setup": "",
+  "false_positives": [],
+  "references": [
+    "https://www.picussecurity.com/resource/blog/picus-10-critical-mitre-attck-techniques-t1036-masquerading"
+  ],
+  "risk_score": 47,
+  "risk_score_mapping": [],
+  "severity": "medium",
+  "severity_mapping": [],
+  "output_index": "",
+  "max_signals": 100,
+  "exceptions_list": [],
+  "actions": [],
+  "type": "eql",
+  "language": "eql",
+  "index": [
+    "logs-auditd.log-*",
+    "logs-auditd_manager.auditd-*"
+  ],
+  "query": "process where host.os.type:(\"linux\",\"macos\") and\n  event.type == \"start\" and\n  (process.executable regex~ \"\"\"/[a-z0-9\\s_\\-\\\\./]+\\s\"\"\") and not\n  process.name in (\"ls\", \"find\", \"grep\", \"xkbcomp\")\n"
+}

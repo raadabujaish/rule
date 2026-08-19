@@ -1,0 +1,147 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<Playbook xmlns="https://soc.example/playbooks" id="PB-DEF-001" name="Defender — High-Confidence Endpoint/Identity/Office Attack Alert - SOC Playbook" version="1.0" status="Production" classification="TLP:AMBER">
+  <Metadata>
+    <Owner>JCB Detection Engineering (WatchWave)</Owner>
+    <LastUpdated>2026-08-14</LastUpdated>
+    <Severity default="High">High</Severity>
+    <Confidence default="Medium">Medium</Confidence>
+    <Category>Various / Defender High-Confidence Alert</Category>
+    <MitreAttack>
+      <Technique id="T1078" name="Valid Accounts"/>
+      <Tactic id="TA0001" name="Initial Access"/>
+    </MitreAttack>
+    <References>
+      <Reference title="MITRE ATT and CK" url="https://attack.mitre.org/techniques/T1078/"/>
+    </References>
+  </Metadata>
+  <ExecutiveSummary>
+    <Overview>Defender for Endpoint/Identity/Office raised a non-informational, unresolved alert (excluding nessus) - a high-confidence native detection. Triage per the alert's title/tactic: confirm the attack and its scope.</Overview>
+    <BusinessImpact>Defender high-confidence alerts surface real endpoint/identity/office attacks warranting SOC action.</BusinessImpact>
+  </ExecutiveSummary>
+  <Scope><Assets>
+    <AssetType>Defender for Endpoint/Identity/Office/DLP protected assets</AssetType>
+  </Assets><LogSources>
+    <LogSource>Microsoft Defender XDR alerts - logs-m365_defender.alert*</LogSource>
+  </LogSources></Scope>
+  <Prerequisites><TelemetryRequirements>
+    <Requirement>Defender XDR alerts via Elastic Agent (verified live). Fields: m365_defender.alert.detection_source, .severity, .status, .title, .category, threat.tactic.name, user.name, host.name, m365_defender.alert.evidence.device_dns_name. INGEST LAG ~26 min - 4h windows + event.ingested override.</Requirement>
+  </TelemetryRequirements><DetectionSignals>
+    <Signal><Name>High-Confidence Endpoint/Identity/Office</Name><Details>Defender alert (MDE/MDI/MDO), severity != informational, status != resolved.</Details></Signal>
+  </DetectionSignals></Prerequisites>
+  <Inputs>
+    <Input name="$host" description="Affected host (host.name / device_dns_name)."/>
+    <Input name="$user" description="Affected user (user.name)."/>
+  </Inputs>
+  <Triage><ImmediateCapture>
+    <Item>$host: $host</Item>
+  </ImmediateCapture><InitialAssessment>
+    <Rule>Weigh the full evidence story per the ClassificationGuidance, not any single fact.</Rule>
+  </InitialAssessment></Triage>
+  <Investigation>
+    <Goal>Confirm the Defender-detected attack, its tactic and scope, and whether it is a true incident.</Goal>
+    <Workflow>
+      <Step order="1" name="Read the Defender alert(s) for this host/user">
+        <Purpose>The alert title, tactic, detection source and severity define the attack and investigation path.</Purpose>
+        <Query platform="Elastic" language="ES|QL" id="INV-01-DEF-ALERT">
+          <![CDATA[
+FROM logs-m365_defender.alert*
+| WHERE m365_defender.alert.detection_source IN ("microsoftDefenderForEndpoint","microsoftDefenderForIdentity","microsoftDefenderForOffice365") AND m365_defender.alert.severity != "informational" AND (host.name == "$host" OR user.name == "$user") AND @timestamp >= NOW() - 4 hours
+| KEEP @timestamp, m365_defender.alert.title, m365_defender.alert.severity, m365_defender.alert.detection_source, threat.tactic.name, user.name, host.name
+| SORT @timestamp DESC
+| LIMIT 25
+          ]]>
+        </Query>
+        <ExpectedOutput>
+          <Field name="m365_defender.alert.title"/>
+          <Field name="m365_defender.alert.severity"/>
+          <Field name="threat.tactic.name"/>
+          <Field name="host.name"/>
+        </ExpectedOutput>
+        <AnalystNotes>Read the title and tactic. Credential Access/Lateral Movement/Exfiltration tactics on a sensitive host/user are high priority. Detection source tells you the surface (endpoint/identity/office).</AnalystNotes>
+      </Step>
+      <Step order="2" name="Other Defender alerts on the same host/user (scope)">
+        <Purpose>Multiple alerts across tactics on one entity indicate a real multi-stage incident.</Purpose>
+        <Query platform="Elastic" language="ES|QL" id="INV-02-DEF-SCOPE" optional="true">
+          <![CDATA[
+FROM logs-m365_defender.alert*
+| WHERE (host.name == "$host" OR user.name == "$user") AND @timestamp >= NOW() - 4 hours
+| KEEP @timestamp, m365_defender.alert.title, threat.tactic.name, m365_defender.alert.detection_source
+| SORT @timestamp DESC
+| LIMIT 25
+          ]]>
+        </Query>
+        <ExpectedOutput>
+          <Field name="m365_defender.alert.title"/>
+          <Field name="threat.tactic.name"/>
+        </ExpectedOutput>
+        <AnalystNotes>Several alerts across tactics (e.g. Initial Access then Credential Access then Lateral Movement) on one host/user = a real intrusion - escalate.</AnalystNotes>
+      </Step>
+      <Step order="3" name="Finalize classification">
+        <DecisionTree>
+          <Node><Condition>Defender alert(s) confirm an attack (credential access/lateral/exfil) on a sensitive host/user, especially multiple tactics.</Condition><Result>True Positive (Confirmed Attack - IR per tactic)</Result></Node>
+          <Node><Condition>A known-benign/expected alert type that is tuned in Defender but promoted here.</Condition><Result>False Positive</Result></Node>
+          <Node><Condition>A test/simulation (attack-sim) or authorised red-team.</Condition><Result>Benign Activity</Result></Node>
+          <Node><Condition>Alert with unclear scope/context.</Condition><Result>Needs Escalation</Result></Node>
+        </DecisionTree>
+        <DocumentationChecklist>
+          <Item>Attach outputs of INV-01-DEF-ALERT, INV-02-DEF-SCOPE to the case.</Item>
+        </DocumentationChecklist>
+      </Step>
+    </Workflow>
+  </Investigation>
+  <ClassificationGuidance>
+    <FalsePositive>
+      <Definition>A benign/expected alert or a tuned Defender detection.</Definition>
+      <Indicators>
+        <Item>Known benign category.</Item>
+        <Item>Expected activity.</Item>
+        <Item>No corroboration.</Item>
+      </Indicators>
+      <SOCAction>
+        <Item>Confirm benign; tune in Defender; close.</Item>
+      </SOCAction>
+    </FalsePositive>
+    <TruePositive>
+      <Definition>A real Defender-confirmed attack.</Definition>
+      <Indicators>
+        <Item>High-severity tactic.</Item>
+        <Item>Multiple alerts on the entity.</Item>
+        <Item>Sensitive host/user.</Item>
+      </Indicators>
+      <SOCAction>
+        <Item>Follow the tactic-appropriate IR (isolate host / reset user); pull Defender timeline; open IR.</Item>
+      </SOCAction>
+    </TruePositive>
+    <Misconfiguration>
+      <Definition>An attack-simulation or authorised test.</Definition>
+      <Indicators>
+        <Item>Attack-sim/red-team.</Item>
+        <Item>Known exercise.</Item>
+      </Indicators>
+      <SOCAction>
+        <Item>Confirm the exercise; document.</Item>
+      </SOCAction>
+    </Misconfiguration>
+  </ClassificationGuidance>
+  <Response><IRForHumans>
+    <Phase name="Immediate Actions (0-30 minutes)">
+      <Action priority="1">Read the Defender alert; follow the tactic-appropriate response.</Action>
+      <Action priority="2">Isolate host / reset user per the alert.</Action>
+    </Phase>
+    <Phase name="Containment and Eradication (hours)">
+      <Action>Isolate host / reset user; pull the Defender timeline; open IR.</Action>
+      <Action>Scope across the entity's other alerts.</Action>
+    </Phase>
+    <Phase name="Recovery and Hardening (days)">
+      <Action>Ensure Defender is enforcing; tune benign categories in Defender; integrate the Defender timeline into IR.</Action>
+    </Phase>
+  </IRForHumans></Response>
+  <QualityChecks>
+    <Check>Defender ingest lag ~26 min - 4h window + event.ingested override. detection_source distinguishes the protection surface.</Check>
+  </QualityChecks>
+  <ClosureCriteria><FalsePositiveClosure>
+    <Item>Benign/tuned alert confirmed; documented.</Item>
+  </FalsePositiveClosure><TruePositiveClosure>
+    <Item>Attack scoped and contained per tactic; Defender timeline retained.</Item>
+  </TruePositiveClosure></ClosureCriteria>
+</Playbook>

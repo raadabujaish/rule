@@ -1,0 +1,76 @@
+{
+  "rule_id": "jcb-win-inhibit-recovery",
+  "name": "Windows — Inhibit System Recovery (Ransomware Precursor)",
+  "version": 1,
+  "enabled": true,
+  "interval": "1h",
+  "from": "now-90m",
+  "to": "now",
+  "description": "Attacker objective\nDestroy backups and recovery options (shadow copies, boot recovery, backup catalog) so victims cannot restore — the hallmark preparation step of ransomware.\n\nAttack logic\nBefore or during encryption, ransomware deletes Volume Shadow Copies, disables Windows boot recovery, and removes backup catalogs to maximize damage and prevent restoration.\n\nWhy this detection works\nProcess command-line auditing records these destructive commands (vssadmin/wmic shadow delete, bcdedit recovery-off, wbadmin delete), independent of case.\n\nFalse positives\nA backup administrator legitimately pruning shadow storage or catalogs (should be scheduled/known).\n\nTuning\nAllowlist verified backup automation and windows; treat interactive or unexpected execution as an active ransomware incident.\n\nRequired telemetry\nProcess creation with command line: Sysmon Event ID 1 and Windows Security 4688.",
+  "tags": [
+    "JCB",
+    "Windows",
+    "Phase3",
+    "Use Case: Threat Detection",
+    "Tactic: Impact"
+  ],
+  "author": [
+    "raadabujaish"
+  ],
+  "license": "",
+  "threat": [
+    {
+      "framework": "MITRE ATT&CK",
+      "tactic": {
+        "id": "TA0040",
+        "name": "Impact",
+        "reference": "https://attack.mitre.org/tactics/TA0040/"
+      },
+      "technique": [
+        {
+          "id": "T1490",
+          "name": "Inhibit System Recovery",
+          "reference": "https://attack.mitre.org/techniques/T1490/"
+        }
+      ]
+    }
+  ],
+  "investigation_fields": {
+    "field_names": [
+      "@timestamp",
+      "host.name",
+      "user.name",
+      "process.name",
+      "process.parent.name",
+      "process.command_line",
+      "event.code",
+      "winlog.event_data.SubjectUserName",
+      "user.domain",
+      "process.executable",
+      "process.args",
+      "process.parent.executable",
+      "event.action"
+    ]
+  },
+  "related_integrations": [],
+  "required_fields": [],
+  "setup": "",
+  "note": "## Investigation guide\n1. Treat as a likely in-progress ransomware event: isolate the host immediately.\n2. Identify the user/parent process and any mass file modification; preserve evidence and invoke IR.\n3. Check other hosts for the same command pattern (worming/estate-wide deployment).",
+  "false_positives": [
+    "A backup administrator legitimately pruning shadow storage or catalogs (should be scheduled/known)."
+  ],
+  "references": [
+    "https://attack.mitre.org/techniques/T1490/"
+  ],
+  "risk_score": 88,
+  "risk_score_mapping": [],
+  "severity": "critical",
+  "severity_mapping": [],
+  "output_index": "",
+  "max_signals": 100,
+  "exceptions_list": [],
+  "actions": [],
+  "type": "esql",
+  "language": "esql",
+  "query": "FROM logs-windows.sysmon_operational-*,logs-system.security-* METADATA _id, _index, _version\n| WHERE (event.code == \"1\" OR event.code == \"4688\") AND process.command_line IS NOT NULL\n| EVAL cl = TO_LOWER(process.command_line)\n| WHERE (cl LIKE \"*vssadmin*\" AND cl LIKE \"*delete*\" AND cl LIKE \"*shadow*\")\n   OR (cl LIKE \"*vssadmin*\" AND cl LIKE \"*resize*\" AND cl LIKE \"*shadowstorage*\")\n   OR (cl LIKE \"*wmic*\" AND cl LIKE \"*shadowcopy*\" AND cl LIKE \"*delete*\")\n   OR (cl LIKE \"*win32_shadowcopy*\" AND cl LIKE \"*delete*\")\n   OR (cl LIKE \"*bcdedit*\" AND (cl LIKE \"*recoveryenabled*no*\" OR cl LIKE \"*bootstatuspolicy*ignoreallfailures*\"))\n   OR (cl LIKE \"*wbadmin*\" AND cl LIKE \"*delete*\" AND (cl LIKE \"*catalog*\" OR cl LIKE \"*systemstatebackup*\" OR cl LIKE \"*backup*\"))\n| KEEP @timestamp, host.name, user.name, process.name, process.parent.name, process.command_line, event.code, winlog.event_data.SubjectUserName"
+}

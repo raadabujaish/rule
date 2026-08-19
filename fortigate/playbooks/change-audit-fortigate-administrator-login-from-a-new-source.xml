@@ -1,0 +1,188 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<Playbook xmlns="https://soc.example/playbooks" id="PB-JCB-NEW-7" name="Change Audit — FortiGate Administrator Login from a New Source - SOC Playbook" version="2.1" status="Production" classification="TLP:AMBER">
+  <Metadata>
+    <Owner>JCB Detection Engineering (WatchWave)</Owner>
+    <LastUpdated>2026-08-19</LastUpdated>
+    <Severity default="Low">Low</Severity>
+    <Confidence default="Medium">Medium</Confidence>
+    <Category>Change Audit — Valid Accounts (Anomalous Admin Access)</Category>
+    <MitreAttack>
+      <Technique id="T1078" name="Valid Accounts"/>
+      <Tactic id="TA0001" name="Initial Access"/>
+    </MitreAttack>
+    <References>
+      <Reference title="MITRE ATT&amp;CK T1078 Valid Accounts" url="https://attack.mitre.org/techniques/T1078/"/>
+      <Reference title="FortiGate administrative login event reference" url="https://docs.fortinet.com/document/fortigate/7.4.0/fortios-log-message-reference"/>
+    </References>
+  </Metadata>
+  <ExecutiveSummary>
+    <Overview>A FortiGate administrator successfully logged in from a source that has not been seen for admin logins before (new-terms on the login source). The triage question: is this a legitimate admin working from a new but authorised location (new workstation, VPN pool, jump host), or is it unauthorised use of valid administrator credentials to reach the firewall management plane? This is a change-audit / anomalous-access signal, low severity by default, whose weight rises sharply if the new source then makes configuration changes or shows credential-guessing behaviour. Verified live: FortiGate login events carry user.name, source.ip and event.outcome ("success"); fortinet.firewall.status is null on logins, so success/failure is read from event.outcome. Baseline example: admin "and" normally logs in from 192.168.193.10 (the management workstation).</Overview>
+    <BusinessImpact>Administrative access to the FortiGate cluster controls the bank's perimeter and internal segmentation. Valid-account misuse against the firewall management plane is a foothold to weaken defenses, open ingress, or observe/redirect traffic — so an admin session from an unexpected source deserves confirmation even when the login itself succeeded.</BusinessImpact>
+  </ExecutiveSummary>
+  <Scope>
+    <Assets>
+      <AssetType>FortiGate firewall cluster (JCB-FGT-Primary / JCB-FGT-Secondary) management plane</AssetType>
+    </Assets>
+    <LogSources>
+      <LogSource>FortiGate event log — logs-fortinet_fortigate.log-* (verified live: fortinet.firewall.action "login" with user.name, source.ip, event.outcome, observer.name populated; status null on login)</LogSource>
+    </LogSources>
+  </Scope>
+  <Prerequisites>
+    <TelemetryRequirements>
+      <Requirement>FortiGate admin login events shipped to logs-fortinet_fortigate.log-* (verified live).</Requirement>
+      <Requirement>Success/failure is read from event.outcome ("success"/other), NOT fortinet.firewall.status which is null on login events (verified live).</Requirement>
+      <Requirement>The "new source" determination is historical (new-terms baseline of admin login sources). Within a 4-hour investigation window you will typically see only the new source; compare against the admin's known-good sources / the baseline the rule used.</Requirement>
+    </TelemetryRequirements>
+    <DetectionSignals>
+      <Signal><Name>Admin login from a new source</Name><Details>fortinet.firewall.action "login" by a user.name from a source.ip not previously seen for admin logins, event.outcome "success", on a FortiGate (observer.name).</Details></Signal>
+      <Signal><Name>Escalating follow-on</Name><Details>Config changes attributable to the new source (ui="GUI(&lt;source&gt;)"), or failed logins / multiple accounts from the same source, turn an anomalous login into a likely intrusion.</Details></Signal>
+    </DetectionSignals>
+  </Prerequisites>
+  <Inputs>
+    <Input name="$admin" description="The administrator account that logged in (user.name from the alert)."/>
+    <Input name="$source_ip" description="The new source address the admin logged in from (source.ip from the alert)."/>
+  </Inputs>
+  <Triage>
+    <ImmediateCapture>
+      <Item>Admin account: $admin</Item>
+      <Item>New source: $source_ip</Item>
+      <Item>Device (observer.name) and login outcome from the alert</Item>
+    </ImmediateCapture>
+    <InitialAssessment>
+      <Rule>If $source_ip maps to a known admin location (management subnet, VPN pool, a newly-provisioned admin workstation) and $admin regularly administers the firewall, lean legitimate new location (False Positive / authorised).</Rule>
+      <Rule>If the new source then makes config changes (INV-02), or the source shows failed logins / multiple admin accounts (INV-03), or $source_ip is outside any admin network, escalate.</Rule>
+    </InitialAssessment>
+  </Triage>
+  <Investigation>
+    <Goal>Decide whether the admin login from the new source is legitimate authorised access from a new location or unauthorised valid-account use, by profiling the admin's login pattern and checking for follow-on configuration changes and credential-guessing from the source.</Goal>
+    <Workflow>
+      <Step order="1" name="Profile the admin's recent login sources and outcomes">
+        <Purpose>Establish $admin's login pattern in the window — which sources, success/failure, which devices — so the new source stands out against the admin's normal behaviour.</Purpose>
+        <Query platform="Elastic" language="ES|QL" id="INV-01-ADMIN-LOGIN-PATTERN">
+          <![CDATA[
+FROM logs-fortinet_fortigate.log-*
+| WHERE fortinet.firewall.action == "login" AND user.name == "$admin" AND @timestamp >= NOW() - 4 hours
+| STATS logins = COUNT(*), outcomes = VALUES(event.outcome), devices = VALUES(observer.name), first_seen = MIN(@timestamp), last_seen = MAX(@timestamp) BY source.ip
+| SORT logins DESC
+| LIMIT 20
+          ]]>
+        </Query>
+        <ExpectedOutput>
+          <Field name="source.ip"/>
+          <Field name="outcomes"/>
+          <Field name="devices"/>
+        </ExpectedOutput>
+        <AnalystNotes>Compare the new $source_ip against the admin's other sources here and against the known-good baseline (e.g. the management workstation 192.168.193.10). A single successful login from a plausible admin subnet is likely benign; the new source appearing alongside failures, or being the admin's only activity from an unusual network, is more concerning.</AnalystNotes>
+      </Step>
+      <Step order="2" name="Did the new source make configuration changes">
+        <Purpose>The decisive escalation check: a new-source admin session that proceeds to change firewall config is far higher-risk than a login alone. Config changes carry the operator in fortinet.firewall.ui as "GUI(&lt;source&gt;)".</Purpose>
+        <Query platform="Elastic" language="ES|QL" id="INV-02-FOLLOWON-CHANGES">
+          <![CDATA[
+FROM logs-fortinet_fortigate.log-*
+| WHERE fortinet.firewall.action IN ("Add","Edit","Delete") AND fortinet.firewall.ui LIKE "*$source_ip*" AND @timestamp >= NOW() - 4 hours
+| KEEP @timestamp, observer.name, fortinet.firewall.cfgpath, fortinet.firewall.cfgattr, fortinet.firewall.ui
+| SORT @timestamp DESC
+| LIMIT 25
+          ]]>
+        </Query>
+        <ExpectedOutput>
+          <Field name="fortinet.firewall.cfgpath"/>
+          <Field name="fortinet.firewall.cfgattr"/>
+          <Field name="fortinet.firewall.ui"/>
+        </ExpectedOutput>
+        <AnalystNotes>Any high-impact change (firewall.policy, address objects, system.admin/api-user, admin trusted-host/access) made from the new source turns this into a probable intrusion — pivot to the "Potential Unauthorized Changes" response. No changes keeps it an access-only anomaly to verify with the admin.</AnalystNotes>
+      </Step>
+      <Step order="3" name="Check the new source for credential-guessing or multi-account use">
+        <Purpose>Distinguish a benign new admin location from an attacker source: failed logins before success, or several admin accounts attempted from the same source, indicate credential access rather than a legitimate move.</Purpose>
+        <Query platform="Elastic" language="ES|QL" id="INV-03-SOURCE-BEHAVIOUR">
+          <![CDATA[
+FROM logs-fortinet_fortigate.log-*
+| WHERE fortinet.firewall.action == "login" AND source.ip == "$source_ip" AND @timestamp >= NOW() - 4 hours
+| STATS attempts = COUNT(*), users = VALUES(user.name), devices = VALUES(observer.name), last_seen = MAX(@timestamp) BY event.outcome
+| SORT attempts DESC
+| LIMIT 15
+          ]]>
+        </Query>
+        <ExpectedOutput>
+          <Field name="event.outcome"/>
+          <Field name="attempts"/>
+          <Field name="users"/>
+        </ExpectedOutput>
+        <AnalystNotes>A single successful login for one admin account from the source is consistent with a legitimate new location. Failed attempts preceding success, or multiple distinct admin usernames tried from the same source, is credential-guessing / spraying against the management plane and should be escalated regardless of the eventual outcome.</AnalystNotes>
+      </Step>
+    </Workflow>
+  </Investigation>
+  <DecisionTree>
+    <Node><Condition>INV-02 shows the new source made firewall configuration changes (especially high-impact policy/address/admin-access changes) with no change ticket.</Condition><Result>True Positive (Valid-account misuse leading to firewall change — escalate to IR)</Result></Node>
+    <Node><Condition>INV-03 shows failed logins preceding success, or multiple admin accounts attempted from $source_ip, or $source_ip is outside any authorised admin network.</Condition><Result>True Positive (Credential access / unauthorised admin-plane access — escalate to IR)</Result></Node>
+    <Node><Condition>INV-01/INV-03 show a single successful login for $admin from a source that maps to a known admin location (management subnet, VPN pool, newly-provisioned admin workstation), with no follow-on changes and no failures.</Condition><Result>False Positive (Authorised admin access from a new but legitimate location)</Result></Node>
+    <Node><Condition>The new source is a newly-added but sanctioned admin path (e.g. a new jump host or NAT egress) whose baseline simply has not caught up.</Condition><Result>Misconfiguration (Baseline gap — record the new legitimate source; do not disable the analytic)</Result></Node>
+    <Node><Condition>$source_ip cannot be attributed to a known admin location and no follow-on activity yet confirms intent.</Condition><Result>Needs Escalation</Result></Node>
+  </DecisionTree>
+  <ClassificationGuidance>
+    <FalsePositive>
+      <Definition>A known administrator legitimately logged in from a new but authorised location — the source must be tied to a sanctioned admin network/workstation, not merely assumed benign because the login succeeded.</Definition>
+      <Indicators>
+        <Item>$source_ip maps to a management subnet, VPN pool, or a newly-provisioned admin workstation (confirmable with the admin/network team).</Item>
+        <Item>Single successful login for $admin, no failed attempts and no other accounts from the source (INV-03).</Item>
+        <Item>No follow-on configuration changes (INV-02).</Item>
+      </Indicators>
+      <SOCAction>
+        <Item>Confirm the new location with $admin / network team; close as false_positive.</Item>
+        <Item>If the source is a permanent new admin path, record it so the baseline recognises it going forward.</Item>
+      </SOCAction>
+    </FalsePositive>
+    <TruePositive>
+      <Definition>Valid administrator credentials were used from an unauthorised source to reach the firewall management plane — for access, credential-guessing, or to make configuration changes.</Definition>
+      <Indicators>
+        <Item>Follow-on firewall config changes from the new source (INV-02).</Item>
+        <Item>Failed logins before success, or multiple admin accounts tried from the source (INV-03).</Item>
+        <Item>Source outside any authorised admin network / geolocation.</Item>
+      </Indicators>
+      <SOCAction>
+        <Item>Treat $admin's credentials as potentially compromised; force a credential reset and review FortiGate admin sessions.</Item>
+        <Item>Restrict admin access to trusted-host management IPs; if changes were made, revert them and follow the unauthorised-change response; hunt for the source elsewhere in the estate.</Item>
+      </SOCAction>
+    </TruePositive>
+    <Misconfiguration>
+      <Definition>A sanctioned but newly-introduced admin path (new jump host, changed NAT/VPN egress) tripped the new-source baseline — legitimate, just not yet learned.</Definition>
+      <Indicators>
+        <Item>The source is confirmed as a new authorised admin egress/host.</Item>
+        <Item>Behaviour is otherwise normal (single success, no changes or authorised changes).</Item>
+      </Indicators>
+      <SOCAction>
+        <Item>Record the new legitimate source; keep the analytic enabled so genuinely new sources still alert.</Item>
+      </SOCAction>
+    </Misconfiguration>
+  </ClassificationGuidance>
+  <Response>
+    <IRForHumans>
+      <Phase name="Immediate Actions (0-30 minutes)">
+        <Action priority="1">Attribute $source_ip (INV-01/INV-03) — is it a known admin location? Check INV-02 for any configuration changes from the source.</Action>
+        <Action priority="2">If the source is unauthorised or config changes were made, treat $admin as compromised: force credential reset and review active FortiGate admin sessions.</Action>
+      </Phase>
+      <Phase name="Containment and Eradication (hours)">
+        <Action>Revert any unauthorised changes made from the source; restrict FortiGate admin access to trusted management IPs; rotate admin credentials/API keys as needed.</Action>
+        <Action>Review the source for wider activity (other devices/services) and contain it; reconstruct the admin session timeline.</Action>
+      </Phase>
+      <Phase name="Recovery and Hardening (days)">
+        <Action>Enforce admin trusted-host restrictions and MFA for FortiGate administration; define the authorised admin source set.</Action>
+        <Action>Maintain the new-source baseline and pair this analytic with the config-change analytic for higher-confidence correlated detection.</Action>
+      </Phase>
+    </IRForHumans>
+  </Response>
+  <Escalation>
+    <Trigger>Follow-on config changes from the new source, credential-guessing / multi-account attempts from the source, or a source that cannot be attributed to an authorised admin location.</Trigger>
+    <To>SOC L2 / IR (with Network/Firewall administration)</To>
+  </Escalation>
+  <Closure>
+    <FalsePositiveClosure>
+      <Item>New source confirmed as an authorised admin location by the admin/network team.</Item>
+      <Item>Single successful login, no follow-on changes and no credential-guessing; new legitimate source recorded for the baseline.</Item>
+    </FalsePositiveClosure>
+    <TruePositiveClosure>
+      <Item>$admin credentials reset and admin sessions reviewed; unauthorised changes reverted; trusted-host restrictions applied.</Item>
+      <Item>Source contained and hunted across the estate; incident documented.</Item>
+    </TruePositiveClosure>
+  </Closure>
+</Playbook>

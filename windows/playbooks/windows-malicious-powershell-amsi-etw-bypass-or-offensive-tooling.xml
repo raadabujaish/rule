@@ -1,0 +1,151 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<Playbook xmlns="https://soc.example/playbooks" id="PB-WIN-047" name="Windows — Malicious PowerShell: AMSI/ETW Bypass or Offensive Tooling - SOC Playbook" version="1.0" status="Production" classification="TLP:AMBER">
+  <Metadata>
+    <Owner>JCB Detection Engineering (WatchWave)</Owner>
+    <LastUpdated>2026-08-14</LastUpdated>
+    <Severity default="High">High</Severity>
+    <Confidence default="High">High</Confidence>
+    <Category>Execution / Defense Evasion</Category>
+    <MitreAttack>
+      <Technique id="T1059.001" name="PowerShell"/>
+      <Tactic id="TA0002" name="Execution"/>
+    </MitreAttack>
+    <References>
+      <Reference title="MITRE ATT and CK" url="https://attack.mitre.org/techniques/T1059/"/>
+    </References>
+  </Metadata>
+  <ExecutiveSummary>
+    <Overview>A PowerShell script block (4104) contained AMSI/ETW bypass strings or offensive-tooling names - amsiInitFailed, AmsiScanBuffer, EtwEventWrite, sekurlsa, Invoke-Mimikatz, Rubeus, Invoke-BloodHound, etc. Triage question: is this malicious PowerShell (credential theft/AD attack/evasion), or a security tool/false match?</Overview>
+    <BusinessImpact>AMSI/ETW bypass disables PowerShell's malware scanning; the tooling strings indicate credential theft and AD attacks - strong compromise signals.</BusinessImpact>
+  </ExecutiveSummary>
+  <Scope><Assets>
+    <AssetType>Windows servers and workstations (INTDOM domain)</AssetType>
+    <AssetType>Domain controllers</AssetType>
+  </Assets><LogSources>
+    <LogSource>PowerShell operational log - logs-windows.powershell_operational-*</LogSource>
+  </LogSources></Scope>
+  <Prerequisites><TelemetryRequirements>
+    <Requirement>Windows Security + Sysmon + PowerShell logs via Elastic Agent (verified live). Sysmon event.code 1=process(command_line/parent populated), 11=file, 13/12=registry(registry.path populated); process.code_signature NOT collected.</Requirement>
+  </TelemetryRequirements><DetectionSignals>
+    <Signal><Name>Malicious PowerShell</Name><Details>4104 script block with AMSI/ETW-bypass or offensive-tool strings.</Details></Signal>
+  </DetectionSignals></Prerequisites>
+  <Inputs>
+    <Input name="$hostname" description="Host where the script ran."/>
+    <Input name="$username" description="Account (user.name) if present."/>
+  </Inputs>
+  <Triage><ImmediateCapture>
+    <Item>Host: $hostname</Item>
+  </ImmediateCapture><InitialAssessment>
+    <Rule>Weigh the evidence story, not any single fact - see ClassificationGuidance.</Rule>
+  </InitialAssessment></Triage>
+  <Investigation>
+    <Goal>Determine whether the PowerShell script block is malicious tooling/evasion or a benign match.</Goal>
+    <Workflow>
+      <Step order="1" name="The offending script-block content">
+        <Purpose>Reading the actual script block confirms real offensive tooling vs a benign string match.</Purpose>
+        <Query platform="Elastic" language="ES|QL" id="INV-01-PSMAL-SCRIPT">
+          <![CDATA[
+FROM logs-windows.powershell_operational-*
+| WHERE event.code == "4104" AND host.name == "$hostname" AND @timestamp >= NOW() - 4 hours
+| EVAL sb = TO_LOWER(powershell.file.script_block_text)
+| WHERE sb LIKE "*amsiinitfailed*" OR sb LIKE "*amsiscanbuffer*" OR sb LIKE "*etweventwrite*" OR sb LIKE "*sekurlsa*" OR sb LIKE "*invoke-mimikatz*" OR sb LIKE "*rubeus*" OR sb LIKE "*invoke-bloodhound*" OR sb LIKE "*invoke-kerberoast*"
+| KEEP @timestamp, user.name, powershell.file.script_block_text
+| SORT @timestamp DESC
+| LIMIT 10
+          ]]>
+        </Query>
+        <ExpectedOutput>
+          <Field name="user.name"/>
+          <Field name="powershell.file.script_block_text"/>
+        </ExpectedOutput>
+        <AnalystNotes>Read the script block: an actual AMSI-bypass one-liner or a mimikatz/Rubeus invocation is malicious. A security tool's detection signature or a defender's test script may match benignly - the content distinguishes them.</AnalystNotes>
+      </Step>
+      <Step order="2" name="What else did this host/account run around the script">
+        <Purpose>Malicious PowerShell usually sits amid other attack activity (credential access, lateral movement).</Purpose>
+        <Query platform="Elastic" language="ES|QL" id="INV-02-PSMAL-CONTEXT" optional="true">
+          <![CDATA[
+FROM logs-system.security-*
+| WHERE host.name == "$hostname" AND event.code IN ("4624","4648","4672","5145") AND @timestamp >= NOW() - 2 hours
+| EVAL src = COALESCE(TO_STRING(source.ip), "local")
+| STATS c = COUNT(*), codes = VALUES(event.code) BY src
+| SORT c DESC
+| LIMIT 10
+          ]]>
+        </Query>
+        <ExpectedOutput>
+          <Field name="src"/>
+          <Field name="codes"/>
+          <Field name="c"/>
+        </ExpectedOutput>
+        <AnalystNotes>Explicit-credential logons (4648), remote logons or pipe access around the script support an active intrusion - escalate.</AnalystNotes>
+      </Step>
+      <Step order="3" name="Finalize classification">
+        <DecisionTree>
+          <Node><Condition>The script block is genuine offensive tooling (mimikatz/Rubeus/BloodHound) or an AMSI/ETW bypass, especially amid other attack activity.</Condition><Result>True Positive (Malicious PowerShell - IR)</Result></Node>
+          <Node><Condition>The match is a benign security-tool signature or a documented defender test.</Condition><Result>False Positive</Result></Node>
+          <Node><Condition>Script content is obfuscated/ambiguous.</Condition><Result>Needs Escalation</Result></Node>
+        </DecisionTree>
+        <DocumentationChecklist>
+          <Item>Attach outputs of INV-01-PSMAL-SCRIPT, INV-02-PSMAL-CONTEXT to the case.</Item>
+        </DocumentationChecklist>
+      </Step>
+    </Workflow>
+  </Investigation>
+  <ClassificationGuidance>
+    <FalsePositive>
+      <Definition>A benign string match (security-tool signature, documented test).</Definition>
+      <Indicators>
+        <Item>Content is a detection signature/test, not an invocation.</Item>
+        <Item>Security-team context.</Item>
+        <Item>No attack activity.</Item>
+      </Indicators>
+      <SOCAction>
+        <Item>Confirm the benign source; close as false_positive.</Item>
+      </SOCAction>
+    </FalsePositive>
+    <TruePositive>
+      <Definition>Malicious PowerShell tooling or evasion.</Definition>
+      <Indicators>
+        <Item>Real mimikatz/Rubeus/BloodHound invocation or AMSI bypass.</Item>
+        <Item>Attack-activity context.</Item>
+        <Item>Non-admin/unexpected account.</Item>
+      </Indicators>
+      <SOCAction>
+        <Item>Isolate the host; open IR; treat host credentials as exposed.</Item>
+        <Item>Capture the full script; hunt the same tooling estate-wide.</Item>
+      </SOCAction>
+    </TruePositive>
+    <Misconfiguration>
+      <Definition>A red-team/security exercise not deconflicted.</Definition>
+      <Indicators>
+        <Item>Internal security-team source.</Item>
+        <Item>No engagement notice.</Item>
+      </Indicators>
+      <SOCAction>
+        <Item>Confirm with the security team; document; require deconfliction.</Item>
+      </SOCAction>
+    </Misconfiguration>
+  </ClassificationGuidance>
+  <Response><IRForHumans>
+    <Phase name="Immediate Actions (0-30 minutes)">
+      <Action priority="1">Confirm the activity on the host; if malicious indicators, isolate the host.</Action>
+      <Action priority="2">Identify the responsible account/process and its origin.</Action>
+    </Phase>
+    <Phase name="Containment and Eradication (hours)">
+      <Action>Isolate the host; capture volatile evidence; hunt the same pattern across the estate.</Action>
+      <Action>Reset credentials used on the host if compromise is confirmed.</Action>
+    </Phase>
+    <Phase name="Recovery and Hardening (days)">
+      <Action>Remediate the root cause; add/verify EDR coverage; apply relevant hardening.</Action>
+    </Phase>
+  </IRForHumans></Response>
+  <QualityChecks>
+    <Check>Confirm the required telemetry (Sysmon/Security auditing) is present on the host.</Check>
+    <Check>Tune known-benign administrative sources via exceptions, not by disabling the rule.</Check>
+  </QualityChecks>
+  <ClosureCriteria><FalsePositiveClosure>
+    <Item>Activity confirmed benign/authorised and documented.</Item>
+  </FalsePositiveClosure><TruePositiveClosure>
+    <Item>Host contained and triaged; root cause eradicated; estate swept; findings recorded.</Item>
+  </TruePositiveClosure></ClosureCriteria>
+</Playbook>

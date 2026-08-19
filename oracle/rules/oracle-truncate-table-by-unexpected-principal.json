@@ -1,0 +1,71 @@
+{
+  "rule_id": "jcb-ora-truncate-unexpected-principal",
+  "name": "Oracle — TRUNCATE TABLE by Unexpected Principal",
+  "version": 1,
+  "enabled": true,
+  "interval": "1h",
+  "from": "now-3h",
+  "to": "now",
+  "description": "Attacker objective\nIrrecoverably destroy data in banking tables. TRUNCATE is fast, minimally logged, and cannot be rolled back.\n\nAttack logic\nTRUNCATE in a core-banking database is normally limited to ETL/staging refreshes performed by a known service account against a fixed set of staging tables. TRUNCATE by any other principal is outside that pattern.\n\nWhy this detection works\nUnified Audit captures the action and principal for every statement, so allowlisting the ETL account makes any other TRUNCATE a high-signal event.\n\nFalse positives\nA new ETL/maintenance service account not yet allowlisted.\n\nTuning\nAllowlist verified ETL accounts. To also catch the ETL account truncating a production (non-staging) table, add an object allowlist scoped to the sanctioned staging tables.\n\nRequired telemetry\nOracle Unified Audit shipped as apps-* (ACTION_NAME, USERNAME, SQL_TEXT).",
+  "tags": [
+    "JCB",
+    "Oracle",
+    "Phase3",
+    "Use Case: Threat Detection",
+    "Tactic: Impact"
+  ],
+  "author": [
+    "raadabujaish"
+  ],
+  "threat": [
+    {
+      "framework": "MITRE ATT&CK",
+      "tactic": {
+        "id": "TA0040",
+        "name": "Impact",
+        "reference": "https://attack.mitre.org/tactics/TA0040/"
+      },
+      "technique": [
+        {
+          "id": "T1485",
+          "name": "Data Destruction",
+          "reference": "https://attack.mitre.org/techniques/T1485/"
+        }
+      ]
+    }
+  ],
+  "investigation_fields": {
+    "field_names": [
+      "USERNAME",
+      "ACTION_NAME",
+      "SQL_TEXT",
+      "type",
+      "TIMESTAMP"
+    ]
+  },
+  "related_integrations": [],
+  "required_fields": [],
+  "setup": "",
+  "note": "## Investigation guide\n1. SQL_TEXT names the truncated table; confirm it is not a production banking table.\n2. Confirm the actor is an authorised ETL principal.\n3. If unauthorised, treat as data-destruction and begin IR.",
+  "false_positives": [
+    "A new ETL/maintenance service account not yet allowlisted."
+  ],
+  "references": [
+    "https://attack.mitre.org/techniques/T1485/"
+  ],
+  "risk_score": 73,
+  "risk_score_mapping": [],
+  "severity": "high",
+  "severity_mapping": [],
+  "output_index": "",
+  "max_signals": 100,
+  "exceptions_list": [],
+  "actions": [],
+  "type": "query",
+  "language": "kuery",
+  "index": [
+    "apps-*",
+    "-apps-*-2025"
+  ],
+  "query": "ACTION_NAME.keyword:\"TRUNCATE TABLE\" and not USERNAME.keyword:\"INH_LIFE\""
+}

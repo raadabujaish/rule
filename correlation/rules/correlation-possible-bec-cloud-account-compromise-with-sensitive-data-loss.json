@@ -1,0 +1,98 @@
+{
+  "rule_id": "jcb-corr-fp-bec-dataloss",
+  "name": "Correlation — Possible BEC / Cloud-Account Compromise with Sensitive Data Loss",
+  "version": 1,
+  "enabled": true,
+  "interval": "1h",
+  "from": "now-24h",
+  "to": "now",
+  "description": "Attacker objective\nCompromise a cloud identity (business email compromise) and use it to exfiltrate sensitive data — the same user shows a suspicious Microsoft 365 identity/mail action (external forwarding, delegation, OAuth consent, app-credential or privileged-role addition) and a DLP exfiltration event.\n\nAttack logic\nA suspicious M365 identity or mailbox action is a cloud-account-compromise signal; a DLP incident by the same user is a data-loss signal. Together on one identity they indicate account takeover followed by data theft.\n\nWhy this detection works\nCorrelating an M365 identity/mail alert and a DLP alert on the same normalized user confirms cloud-account compromise with data loss across two domains. The user is normalized to a canonical form and records that cannot be confidently normalized are excluded.\n\nFalse positives\nA power user whose legitimate M365 administration coincides with a routine DLP event.\n\nTuning\nEndpoint DLP user attribution is partial (many records carry a display name rather than a domain login), so this rule is conservative by design and is disabled until user normalization is improved. Enable once the DLP source emits a consistent domain login.\n\nRequired telemetry\nM365/Entra identity alerts and DLP alerts, joined on the normalized user (canonical lowercased login). NOTE: Forcepoint user attribution is partial — display-name records are excluded from the join.",
+  "tags": [
+    "JCB",
+    "Correlation",
+    "Forcepoint-DLP",
+    "Phase3",
+    "Tactic: Initial Access",
+    "Use Case: Threat Detection"
+  ],
+  "author": [
+    "raadabujaish"
+  ],
+  "license": "",
+  "threat": [
+    {
+      "framework": "MITRE ATT&CK",
+      "tactic": {
+        "id": "TA0001",
+        "name": "Initial Access",
+        "reference": "https://attack.mitre.org/tactics/TA0001/"
+      },
+      "technique": [
+        {
+          "id": "T1078",
+          "name": "Valid Accounts",
+          "reference": "https://attack.mitre.org/techniques/T1078/"
+        }
+      ]
+    },
+    {
+      "framework": "MITRE ATT&CK",
+      "tactic": {
+        "id": "TA0010",
+        "name": "Exfiltration",
+        "reference": "https://attack.mitre.org/tactics/TA0010/"
+      },
+      "technique": [
+        {
+          "id": "T1567",
+          "name": "Exfiltration Over Web Service",
+          "reference": "https://attack.mitre.org/techniques/T1567/"
+        }
+      ]
+    }
+  ],
+  "investigation_fields": {
+    "field_names": [
+      "norm_user",
+      "kibana.alert.rule.name",
+      "kibana.alert.severity",
+      "host.name",
+      "user.name",
+      "source.ip",
+      "destination.ip",
+      "message"
+    ]
+  },
+  "related_integrations": [],
+  "required_fields": [],
+  "setup": "",
+  "note": "## Investigation guide\n1. norm_user = the identity flagged by both M365 and DLP; review m365_detections and dlp_detections.\n2. Treat as possible BEC/account takeover with data loss — reset the account, revoke tokens/app grants, and review the data moved.\n3. Because DLP user attribution is partial, absence of a match does not rule out BEC; corroborate with host-based correlation.",
+  "false_positives": [
+    "A power user whose legitimate M365 administration coincides with a routine DLP event."
+  ],
+  "references": [
+    "https://attack.mitre.org/techniques/T1078/",
+    "https://attack.mitre.org/techniques/T1567/"
+  ],
+  "risk_score": 90,
+  "risk_score_mapping": [],
+  "severity": "critical",
+  "severity_mapping": [],
+  "output_index": "",
+  "max_signals": 100,
+  "exceptions_list": [],
+  "actions": [],
+  "type": "esql",
+  "language": "esql",
+  "query": "FROM .alerts-security.alerts-* METADATA _id, _index, _version\n| WHERE kibana.alert.rule.name IN (\"Entra ID — Application Credential (Secret or Certificate) Added\", \"Entra ID — Member Added to a Privileged Directory Role\", \"Entra ID — OAuth Consent, Permission Grant or Service Principal Added\", \"Exchange Online — Mailbox External Forwarding Configured\", \"Exchange Online — Mailbox FullAccess or SendAs Delegation Granted\", \"SharePoint/OneDrive — Burst of Anonymous Sharing Links by a User\", \"Exchange Online — Transport (Mail Flow) Rule Created or Modified\", \"SharePoint — Site Collection Administrator Added\", \"Microsoft Teams — Application Installed\", \"Forcepoint DLP — Bulk Sensitive Data to Personal / Public Email by One User\", \"Forcepoint DLP — Sensitive Data Transfer Outside Working Hours\", \"Forcepoint DLP — Sensitive Data Sent to a Personal / Public Email Domain\", \"Forcepoint DLP — Cardholder / PCI Data Transfer\")\n| EVAL norm_user = TO_LOWER(user.name)\n| WHERE norm_user IS NOT NULL AND norm_user != \"\"\n| EVAL is_dlp = kibana.alert.rule.name IN (\"Forcepoint DLP — Bulk Sensitive Data to Personal / Public Email by One User\", \"Forcepoint DLP — Sensitive Data Transfer Outside Working Hours\", \"Forcepoint DLP — Sensitive Data Sent to a Personal / Public Email Domain\", \"Forcepoint DLP — Cardholder / PCI Data Transfer\")\n| STATS m365_alerts = COUNT(CASE(NOT is_dlp, kibana.alert.rule.name, null)), dlp_alerts = COUNT(CASE(is_dlp, kibana.alert.rule.name, null)), m365_detections = VALUES(CASE(NOT is_dlp, kibana.alert.rule.name, null)), dlp_detections = VALUES(CASE(is_dlp, kibana.alert.rule.name, null)), first_seen = MIN(@timestamp), last_seen = MAX(@timestamp) BY norm_user\n| WHERE m365_alerts >= 1 AND dlp_alerts >= 1",
+  "alert_suppression": {
+    "group_by": [
+      "user.name"
+    ],
+    "duration": {
+      "value": 24,
+      "unit": "h"
+    },
+    "missing_fields_strategy": "suppress"
+  }
+}

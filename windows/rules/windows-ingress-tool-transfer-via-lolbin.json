@@ -1,0 +1,76 @@
+{
+  "rule_id": "jcb-win-ingress-tool-transfer-lolbin",
+  "name": "Windows — Ingress Tool Transfer via LOLBin",
+  "version": 1,
+  "enabled": true,
+  "interval": "1h",
+  "from": "now-90m",
+  "to": "now",
+  "description": "Attacker objective\nDownload attacker tooling or a second-stage payload onto a compromised host using a trusted built-in binary (living off the land).\n\nAttack logic\nRather than a browser, attackers fetch files with certutil, bitsadmin, mshta, curl/wget, or PowerShell download methods so the transfer blends in with system activity.\n\nWhy this detection works\nProcess command-line auditing records the LOLBin and its URL/output arguments; matching download-specific argument patterns isolates ingress transfers, independent of case.\n\nFalse positives\nAn administrator or software-management process legitimately downloading with these tools.\n\nTuning\nAllowlist sanctioned software-distribution hosts/accounts; review the destination URL for reputation.\n\nRequired telemetry\nProcess creation with command line: Sysmon Event ID 1 and Windows Security 4688.",
+  "tags": [
+    "JCB",
+    "Windows",
+    "Phase3",
+    "Use Case: Threat Detection",
+    "Tactic: Command and Control"
+  ],
+  "author": [
+    "raadabujaish"
+  ],
+  "license": "",
+  "threat": [
+    {
+      "framework": "MITRE ATT&CK",
+      "tactic": {
+        "id": "TA0011",
+        "name": "Command and Control",
+        "reference": "https://attack.mitre.org/tactics/TA0011/"
+      },
+      "technique": [
+        {
+          "id": "T1105",
+          "name": "Ingress Tool Transfer",
+          "reference": "https://attack.mitre.org/techniques/T1105/"
+        }
+      ]
+    }
+  ],
+  "investigation_fields": {
+    "field_names": [
+      "@timestamp",
+      "host.name",
+      "user.name",
+      "process.name",
+      "process.parent.name",
+      "process.command_line",
+      "event.code",
+      "winlog.event_data.SubjectUserName",
+      "user.domain",
+      "process.executable",
+      "process.args",
+      "process.parent.executable",
+      "event.action"
+    ]
+  },
+  "related_integrations": [],
+  "required_fields": [],
+  "setup": "",
+  "note": "## Investigation guide\n1. Review the URL, the destination path and the requesting host/user.\n2. If the source is untrusted, retrieve the downloaded file, isolate the host and hunt for execution of the payload.",
+  "false_positives": [
+    "An administrator or software-management process legitimately downloading with these tools."
+  ],
+  "references": [
+    "https://attack.mitre.org/techniques/T1105/"
+  ],
+  "risk_score": 73,
+  "risk_score_mapping": [],
+  "severity": "high",
+  "severity_mapping": [],
+  "output_index": "",
+  "max_signals": 100,
+  "exceptions_list": [],
+  "actions": [],
+  "type": "esql",
+  "language": "esql",
+  "query": "FROM logs-windows.sysmon_operational-*,logs-system.security-* METADATA _id, _index, _version\n| WHERE (event.code == \"1\" OR event.code == \"4688\") AND process.command_line IS NOT NULL\n| EVAL cl = TO_LOWER(process.command_line)\n| WHERE (cl LIKE \"*certutil*\" AND (cl LIKE \"*urlcache*\" OR cl LIKE \"*verifyctl*\" OR cl LIKE \"*-split*\") AND cl LIKE \"*http*\")\n   OR (cl LIKE \"*bitsadmin*\" AND (cl LIKE \"*transfer*\" OR cl LIKE \"*addfile*\"))\n   OR (cl LIKE \"*mshta*\" AND cl LIKE \"*http*\")\n   OR ((cl LIKE \"*curl *\" OR cl LIKE \"*wget *\") AND cl LIKE \"*http*\" AND (cl LIKE \"*-o*\" OR cl LIKE \"*-outfile*\"))\n   OR (cl LIKE \"*powershell*\" AND (cl LIKE \"*downloadfile*\" OR cl LIKE \"*downloadstring*\" OR cl LIKE \"*invoke-webrequest*\" OR cl LIKE \"*start-bitstransfer*\") AND cl LIKE \"*http*\")\n| KEEP @timestamp, host.name, user.name, process.name, process.parent.name, process.command_line, event.code, winlog.event_data.SubjectUserName"
+}

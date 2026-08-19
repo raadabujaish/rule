@@ -1,0 +1,150 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<Playbook xmlns="https://soc.example/playbooks" id="PB-WIN-004" name="Change Audit — Windows User Account Created/Deleted/Enabled/Disabled/Modified - SOC Playbook" version="1.0" status="Production" classification="TLP:AMBER">
+  <Metadata>
+    <Owner>JCB Detection Engineering (WatchWave)</Owner>
+    <LastUpdated>2026-08-14</LastUpdated>
+    <Severity default="Medium">Medium</Severity>
+    <Confidence default="Medium">Medium</Confidence>
+    <Category>Persistence / Create or Manipulate Account</Category>
+    <MitreAttack>
+      <Technique id="T1136.001" name="Local Account"/>
+      <Tactic id="TA0003" name="Persistence"/>
+    </MitreAttack>
+    <References>
+      <Reference title="MITRE ATT and CK" url="https://attack.mitre.org/techniques/T1136/"/>
+    </References>
+  </Metadata>
+  <ExecutiveSummary>
+    <Overview>A user account was created/enabled/deleted/disabled or modified (4720/4722/4725/4726/4738/4767/4781). This is the canonical account-lifecycle audit (the QA-AD Created/Deleted OR-variants duplicate it and are retiring). Triage question: authorised IAM lifecycle action, or an attacker creating a backdoor account or manipulating one?</Overview>
+    <BusinessImpact>Attacker-created or -modified accounts provide persistence and access; unexpected lifecycle changes on privileged accounts are high risk.</BusinessImpact>
+  </ExecutiveSummary>
+  <Scope><Assets>
+    <AssetType>Windows servers and workstations (INTDOM domain)</AssetType>
+    <AssetType>Domain controllers</AssetType>
+  </Assets><LogSources>
+    <LogSource>Windows Security event log - logs-system.security-*</LogSource>
+  </LogSources></Scope>
+  <Prerequisites><TelemetryRequirements>
+    <Requirement>Windows Security + Sysmon + PowerShell logs via Elastic Agent (verified live). Sysmon event.code 1=process(command_line/parent populated), 11=file, 13/12=registry(registry.path populated); process.code_signature NOT collected.</Requirement>
+  </TelemetryRequirements><DetectionSignals>
+    <Signal><Name>Account lifecycle change</Name><Details>4720/4722/4725/4726/4738/4767/4781.</Details></Signal>
+  </DetectionSignals></Prerequisites>
+  <Inputs>
+    <Input name="$username" description="Actor (SubjectUserName)."/>
+    <Input name="$target_user" description="Account changed (TargetUserName)."/>
+  </Inputs>
+  <Triage><ImmediateCapture>
+    <Item>Host: $hostname</Item>
+  </ImmediateCapture><InitialAssessment>
+    <Rule>Weigh the evidence story, not any single fact - see ClassificationGuidance.</Rule>
+  </InitialAssessment></Triage>
+  <Investigation>
+    <Goal>Determine whether the account lifecycle change is authorised IAM activity or an unauthorised backdoor/manipulation.</Goal>
+    <Workflow>
+      <Step order="1" name="Reconstruct the account change and actor">
+        <Purpose>Identify what changed on which account by whom, and whether several accounts were touched.</Purpose>
+        <Query platform="Elastic" language="ES|QL" id="INV-01-ACCT-CHANGE">
+          <![CDATA[
+FROM logs-system.security-*
+| WHERE event.code IN ("4720","4722","4725","4726","4738","4767","4781") AND winlog.event_data.SubjectUserName == "$username" AND @timestamp >= NOW() - 4 hours
+| STATS changes = COUNT(*), codes = VALUES(event.code), targets = VALUES(winlog.event_data.TargetUserName), first_seen = MIN(@timestamp), last_seen = MAX(@timestamp) BY host.name
+| SORT changes DESC
+| LIMIT 20
+          ]]>
+        </Query>
+        <ExpectedOutput>
+          <Field name="host.name"/>
+          <Field name="codes"/>
+          <Field name="targets"/>
+          <Field name="changes"/>
+        </ExpectedOutput>
+        <AnalystNotes>4720 create + 4722 enable of a new account in minutes = account provisioning (or backdoor). A burst of changes across accounts by one actor is scripted. Suppression is per Subject+Target 1h.</AnalystNotes>
+      </Step>
+      <Step order="2" name="Was a newly created account then added to a group or used">
+        <Purpose>A new account added to a privileged group or logging on immediately is a backdoor pattern.</Purpose>
+        <Query platform="Elastic" language="ES|QL" id="INV-02-ACCT-FOLLOWON" optional="true">
+          <![CDATA[
+FROM logs-system.security-*
+| WHERE winlog.event_data.TargetUserName == "$target_user" AND event.code IN ("4728","4732","4756","4624") AND @timestamp >= NOW() - 2 hours
+| STATS c = COUNT(*), codes = VALUES(event.code), groups = VALUES(winlog.event_data.TargetUserName)
+| LIMIT 5
+          ]]>
+        </Query>
+        <ExpectedOutput>
+          <Field name="codes"/>
+          <Field name="c"/>
+          <Field name="groups"/>
+        </ExpectedOutput>
+        <AnalystNotes>Create -&gt; add-to-privileged-group -&gt; logon within minutes is a classic backdoor sequence. Empty = a plain account change.</AnalystNotes>
+      </Step>
+      <Step order="3" name="Finalize classification">
+        <DecisionTree>
+          <Node><Condition>A new account created then added to a privileged group / used, by an unfamiliar actor with no ticket.</Condition><Result>True Positive (Backdoor Account - escalate)</Result></Node>
+          <Node><Condition>Modification/enable of a privileged account by an unexpected actor.</Condition><Result>True Positive (Account Manipulation - escalate)</Result></Node>
+          <Node><Condition>Known IAM admin performing lifecycle changes under an approved process.</Condition><Result>False Positive</Result></Node>
+          <Node><Condition>Plausible admin, no ticket, no follow-on.</Condition><Result>Needs Escalation</Result></Node>
+        </DecisionTree>
+        <DocumentationChecklist>
+          <Item>Attach outputs of INV-01-ACCT-CHANGE, INV-02-ACCT-FOLLOWON to the case.</Item>
+        </DocumentationChecklist>
+      </Step>
+    </Workflow>
+  </Investigation>
+  <ClassificationGuidance>
+    <FalsePositive>
+      <Definition>Authorised IAM account lifecycle.</Definition>
+      <Indicators>
+        <Item>Recognised IAM admin/process.</Item>
+        <Item>Approved ticket.</Item>
+        <Item>Expected account.</Item>
+      </Indicators>
+      <SOCAction>
+        <Item>Verify; close as false_positive.</Item>
+      </SOCAction>
+    </FalsePositive>
+    <TruePositive>
+      <Definition>Backdoor account creation or account manipulation.</Definition>
+      <Indicators>
+        <Item>New account -&gt; privileged group -&gt; logon.</Item>
+        <Item>Unfamiliar actor.</Item>
+        <Item>Privileged target modified.</Item>
+      </Indicators>
+      <SOCAction>
+        <Item>Disable the account; open IR; review the actor.</Item>
+        <Item>Check for other backdoors by the same actor.</Item>
+      </SOCAction>
+    </TruePositive>
+    <Misconfiguration>
+      <Definition>An HR/provisioning automation acting unexpectedly.</Definition>
+      <Indicators>
+        <Item>Provisioning account per a broken job.</Item>
+        <Item>Owner confirms.</Item>
+      </Indicators>
+      <SOCAction>
+        <Item>Fix the job; document.</Item>
+      </SOCAction>
+    </Misconfiguration>
+  </ClassificationGuidance>
+  <Response><IRForHumans>
+    <Phase name="Immediate Actions (0-30 minutes)">
+      <Action priority="1">Confirm the activity on the host; if malicious indicators, isolate the host.</Action>
+      <Action priority="2">Identify the responsible account/process and its origin.</Action>
+    </Phase>
+    <Phase name="Containment and Eradication (hours)">
+      <Action>Isolate the host; capture volatile evidence; hunt the same pattern across the estate.</Action>
+      <Action>Reset credentials used on the host if compromise is confirmed.</Action>
+    </Phase>
+    <Phase name="Recovery and Hardening (days)">
+      <Action>Remediate the root cause; add/verify EDR coverage; apply relevant hardening.</Action>
+    </Phase>
+  </IRForHumans></Response>
+  <QualityChecks>
+    <Check>Confirm the required telemetry (Sysmon/Security auditing) is present on the host.</Check>
+    <Check>Tune known-benign administrative sources via exceptions, not by disabling the rule.</Check>
+  </QualityChecks>
+  <ClosureCriteria><FalsePositiveClosure>
+    <Item>Activity confirmed benign/authorised and documented.</Item>
+  </FalsePositiveClosure><TruePositiveClosure>
+    <Item>Host contained and triaged; root cause eradicated; estate swept; findings recorded.</Item>
+  </TruePositiveClosure></ClosureCriteria>
+</Playbook>
